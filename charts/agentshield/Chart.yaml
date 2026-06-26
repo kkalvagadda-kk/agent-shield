@@ -1,0 +1,117 @@
+apiVersion: v2
+name: agentshield
+description: >
+  AgentShield — self-hosted AI agent governance platform. Provides safety
+  scanning, OPA policy enforcement, human-in-the-loop approvals, observability,
+  and agent deployment on Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - ai
+  - agents
+  - safety
+  - governance
+  - llm
+
+home: https://github.com/your-org/agent-platform
+maintainers:
+  - name: AgentShield Team
+    email: platform@agentshield.internal
+
+dependencies:
+  # ── Data layer ─────────────────────────────────────────────────────────────
+  - name: postgresql
+    version: "18.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+
+  # pgbouncer: local chart (no official Bitnami Helm chart exists)
+  - name: pgbouncer
+    version: "0.1.0"
+    repository: "file://charts/pgbouncer"
+    condition: pgbouncer.enabled
+
+  - name: redis
+    version: "27.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+
+  - name: minio
+    version: "17.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: minio.enabled
+
+  # ── Identity ───────────────────────────────────────────────────────────────
+  - name: keycloak
+    version: "25.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: keycloak.enabled
+
+  # ── Observability ──────────────────────────────────────────────────────────
+  - name: langfuse
+    version: "1.x.x"
+    repository: https://langfuse.github.io/langfuse-k8s
+    condition: langfuse.enabled
+
+  - name: clickhouse
+    version: "9.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: clickhouse.enabled
+
+  # ── Registry UI ────────────────────────────────────────────────────────────
+  - name: appsmith
+    version: "3.x.x"
+    repository: https://helm.appsmith.com
+    condition: appsmith.enabled
+
+  # ── Platform services (local sub-charts) ──────────────────────────────────
+  - name: registry-api
+    version: "0.2.0"
+    repository: "file://charts/registry-api"
+    condition: registry-api.enabled
+
+  - name: deploy-controller
+    version: "0.1.0"
+    repository: "file://charts/deploy-controller"
+    condition: deploy-controller.enabled
+
+  - name: safety-orchestrator
+    version: "0.1.0"
+    repository: "file://charts/safety-orchestrator"
+    condition: safety-orchestrator.enabled
+
+  # ── Safety scanners (local sub-charts) ────────────────────────────────────
+  - name: llm-guard
+    version: "0.1.0"
+    repository: "file://charts/llm-guard"
+    condition: llm-guard.enabled
+
+  - name: presidio
+    version: "0.1.0"
+    repository: "file://charts/presidio"
+    condition: presidio.enabled
+
+  - name: nemo
+    version: "0.1.0"
+    repository: "file://charts/nemo"
+    condition: nemo.enabled
+
+  # ── LLM routing ───────────────────────────────────────────────────────────
+  - name: portkey
+    version: "0.1.0"
+    repository: "file://charts/portkey"
+    condition: portkey.enabled
+
+  # ── Policy enforcement (local sub-chart for standalone OPA pods) ──────────
+  - name: opa
+    version: "0.1.0"
+    repository: "file://charts/opa"
+    condition: opa.enabled
+
+  # ── Visual builder UI (local sub-chart) ───────────────────────────────────
+  - name: studio
+    version: "0.1.0"
+    repository: "file://charts/studio"
+    condition: studio.enabled

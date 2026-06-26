@@ -1,0 +1,158 @@
+direction: right
+
+title: |md
+  # Request Flow — Option A: Safety Orchestrator as Network-Enforced Input Proxy
+| {
+  near: top-center
+  shape: text
+  style.font-size: 24
+}
+
+# ─── Low-Risk Flow ───────────────────────────────────────────────────────────
+low-risk: "Low-Risk Request Flow" {
+  style.fill: "#d3f9d8"
+  style.stroke: "#2f9e44"
+  style.border-radius: 8
+
+  user: "User" {shape: person}
+  envoy: "Envoy\n(JWT auth + rate limit)"
+
+  safety: "Safety Orchestrator\n(network-enforced input proxy)" {
+    style.fill: "#ebfbee"
+    style.stroke: "#2f9e44"
+
+    llmguard: "LLM Guard"
+    presidio: "Presidio\n(PII detection)"
+    nemo: "NeMo Guardrails"
+
+    llmguard -> presidio: "" {style.opacity: 0}
+    presidio -> nemo: "" {style.opacity: 0}
+  }
+
+  agent: "Agent Pod\n(LangGraph)" {
+    style.fill: "#b2f2bb"
+    style.stroke: "#2f9e44"
+  }
+  portkey: "Portkey\n(LLM proxy)"
+  llm: "LLM Provider" {shape: cloud}
+  opa: "OPA sidecar\n(tool auth)" {
+    style.fill: "#ebfbee"
+    style.stroke: "#2f9e44"
+  }
+  tool: "External Tool" {shape: cloud}
+  langfuse: "Langfuse\n(async trace)" {
+    style.fill: "#f8f9fa"
+    style.stroke: "#868e96"
+  }
+
+  # Input path — network-enforced via Safety
+  user -> envoy: "1. HTTPS request" {style.stroke: "#2f9e44"}
+  envoy -> safety: "2. forward to Safety Orchestrator" {style.stroke: "#2f9e44"}
+  safety -> user: "3a. 422 Blocked\n(if unsafe)" {style.stroke: "#e03131"}
+  safety -> agent: "3b. sanitized request\n(if clean)" {style.stroke: "#2f9e44"}
+
+  # Agent → LLM inference
+  agent -> portkey: "4. LLM inference" {style.stroke: "#2f9e44"}
+  portkey -> llm: "4a. forward request" {style.stroke: "#2f9e44"}
+  llm -> portkey: "4b. response" {style.stroke: "#2f9e44"}
+  portkey -> agent: "5. response" {style.stroke: "#2f9e44"}
+
+  # Agent → tool auth + execution
+  agent -> opa: "6. tool call auth" {style.stroke: "#2f9e44"}
+  opa -> agent: "6a. allow (risk=low)" {style.stroke: "#2f9e44"}
+  agent -> tool: "7. execute" {style.stroke: "#2f9e44"}
+  tool -> agent: "8. result" {style.stroke: "#2f9e44"}
+
+  # Output path — agent-initiated
+  agent -> safety: "9. output scan" {style.stroke: "#2f9e44"}
+  safety -> agent: "9a. clean output" {style.stroke: "#2f9e44"}
+  agent -> langfuse: "10. async trace" {
+    style.stroke: "#868e96"
+    style.stroke-dash: 3
+  }
+  agent -> user: "11. response" {style.stroke: "#2f9e44"}
+}
+
+# ─── High-Risk Flow (HITL) ───────────────────────────────────────────────────
+high-risk: "High-Risk Request Flow (HITL)" {
+  style.fill: "#fff5f5"
+  style.stroke: "#e03131"
+  style.border-radius: 8
+
+  user2: "User" {shape: person}
+  envoy2: "Envoy\n(JWT auth + rate limit)"
+
+  safety2: "Safety Orchestrator\n(network-enforced input proxy)" {
+    style.fill: "#fff5f5"
+    style.stroke: "#e03131"
+
+    llmguard2: "LLM Guard"
+    presidio2: "Presidio\n(PII detection)"
+    nemo2: "NeMo Guardrails"
+
+    llmguard2 -> presidio2: "" {style.opacity: 0}
+    presidio2 -> nemo2: "" {style.opacity: 0}
+  }
+
+  agent2: "Agent Pod\n(LangGraph)" {
+    style.fill: "#ffe3e3"
+    style.stroke: "#e03131"
+  }
+  portkey2: "Portkey\n(LLM proxy)"
+  llm2: "LLM Provider" {shape: cloud}
+  opa2: "OPA sidecar\n(policy check)" {
+    style.fill: "#fff5f5"
+    style.stroke: "#e03131"
+  }
+
+  postgres: "Postgres\n(approval store)" {shape: cylinder}
+  redis: "Redis\n(pub/sub)" {
+    style.fill: "#fff5f5"
+    style.stroke: "#868e96"
+  }
+  slack: "Slack\n(notification)" {
+    style.fill: "#fff5f5"
+    style.stroke: "#868e96"
+  }
+  reviewer: "Reviewer" {shape: person}
+  appsmith: "Appsmith\n(reviewer UI)"
+  tool2: "External Tool" {shape: cloud}
+  safety3: "Safety Orchestrator\n(output scan)" {
+    style.fill: "#fff5f5"
+    style.stroke: "#e03131"
+  }
+
+  # Input path — same network-enforced Safety proxy
+  user2 -> envoy2: "1. HTTPS request" {style.stroke: "#2f9e44"}
+  envoy2 -> safety2: "2. forward to Safety Orchestrator" {style.stroke: "#2f9e44"}
+  safety2 -> user2: "3a. 422 Blocked\n(if unsafe)" {style.stroke: "#e03131"}
+  safety2 -> agent2: "3b. sanitized request\n(if clean)" {style.stroke: "#2f9e44"}
+
+  # Agent → LLM inference
+  agent2 -> portkey2: "4. LLM inference" {style.stroke: "#2f9e44"}
+  portkey2 -> llm2: "4a. forward request" {style.stroke: "#2f9e44"}
+  llm2 -> portkey2: "4b. response" {style.stroke: "#2f9e44"}
+  portkey2 -> agent2: "5. response" {style.stroke: "#2f9e44"}
+
+  # OPA flags HIGH RISK → HITL loop begins
+  agent2 -> opa2: "6. tool call auth" {style.stroke: "#2f9e44"}
+  opa2 -> agent2: "6a. HIGH RISK → require approval" {style.stroke: "#e03131"}
+  agent2 -> postgres: "7. INSERT approval\nstatus=pending" {style.stroke: "#e03131"}
+  agent2 -> agent2: "8. interrupt()\ncheckpoint saved" {style.stroke: "#e03131"}
+
+  # Notification chain
+  postgres -> redis: "9. NOTIFY pending" {style.stroke: "#e03131"}
+  redis -> slack: "10. notify reviewer" {style.stroke: "#e03131"}
+  reviewer -> appsmith: "11. view context"
+  appsmith -> postgres: "12. APPROVE\nUPDATE status=approved" {style.stroke: "#2f9e44"}
+  postgres -> agent2: "13. NOTIFY → resume" {style.stroke: "#2f9e44"}
+
+  # Approved execution
+  agent2 -> tool2: "14. execute approved action" {style.stroke: "#2f9e44"}
+  tool2 -> agent2: "15. result" {style.stroke: "#2f9e44"}
+
+  # Output scan + response
+  agent2 -> safety3: "16. output scan" {style.stroke: "#2f9e44"}
+  safety3 -> agent2: "16a. clean output" {style.stroke: "#2f9e44"}
+  agent2 -> user2: "17. response" {style.stroke: "#2f9e44"}
+}

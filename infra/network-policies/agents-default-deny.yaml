@@ -1,0 +1,24 @@
+# Apply to all agents-{team} namespaces via namespace label selector
+# All agent team namespaces must carry label: agentshield.io/namespace-type: agents
+# (see infra/namespaces/agents-platform.yaml for the template)
+#
+# This policy denies all ingress AND egress by default.
+# agents-allow-egress.yaml opens the specific ports agents are permitted to use.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agents-default-deny
+  # NOTE: NetworkPolicy is namespace-scoped; deploy this manifest into each
+  # agents-{team} namespace. Use kustomize or ArgoCD ApplicationSet to fan out
+  # across all team namespaces automatically.
+  # Example: kubectl apply -f agents-default-deny.yaml -n agents-<team>
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/policy-type: default-deny
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

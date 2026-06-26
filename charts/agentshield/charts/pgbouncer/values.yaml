@@ -1,0 +1,54 @@
+replicaCount: 2
+
+image:
+  repository: bitnami/pgbouncer
+  tag: "1.23.1"
+  pullPolicy: IfNotPresent
+
+# Backend PostgreSQL connection
+postgresql:
+  host: agentshield-postgresql
+  port: 5432
+  database: "*"
+  existingSecret: postgres-passwords
+  existingSecretPasswordKey: keycloak  # superuser password key
+
+# Pool settings
+pgbouncer:
+  poolMode: transaction
+  maxClientConn: 200
+  defaultPoolSize: 25
+  reservePoolSize: 5
+  authType: scram-sha-256
+  logConnections: false
+  logDisconnections: false
+  serverIdleTimeout: 600
+  clientIdleTimeout: 600
+
+service:
+  type: ClusterIP
+  port: 5432
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podDisruptionBudget:
+  create: true
+  minAvailable: 1
+
+livenessProbe:
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3

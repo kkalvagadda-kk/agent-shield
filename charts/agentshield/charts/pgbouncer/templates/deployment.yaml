@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-pgbouncer
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: pgbouncer
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pgbouncer
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pgbouncer
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: pgbouncer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: pgbouncer
+              containerPort: 5432
+              protocol: TCP
+          env:
+            - name: POSTGRESQL_HOST
+              value: {{ .Values.postgresql.host | quote }}
+            - name: POSTGRESQL_PORT
+              value: {{ .Values.postgresql.port | quote }}
+            - name: PGBOUNCER_DATABASE
+              value: {{ .Values.postgresql.database | quote }}
+            - name: PGBOUNCER_POOL_MODE
+              value: {{ .Values.pgbouncer.poolMode | quote }}
+            - name: PGBOUNCER_MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | quote }}
+            - name: PGBOUNCER_DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: PGBOUNCER_RESERVE_POOL_SIZE
+              value: {{ .Values.pgbouncer.reservePoolSize | quote }}
+            - name: PGBOUNCER_AUTH_TYPE
+              value: {{ .Values.pgbouncer.authType | quote }}
+            - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
+              value: {{ .Values.pgbouncer.serverIdleTimeout | quote }}
+            - name: PGBOUNCER_CLIENT_IDLE_TIMEOUT
+              value: {{ .Values.pgbouncer.clientIdleTimeout | quote }}
+            - name: POSTGRESQL_USERNAME
+              value: postgres
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.existingSecret }}
+                  key: {{ .Values.postgresql.existingSecretPasswordKey }}
+          livenessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          readinessProbe:
+            tcpSocket:
+              port: 5432
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

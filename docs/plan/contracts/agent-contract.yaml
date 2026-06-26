@@ -1,0 +1,382 @@
+openapi: "3.1.0"
+info:
+  title: AgentShield Agent Pod Contract
+  version: "1.0.0"
+  description: |
+    Every agent pod deployed by AgentShield (SDK-built or declarative runner)
+    MUST expose these endpoints. The SDK's server.py implements this automatically.
+    
+    For declarative runners: the declarative-runner image satisfies this contract.
+    For SDK agents: agentshield_sdk.server provides a FastAPI app that satisfies this.
+    
+    Kubernetes liveness probe: GET /health (every 15s, initialDelaySeconds: 15)
+    Kubernetes readiness probe: GET /ready (every 10s, initialDelaySeconds: 20)
+
+servers:
+  - url: http://{agent-name}.{namespace}:8080
+    description: Agent pod endpoint (accessed within cluster)
+
+components:
+  schemas:
+    ChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: "User input. Already safety-scanned by Safety Orchestrator."
+          example: "What is the status of order 12345?"
+        thread_id:
+          type: string
+          description: "Conversation thread ID for multi-turn continuity. UUID or client-generated string. If not provided, a new thread is created."
+          nullable: true
+          example: "thread_abc123"
+        metadata:
+          type: object
+          description: "Optional request context (user_id, session_id, etc.)"
+          additionalProperties: true
+          nullable: true
+
+    ChatResponse:
+      type: object
+      required: [response, thread_id]
+      properties:
+        response:
+          type: string
+          description: "Final agent response text"
+          example: "Your order 12345 was delivered on June 20th."
+        thread_id:
+          type: string
+          description: "Thread ID to pass in subsequent turns"
+        tool_calls:
+          type: array
+          description: "Summary of tool calls made during this turn"
+          items:
+            type: object
+            properties:
+              tool:
+                type: string
+              args:
+                type: object
+              result:
+                type: string
+              risk:
+                type: string
+                enum: [low, high]
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            model:
+              type: string
+
+    ResumeRequest:
+      type: object
+      required: [thread_id, approval_id, decision]
+      properties:
+        thread_id:
+          type: string
+          description: "LangGraph checkpoint thread ID to resume"
+        approval_id:
+          type: string
+          format: uuid
+        decision:
+          type: string
+          enum: [approved, rejected]
+        reviewer_id:
+          type: string
+        reviewer_notes:
+          type: string
+          nullable: true
+
+    ResumeResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [resumed, completed, error]
+        message:
+          type: string
+          nullable: true
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        agent_name:
+          type: string
+        version:
+          type: string
+
+    ReadinessResponse:
+      type: object
+      required: [status, checks]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          description: "Health of each dependency; all must be 'ok' for ready=true"
+          properties:
+            postgres:
+              type: string
+              enum: [ok, error]
+              description: "Can connect to Postgres (checkpoints)"
+            safety_orchestrator:
+              type: string
+              enum: [ok, error]
+              description: "Safety Orchestrator reachable"
+            langfuse:
+              type: string
+              enum: [ok, error]
+              description: "Langfuse tracing reachable"
+            opa:
+              type: string
+              enum: [ok, error]
+              description: "OPA sidecar reachable at localhost:8181"
+
+    MetricsResponse:
+      type: string
+      description: "Prometheus text format metrics"
+      example: |
+        # HELP agent_requests_total Total requests processed
+        # TYPE agent_requests_total counter
+        agent_requests_total{agent="order-agent",status="success"} 42
+        # HELP agent_request_duration_seconds Request latency
+        # TYPE agent_request_duration_seconds histogram
+        agent_request_duration_seconds_bucket{le="0.1"} 38
+
+    SSEEvent:
+      description: |
+        Server-Sent Events format. Each event has a type and JSON data.
+        See sse-protocol.md for full event specification.
+      type: string
+      example: |
+        event: text_delta
+        data: {"content": "Looking up your order..."}
+
+        event: tool_call_start
+        data: {"tool": "lookup_order", "args": {"order_id": "12345"}}
+
+        event: done
+        data: {"usage": {"input_tokens": 45, "output_tokens": 23}}
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: agentHealth
+      description: |
+        Kubernetes liveness probe. Must return 200 if the process is alive.
+        Does NOT check dependencies — use /ready for that.
+        Response within 1s or Kubernetes marks as failed.
+      responses:
+        "200":
+          description: Agent process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                agent_name: order-agent
+                version: "1.2.3"
+
+  /ready:
+    get:
+      summary: Readiness probe
+      operationId: agentReady
+      description: |
+        Kubernetes readiness probe. Checks all dependencies:
+        - Postgres connectivity (LangGraph checkpoints)
+        - Safety Orchestrator reachable
+        - Langfuse reachable
+        - OPA sidecar responsive at localhost:8181
+        
+        Returns 200 only if all checks pass.
+        Returns 503 if any check fails — pod removed from service endpoints.
+        Response within 2s.
+      responses:
+        "200":
+          description: All dependencies healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              example:
+                status: ready
+                checks:
+                  postgres: ok
+                  safety_orchestrator: ok
+                  langfuse: ok
+                  opa: ok
+        "503":
+          description: One or more dependencies unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+              example:
+                status: not_ready
+                checks:
+                  postgres: ok
+                  safety_orchestrator: error
+                  langfuse: ok
+                  opa: ok
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: agentMetrics
+      description: |
+        Prometheus text format metrics scraped by the platform's Prometheus instance.
+        Required metrics:
+        - agent_requests_total (counter, labels: status)
+        - agent_request_duration_seconds (histogram)
+        - agent_tool_calls_total (counter, labels: tool_name, risk, outcome)
+        - agent_approvals_pending (gauge)
+        - agent_active_threads (gauge)
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+
+  /chat:
+    post:
+      summary: Synchronous chat endpoint
+      operationId: chat
+      description: |
+        Receives a user message and returns the complete agent response.
+        
+        The request has already been safety-scanned by the Safety Orchestrator
+        before reaching this endpoint. The agent MUST NOT re-scan.
+        
+        The agent MUST:
+        1. Call OPA sidecar (localhost:8181) before each tool execution
+        2. For high-risk tools: create an approval record and call interrupt()
+        3. Emit a Langfuse trace asynchronously after completion
+        4. Write LangGraph checkpoint to Postgres after each turn
+        
+        Timeout: client should use 30s timeout for this endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+            example:
+              message: "What is the status of order 12345?"
+              thread_id: "thread_abc123"
+      responses:
+        "200":
+          description: Agent response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+              example:
+                response: "Your order 12345 was delivered on June 20th at 2:30pm."
+                thread_id: "thread_abc123"
+                tool_calls:
+                  - tool: lookup_order
+                    args:
+                      order_id: "12345"
+                    result: "delivered on June 20th at 2:30pm"
+                    risk: low
+                usage:
+                  input_tokens: 45
+                  output_tokens: 23
+                  model: gpt-4o-mini
+        "422":
+          description: Input validation error
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+        "503":
+          description: Agent not ready (dependency check failed)
+
+  /chat/stream:
+    post:
+      summary: Streaming chat endpoint (Server-Sent Events)
+      operationId: chatStream
+      description: |
+        Same semantics as /chat but returns Server-Sent Events stream.
+        Content-Type: text/event-stream.
+        
+        Events are emitted in order:
+        1. text_delta (zero or more) — partial response tokens
+        2. tool_call_start — when a tool is being called
+        3. tool_call_end — with tool result
+        4. approval_requested — if high-risk tool requires approval (stream pauses here)
+        5. approval_decided — when reviewer makes a decision
+        6. done — final event with usage stats
+        
+        On approval_requested: the stream stays open (connection held). The frontend
+        should display an approval waiting UI. When the reviewer approves/rejects via
+        the Appsmith queue, the approval_decided event is emitted and execution continues.
+        
+        See contracts/sse-protocol.md for full event specification.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatRequest'
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEEvent'
+        "503":
+          description: Agent not ready
+
+  /resume/{thread_id}:
+    post:
+      summary: Resume a paused agent thread after approval decision
+      operationId: resumeThread
+      description: |
+        Called by the Registry API's approval notifier when a reviewer makes a decision.
+        The agent resumes execution from its LangGraph checkpoint.
+        
+        Not called directly by clients. Internal endpoint used by the approval flow:
+        Registry API → POST /resume/{thread_id} → agent resumes → emits approval_decided SSE event.
+      parameters:
+        - name: thread_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResumeRequest'
+      responses:
+        "200":
+          description: Thread resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResumeResponse'
+        "404":
+          description: Thread not found or already completed
+        "409":
+          description: Thread is not in a paused state

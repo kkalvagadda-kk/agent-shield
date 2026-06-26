@@ -1,0 +1,729 @@
+# ============================================================================
+# AgentShield Umbrella Chart — Top-Level Values
+# ============================================================================
+# All passwords / API keys are read from pre-existing Kubernetes Secrets.
+# Never store credential values in this file.
+# Create secrets before installing:
+#
+#   kubectl create secret generic postgres-passwords \
+#     -n agentshield-platform \
+#     --from-literal=keycloak=<pw> \
+#     --from-literal=agentshield=<pw> \
+#     --from-literal=langfuse=<pw> \
+#     --from-literal=langgraph=<pw> \
+#     --from-literal=appsmith=<pw>
+#
+#   kubectl create secret generic redis-password \
+#     -n agentshield-platform --from-literal=redis-password=<pw>
+#
+#   kubectl create secret generic minio-credentials \
+#     -n agentshield-platform \
+#     --from-literal=root-user=<access-key> \
+#     --from-literal=root-password=<secret-key>
+#
+#   kubectl create secret generic keycloak-admin-password \
+#     -n agentshield-platform --from-literal=admin-password=<pw>
+#
+#   kubectl create secret generic langfuse-api-keys \
+#     -n agentshield-platform \
+#     --from-literal=public-key=<pk> \
+#     --from-literal=secret-key=<sk>
+# ============================================================================
+
+# ── Global overrides ─────────────────────────────────────────────────────────
+global:
+  # Registry prefix for all platform images (override with your internal registry)
+  # Example: harbor.internal/agentshield
+  imageRegistry: ""
+
+  # StorageClass for all PersistentVolumeClaims (leave empty to use cluster default)
+  storageClass: ""
+
+  # Hostname (ClusterIP service name) of PgBouncer — all services connect here
+  postgresHost: "agentshield-pgbouncer"
+
+  # Internal hostname of Langfuse web service for SDK tracing
+  langfuseHost: "http://agentshield-langfuse-web:3000"
+
+  # Namespace all platform components run in (ArgoCD / helmfile override)
+  namespace: agentshield-platform
+
+  # imagePullSecrets: names of pre-created K8s Secrets with registry credentials.
+  # Leave empty for local Docker Desktop (no auth needed for local images).
+  # Example (Harbor/ECR):
+  #   imagePullSecrets:
+  #     - name: harbor-registry-creds
+  imagePullSecrets: []
+
+# ── Sub-chart enable flags ────────────────────────────────────────────────────
+# Set a flag to false to skip a component (e.g. if you bring your own Postgres)
+postgresql:
+  enabled: true
+
+pgbouncer:
+  enabled: true
+
+redis:
+  enabled: true
+
+minio:
+  enabled: true
+
+keycloak:
+  enabled: true
+
+langfuse:
+  enabled: true
+
+clickhouse:
+  enabled: true
+
+appsmith:
+  enabled: true
+
+registry-api:
+  enabled: true
+
+deploy-controller:
+  enabled: true
+
+safety-orchestrator:
+  enabled: true
+
+llm-guard:
+  enabled: true
+
+presidio:
+  enabled: true
+
+nemo:
+  enabled: true
+
+portkey:
+  enabled: true
+
+opa:
+  enabled: true
+
+studio:
+  enabled: true
+
+# ── PostgreSQL (Bitnami) ─────────────────────────────────────────────────────
+postgresql:
+  enabled: true
+
+  auth:
+    # Passwords are sourced from the pre-created K8s Secret "postgres-passwords".
+    # The Bitnami chart supports existingSecret for the postgres superuser.
+    existingSecret: postgres-passwords
+    secretKeys:
+      adminPasswordKey: keycloak   # reused as postgres superuser during init
+    database: postgres
+    username: postgres
+
+  primary:
+    persistence:
+      enabled: true
+      size: 20Gi
+      # storageClass inherits global.storageClass if set
+
+    replication:
+      synchronousCommit: "on"
+      numSynchronousReplicas: 1
+
+    initdb:
+      # Post-boot SQL: create all platform databases and users.
+      # Passwords are injected at runtime from the postgres-passwords Secret
+      # via the DATABASE_PASSWORDS_ env var pattern (see scriptsConfigMap below).
+      scripts:
+        01_create_databases.sql: |
+          CREATE DATABASE keycloak;
+          CREATE DATABASE agentshield;
+          CREATE DATABASE langfuse;
+          CREATE DATABASE langgraph;
+          CREATE DATABASE appsmith;
+        02_create_users.sql: |
+          -- Application roles. Passwords are set immediately after by 03_set_passwords.sh.
+          CREATE ROLE keycloak_user WITH LOGIN;
+          CREATE ROLE agentshield_user WITH LOGIN;
+          CREATE ROLE langfuse_user WITH LOGIN;
+          CREATE ROLE langgraph_user WITH LOGIN;
+          CREATE ROLE appsmith_user WITH LOGIN;
+
+          GRANT ALL PRIVILEGES ON DATABASE keycloak TO keycloak_user;
+          GRANT ALL PRIVILEGES ON DATABASE agentshield TO agentshield_user;
+          GRANT ALL PRIVILEGES ON DATABASE langfuse TO langfuse_user;
+          GRANT ALL PRIVILEGES ON DATABASE langgraph TO langgraph_user;
+          GRANT ALL PRIVILEGES ON DATABASE appsmith TO appsmith_user;
+          -- PostgreSQL 15+ removed CREATE from PUBLIC on schema public; grant it explicitly.
+          \c keycloak
+          GRANT ALL ON SCHEMA public TO keycloak_user;
+          \c agentshield
+          GRANT ALL ON SCHEMA public TO agentshield_user;
+          \c langfuse
+          GRANT ALL ON SCHEMA public TO langfuse_user;
+          \c langgraph
+          GRANT ALL ON SCHEMA public TO langgraph_user;
+          \c appsmith
+          GRANT ALL ON SCHEMA public TO appsmith_user;
+        03_set_passwords.sh: |
+          #!/bin/bash
+          # Set each application role's password to the postgres superuser password
+          # so PgBouncer can authenticate them. Rotate to per-role secrets in Phase 3.
+          set -e
+          export PGPASSWORD="${POSTGRESQL_PASSWORD}"
+          PW="${POSTGRESQL_PASSWORD}"
+          psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE keycloak_user WITH PASSWORD '${PW}'"
+          psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE agentshield_user WITH PASSWORD '${PW}'"
+          psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE langfuse_user WITH PASSWORD '${PW}'"
+          psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE langgraph_user WITH PASSWORD '${PW}'"
+          psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE appsmith_user WITH PASSWORD '${PW}'"
+
+  readReplicas:
+    replicaCount: 1
+    persistence:
+      enabled: true
+      size: 20Gi
+
+  metrics:
+    enabled: true
+
+# ── PgBouncer (Bitnami) ───────────────────────────────────────────────────────
+pgbouncer:
+  enabled: true
+
+  # PgBouncer connects to the Postgres primary service.
+  postgresql:
+    host: agentshield-postgresql
+    port: 5432
+    database: postgres
+    username: postgres
+    existingSecret: postgres-passwords
+    existingSecretPasswordKey: keycloak  # superuser pw; override per-db in pgbouncer.ini
+
+  pgbouncer:
+    poolMode: transaction
+    maxClientConn: 200
+    defaultPoolSize: 25
+    reservePoolSize: 5
+    logConnections: false
+    logDisconnections: false
+    authType: scram-sha-256
+
+  service:
+    port: 5432
+
+# ── Redis (Bitnami) ───────────────────────────────────────────────────────────
+redis:
+  enabled: true
+
+  auth:
+    enabled: true
+    existingSecret: redis-password
+    existingSecretPasswordKey: redis-password
+
+  architecture: standalone
+
+  master:
+    persistence:
+      enabled: true
+      size: 8Gi
+    # AOF persistence for durability
+    extraFlags:
+      - "--appendonly yes"
+      - "--appendfsync everysec"
+
+  metrics:
+    enabled: true
+
+# ── MinIO (Bitnami) ───────────────────────────────────────────────────────────
+minio:
+  enabled: true
+
+  auth:
+    existingSecret: minio-credentials
+    existingSecretAccessKeyIDKey: root-user
+    existingSecretSecretAccessKeyKey: root-password
+
+  defaultBuckets: "postgres-backups,clickhouse-backups,langfuse-media,eval-artifacts"
+
+  persistence:
+    enabled: true
+    size: 50Gi
+
+  mode: standalone
+
+  service:
+    port: 9000
+
+  consoleService:
+    port: 9001
+
+# ── Keycloak (Bitnami) ────────────────────────────────────────────────────────
+keycloak:
+  enabled: true
+
+  auth:
+    adminUser: admin
+    existingSecret: keycloak-admin-password
+    existingSecretKey: admin-password
+
+  # Realm is configured post-install via kcadm.sh CLI (see plan.md Week 1, Task 8).
+  # Initial realm: agentshield
+  # Initial clients: registry-api, envoy-gateway
+  # Initial users: platform-admin, agent-reviewer
+
+  extraEnvVars:
+    - name: KC_DB
+      value: postgres
+    - name: KC_DB_URL
+      value: jdbc:postgresql://agentshield-pgbouncer:5432/keycloak
+    - name: KC_DB_USERNAME
+      value: keycloak_user
+    - name: KC_DB_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: postgres-passwords
+          key: keycloak
+    - name: KC_HOSTNAME_STRICT
+      value: "false"
+    - name: KC_HTTP_ENABLED
+      value: "true"
+
+  startupProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+  livenessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 20
+
+  readinessProbe:
+    initialDelaySeconds: 120
+    periodSeconds: 10
+
+  service:
+    type: ClusterIP
+    ports:
+      http: 80
+
+  postgresql:
+    enabled: false  # Using shared Postgres via PgBouncer
+
+  externalDatabase:
+    host: agentshield-pgbouncer
+    port: 5432
+    database: keycloak
+    user: keycloak_user
+    existingSecret: postgres-passwords
+    existingSecretPasswordKey: keycloak
+
+# ── Langfuse ──────────────────────────────────────────────────────────────────
+langfuse:
+  enabled: true
+
+  langfuse:
+    salt:
+      existingSecret: langfuse-api-keys
+      existingSecretKey: salt
+    nextAuthSecret:
+      existingSecret: langfuse-api-keys
+      existingSecretKey: nextauth-secret
+
+    database:
+      host: agentshield-pgbouncer
+      port: 5432
+      name: langfuse
+      user: langfuse_user
+      password:
+        existingSecret: postgres-passwords
+        existingSecretKey: langfuse
+
+    clickhouse:
+      enabled: true
+      host: agentshield-clickhouse
+      port: 8123
+      user: langfuse
+      password:
+        existingSecret: langfuse-clickhouse-password
+        existingSecretKey: password
+
+    s3:
+      enabled: true
+      endpoint: http://agentshield-minio:9000
+      bucket: langfuse-media
+      region: us-east-1
+      accessKeyId:
+        existingSecret: minio-credentials
+        existingSecretKey: root-user
+      secretAccessKey:
+        existingSecret: minio-credentials
+        existingSecretKey: root-password
+      forcePathStyle: true
+
+    redis:
+      host: agentshield-redis-master
+      port: 6379
+      password:
+        existingSecret: redis-password
+        existingSecretKey: redis-password
+
+  web:
+    replicaCount: 1
+    service:
+      type: ClusterIP
+      port: 3000
+
+  worker:
+    replicaCount: 1
+
+# ── ClickHouse (Bitnami) — Langfuse trace backend ─────────────────────────────
+clickhouse:
+  enabled: true
+
+  auth:
+    username: langfuse
+    existingSecret: langfuse-clickhouse-password
+    existingSecretKey: password
+
+  shards: 1
+  replicaCount: 1
+
+  persistence:
+    enabled: true
+    size: 20Gi
+
+  service:
+    ports:
+      http: 8123
+      tcp: 9000
+
+# ── Appsmith (Community Edition) ──────────────────────────────────────────────
+appsmith:
+  enabled: true
+
+  persistence:
+    enabled: true
+    size: 10Gi
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  ingress:
+    enabled: false  # Enable and configure externally if needed
+
+# ── Registry API (local sub-chart) ───────────────────────────────────────────
+registry-api:
+  enabled: true
+
+  replicaCount: 2
+
+  image:
+    repository: registry.internal/agentshield/registry-api
+    tag: "0.2.2"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  env:
+    DATABASE_URL:
+      valueFrom:
+        secretKeyRef:
+          name: postgres-passwords
+          key: agentshield  # Registry API reads DB password from here; full URL built in config.py
+    REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
+    LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
+    KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8000
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 8000
+    initialDelaySeconds: 20
+    periodSeconds: 10
+
+# ── Deploy Controller (local sub-chart) ───────────────────────────────────────
+deploy-controller:
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: registry.internal/agentshield/deploy-controller
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  env:
+    REGISTRY_API_URL: "http://agentshield-registry-api:8000"
+    POLL_INTERVAL_SECONDS: "5"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+  # RBAC — ClusterRole allows create/update/delete in agents-* namespaces
+  rbac:
+    create: true
+
+# ── Safety Orchestrator (local sub-chart) ─────────────────────────────────────
+safety-orchestrator:
+  enabled: true
+
+  replicaCount: 2
+
+  image:
+    repository: registry.internal/agentshield/safety-orchestrator
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8080
+
+  env:
+    LLM_GUARD_URL: "http://agentshield-llm-guard:8000"
+    PRESIDIO_ANALYZER_URL: "http://agentshield-presidio:3000"
+    PRESIDIO_ANONYMIZER_URL: "http://agentshield-presidio:3001"
+    NEMO_URL: "http://agentshield-nemo:8000"
+    SCANNER_TIMEOUT_SECONDS: "5"
+    LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
+    POSTGRES_HOST: "agentshield-pgbouncer"
+    POSTGRES_DB: "agentshield"
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 15
+
+  readinessProbe:
+    httpGet:
+      path: /ready
+      port: 8080
+    initialDelaySeconds: 20
+
+# ── LLM Guard (local sub-chart) ───────────────────────────────────────────────
+llm-guard:
+  enabled: true
+
+  replicaCount: 2
+
+  image:
+    repository: ghcr.io/protectai/llm-guard
+    tag: "0.5.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  env:
+    INPUT_SCANNERS: "PromptInjection,Secrets,Toxicity"
+    OUTPUT_SCANNERS: "Sensitive,Toxicity,NoRefusal"
+
+  resources:
+    # DeBERTa model requires ~3GB RAM; 4Gi limit gives headroom
+    requests:
+      cpu: 1000m
+      memory: 4Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+# ── Presidio (local sub-chart) ────────────────────────────────────────────────
+presidio:
+  enabled: true
+
+  replicaCount: 1
+
+  analyzer:
+    image:
+      repository: mcr.microsoft.com/presidio-analyzer
+      tag: latest
+      pullPolicy: IfNotPresent
+    port: 3000
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+  anonymizer:
+    image:
+      repository: mcr.microsoft.com/presidio-anonymizer
+      tag: latest
+      pullPolicy: IfNotPresent
+    port: 3001
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+  service:
+    type: ClusterIP
+
+# ── NeMo Guardrails (local sub-chart) ─────────────────────────────────────────
+nemo:
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: nvcr.io/nvidia/nemo
+    tag: "24.09"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8000
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 1000m
+      memory: 3Gi
+
+  # YARA injection rules mounted from ConfigMap
+  rulesConfigMap: nemo-yara-rules
+
+# ── Portkey OSS (local sub-chart) ─────────────────────────────────────────────
+portkey:
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: portkeyai/gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8787
+
+  env:
+    REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/1"
+    # Provider API keys are injected via separate K8s Secrets mounted as env vars:
+    #   kubectl create secret generic llm-provider-keys \
+    #     --from-literal=OPENAI_API_KEY=<key> \
+    #     --from-literal=ANTHROPIC_API_KEY=<key>
+    OPENAI_API_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: llm-provider-keys
+          key: OPENAI_API_KEY
+    ANTHROPIC_API_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: llm-provider-keys
+          key: ANTHROPIC_API_KEY
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# ── OPA standalone (local sub-chart — policy bundle server / audit) ────────────
+# Note: per-agent OPA sidecars are injected by the Deploy Controller, not this chart.
+# This sub-chart runs a standalone OPA instance for policy bundle hosting and audit.
+opa:
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: openpolicyagent/opa
+    tag: "0.69.0-static"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 8181
+
+  args:
+    - run
+    - "--server"
+    - "--addr=0.0.0.0:8181"
+    - "--bundle=/policies/"
+    - "--log-level=info"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# ── AgentShield Studio (local sub-chart) ──────────────────────────────────────
+studio:
+  enabled: true
+
+  replicaCount: 1
+
+  image:
+    repository: registry.internal/agentshield/studio
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: ClusterIP
+    port: 80
+
+  env:
+    VITE_REGISTRY_API_URL: "http://agentshield-registry-api:8000"
+    VITE_LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  ingress:
+    enabled: false  # Enable and set hostname for external access
+    # hostname: studio.agentshield.internal

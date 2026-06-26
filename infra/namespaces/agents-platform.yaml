@@ -1,0 +1,12 @@
+# Template: copy this file and replace 'platform' with team name to create new team namespaces
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+    agentshield.io/team: platform
+    kubernetes.io/metadata.name: agents-platform
+  annotations:
+    agentshield.io/description: Agent pods for platform team

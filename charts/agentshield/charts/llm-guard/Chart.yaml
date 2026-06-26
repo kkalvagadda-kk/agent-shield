@@ -1,0 +1,6 @@
+apiVersion: v2
+name: llm-guard
+description: AgentShield llm-guard service (stub — not yet implemented)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

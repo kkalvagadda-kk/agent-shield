@@ -1,0 +1,100 @@
+direction: right
+
+title: |md
+  # Agent Creation & Deployment — Three Paths
+| {
+  near: top-center
+  shape: text
+  style.font-size: 24
+}
+
+# Visual (No-Code) Path
+visual: "Path 1: Visual Builder (No-Code)" {
+  style.fill: "#e7f5ff"
+  style.stroke: "#1971c2"
+  style.border-radius: 8
+
+  user: "Product / Ops\nTeam" {shape: person}
+  studio: "AgentShield Studio\n(React + React Flow)"
+  json: "Workflow JSON\n(nodes + edges + tools)"
+  registry: "Registry API"
+  controller: "Deploy Controller"
+  pod: "Declarative Runner Pod\n(generic image)" {
+    style.fill: "#d3f9d8"
+  }
+
+  user -> studio: "drag-drop\nbuild"
+  studio -> json: "serialize"
+  json -> registry: "POST /agents"
+  registry -> controller: "deploy event"
+  controller -> pod: "create Deployment\n(loads JSON at runtime)"
+}
+
+# SDK Declarative Path
+sdk-simple: "Path 2: SDK Declarative (Code-Light)" {
+  style.fill: "#fff9db"
+  style.stroke: "#f08c00"
+  style.border-radius: 8
+
+  dev: "Developer" {shape: person}
+  code: "Agent(\n  instructions,\n  tools\n)"
+  git: "Git Push"
+  ci: "CI Pipeline\n(lint → test → build)"
+  image: "Container Image\n(registry.internal)" {shape: cylinder}
+  registry2: "Registry API"
+  controller2: "Deploy Controller"
+  pod2: "Custom Agent Pod" {
+    style.fill: "#d3f9d8"
+  }
+
+  dev -> code: "write Python"
+  code -> git: "push"
+  git -> ci: "trigger"
+  ci -> image: "docker build\n+ push"
+  image -> registry2: "register\n(Appsmith UI)"
+  registry2 -> controller2: "deploy event"
+  controller2 -> pod2: "create Deployment\n(custom image)"
+}
+
+# SDK Graph Path
+sdk-graph: "Path 3: SDK Graph (Full Control)" {
+  style.fill: "#f3f0ff"
+  style.stroke: "#7048e8"
+  style.border-radius: 8
+
+  eng: "Engineer" {shape: person}
+  graph: "StateGraph(\n  nodes,\n  edges,\n  conditions\n)"
+  git2: "Git Push"
+  ci2: "CI Pipeline\n(lint → test → OPA → build)"
+  image2: "Container Image" {shape: cylinder}
+  registry3: "Registry API"
+  controller3: "Deploy Controller"
+  pod3: "Custom Agent Pod\n+ OPA Sidecar" {
+    style.fill: "#d3f9d8"
+  }
+
+  eng -> graph: "write graph.py\n+ policy.rego"
+  graph -> git2: "push"
+  git2 -> ci2: "trigger"
+  ci2 -> image2: "docker build\n+ push"
+  image2 -> registry3: "register"
+  registry3 -> controller3: "deploy event"
+  controller3 -> pod3: "create Deployment\n+ sidecar injection"
+}
+
+# Common destination
+k8s: "Kubernetes Cluster" {
+  style.fill: "#f8f9fa"
+  style.stroke: "#495057"
+  style.border-radius: 8
+
+  ns: "agents-{team} namespace" {
+    safety: "Safety Pipeline\n(same for all agents)"
+    tracing: "Langfuse Tracing"
+    hitl: "HITL Approval Flow"
+  }
+}
+
+visual.pod -> k8s.ns.safety: "governed"
+sdk-simple.pod2 -> k8s.ns.safety: "governed"
+sdk-graph.pod3 -> k8s.ns.safety: "governed"

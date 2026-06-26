@@ -1,0 +1,23 @@
+# Default values for registry-api sub-chart.
+# These are overridden by the parent agentshield umbrella chart values
+# under the `registry-api:` key (see charts/agentshield/values.yaml).
+
+replicaCount: 2
+
+image:
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+logLevel: "INFO"
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

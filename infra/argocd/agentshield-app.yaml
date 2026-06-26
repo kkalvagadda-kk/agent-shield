@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: agentshield
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: agentshield
+    app.kubernetes.io/part-of: agent-platform
+  annotations:
+    # Prevent accidental deletion via ArgoCD UI or CLI without explicit cascade flag
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: default
+
+  source:
+    # Replace with your actual git repository URL
+    repoURL: https://github.com/your-org/agent-platform.git
+    targetRevision: HEAD
+    path: charts/agentshield
+    helm:
+      releaseName: agentshield
+      valueFiles:
+        - values.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: agentshield-platform
+
+  syncPolicy:
+    automated:
+      prune: true        # Delete resources that are no longer in git
+      selfHeal: true     # Revert manual changes made outside of git
+      allowEmpty: false  # Prevent accidental deletion of all resources
+    syncOptions:
+      - CreateNamespace=true             # Auto-create agentshield-platform namespace if absent
+      - PrunePropagationPolicy=foreground # Wait for child resources to be deleted before pruning parent
+      - PruneLast=true                   # Prune resources after all other sync phases complete
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # Do not diff the `data` field on Secrets — decrypted values managed by
+  # external-secrets or sealed-secrets will always appear as drift otherwise.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      jsonPointers:
+        - /data

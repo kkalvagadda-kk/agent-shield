@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: platform
+    kubernetes.io/metadata.name: agentshield-platform
+  annotations:
+    agentshield.io/description: AgentShield platform services

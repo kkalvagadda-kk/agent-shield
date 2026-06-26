@@ -1,0 +1,234 @@
+{{- /*
+  realm-init-job.yaml
+  Post-install / post-upgrade Helm hook Job that configures the Keycloak
+  `agentshield` realm after the Keycloak pod is ready.
+
+  What it creates:
+    • Realm    : agentshield (display name "AgentShield")
+    • Client   : registry-api   — confidential, service accounts enabled
+    • Client   : envoy-gateway  — public client, used by Envoy JWT filter
+    • User     : platform-admin (password from keycloak-user-passwords)
+    • User     : agent-reviewer (password from keycloak-user-passwords)
+
+  Secrets expected (pre-created before Helm install):
+    keycloak-admin-password  → key: password         (Keycloak admin)
+    keycloak-user-passwords  → key: platform-admin   (platform-admin pw)
+                             → key: agent-reviewer   (agent-reviewer pw)
+
+  Hook policy:
+    • Runs after install and upgrade (post-install, post-upgrade)
+    • Deleted automatically on success (hook-succeeded)
+    • On failure the pod remains for log inspection; operator must delete
+      manually or re-run `helm upgrade` to trigger a fresh attempt.
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-realm-init
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: keycloak-realm-init
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+  annotations:
+    # Run after the main Helm resources are applied (on both install and upgrade).
+    "helm.sh/hook": post-install,post-upgrade
+    # Clean up the Job pod once it completes successfully to keep the namespace tidy.
+    # On failure the Job is retained so operators can inspect logs.
+    "helm.sh/hook-delete-policy": hook-succeeded
+    # Weight 10 ensures this job runs after any lower-weight hooks (e.g. DB migrations).
+    "helm.sh/hook-weight": "10"
+spec:
+  # Allow up to 3 retries in case Keycloak is briefly unavailable.
+  backoffLimit: 3
+  # Remove the Job (and its pods) 10 minutes after completion if the
+  # hook-delete-policy hasn't already cleaned it up.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      name: {{ .Release.Name }}-realm-init
+      labels:
+        app.kubernetes.io/name: keycloak-realm-init
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      restartPolicy: OnFailure
+
+      # ── Init container: wait for Keycloak to become reachable ────────────────
+      initContainers:
+        - name: wait-for-keycloak
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              KEYCLOAK_URL="http://{{ .Release.Name }}-keycloak"
+              echo "Waiting for Keycloak at ${KEYCLOAK_URL} ..."
+              until wget -qO- "${KEYCLOAK_URL}/realms/master" > /dev/null 2>&1; do
+                echo "  Keycloak not ready yet — retrying in 10 s ..."
+                sleep 10
+              done
+              echo "Keycloak is reachable. Proceeding with realm initialisation."
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+      # ── Main container: configure realm via kcadm.sh ─────────────────────────
+      containers:
+        - name: realm-init
+          image: quay.io/keycloak/keycloak:26.0
+          imagePullPolicy: IfNotPresent
+          env:
+            # Keycloak admin password — sourced from the pre-created secret.
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin-password
+                  key: admin-password
+            # Platform user passwords — sourced from a separate secret so that
+            # admin credentials and user credentials can be rotated independently.
+            - name: PLATFORM_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-user-passwords
+                  key: platform-admin
+            - name: REVIEWER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-user-passwords
+                  key: agent-reviewer
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              KEYCLOAK_URL="http://{{ .Release.Name }}-keycloak"
+              REALM="agentshield"
+
+              echo "==> Authenticating as admin against ${KEYCLOAK_URL} ..."
+              /opt/keycloak/bin/kcadm.sh config credentials \
+                --server "${KEYCLOAK_URL}" \
+                --realm master \
+                --user admin \
+                --password "${KEYCLOAK_ADMIN_PASSWORD}"
+
+              # ── Realm ──────────────────────────────────────────────────────
+              # Idempotent: create only if the realm does not already exist.
+              echo "==> Creating realm '${REALM}' (idempotent) ..."
+              REALM_EXISTS=$(/opt/keycloak/bin/kcadm.sh get realms \
+                --fields realm \
+                --format csv 2>/dev/null \
+                | grep -c "^\"${REALM}\"" || true)
+
+              if [ "${REALM_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create realms \
+                  -s realm="${REALM}" \
+                  -s enabled=true \
+                  -s displayName="AgentShield"
+                echo "    Realm '${REALM}' created."
+              else
+                echo "    Realm '${REALM}' already exists — skipping creation."
+              fi
+
+              # ── Client: registry-api ───────────────────────────────────────
+              # Confidential client; service accounts enabled for M2M flows
+              # (e.g. Registry API calling other platform services with a JWT).
+              echo "==> Creating client 'registry-api' ..."
+              CLIENT_EXISTS=$(/opt/keycloak/bin/kcadm.sh get clients \
+                -r "${REALM}" --fields clientId --format csv 2>/dev/null \
+                | grep -c "^\"registry-api\"" || true)
+
+              if [ "${CLIENT_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create clients \
+                  -r "${REALM}" \
+                  -s clientId=registry-api \
+                  -s enabled=true \
+                  -s protocol=openid-connect \
+                  -s publicClient=false \
+                  -s serviceAccountsEnabled=true \
+                  -s 'redirectUris=["*"]'
+                echo "    Client 'registry-api' created."
+              else
+                echo "    Client 'registry-api' already exists — skipping."
+              fi
+
+              # ── Client: envoy-gateway ──────────────────────────────────────
+              # Public client consumed by Envoy's JWT filter. Envoy fetches the
+              # JWKS from Keycloak and validates tokens inline — no client secret.
+              echo "==> Creating client 'envoy-gateway' ..."
+              CLIENT_EXISTS=$(/opt/keycloak/bin/kcadm.sh get clients \
+                -r "${REALM}" --fields clientId --format csv 2>/dev/null \
+                | grep -c "^\"envoy-gateway\"" || true)
+
+              if [ "${CLIENT_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create clients \
+                  -r "${REALM}" \
+                  -s clientId=envoy-gateway \
+                  -s enabled=true \
+                  -s protocol=openid-connect \
+                  -s publicClient=true \
+                  -s 'redirectUris=["*"]'
+                echo "    Client 'envoy-gateway' created."
+              else
+                echo "    Client 'envoy-gateway' already exists — skipping."
+              fi
+
+              # ── User: platform-admin ───────────────────────────────────────
+              # Full-access administrative user for the AgentShield Studio and
+              # Registry API. Password from the keycloak-user-passwords secret.
+              echo "==> Creating user 'platform-admin' ..."
+              USER_EXISTS=$(/opt/keycloak/bin/kcadm.sh get users \
+                -r "${REALM}" --fields username --format csv 2>/dev/null \
+                | grep -c "^\"platform-admin\"" || true)
+
+              if [ "${USER_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create users \
+                  -r "${REALM}" \
+                  -s username=platform-admin \
+                  -s enabled=true \
+                  -s 'requiredActions=[]'
+                /opt/keycloak/bin/kcadm.sh set-password \
+                  -r "${REALM}" \
+                  --username platform-admin \
+                  --new-password "${PLATFORM_ADMIN_PASSWORD}"
+                echo "    User 'platform-admin' created and password set."
+              else
+                echo "    User 'platform-admin' already exists — skipping."
+              fi
+
+              # ── User: agent-reviewer ───────────────────────────────────────
+              # Read-only reviewer user for HITL approval flows.
+              echo "==> Creating user 'agent-reviewer' ..."
+              USER_EXISTS=$(/opt/keycloak/bin/kcadm.sh get users \
+                -r "${REALM}" --fields username --format csv 2>/dev/null \
+                | grep -c "^\"agent-reviewer\"" || true)
+
+              if [ "${USER_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create users \
+                  -r "${REALM}" \
+                  -s username=agent-reviewer \
+                  -s enabled=true \
+                  -s 'requiredActions=[]'
+                /opt/keycloak/bin/kcadm.sh set-password \
+                  -r "${REALM}" \
+                  --username agent-reviewer \
+                  --new-password "${REVIEWER_PASSWORD}"
+                echo "    User 'agent-reviewer' created and password set."
+              else
+                echo "    User 'agent-reviewer' already exists — skipping."
+              fi
+
+              echo "==> Realm initialisation complete."
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

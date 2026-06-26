@@ -1,0 +1,262 @@
+# Allow-egress NetworkPolicy for agent pods in agents-{team} namespaces.
+# Scoped to pods with label agentshield.io/role: agent.
+# Also allows ingress on port 8080 (/chat endpoint) from the platform namespace (Envoy routing).
+#
+# NOTE: Deploy into each agents-{team} namespace alongside agents-default-deny.yaml.
+# Example: kubectl apply -f agents-allow-egress.yaml -n agents-<team>
+
+---
+# Egress: agent pods → Safety Orchestrator in agentshield-platform (port 8080)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-safety-orchestrator
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: safety-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# Egress: agent pods → PgBouncer in agentshield-platform (port 5432)
+# Used for LangGraph PostgresSaver checkpointing (langgraph database).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-pgbouncer
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# Egress: agent pods → Postgres primary directly (port 5432)
+# Required for LangGraph AsyncPostgresSaver LISTEN/NOTIFY (agent resume after HITL approval).
+# PgBouncer transaction-pool mode blocks LISTEN/NOTIFY — agents must bypass it
+# for their single persistent checkpoint connection (DIRECT_DATABASE_URL env var).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-postgres-direct
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# Egress: agent pods → Langfuse in agentshield-platform (port 3000)
+# Used for trace emission by the SDK tracing module.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-langfuse
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: langfuse
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# Egress: agent pods → kube-dns (UDP and TCP port 53) for DNS resolution
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-dns
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Egress: agent pods → Portkey in agentshield-platform (port 8787)
+# Agents set OPENAI_BASE_URL=http://portkey:8787/v1 — all LLM inference routes through Portkey
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-portkey
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: portkey
+      ports:
+        - protocol: TCP
+          port: 8787
+
+---
+# Egress: agent pods → Registry API in agentshield-platform (port 8000)
+# Agents call Registry API for: POST /approvals (HITL gate), GET /tools (tool resolution), POST /resume
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-registry-api
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: registry-api
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# Egress: agent pods → internal tool APIs (CIDR 10.0.0.0/8, port 443)
+# Covers internal HTTP tool endpoints called by agent workflows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-internal-tool-apis
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# Ingress: allow traffic to agent pods on port 8080 (/chat endpoint)
+# from the agentshield-platform namespace (Envoy routes requests to agent pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-ingress-from-platform
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+      ports:
+        - protocol: TCP
+          port: 8080

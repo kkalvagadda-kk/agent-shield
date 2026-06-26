@@ -1,0 +1,1032 @@
+openapi: "3.1.0"
+info:
+  title: AgentShield Registry API
+  version: "1.0.0"
+  description: |
+    The Registry API is the source of truth for agent registration, versioning,
+    deployment management, and visual workflow storage. Built with FastAPI 0.115.
+    All endpoints require a valid Keycloak JWT in the Authorization header.
+  contact:
+    name: AgentShield Platform Team
+
+servers:
+  - url: http://registry-api.agentshield-platform:8000
+    description: Internal cluster endpoint
+  - url: https://api.agentshield.internal
+    description: External (via Envoy Gateway)
+
+security:
+  - bearerAuth: []
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Keycloak JWT from realm agentshield
+
+  schemas:
+    Agent:
+      type: object
+      required: [id, name, team, status, agent_type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          maxLength: 128
+          pattern: "^[a-z0-9-]+$"
+          description: URL-safe lowercase name, hyphens allowed
+          example: "order-agent"
+        team:
+          type: string
+          maxLength: 128
+          example: "commerce"
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, archived, deprecated]
+          default: active
+        agent_type:
+          type: string
+          enum: [sdk, declarative]
+          default: sdk
+          description: "sdk = custom container; declarative = Studio-built runner"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+          default: {}
+
+    CreateAgentRequest:
+      type: object
+      required: [name, team]
+      properties:
+        name:
+          type: string
+          maxLength: 128
+          pattern: "^[a-z0-9-]+$"
+          example: "order-agent"
+        team:
+          type: string
+          example: "commerce"
+        description:
+          type: string
+        agent_type:
+          type: string
+          enum: [sdk, declarative]
+          default: sdk
+        metadata:
+          type: object
+
+    AgentVersion:
+      type: object
+      required: [id, agent_id, version_number, eval_passed, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        version_number:
+          type: integer
+          minimum: 1
+        image_tag:
+          type: string
+          nullable: true
+          description: "Container image for SDK agents; null for declarative"
+          example: "registry.internal/order-agent:abc1234"
+        workflow_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Workflow ID for declarative agents; null for SDK"
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolDefinition'
+        eval_passed:
+          type: boolean
+          default: false
+        git_sha:
+          type: string
+          maxLength: 64
+          nullable: true
+        git_branch:
+          type: string
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [pending, eval_passed, eval_failed, deployed, retired]
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          nullable: true
+
+    ToolDefinition:
+      type: object
+      required: [name, risk]
+      properties:
+        name:
+          type: string
+          example: "issue_refund"
+        risk:
+          type: string
+          enum: [low, high]
+          example: "high"
+        description:
+          type: string
+          nullable: true
+
+    CreateVersionRequest:
+      type: object
+      properties:
+        image_tag:
+          type: string
+          nullable: true
+          description: "Required for SDK agents"
+        workflow_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Required for declarative agents"
+        tools:
+          type: array
+          items:
+            $ref: '#/components/schemas/ToolDefinition'
+          default: []
+        eval_passed:
+          type: boolean
+          default: false
+        git_sha:
+          type: string
+        git_branch:
+          type: string
+        notes:
+          type: string
+
+    PatchVersionRequest:
+      type: object
+      properties:
+        eval_passed:
+          type: boolean
+        status:
+          type: string
+          enum: [pending, eval_passed, eval_failed, deployed, retired]
+        notes:
+          type: string
+
+    Deployment:
+      type: object
+      required: [id, agent_id, version_id, status, environment, deployed_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        version_id:
+          type: string
+          format: uuid
+        environment:
+          type: string
+          enum: [production, staging, canary]
+        status:
+          type: string
+          enum: [pending, deploying, running, failed, rolled_back, terminated]
+        replicas:
+          type: integer
+          minimum: 1
+          default: 1
+        canary_percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          nullable: true
+        k8s_namespace:
+          type: string
+          example: "agents-commerce"
+        k8s_deployment_name:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+        deployed_at:
+          type: string
+          format: date-time
+        terminated_at:
+          type: string
+          format: date-time
+          nullable: true
+        deployed_by:
+          type: string
+          nullable: true
+        previous_version_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    DeployRequest:
+      type: object
+      required: [version_id]
+      properties:
+        version_id:
+          type: string
+          format: uuid
+        replicas:
+          type: integer
+          minimum: 1
+          default: 1
+          maximum: 10
+        environment:
+          type: string
+          enum: [production, staging]
+          default: production
+
+    RollbackRequest:
+      type: object
+      properties:
+        target_version_id:
+          type: string
+          format: uuid
+          description: "If not provided, rolls back to the previous version"
+          nullable: true
+
+    Approval:
+      type: object
+      required: [id, agent_id, agent_name, thread_id, tool_name, status, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        agent_name:
+          type: string
+        team:
+          type: string
+        thread_id:
+          type: string
+        tool_name:
+          type: string
+        tool_args:
+          type: object
+          additionalProperties: true
+        risk_level:
+          type: string
+          enum: [high, critical]
+        status:
+          type: string
+          enum: [pending, approved, rejected, timed_out]
+        reviewer_id:
+          type: string
+          nullable: true
+        reviewer_notes:
+          type: string
+          nullable: true
+        trace_id:
+          type: string
+          nullable: true
+        decision_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        version:
+          type: integer
+          description: "Optimistic lock version; pass when patching"
+
+    CreateApprovalRequest:
+      type: object
+      required: [agent_id, agent_name, thread_id, tool_name, tool_args, risk_level]
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        agent_name:
+          type: string
+        team:
+          type: string
+        thread_id:
+          type: string
+        tool_name:
+          type: string
+        tool_args:
+          type: object
+          additionalProperties: true
+        risk_level:
+          type: string
+          enum: [high, critical]
+        trace_id:
+          type: string
+          nullable: true
+        timeout_seconds:
+          type: integer
+          default: 1800
+          description: "Auto-reject after this many seconds (default: 30min)"
+
+    PatchApprovalRequest:
+      type: object
+      required: [decision, reviewer_id, version]
+      properties:
+        decision:
+          type: string
+          enum: [approved, rejected]
+        reviewer_id:
+          type: string
+          example: "reviewer@company.com"
+        reviewer_notes:
+          type: string
+          nullable: true
+        version:
+          type: integer
+          description: "Optimistic lock version; get from GET /approvals/{id}"
+
+    Workflow:
+      type: object
+      required: [id, name, team, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        team:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [draft, published, archived]
+        current_version_number:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          nullable: true
+
+    WorkflowVersion:
+      type: object
+      required: [id, workflow_id, version_number, definition, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workflow_id:
+          type: string
+          format: uuid
+        version_number:
+          type: integer
+        definition:
+          type: object
+          description: "React Flow serialized graph (nodes + edges)"
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            version:
+              type: integer
+            nodes:
+              type: array
+              items:
+                type: object
+            edges:
+              type: array
+              items:
+                type: object
+        change_summary:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          nullable: true
+
+    SaveWorkflowRequest:
+      type: object
+      required: [name, team, definition]
+      properties:
+        name:
+          type: string
+        team:
+          type: string
+        description:
+          type: string
+        definition:
+          type: object
+          description: "React Flow graph JSON"
+        change_summary:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: "Agent not found"
+        code:
+          type: string
+          example: "agent_not_found"
+        field:
+          type: string
+          nullable: true
+          example: "name"
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        database:
+          type: string
+          enum: [connected, disconnected]
+        version:
+          type: string
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: health
+      security: []
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  # --- Agents ---
+  /api/v1/agents:
+    get:
+      summary: List all agents
+      operationId: listAgents
+      parameters:
+        - name: team
+          in: query
+          schema:
+            type: string
+          description: Filter by team
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived, deprecated]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+                  total:
+                    type: integer
+    post:
+      summary: Register a new agent
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+            example:
+              name: "order-agent"
+              team: "commerce"
+              description: "Handles order status and refunds"
+      responses:
+        "201":
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        "409":
+          description: Agent name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/agents/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get agent by name
+      operationId: getAgent
+      responses:
+        "200":
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        "404":
+          description: Not found
+    put:
+      summary: Update agent config
+      operationId: updateAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description:
+                  type: string
+                status:
+                  type: string
+                  enum: [active, archived, deprecated]
+                metadata:
+                  type: object
+      responses:
+        "200":
+          description: Updated agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+    delete:
+      summary: Decommission agent
+      operationId: deleteAgent
+      responses:
+        "204":
+          description: Agent decommissioned (status set to deprecated; no hard delete)
+
+  # --- Versions ---
+  /api/v1/agents/{name}/versions:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: List versions for an agent
+      operationId: listVersions
+      responses:
+        "200":
+          description: List of versions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AgentVersion'
+    post:
+      summary: Register a new version
+      operationId: createVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVersionRequest'
+            example:
+              image_tag: "registry.internal/order-agent:abc1234"
+              tools:
+                - name: lookup_order
+                  risk: low
+                - name: issue_refund
+                  risk: high
+              git_sha: "abc1234def5678"
+              git_branch: "main"
+      responses:
+        "201":
+          description: Version created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+
+  /api/v1/agents/{name}/versions/{version_id}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: version_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      summary: Update version (e.g., mark eval-passed)
+      operationId: patchVersion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchVersionRequest'
+            example:
+              eval_passed: true
+              status: eval_passed
+      responses:
+        "200":
+          description: Updated version
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentVersion'
+
+  # --- Deployments ---
+  /api/v1/agents/{name}/deploy:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Deploy a version of the agent
+      operationId: deployAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeployRequest'
+      responses:
+        "202":
+          description: Deployment initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+        "400":
+          description: Version not eval_passed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/agents/{name}/rollback:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      summary: Rollback to previous (or specified) version
+      operationId: rollbackAgent
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RollbackRequest'
+      responses:
+        "202":
+          description: Rollback initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+  /api/v1/agents/{name}/deployments:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Deployment history for an agent
+      operationId: listDeployments
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, deploying, running, failed, rolled_back, terminated]
+      responses:
+        "200":
+          description: Deployment history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Deployment'
+
+  # --- Approvals ---
+  /api/v1/approvals:
+    get:
+      summary: List approvals (with optional status filter)
+      operationId: listApprovals
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, rejected, timed_out]
+        - name: agent_name
+          in: query
+          schema:
+            type: string
+        - name: team
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: List of approvals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Approval'
+                  total:
+                    type: integer
+    post:
+      summary: Create a new approval request (called by agent SDK)
+      operationId: createApproval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApprovalRequest'
+      responses:
+        "201":
+          description: Approval created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+
+  /api/v1/approvals/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get approval by ID
+      operationId: getApproval
+      responses:
+        "200":
+          description: Approval details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+    patch:
+      summary: Submit approval decision (approve or reject)
+      operationId: decideApproval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchApprovalRequest'
+      responses:
+        "200":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Approval'
+        "409":
+          description: Already decided (optimistic lock conflict)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # --- Workflows ---
+  /api/v1/workflows:
+    get:
+      summary: List workflows (filtered by team)
+      operationId: listWorkflows
+      parameters:
+        - name: team
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, published, archived]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Workflow'
+    post:
+      summary: Save a new visual workflow
+      operationId: createWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveWorkflowRequest'
+      responses:
+        "201":
+          description: Workflow saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+
+  /api/v1/workflows/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get workflow with current definition
+      operationId: getWorkflow
+      responses:
+        "200":
+          description: Workflow with latest version definition
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Workflow'
+                  - type: object
+                    properties:
+                      current_definition:
+                        $ref: '#/components/schemas/WorkflowVersion'
+    put:
+      summary: Update workflow (saves a new version)
+      operationId: updateWorkflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveWorkflowRequest'
+      responses:
+        "200":
+          description: Updated workflow (new version created)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Workflow'
+
+  /api/v1/workflows/{id}/deploy:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      summary: Deploy workflow as a declarative runner pod
+      operationId: deployWorkflow
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version_number:
+                  type: integer
+                  description: "Specific version to deploy; defaults to latest"
+                  nullable: true
+                replicas:
+                  type: integer
+                  default: 1
+      responses:
+        "202":
+          description: Deployment initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Deployment'
+
+  /api/v1/workflows/{id}/versions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      summary: Get version history for a workflow
+      operationId: listWorkflowVersions
+      responses:
+        "200":
+          description: Version history
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkflowVersion'

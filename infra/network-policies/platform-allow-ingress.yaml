@@ -1,0 +1,390 @@
+# Allow-ingress NetworkPolicy for agentshield-platform namespace.
+# Covers all required service-to-service communication within the platform.
+# Apply after platform-default-deny.yaml.
+
+---
+# 1. Allow Envoy ingress from anywhere on 443 and 80 (external traffic entry point)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-envoy-external-ingress
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: envoy-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+
+---
+# 2a. Allow Safety Orchestrator ingress from Envoy on port 8080
+#     Safety acts as network-enforced input proxy — all /chat requests come from Envoy first
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-safety-orchestrator-from-envoy
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: safety-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy-gateway
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# 2b. Allow Safety Orchestrator ingress from agent pods on port 8080
+#     Agents call Safety for output scanning (after generating a response)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-safety-orchestrator-from-agents
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: safety-orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: agents
+          podSelector:
+            matchLabels:
+              agentshield.io/role: agent
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# 2c. Allow Safety Orchestrator egress to agent pods in agents-{team} namespaces on port 8080
+#     After a clean input scan, Safety proxies the sanitized request to the correct agent pod
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-safety-orchestrator-egress-to-agents
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: safety-orchestrator
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: agents
+          podSelector:
+            matchLabels:
+              agentshield.io/role: agent
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
+# 3a. Allow LLM Guard ingress from Safety Orchestrator on port 8000
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-llm-guard-from-safety-orchestrator
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: llm-guard
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: safety-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# 3b. Allow Presidio Analyzer ingress from Safety Orchestrator on port 3000
+#     Allow Presidio Anonymizer ingress from Safety Orchestrator on port 3001
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-presidio-from-safety-orchestrator
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: presidio
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: safety-orchestrator
+      ports:
+        - protocol: TCP
+          port: 3000
+        - protocol: TCP
+          port: 3001
+
+---
+# 3c. Allow NeMo Guardrails ingress from Safety Orchestrator on port 8000
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nemo-from-safety-orchestrator
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nemo
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: safety-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# 4. Allow Registry API ingress from Envoy, Appsmith, Deploy Controller, and agent pods on port 8000
+#    Agent pods call Registry API to: POST /approvals (HITL), GET /tools (tool lookup), POST /resume
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-registry-api-ingress
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: registry-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy-gateway
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: appsmith
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: deploy-controller
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: agents
+          podSelector:
+            matchLabels:
+              agentshield.io/role: agent
+      ports:
+        - protocol: TCP
+          port: 8000
+
+---
+# 5. Allow Postgres/PgBouncer ingress from all platform services on port 5432
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-from-platform-services
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgbouncer
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: agentshield
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# 5b. Allow Postgres primary ingress from PgBouncer on port 5432
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-primary-from-pgbouncer
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 5432
+
+---
+# 6. Allow Redis ingress from all platform services on port 6379
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-from-platform-services
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: agentshield
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# 7. Allow Langfuse ingress from all platform services on port 3000
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-langfuse-from-platform-services
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: langfuse
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/managed-by: agentshield
+      ports:
+        - protocol: TCP
+          port: 3000
+
+---
+# 8. Allow all platform pods egress to kube-dns (UDP and TCP port 53)
+#    kube-dns runs in kube-system namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-platform-egress-dns
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# 9a. Allow Portkey ingress from agent pods on port 8787
+#     Agents configure OPENAI_BASE_URL=http://portkey:8787/v1 — all LLM calls route through Portkey
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-portkey-from-agents
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: portkey
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: agents
+          podSelector:
+            matchLabels:
+              agentshield.io/role: agent
+      ports:
+        - protocol: TCP
+          port: 8787
+
+---
+# 9b. Allow Portkey egress to external LLM providers over HTTPS (port 443)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-portkey-egress-llm-providers
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: portkey
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443

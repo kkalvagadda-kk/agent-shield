@@ -1,0 +1,186 @@
+direction: down
+
+title: |md
+  # AgentShield — System Overview
+| {
+  near: top-center
+  shape: text
+  style.font-size: 24
+}
+
+users: Users / Clients {
+  shape: person
+  style.fill: "#f8f9fa"
+}
+
+platform: "namespace: agentshield-platform" {
+  style.fill: "#e7f5ff"
+  style.stroke: "#1971c2"
+  style.border-radius: 8
+
+  gateway: "Envoy Gateway\n(TLS, JWT, Rate Limit)" {
+    style.fill: "#d3f9d8"
+    style.stroke: "#2f9e44"
+  }
+
+  keycloak: "Keycloak\n(OIDC IdP)" {
+    style.fill: "#fff4e6"
+    style.stroke: "#e8590c"
+  }
+
+  safety: "Safety Layer" {
+    style.fill: "#fff5f5"
+    style.stroke: "#e03131"
+    style.border-radius: 6
+
+    orchestrator: "Safety\nOrchestrator" {
+      style.fill: "#ffe3e3"
+      style.stroke: "#e03131"
+    }
+    llm-guard: "LLM Guard\n(Injection)" {
+      style.fill: "#ffe3e3"
+      style.stroke: "#e03131"
+    }
+    presidio: "Presidio\n(PII)" {
+      style.fill: "#ffe3e3"
+      style.stroke: "#e03131"
+    }
+    nemo: "NeMo\n(YARA Rules)" {
+      style.fill: "#ffe3e3"
+      style.stroke: "#e03131"
+    }
+
+    orchestrator -> llm-guard: parallel {style.stroke-dash: 3}
+    orchestrator -> presidio: parallel {style.stroke-dash: 3}
+    orchestrator -> nemo: parallel {style.stroke-dash: 3}
+  }
+
+  routing: "Portkey OSS\n(LLM Routing, Retries)" {
+    style.fill: "#f3f0ff"
+    style.stroke: "#5f3dc4"
+  }
+
+  management: "Agent Management" {
+    style.fill: "#e3fafc"
+    style.stroke: "#0c8599"
+    style.border-radius: 6
+
+    registry: "Registry API\n(FastAPI)" {
+      style.fill: "#c5f6fa"
+      style.stroke: "#0c8599"
+    }
+    controller: "Deploy\nController" {
+      style.fill: "#c5f6fa"
+      style.stroke: "#0c8599"
+    }
+    appsmith: "Appsmith\n(Registry + Approvals UI)" {
+      style.fill: "#c5f6fa"
+      style.stroke: "#0c8599"
+    }
+
+    registry -> controller
+    appsmith -> registry
+  }
+
+  observability: "Langfuse\n(Tracing, Cost, Eval)" {
+    style.fill: "#f3f0ff"
+    style.stroke: "#7048e8"
+  }
+
+  data: "Data Layer" {
+    style.fill: "#f8f9fa"
+    style.stroke: "#495057"
+    style.border-radius: 6
+
+    postgres: "Postgres 16 (HA)\n+ PgBouncer\n5 DBs" {
+      shape: cylinder
+      style.fill: "#dee2e6"
+      style.stroke: "#495057"
+    }
+    redis: "Redis 7\n(Cache + Pub/Sub)" {
+      shape: cylinder
+      style.fill: "#dee2e6"
+      style.stroke: "#495057"
+    }
+    clickhouse: "ClickHouse\n(Trace Analytics)" {
+      shape: cylinder
+      style.fill: "#dee2e6"
+      style.stroke: "#495057"
+    }
+    minio: "MinIO\n(S3 Backups)" {
+      shape: cylinder
+      style.fill: "#dee2e6"
+      style.stroke: "#495057"
+    }
+  }
+}
+
+agents: "namespace: agents-{team}" {
+  style.fill: "#fff9db"
+  style.stroke: "#f08c00"
+  style.border-radius: 8
+
+  pod: "Agent Pod" {
+    style.fill: "#ffec99"
+    style.stroke: "#f08c00"
+
+    container: "Agent Container\n(SDK + LangGraph)" {
+      style.fill: "#fff3bf"
+    }
+    opa: "OPA Sidecar\n(Policy)" {
+      style.fill: "#fff3bf"
+    }
+  }
+
+  note: |md
+    NetworkPolicy: default-deny
+    Allowed egress only to platform services
+  | {
+    shape: text
+    style.font-size: 11
+    style.font-color: "#e8590c"
+  }
+}
+
+llm: "LLM Providers\n(OpenAI, Anthropic, etc.)" {
+  shape: cloud
+  style.fill: "#f8f9fa"
+}
+
+tools: "External Tools\n(Order API, Email, etc.)" {
+  shape: cloud
+  style.fill: "#f8f9fa"
+}
+
+# Connections — Option A: Safety Orchestrator as network-enforced input proxy
+
+# Ingress: Envoy → Safety (input scan proxy)
+users -> platform.gateway: "HTTPS"
+platform.gateway -> platform.keycloak: "1. validate JWT" {style.stroke-dash: 3}
+platform.gateway -> platform.safety.orchestrator: "2. all /chat requests"
+
+# Safety input proxy
+platform.safety.orchestrator -> agents.pod.container: "3. clean → proxy to agent" {style.stroke: "#2f9e44"}
+platform.safety.orchestrator -> users: "3. blocked → 422" {style.stroke: "#e03131"}
+
+# Agent → LLM via Portkey
+agents.pod.container -> platform.routing: "4. LLM call\n(OPENAI_BASE_URL=portkey)" {style.stroke: "#5f3dc4"}
+platform.routing -> llm: "5. LLM inference" {style.stroke: "#5f3dc4"}
+llm -> platform.routing: "6. response" {style.stroke: "#5f3dc4"}
+platform.routing -> agents.pod.container: "7. response" {style.stroke: "#5f3dc4"}
+
+# Agent → OPA → Tool
+agents.pod.container -> agents.pod.opa: "8. check policy"
+agents.pod.container -> tools: "9. tool calls (if allowed)"
+
+# Agent → output scan (agent-initiated)
+agents.pod.container -> platform.safety.orchestrator: "10. scan output" {style.stroke: "#e03131"}
+
+# Async / infra
+agents.pod.container -> platform.observability: "traces (async)" {style.stroke-dash: 3}
+agents.pod.container -> platform.data.postgres: "checkpoints + approvals"
+agents.pod.container -> platform.management.registry: "POST /approvals\nGET /tools" {style.stroke-dash: 3}
+platform.management.controller -> agents.pod: "reconcile deployments" {style.stroke-dash: 3}
+platform.observability -> platform.data.clickhouse
+platform.observability -> platform.data.postgres
+platform.routing -> platform.data.redis: "cache + cost tracking"

@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+*.env
+
+# Node / Studio
+node_modules/
+dist/
+.cache/
+*.tsbuildinfo
+
+# Helm
+charts/*/charts/*.tgz
+charts/agentshield/charts/*/charts/
+
+# K8s secrets (never commit)
+*-secret.yaml
+*-secrets.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Logs
+*.log
+excalidraw.log
