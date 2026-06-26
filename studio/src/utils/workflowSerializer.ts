@@ -1,0 +1,63 @@
+import { type Node, type Edge } from '@xyflow/react';
+
+// ---------------------------------------------------------------------------
+// Types that map to the backend workflow JSON schema
+// ---------------------------------------------------------------------------
+export interface WorkflowNode {
+  id: string;
+  type: string;
+  position: { x: number; y: number };
+  config: Record<string, unknown>;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  source: string;
+  target: string;
+}
+
+export interface WorkflowDefinition {
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+}
+
+// ---------------------------------------------------------------------------
+// Serialize: React Flow state → workflow JSON for the API
+// ---------------------------------------------------------------------------
+export function serializeWorkflow(nodes: Node[], edges: Edge[]): WorkflowDefinition {
+  return {
+    nodes: nodes.map((node) => ({
+      id: node.id,
+      type: node.type ?? 'agent',
+      position: { x: node.position.x, y: node.position.y },
+      config: ((node.data as { config?: Record<string, unknown> }).config) ?? {},
+    })),
+    edges: edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Deserialize: workflow JSON from API → React Flow state
+// ---------------------------------------------------------------------------
+export function deserializeWorkflow(definition: WorkflowDefinition): {
+  nodes: Node[];
+  edges: Edge[];
+} {
+  return {
+    nodes: definition.nodes.map((n) => ({
+      id: n.id,
+      type: n.type,
+      position: { x: n.position.x, y: n.position.y },
+      data: { config: n.config },
+    })),
+    edges: definition.edges.map((e) => ({
+      id: e.id,
+      source: e.source,
+      target: e.target,
+    })),
+  };
+}
