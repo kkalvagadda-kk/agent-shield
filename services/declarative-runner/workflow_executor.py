@@ -2,29 +2,39 @@
 Workflow executor — parses WORKFLOW_JSON at module startup and builds a
 LangGraph StateGraph from the node/edge definitions.
 
-Workflow JSON format:
+New workflow JSON format (canvas redesign):
     {
       "nodes": [
-        {"id": "node-1", "type": "agent",     "config": {...}},
-        {"id": "node-2", "type": "http_tool", "config": {...}},
-        {"id": "node-3", "type": "end",        "config": {"output_mapping": {...}}}
+        {
+          "id": "triage-agent",
+          "type": "agent",
+          "position": {"x": 100, "y": 200},
+          "config": {
+            "name": "triage-agent",
+            "instructions": "Classify the user issue and route to the right team.",
+            "model": "claude-sonnet-4-6",
+            "risk": "low",
+            "tool_ids": ["uuid-of-lookup-order-tool"],
+            "skill_ids": ["uuid-of-order-skill"]
+          }
+        },
+        {"id": "end", "type": "end", "position": {"x": 600, "y": 200}, "config": {"output_mapping": {}}}
       ],
       "edges": [
-        {"source": "node-1", "target": "node-2"},
-        {"source": "node-2", "target": "node-3"}
+        {"id": "e1", "source": "triage-agent", "target": "end", "condition": "default"}
       ]
     }
 
-Build rules:
-  1. Find the start node (no incoming edges, type != "end") → add START → node edge.
-  2. For each "end" node → add node → END edge.
-  3. For each "agent" node, collect all "http_tool" nodes reachable from it
-     (by following edges) and pass them as embedded tools.  These nodes are
-     NOT added to the StateGraph as independent nodes; they live inside the
-     agent's Runner instead.
-  4. All other nodes ("agent", standalone "http_tool", "end") are StateGraph
-     nodes connected by workflow edges — collapsing through any agent-owned
-     http_tool nodes.
+Key changes from old schema:
+  - Agent nodes declare tool_ids[] and skill_ids[] (refs to Registry records).
+  - Only agents and end nodes appear in the graph.
+  - Edges have an optional "condition" string for conditional routing.
+  - Tool definitions are fetched from the Registry API at startup.
+
+Backward compatibility:
+  - Old schema (nodes with type "http_tool") is still supported.
+  - If tool_ids is absent on an agent config, falls back to the old BFS-based
+    approach to find embedded http_tool nodes.
 
 The graph state is MessagesState (langgraph.graph.MessagesState).
 """
@@ -34,6 +44,7 @@ import base64
 import json
 import logging
 import os
+from collections import defaultdict
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -55,8 +66,7 @@ class WorkflowExecutor:
 
     Usage:
         executor = WorkflowExecutor()
-        checkpointer = await get_checkpointer()
-        executor.graph = executor._build_compiled_graph(checkpointer)
+        await executor.setup()   # fetches tools from Registry API + upgrades checkpointer
 
         result = await executor.run("Hello", thread_id="thread-123")
         async for chunk in executor.run_streamed("Hello", thread_id="thread-123"):
@@ -77,13 +87,155 @@ class WorkflowExecutor:
                     f"Decoding error: {exc}"
                 ) from exc
 
+        # Pre-fetched tool executors keyed by agent node id.
+        # Populated by setup(); empty until then so the graph can still be
+        # built synchronously with old-schema workflows.
+        self._agent_tool_executors: dict[str, list[HttpToolNodeExecutor]] = {}
+
         # Build an initial graph with MemorySaver so the object is usable
         # synchronously.  Callers should await executor.setup() to replace this
         # with an AsyncPostgresSaver when DIRECT_DATABASE_URL is set.
         self.graph: Any = self._build_compiled_graph(checkpointer=None)
 
     # ------------------------------------------------------------------
-    # Graph construction helpers
+    # Registry API fetch helpers (new schema)
+    # ------------------------------------------------------------------
+
+    async def _fetch_tools_for_agent(
+        self, tool_ids: list, skill_ids: list
+    ) -> list[dict]:
+        """Fetch tool definitions from Registry API, flattening skill_ids first."""
+        import httpx
+        from config import REGISTRY_API_URL
+
+        all_tool_ids = list(tool_ids)
+        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10) as client:
+            # Flatten skill_ids → their constituent tool_ids
+            for skill_id in skill_ids:
+                try:
+                    resp = await client.get(f"/api/v1/skills/{skill_id}")
+                    if resp.status_code == 200:
+                        skill = resp.json()
+                        all_tool_ids.extend(skill.get("tool_ids", []))
+                    else:
+                        logger.warning(
+                            "Could not fetch skill %s (status %d)", skill_id, resp.status_code
+                        )
+                except Exception as exc:
+                    logger.warning("Could not fetch skill %s: %s", skill_id, exc)
+
+            # Fetch each tool definition
+            tools = []
+            for tool_id in all_tool_ids:
+                try:
+                    resp = await client.get(f"/api/v1/tools/{tool_id}")
+                    if resp.status_code == 200:
+                        tools.append(resp.json())
+                    else:
+                        logger.warning(
+                            "Tool %s not found (status %d)", tool_id, resp.status_code
+                        )
+                except Exception as exc:
+                    logger.warning("Could not fetch tool %s: %s", tool_id, exc)
+            return tools
+
+    def _tool_dict_to_executor(self, tool: dict) -> HttpToolNodeExecutor:
+        """Convert a ToolResponse dict from the Registry API to an HttpToolNodeExecutor."""
+        config = dict(tool.get("config", {}))
+        # Normalise field names: Registry API uses http_url/http_method;
+        # HttpToolNodeExecutor expects endpoint/method.
+        if "endpoint" not in config:
+            config["endpoint"] = tool.get("config", {}).get("endpoint") or tool.get("http_url", "")
+        if "method" not in config:
+            config["method"] = tool.get("config", {}).get("method") or tool.get("http_method", "GET")
+        if "name" not in config:
+            config["name"] = tool.get("name", "http_tool")
+        if "risk" not in config:
+            config["risk"] = tool.get("risk_level", "low")
+        if "headers" not in config:
+            config["headers"] = tool.get("config", {}).get("headers") or tool.get("http_headers") or {}
+        if "body_template" not in config:
+            config["body_template"] = (
+                tool.get("config", {}).get("body_template")
+                or tool.get("http_body_template")
+                or ""
+            )
+        if "auth_config_id" not in config:
+            config["auth_config_id"] = tool.get("auth_config_id")
+        return HttpToolNodeExecutor(config)
+
+    async def _prefetch_agent_tools(self) -> None:
+        """Fetch tool definitions from Registry API for all new-schema agent nodes."""
+        for node in self.definition["nodes"]:
+            if node["type"] != "agent":
+                continue
+            node_config = node["config"]
+            tool_ids = node_config.get("tool_ids", [])
+            skill_ids = node_config.get("skill_ids", [])
+            # Only use Registry API fetch for new-schema agents (have tool_ids/skill_ids)
+            if not tool_ids and not skill_ids:
+                continue
+            tool_dicts = await self._fetch_tools_for_agent(tool_ids, skill_ids)
+            self._agent_tool_executors[node["id"]] = [
+                self._tool_dict_to_executor(t) for t in tool_dicts
+            ]
+            logger.info(
+                "_prefetch_agent_tools: agent=%s fetched %d tools",
+                node["id"],
+                len(self._agent_tool_executors[node["id"]]),
+            )
+
+    # ------------------------------------------------------------------
+    # Conditional routing helpers (new schema)
+    # ------------------------------------------------------------------
+
+    def _is_end_node(self, node_id: str) -> bool:
+        """Return True if *node_id* refers to an end-type node."""
+        nodes_by_id: dict[str, dict] = {n["id"]: n for n in self.definition["nodes"]}
+        node = nodes_by_id.get(node_id)
+        return node is not None and node["type"] == "end"
+
+    def _make_router(self, node_id: str, outgoing_edges: list[dict]):
+        """
+        Returns (router_fn, path_map) for add_conditional_edges.
+
+        Routing logic: examine the last AI message content for condition keywords.
+        If the message contains the condition string (case-insensitive), that edge is taken.
+        If no condition matches, the 'default' edge (or first unconditional edge) is taken.
+        """
+        # Build condition → target map (exclude "default" sentinel)
+        conditional = {
+            e["condition"]: e["target"]
+            for e in outgoing_edges
+            if e.get("condition") and e["condition"] != "default"
+        }
+        default_target = next(
+            (
+                e["target"]
+                for e in outgoing_edges
+                if not e.get("condition") or e["condition"] == "default"
+            ),
+            END,
+        )
+
+        def resolve(target: str) -> str:
+            return END if self._is_end_node(target) else target
+
+        def router(state: MessagesState) -> str:
+            last = state["messages"][-1] if state["messages"] else None
+            content = str(getattr(last, "content", "")).lower() if last else ""
+            for cond, target in conditional.items():
+                if cond.lower() in content:
+                    return resolve(target)
+            return resolve(default_target)
+
+        path_map = {cond: resolve(t) for cond, t in conditional.items()}
+        path_map["default"] = resolve(default_target)
+
+        return router, path_map
+
+    # ------------------------------------------------------------------
+    # Old-schema BFS helpers (backward compat)
     # ------------------------------------------------------------------
 
     def _get_agent_owned_http_tool_ids(self) -> set[str]:
@@ -133,111 +285,12 @@ class WorkflowExecutor:
         result: list[str] = []
         for target_id in direct_targets:
             if target_id in agent_owned_ids:
-                # Collapse: find the effective successors of the internalized node.
                 result.extend(
                     self._resolve_effective_successors(target_id, agent_owned_ids)
                 )
             else:
                 result.append(target_id)
         return result
-
-    def _build_compiled_graph(self, checkpointer: Any = None) -> Any:
-        """Build and compile the StateGraph from the workflow definition.
-
-        Args:
-            checkpointer: LangGraph checkpointer (AsyncPostgresSaver / MemorySaver).
-                          If None, falls back to MemorySaver so the graph can be
-                          built synchronously in __init__.
-
-        Returns:
-            A compiled LangGraph graph.
-        """
-        if checkpointer is None:
-            from langgraph.checkpoint.memory import MemorySaver  # type: ignore[import]
-            checkpointer = MemorySaver()
-
-        nodes_by_id: dict[str, dict] = {n["id"]: n for n in self.definition["nodes"]}
-        edges: list[dict] = self.definition["edges"]
-
-        # Identify which http_tool nodes are owned by agent nodes.
-        agent_owned_ids = self._get_agent_owned_http_tool_ids()
-
-        builder: StateGraph = StateGraph(MessagesState)
-
-        # --- Add nodes ---
-        for node in self.definition["nodes"]:
-            node_id: str = node["id"]
-            node_type: str = node["type"]
-            node_config: dict = node["config"]
-
-            if node_id in agent_owned_ids:
-                # Agent-owned http_tool — embedded as a tool, not a graph node.
-                continue
-
-            if node_type == "agent":
-                # Collect reachable http_tool executors as embedded tools.
-                reachable_http_tool_ids = [
-                    tid
-                    for tid in agent_owned_ids
-                    if any(
-                        e["source"] == node_id and e["target"] == tid
-                        for e in self._expand_reachable_http_tools(node_id, edges, agent_owned_ids)
-                    )
-                ]
-                # Build HttpToolNodeExecutors for all agent-owned http_tool nodes
-                # reachable from this agent node.
-                http_tool_executors = self._collect_http_tool_executors(
-                    node_id, nodes_by_id, edges, agent_owned_ids
-                )
-                executor = AgentNodeExecutor(node_config, http_tool_executors)
-                builder.add_node(node_id, executor.execute)
-
-            elif node_type == "http_tool":
-                # Standalone http_tool (not reachable from any agent node).
-                executor = HttpToolNodeExecutor(node_config)  # type: ignore[assignment]
-                builder.add_node(node_id, executor.execute)
-
-            elif node_type == "end":
-                end_executor = EndNodeExecutor(node_config)
-                builder.add_node(node_id, end_executor.execute)
-
-            else:
-                logger.warning("Unknown node type %r (node %s) — skipping", node_type, node_id)
-
-        # --- Add edges ---
-        incoming: set[str] = {e["target"] for e in edges}
-        for node in self.definition["nodes"]:
-            node_id = node["id"]
-            node_type = node["type"]
-
-            if node_id in agent_owned_ids:
-                continue
-
-            # START → start nodes (no incoming edges, type != "end").
-            if node_id not in incoming and node_type != "end":
-                builder.add_edge(START, node_id)
-                logger.debug("Edge: START → %s", node_id)
-
-            # end nodes → END.
-            if node_type == "end":
-                builder.add_edge(node_id, END)
-                logger.debug("Edge: %s → END", node_id)
-
-            # Workflow edges (collapsing through agent-owned http_tool nodes).
-            successors = self._resolve_effective_successors(node_id, agent_owned_ids)
-            for succ_id in successors:
-                if succ_id in agent_owned_ids:
-                    continue
-                builder.add_edge(node_id, succ_id)
-                logger.debug("Edge: %s → %s", node_id, succ_id)
-
-        compiled = builder.compile(checkpointer=checkpointer)
-        logger.info(
-            "WorkflowExecutor compiled graph: %d nodes (excl. %d agent-owned http_tools)",
-            len(self.definition["nodes"]) - len(agent_owned_ids),
-            len(agent_owned_ids),
-        )
-        return compiled
 
     def _expand_reachable_http_tools(
         self,
@@ -279,16 +332,215 @@ class WorkflowExecutor:
         return executors
 
     # ------------------------------------------------------------------
-    # Public async setup (replaces MemorySaver with Postgres checkpointer)
+    # Graph construction
+    # ------------------------------------------------------------------
+
+    def _is_new_schema(self) -> bool:
+        """Return True if any agent node uses tool_ids/skill_ids (new canvas schema)."""
+        for node in self.definition["nodes"]:
+            if node["type"] == "agent":
+                cfg = node.get("config", {})
+                if cfg.get("tool_ids") is not None or cfg.get("skill_ids") is not None:
+                    return True
+        return False
+
+    def _build_compiled_graph(self, checkpointer: Any = None) -> Any:
+        """Build and compile the StateGraph from the workflow definition.
+
+        Supports both old schema (http_tool nodes as edges) and new schema
+        (tool_ids/skill_ids on agent config + conditional edge routing).
+
+        Args:
+            checkpointer: LangGraph checkpointer (AsyncPostgresSaver / MemorySaver).
+                          If None, falls back to MemorySaver so the graph can be
+                          built synchronously in __init__.
+
+        Returns:
+            A compiled LangGraph graph.
+        """
+        if checkpointer is None:
+            from langgraph.checkpoint.memory import MemorySaver  # type: ignore[import]
+            checkpointer = MemorySaver()
+
+        nodes_by_id: dict[str, dict] = {n["id"]: n for n in self.definition["nodes"]}
+        edges: list[dict] = self.definition["edges"]
+
+        use_new_schema = self._is_new_schema()
+
+        if use_new_schema:
+            return self._build_new_schema_graph(nodes_by_id, edges, checkpointer)
+        else:
+            return self._build_old_schema_graph(nodes_by_id, edges, checkpointer)
+
+    def _build_new_schema_graph(
+        self,
+        nodes_by_id: dict[str, dict],
+        edges: list[dict],
+        checkpointer: Any,
+    ) -> Any:
+        """Build graph for new canvas schema (tool_ids + conditional routing)."""
+        builder: StateGraph = StateGraph(MessagesState)
+
+        # --- Add nodes ---
+        for node in self.definition["nodes"]:
+            node_id: str = node["id"]
+            node_type: str = node["type"]
+            node_config: dict = node["config"]
+
+            if node_type == "agent":
+                # Use pre-fetched executors if available, else empty list
+                tool_executors = self._agent_tool_executors.get(node_id, [])
+                executor = AgentNodeExecutor(node_config, tool_executors)
+                builder.add_node(node_id, executor.execute)
+
+            elif node_type == "end":
+                end_executor = EndNodeExecutor(node_config)
+                builder.add_node(node_id, end_executor.execute)
+
+            else:
+                logger.warning("Unknown node type %r (node %s) — skipping", node_type, node_id)
+
+        # --- Determine start nodes and add START edges ---
+        incoming: set[str] = {e["target"] for e in edges}
+        for node in self.definition["nodes"]:
+            node_id = node["id"]
+            node_type = node["type"]
+            if node_id not in incoming and node_type != "end":
+                builder.add_edge(START, node_id)
+                logger.debug("Edge: START → %s", node_id)
+            if node_type == "end":
+                builder.add_edge(node_id, END)
+                logger.debug("Edge: %s → END", node_id)
+
+        # --- Add workflow edges (with conditional routing support) ---
+        edges_by_source: dict[str, list[dict]] = defaultdict(list)
+        for edge in edges:
+            edges_by_source[edge["source"]].append(edge)
+
+        for node_id, outgoing in edges_by_source.items():
+            # Skip edges originating from end nodes (already wired to END above)
+            src_node = nodes_by_id.get(node_id)
+            if src_node and src_node["type"] == "end":
+                continue
+
+            has_conditions = any(
+                e.get("condition") and e["condition"] != "default"
+                for e in outgoing
+            )
+            is_multi = len(outgoing) > 1
+
+            if is_multi or has_conditions:
+                # Conditional routing
+                router_fn, path_map = self._make_router(node_id, outgoing)
+                builder.add_conditional_edges(node_id, router_fn, path_map)
+                logger.debug(
+                    "Conditional edges from %s: %s", node_id, list(path_map.keys())
+                )
+            else:
+                # Simple unconditional edge
+                target = outgoing[0]["target"]
+                resolved = END if self._is_end_node(target) else target
+                builder.add_edge(node_id, resolved)
+                logger.debug("Edge: %s → %s", node_id, resolved)
+
+        compiled = builder.compile(checkpointer=checkpointer)
+        logger.info(
+            "WorkflowExecutor compiled new-schema graph: %d nodes",
+            len(self.definition["nodes"]),
+        )
+        return compiled
+
+    def _build_old_schema_graph(
+        self,
+        nodes_by_id: dict[str, dict],
+        edges: list[dict],
+        checkpointer: Any,
+    ) -> Any:
+        """Build graph for old schema (http_tool nodes embedded as agent tools)."""
+        agent_owned_ids = self._get_agent_owned_http_tool_ids()
+        builder: StateGraph = StateGraph(MessagesState)
+
+        # --- Add nodes ---
+        for node in self.definition["nodes"]:
+            node_id: str = node["id"]
+            node_type: str = node["type"]
+            node_config: dict = node["config"]
+
+            if node_id in agent_owned_ids:
+                continue
+
+            if node_type == "agent":
+                http_tool_executors = self._collect_http_tool_executors(
+                    node_id, nodes_by_id, edges, agent_owned_ids
+                )
+                executor = AgentNodeExecutor(node_config, http_tool_executors)
+                builder.add_node(node_id, executor.execute)
+
+            elif node_type == "http_tool":
+                executor = HttpToolNodeExecutor(node_config)  # type: ignore[assignment]
+                builder.add_node(node_id, executor.execute)
+
+            elif node_type == "end":
+                end_executor = EndNodeExecutor(node_config)
+                builder.add_node(node_id, end_executor.execute)
+
+            else:
+                logger.warning("Unknown node type %r (node %s) — skipping", node_type, node_id)
+
+        # --- Add edges ---
+        incoming: set[str] = {e["target"] for e in edges}
+        for node in self.definition["nodes"]:
+            node_id = node["id"]
+            node_type = node["type"]
+
+            if node_id in agent_owned_ids:
+                continue
+
+            if node_id not in incoming and node_type != "end":
+                builder.add_edge(START, node_id)
+                logger.debug("Edge: START → %s", node_id)
+
+            if node_type == "end":
+                builder.add_edge(node_id, END)
+                logger.debug("Edge: %s → END", node_id)
+
+            successors = self._resolve_effective_successors(node_id, agent_owned_ids)
+            for succ_id in successors:
+                if succ_id in agent_owned_ids:
+                    continue
+                builder.add_edge(node_id, succ_id)
+                logger.debug("Edge: %s → %s", node_id, succ_id)
+
+        compiled = builder.compile(checkpointer=checkpointer)
+        logger.info(
+            "WorkflowExecutor compiled old-schema graph: %d nodes (excl. %d agent-owned http_tools)",
+            len(self.definition["nodes"]) - len(agent_owned_ids),
+            len(agent_owned_ids),
+        )
+        return compiled
+
+    # ------------------------------------------------------------------
+    # Public async setup (fetches tools + upgrades checkpointer)
     # ------------------------------------------------------------------
 
     async def setup(self) -> None:
         """Rebuild the compiled graph with the environment-configured checkpointer.
 
-        Call this once in the FastAPI lifespan *after* creating the WorkflowExecutor
-        to upgrade from MemorySaver (set in __init__) to AsyncPostgresSaver when
-        DIRECT_DATABASE_URL is configured.
+        Also pre-fetches tool/skill definitions from the Registry API for
+        new-schema agent nodes before rebuilding the graph.
+
+        Call this once in the FastAPI lifespan *after* creating the WorkflowExecutor.
         """
+        # Fetch tools from Registry API for new-schema workflows
+        if self._is_new_schema():
+            try:
+                await self._prefetch_agent_tools()
+            except Exception as exc:
+                logger.warning(
+                    "WorkflowExecutor.setup: tool prefetch failed (continuing with empty tools): %s",
+                    exc,
+                )
+
         checkpointer = await get_checkpointer()
         self.graph = self._build_compiled_graph(checkpointer)
         logger.info(

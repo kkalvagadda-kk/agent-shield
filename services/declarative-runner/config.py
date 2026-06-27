@@ -47,6 +47,10 @@ AGENTSHIELD_LANGFUSE_HOST: str = os.getenv(
     "AGENTSHIELD_LANGFUSE_HOST", "http://langfuse.agentshield-platform:3000"
 )
 
+# --- Registry API ---
+# Used by the declarative runner to fetch tool and skill definitions at startup.
+REGISTRY_API_URL: str = os.environ.get("REGISTRY_API_URL", "http://agentshield-registry-api.agentshield-platform:8000")
+
 # --- Dev mode ---
 # True when OPA URL is the default localhost value and not explicitly configured.
 _OPA_URL_EXPLICITLY_SET: bool = bool(os.getenv("AGENTSHIELD_OPA_URL"))

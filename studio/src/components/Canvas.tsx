@@ -12,7 +12,6 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import { AgentNode } from '../nodes/AgentNode';
-import { HttpToolNode } from '../nodes/HttpToolNode';
 import { EndNode } from '../nodes/EndNode';
 import PropertiesPanel from './PropertiesPanel';
 import Toolbar from './Toolbar';
@@ -22,18 +21,17 @@ import { serializeWorkflow } from '../utils/workflowSerializer';
 import { updateWorkflow, deployWorkflow as deployWorkflowApi } from '../api/registryApi';
 
 // ---------------------------------------------------------------------------
-// Node type registry
+// Node type registry — http_tool removed (legacy only, not on canvas)
 // ---------------------------------------------------------------------------
 const nodeTypes = {
   agent: AgentNode,
-  http_tool: HttpToolNode,
   end: EndNode,
 };
 
 // ---------------------------------------------------------------------------
 // Default configs for new nodes
 // ---------------------------------------------------------------------------
-function defaultConfigForType(type: 'agent' | 'http_tool' | 'end') {
+function defaultConfigForType(type: 'agent' | 'end') {
   switch (type) {
     case 'agent':
       return {
@@ -41,16 +39,8 @@ function defaultConfigForType(type: 'agent' | 'http_tool' | 'end') {
         instructions: '',
         model: 'claude-sonnet-4-6',
         risk: 'low',
-      };
-    case 'http_tool':
-      return {
-        name: 'new-tool',
-        endpoint: '',
-        method: 'GET',
-        headers: {},
-        body_template: '',
-        risk: 'low',
-        auth_config_id: null,
+        tool_ids: [] as string[],
+        skill_ids: [] as string[],
       };
     case 'end':
       return { output_mapping: {} };
@@ -67,7 +57,7 @@ export default function Canvas() {
   const [isDeploying, setIsDeploying] = useState(false);
 
   // ---- Add node ----
-  const addNode = (type: 'agent' | 'http_tool' | 'end') => {
+  const addNode = (type: 'agent' | 'end') => {
     const id = crypto.randomUUID();
     const newNode = {
       id,
@@ -117,7 +107,18 @@ export default function Canvas() {
 
   // ---- Connect edges ----
   const onConnect = (connection: Connection) => {
-    store.setEdges((edges) => addEdge(connection, edges));
+    store.setEdges((edges) =>
+      addEdge(
+        {
+          ...connection,
+          type: 'smoothstep',
+          animated: true,
+          data: { condition: '' },
+          label: '',
+        },
+        edges
+      )
+    );
   };
 
   return (
@@ -135,13 +136,34 @@ export default function Canvas() {
         <div className="flex-1">
           <ReactFlow
             nodes={store.nodes}
-            edges={store.edges}
+            edges={store.edges.map((e) => ({
+              ...e,
+              style:
+                e.id === store.selectedEdgeId
+                  ? { stroke: '#3b82f6', strokeWidth: 2.5 }
+                  : { stroke: '#94a3b8', strokeWidth: 2 },
+            }))}
             onNodesChange={store.onNodesChange}
             onEdgesChange={store.onEdgesChange}
             onConnect={onConnect}
-            onNodeClick={(_, node) => store.selectNode(node.id)}
-            onPaneClick={() => store.selectNode(null)}
+            onNodeClick={(_, node) => {
+              store.selectNode(node.id);
+            }}
+            onEdgeClick={(_, edge) => {
+              store.selectNode(null);
+              store.selectEdge(edge.id);
+            }}
+            onPaneClick={() => {
+              store.selectNode(null);
+              store.selectEdge(null);
+            }}
             nodeTypes={nodeTypes}
+            defaultEdgeOptions={{
+              type: 'smoothstep',
+              animated: true,
+              style: { stroke: '#94a3b8', strokeWidth: 2 },
+            }}
+            edgesFocusable
             fitView
             snapToGrid
             snapGrid={[16, 16]}

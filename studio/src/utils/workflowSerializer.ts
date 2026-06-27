@@ -14,6 +14,7 @@ export interface WorkflowEdge {
   id: string;
   source: string;
   target: string;
+  condition?: string;
 }
 
 export interface WorkflowDefinition {
@@ -36,6 +37,7 @@ export function serializeWorkflow(nodes: Node[], edges: Edge[]): WorkflowDefinit
       id: edge.id,
       source: edge.source,
       target: edge.target,
+      ...(edge.data?.condition ? { condition: String(edge.data.condition) } : {}),
     })),
   };
 }
@@ -58,6 +60,10 @@ export function deserializeWorkflow(definition: WorkflowDefinition): {
       id: e.id,
       source: e.source,
       target: e.target,
+      label: e.condition ?? '',
+      data: { condition: e.condition ?? '' },
+      type: 'smoothstep',
+      animated: true,
     })),
   };
 }

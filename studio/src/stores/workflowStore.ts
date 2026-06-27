@@ -20,6 +20,7 @@ interface WorkflowState {
   nodes: Node[];
   edges: Edge[];
   selectedNodeId: string | null;
+  selectedEdgeId: string | null;
   isDirty: boolean;
   workflowId: string | null;
   workflowName: string | null;
@@ -31,7 +32,9 @@ interface WorkflowState {
   onNodesChange: OnNodesChange;
   onEdgesChange: OnEdgesChange;
   selectNode: (id: string | null) => void;
+  selectEdge: (id: string | null) => void;
   updateNodeConfig: (id: string, config: Partial<NodeConfig>) => void;
+  updateEdgeCondition: (id: string, condition: string) => void;
   markSaved: (workflowId: string, name: string, team: string) => void;
   resetCanvas: () => void;
 }
@@ -40,6 +43,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
   nodes: [],
   edges: [],
   selectedNodeId: null,
+  selectedEdgeId: null,
   isDirty: false,
   workflowId: null,
   workflowName: null,
@@ -74,7 +78,26 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
   },
 
   selectNode: (id) => {
-    set({ selectedNodeId: id });
+    set({ selectedNodeId: id, selectedEdgeId: null });
+  },
+
+  selectEdge: (id) => {
+    set({ selectedEdgeId: id, selectedNodeId: null });
+  },
+
+  updateEdgeCondition: (id, condition) => {
+    set((state) => ({
+      edges: state.edges.map((edge) =>
+        edge.id === id
+          ? {
+              ...edge,
+              label: condition,
+              data: { ...(edge.data ?? {}), condition },
+            }
+          : edge
+      ),
+      isDirty: true,
+    }));
   },
 
   updateNodeConfig: (id, config) => {
@@ -106,6 +129,7 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
       nodes: [],
       edges: [],
       selectedNodeId: null,
+      selectedEdgeId: null,
       isDirty: false,
       workflowId: null,
       workflowName: null,

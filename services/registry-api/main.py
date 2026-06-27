@@ -45,6 +45,7 @@ from routers.agents import router as agents_router
 from routers.approvals import router as approvals_router
 from routers.deployments import global_deployments_router, router as deployments_router
 from routers.opa_decisions import router as opa_decisions_router
+from routers.skills import router as skills_router
 from routers.teams import router as teams_router
 from routers.versions import router as versions_router, versions_global_router
 from routers.workflows import router as workflows_router
@@ -137,6 +138,9 @@ def create_app() -> FastAPI:
     app.include_router(approvals_router)
     app.include_router(opa_decisions_router)
     app.include_router(teams_router)
+
+    # --- Skills router (canvas redesign) ---
+    app.include_router(skills_router)
 
     # --- Stub routers (Phase 4 will fill these in) ---
     app.include_router(tools_router)

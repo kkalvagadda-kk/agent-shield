@@ -1,8 +1,8 @@
-import { Bot, Circle, Rocket, Save, Wrench, Flag } from 'lucide-react';
+import { Bot, Circle, Flag, Rocket, Save } from 'lucide-react';
 import { useWorkflowStore } from '../stores/workflowStore';
 
 interface ToolbarProps {
-  onAddNode: (type: 'agent' | 'http_tool' | 'end') => void;
+  onAddNode: (type: 'agent' | 'end') => void;
   onSave: () => void;
   onDeploy: () => void;
   isSaving?: boolean;
@@ -29,15 +29,6 @@ export default function Toolbar({
       >
         <Bot size={13} />
         + Agent
-      </button>
-
-      <button
-        onClick={() => onAddNode('http_tool')}
-        className="btn-secondary py-1.5 text-xs"
-        title="Add HTTP Tool node"
-      >
-        <Wrench size={13} />
-        + HTTP Tool
       </button>
 
       <button

@@ -1,3 +1,4 @@
+// Legacy — no longer added to canvas; kept for backward-compatible deserialization only
 import { memo } from 'react';
 import { Handle, Position, type NodeProps, type Node } from '@xyflow/react';
 import { Wrench } from 'lucide-react';

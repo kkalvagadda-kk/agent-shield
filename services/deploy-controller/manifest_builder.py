@@ -165,6 +165,19 @@ def build_deployment(
             k8s_client.V1EnvVar(name="WORKFLOW_JSON", value=workflow_json_b64)
         )
 
+    # --- REGISTRY_API_URL (declarative runner tool/skill resolution) ---
+    env_vars.append(
+        k8s_client.V1EnvVar(
+            name="REGISTRY_API_URL",
+            value_from=k8s_client.V1EnvVarSource(
+                secret_key_ref=k8s_client.V1SecretKeySelector(
+                    name="agentshield-secrets",
+                    key="registry-api-url",
+                )
+            ),
+        )
+    )
+
     # --- Agent container ---
     agent_container = k8s_client.V1Container(
         name=agent_name,

@@ -533,6 +533,35 @@ class TeamResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Skill
+# ---------------------------------------------------------------------------
+class SkillCreate(BaseModel):
+    name: str = Field(..., max_length=256)
+    team: str = Field(..., max_length=128)
+    description: str | None = None
+    tool_ids: list[str] = Field(default_factory=list)
+
+
+class SkillUpdate(BaseModel):
+    name: str | None = Field(None, max_length=256)
+    description: str | None = None
+    tool_ids: list[str] | None = None
+    status: str | None = None
+
+
+class SkillResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    team: str
+    description: str | None
+    tool_ids: list[str]
+    status: str
+    created_at: datetime
+    created_by: str | None
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
 # Error  (matches ErrorResponse in OpenAPI spec)
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
@@ -594,6 +623,10 @@ __all__ = [
     "TeamCreate",
     "TeamUpdate",
     "TeamResponse",
+    # Skill
+    "SkillCreate",
+    "SkillUpdate",
+    "SkillResponse",
     # Error
     "ErrorResponse",
 ]

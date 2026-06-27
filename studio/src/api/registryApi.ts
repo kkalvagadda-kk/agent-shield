@@ -85,6 +85,24 @@ export interface Paginated<T> {
   total: number;
 }
 
+export interface RegistryTool {
+  id: string;
+  name: string;
+  display_name: string | null;
+  description: string | null;
+  type: string;
+  config: Record<string, unknown>;
+}
+
+export interface Skill {
+  id: string;
+  name: string;
+  team: string;
+  description: string | null;
+  tool_ids: string[];
+  status: string;
+}
+
 // ---------------------------------------------------------------------------
 // Agents
 // ---------------------------------------------------------------------------
@@ -250,5 +268,21 @@ export interface AuthConfig {
 
 export const listAuthConfigs = async (): Promise<Paginated<AuthConfig>> => {
   const { data } = await http.get<Paginated<AuthConfig>>("/auth-configs/");
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+export const listTools = async (params?: { team?: string }): Promise<Paginated<RegistryTool>> => {
+  const { data } = await http.get<Paginated<RegistryTool>>('/tools/', { params });
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+export const listSkills = async (params?: { team?: string }): Promise<Paginated<Skill>> => {
+  const { data } = await http.get<Paginated<Skill>>('/skills/', { params });
   return data;
 };

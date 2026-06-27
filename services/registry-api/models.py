@@ -760,6 +760,27 @@ class AgentTool(Base):
 
 
 # ---------------------------------------------------------------------------
+# skills
+# ---------------------------------------------------------------------------
+class Skill(Base):
+    __tablename__ = "skills"
+    __table_args__ = (
+        UniqueConstraint("name", "team", name="uq_skills_name_team"),
+        Index("idx_skills_team", "team"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(_UUID, primary_key=True, server_default=_GEN_UUID)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_ids: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+    created_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
+    updated_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -779,4 +800,5 @@ __all__ = [
     "MCPServer",
     "Tool",
     "AgentTool",
+    "Skill",
 ]

@@ -39,9 +39,10 @@ A product/ops team member creates an agent workflow using drag-and-drop in Agent
 
 **Acceptance Scenarios**:
 
-1. **Given** a user opens Studio, **When** they drag an Agent node + HTTP Tool node, connect them, fill in instructions/endpoint, and click Deploy, **Then** agent is live within 90s.
-2. **Given** a visual workflow exists, **When** user edits instructions and redeploys, **Then** new version serves within 60s (no container build needed).
+1. **Given** a user opens Studio, **When** they drag two Agent nodes, connect them with a conditional edge, attach tools from the Registry via the PropertiesPanel, and click Deploy, **Then** the workflow is live within 90s.
+2. **Given** a visual workflow exists, **When** user edits agent instructions or changes tool associations and redeploys, **Then** new version serves within 60s (no container build needed).
 3. **Given** a visual agent is deployed, **When** a high-risk tool is called, **Then** the same HITL approval flow fires as for SDK-built agents.
+4. **Given** a multi-agent workflow, **When** the first agent's output contains a routing keyword, **Then** the declarative runner routes to the correct downstream agent via conditional edge.
 
 ---
 
@@ -181,8 +182,10 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | OPADecision | Audit log entry for every OPA policy evaluation | id, agent_name, tool_name, decision (allow/deny/require_approval), policy_version, deny_reason, thread_id, trace_id | Written on every tool-call authorization; 1:0..1 with Approval (every require_approval decision has a linked Approval row) |
 | OPAPolicy | Auto-generated policy for an agent | tool_allowlist, risk_classification, allow_deanonymize_tools (list) | 1:1 with agent; derived from agent-tool bindings |
 | Tool | A reusable, independently-managed tool definition | name, type (native/http/mcp), input_schema, risk_level, auth_config_id | Many-to-many with agents; belongs to optional auth config |
+| Skill | A named bundle of tools reusable across agents | name, team, description, tool_ids[] (references Tools), status | Selected on AgentNode in Studio; flattened to constituent tools at declarative runner startup |
 | AuthConfig | Credential configuration decoupled from tool definition | type (api_key/oauth2/bearer/mtls), k8s_secret_ref, owner_team | Referenced by many tools |
 | MCPServer | A registered MCP server whose tools are auto-discovered | server_url, transport, auth_config_id, status | Has many tools (discovered); referenced by agents |
+| Workflow | A visual agent workflow definition (Studio canvas) | name, team, definition (JSON), version_count | Deployed as a declarative runner pod; definition carries node/edge graph with tool_ids and skill_ids per agent node |
 
 ---
 
@@ -495,21 +498,28 @@ AgentShield supports three tiers of agent creation, all governed by the same saf
 **Output**: JSON workflow definition → deployed as declarative runner pod
 
 ```
-┌────────────────────────────────────────────────┐
-│ Studio Canvas                                   │
-│                                                 │
-│  [Agent Node] ──→ [Approval Gate] ──→ [End]    │
-│       │                                         │
-│       └─────→ [Escalation Agent]               │
-│                                                 │
-│  Properties: instructions, model, tools, risk   │
-└────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Studio Canvas                                                 │
+│                                                              │
+│  [Agent: Triage] ──"refund"──→ [Agent: Refund Handler]      │
+│        │                               │                     │
+│        │──"default"──→ [End]      ──→ [End]                 │
+│                                                              │
+│  PropertiesPanel (selected agent):                          │
+│    Instructions, Model, Risk                                 │
+│    Tools:  ☑ lookup_order  ☑ get_customer                   │
+│    Skills: ☑ Order Management (bundles 3 tools)             │
+│                                                              │
+│  PropertiesPanel (selected edge):                           │
+│    Condition: "refund"  (keyword matched in agent output)   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Tools defined as HTTP endpoints (no Python):
-- Method + URL + headers + body template
-- Input/output mapping via `{{variable}}` syntax
-- Test button for validation
+**Canvas node types**: `AgentNode` and `EndNode` only — tools are Registry resources, not canvas nodes.
+
+**Tool and Skill association**: Agents declare which tools/skills they use via multi-select checkboxes in the PropertiesPanel. The declarative runner fetches tool definitions from the Registry API at pod startup and builds the LangGraph agent from them.
+
+**Agent-to-agent routing**: Edges carry an optional `condition` string. When an agent's output contains the condition keyword (case-insensitive match), the declarative runner routes to that edge's target. The `default` condition (or blank) is the fallback path. One agent can fan out to multiple downstream agents via multiple conditional edges.
 
 ### Tier 2: SDK Declarative (Code-Light) — Phase 1
 
@@ -571,6 +581,37 @@ The Declarative Runner is a generic Python service (~600 lines) that loads a wor
 ### Startup
 On pod start, the runner reads `WORKFLOW_JSON` env var (base64-encoded), parses it, and calls `build_graph(definition)` to construct a compiled LangGraph `StateGraph`. The compiled graph is cached in memory for the pod lifetime.
 
+### Workflow JSON Schema
+
+The workflow definition stored in the `workflows.definition` column and base64-encoded into `WORKFLOW_JSON` env var:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "triage-agent",
+      "type": "agent",
+      "position": {"x": 100, "y": 200},
+      "config": {
+        "name": "triage-agent",
+        "instructions": "Classify the user request and route to the right team.",
+        "model": "claude-sonnet-4-6",
+        "risk": "low",
+        "tool_ids": ["uuid-of-lookup-order-tool"],
+        "skill_ids": ["uuid-of-order-management-skill"]
+      }
+    },
+    {"id": "end", "type": "end", "position": {"x": 600, "y": 200}, "config": {"output_mapping": {}}}
+  ],
+  "edges": [
+    {"id": "e1", "source": "triage-agent", "target": "refund-agent", "condition": "refund"},
+    {"id": "e2", "source": "triage-agent", "target": "end", "condition": "default"}
+  ]
+}
+```
+
+Only `agent` and `end` node types exist. `http_tool` nodes are gone from the canvas; HTTP tools are managed in the Tool Registry and referenced by UUID.
+
 ### Node Execution Model
 
 **State:** The runner maintains a typed state dict `WorkflowState` with:
@@ -579,27 +620,27 @@ On pod start, the runner reads `WORKFLOW_JSON` env var (base64-encoded), parses 
 - `session_id: str` — from Safety Orchestrator scan response
 - `__interrupt__: dict | None` — pending approval context
 
+**Startup tool resolution**: Before building the graph, the runner fetches tool and skill definitions from the Registry API:
+1. For each `skill_id` on an agent node → `GET /api/v1/skills/{id}` → collect its `tool_ids[]`
+2. For each resolved `tool_id` → `GET /api/v1/tools/{id}` → fetch the HTTP tool definition
+3. Build `HttpToolExecutor` callables from fetched configs; wrap as LangGraph `@tool` functions
+4. Pass to `create_react_agent(llm, tools=[...])` for that agent node
+
 **Agent Node:**
-- Creates a temporary `Agent(instructions, tools, model)` from node config
-- Calls `Runner.run(agent, input=state["messages"])` via SDK
-- Stores LLM output in `state["outputs"][node_id]`
-- LLM output is parsed to extract named slot values using the node's `output_mapping` config (e.g., `{"order_id": "$.order_id"}` — JSONPath expression against structured LLM output or regex against free text)
+- Creates a temporary `create_react_agent(llm, tools, checkpointer)` from node config + fetched tools
+- LLM output stored in `state["messages"]`
 
-**HTTP Tool Node:**
-- Reads URL template (e.g., `https://api.internal/orders/{{order_id}}/status`)
-- Resolves `{{variable}}` placeholders by looking up `state["outputs"]` — variable name maps to a key in a prior node's output
-- Executes HTTP call via `httpx`
-- Stores response in `state["outputs"][node_id]`
+**Conditional routing (edges with `condition`):**
+- Outgoing edges from an agent node are grouped; if any have a `condition`, `add_conditional_edges` is used
+- Routing function: examines the last AI message content for the condition keyword (case-insensitive substring match)
+- If no keyword matches, takes the `default` edge (or first unconditional edge)
+- One agent can fan out to multiple downstream agents
 
-**Approval Gate Node:**
-- Evaluates condition expression against `state["outputs"]` (e.g., `state["outputs"]["lookup_node"]["amount"] > 100`)
-- If condition met: creates approval record via Registry API, calls LangGraph `interrupt()` — same mechanism as SDK agents
+**Approval Gate Node** (Phase 2):
+- Evaluates condition expression against `state["outputs"]`
+- If met: creates approval record via Registry API, calls LangGraph `interrupt()`
 - The LangGraph `interrupt()` checkpoints state to Postgres via `AsyncPostgresSaver`
-- Resume works identically to SDK agents: Postgres NOTIFY → `Runner.run(agent, Command(resume=decision))` called on the runner's `/resume/{thread_id}` endpoint
-
-**Router Node:**
-- Evaluates `if/else-if/default` conditions against `state["outputs"]`
-- Returns next node_id as a `Command(goto=next_node_id)` to LangGraph
+- Resume: Postgres NOTIFY → `Runner.run(agent, Command(resume=decision))` on `/resume/{thread_id}`
 
 ### Variable Binding Rules
 - Variables are resolved left-to-right in execution order
@@ -684,8 +725,28 @@ Studio Approval Gate nodes and OPA tool risk classification are **complementary,
 - Cost allocation/billing per team (tracked in Langfuse but no chargeback system)
 - Custom Appsmith UI polish (functional MVP, not beautiful)
 - Mobile interface for approvals (desktop web only)
-- Agent-to-agent communication (each agent is independent)
 - Visual builder import/export to other platforms (Langflow, Dify)
+
+---
+
+## Future Improvements
+
+### Conditional Routing Enhancements (Studio Canvas)
+
+The current Phase 8 implementation uses **Option 1** (keyword match). Two stronger alternatives are deferred:
+
+**Option 1 — Keyword match (current, implemented)**
+The condition string on an edge is a plain keyword. The declarative runner checks whether the last agent output contains it (case-insensitive substring). Simple, zero-latency overhead, good for clear routing signals. Limitation: fragile if the agent phrases its response differently.
+
+**Option 2 — Structured output field (planned, Phase 10)**
+The agent is instructed to emit a JSON field (`route_to: "condition_name"`) as the last message. The runner parses `route_to` from the AI response. No keyword guessing — explicit contract between agent and router. Requires agent instruction discipline.
+
+**Option 3 — LLM-evaluated condition (future)**
+You write a natural-language condition on the edge (e.g., "the user mentioned a refund"). After each agent step, a small, fast LLM call evaluates the condition against the agent's output and returns `true/false`. Most flexible — conditions can express semantic intent not tied to specific wording. Tradeoff: adds one LLM round-trip of latency per edge evaluated, plus token cost. Suitable for complex routing logic where precision matters more than speed.
+
+### In-Browser SDK Agent Editor (HIGHEST PRIORITY post-roadmap)
+
+A Monaco editor embedded in Studio allows users to write `agent.py` directly in the browser. A Kaniko build service compiles it into a Docker image without requiring a local toolchain. Users never need to clone the repo, install Python, or run Docker locally to create SDK agents. The platform handles the full build-push-deploy loop from a browser tab.
 
 ---
 
@@ -710,14 +771,20 @@ Studio Approval Gate nodes and OPA tool risk classification are **complementary,
 - SSE streaming protocol (text_delta, tool_call_start/end, approval_requested/decided, done)
 - `agentshield dev` — local development server with mock safety layer
 
-**Studio v0 deliverables (Phase 1)**:
-- React + React Flow canvas with 3 node types: Agent, HTTP Tool, End
-- Properties panel: agent instructions, model selector, tool endpoint/method/body
+**Studio v0 deliverables (Phase 1 — implemented in Phase 8)**:
+- React + React Flow canvas with 2 node types: **AgentNode** and **EndNode** (HttpToolNode removed from canvas)
+- PropertiesPanel per node type:
+  - AgentNode: instructions, model selector, risk, **tool multi-select** (fetched from Tool Registry), **skill multi-select** (fetched from Skill Registry)
+  - EdgePanel: condition keyword for conditional routing between agents
+  - EndNode: output mapping config
+- Conditional agent-to-agent edges: one agent fans out to multiple agents via condition keywords
+- Skills Registry: named bundles of tools reusable across agents; CRUD at `/api/v1/skills/`
 - Save workflow to Registry API (JSON serialization)
+- First-save modal: workflow name + team assignment
 - One-click Deploy → declarative runner pod (no container build)
-- Declarative Runner pod: generic image that interprets workflow JSON at runtime
+- Declarative Runner pod: fetches tool/skill definitions from Registry API at startup; uses `add_conditional_edges` for routing
 
-**Exit criteria**: A developer can create an agent with `Agent(instructions, tools)` and deploy via SDK path. A product team member can build a simple agent visually in Studio and deploy with one click. Both paths produce governed agents (safety scan, OPA, HITL, tracing).
+**Exit criteria**: A developer can create an agent with `Agent(instructions, tools)` and deploy via SDK path. A product team member can build a multi-agent workflow visually in Studio, link tools from the Registry, set routing conditions between agents, and deploy with one click. Both paths produce governed agents (safety scan, OPA, HITL, tracing).
 
 ### Phase 2 — Scale, Multi-Agent & Studio Enhancement (Weeks 8-12)
 
@@ -755,6 +822,41 @@ Studio Approval Gate nodes and OPA tool risk classification are **complementary,
 - Admission webhook for contract validation
 - Studio import/export formats
 - Multi-cluster support investigation
+
+---
+
+---
+
+## ⚠️ TODO — Highest Priority (Post-Implementation)
+
+### In-Browser SDK Agent Editor + Platform-Managed Image Build
+
+**Why:** The current SDK agent workflow is CLI-first — developers write `agent.py` locally, build and push their own Docker image, then register via `agentshield deploy --image <tag>`. This creates friction for non-DevOps users and breaks the self-service experience.
+
+**Desired experience:**
+1. User opens Studio → Create Agent → selects type "SDK"
+2. Studio presents a Monaco code editor pre-populated with an `agent.py` template
+3. User writes tools and `Agent(...)` constructor in the browser
+4. On submit, the platform:
+   - Saves `agent.py` to a versioned object store (MinIO bucket `agent-source`)
+   - Spawns a Kaniko build job in K8s (or BuildKit daemon) to build the image
+   - Streams build logs back to Studio via SSE
+   - On success, pushes image to internal registry and auto-creates an `agent_version` record
+   - Triggers deployment if user checked "deploy immediately"
+
+**Scope to build:**
+- Studio: Monaco editor component in `CreateAgentPage.tsx` (and a new `EditAgentPage`)
+- Build service: new `services/build-service/` — FastAPI that accepts `{agent_name, source_code}`, runs Kaniko job via K8s Jobs API, streams logs, updates version status
+- Registry API: `agent_versions.source_url` column (points to MinIO object) + `build_status` field
+- MinIO: `agent-source` bucket with per-version paths `{team}/{agent}/{version}/agent.py`
+- Studio: build log stream panel (EventSource on `GET /api/v1/agents/{name}/versions/{id}/build-logs`)
+- Dockerfile template: baked into build service, not user-editable (security constraint)
+
+**Security constraints:**
+- User-supplied `agent.py` runs inside a container, not on the platform host
+- Kaniko runs in a dedicated `agentshield-builds` namespace with network egress limited to registry + PyPI
+- No `FROM` override — the base image is always `python:3.12-slim` + `agentshield-sdk`
+- Source stored in MinIO, not Git (Git integration is a future enhancement)
 
 ---
 
