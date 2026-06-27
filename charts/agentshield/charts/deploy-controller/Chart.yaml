@@ -2,5 +2,5 @@ apiVersion: v2
 name: deploy-controller
 description: AgentShield Deploy Controller — reconciles K8s agent workloads from Registry state
 type: application
-version: 0.1.1
-appVersion: "0.1.1"
+version: 0.1.3
+appVersion: "0.1.3"

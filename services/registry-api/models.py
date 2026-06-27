@@ -139,6 +139,14 @@ class Agent(Base):
     agent_tools: Mapped[list[AgentTool]] = relationship(
         "AgentTool", back_populates="agent", cascade="all, delete-orphan"
     )
+    llm_provider_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("llm_providers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    llm_provider: Mapped[Optional["LLMProvider"]] = relationship(
+        "LLMProvider", back_populates="agents", foreign_keys=[llm_provider_id]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +360,10 @@ class Deployment(Base):
     )
     terminated_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
     deployed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    llm_secret_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    llm_env_keys: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    llm_provider_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    llm_provider_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     previous_version_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
         ForeignKey("agent_versions.id"),
@@ -760,6 +772,41 @@ class AgentTool(Base):
 
 
 # ---------------------------------------------------------------------------
+# llm_providers
+# ---------------------------------------------------------------------------
+class LLMProvider(Base):
+    __tablename__ = "llm_providers"
+    __table_args__ = (
+        UniqueConstraint("name", "team", name="uq_llm_providers_name_team"),
+        CheckConstraint(
+            "provider IN ('anthropic','bedrock')",
+            name="ck_llm_providers_provider",
+        ),
+        Index("idx_llm_providers_team", "team"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    default_model: Mapped[str] = mapped_column(String(256), nullable=False)
+    credentials_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    # Relationships
+    agents: Mapped[list[Agent]] = relationship(
+        "Agent", back_populates="llm_provider", foreign_keys="Agent.llm_provider_id"
+    )
+
+
+# ---------------------------------------------------------------------------
 # skills
 # ---------------------------------------------------------------------------
 class Skill(Base):
@@ -800,5 +847,6 @@ __all__ = [
     "MCPServer",
     "Tool",
     "AgentTool",
+    "LLMProvider",
     "Skill",
 ]
