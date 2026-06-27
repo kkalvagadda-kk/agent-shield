@@ -188,6 +188,31 @@ kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --tim
 kubectl rollout status deployment/agentshield-deploy-controller -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3m
 
+# ── Step 7: Seed default teams ────────────────────────────────────────────────
+echo ""
+echo "[7/7] Seeding default teams..."
+REGISTRY_URL="http://localhost:8000"
+kubectl port-forward svc/agentshield-registry-api -n "$NAMESPACE" 8000:8000 &
+PF_PID=$!
+sleep 3
+
+for TEAM_NAME in platform operations; do
+  NAMESPACE_VAL="agents-${TEAM_NAME}"
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${REGISTRY_URL}/api/v1/teams/" \
+    -H "Content-Type: application/json" \
+    -d "{\"name\":\"${TEAM_NAME}\",\"namespace\":\"${NAMESPACE_VAL}\"}")
+  if [ "$STATUS" = "201" ]; then
+    echo "  Created team: ${TEAM_NAME}"
+  elif [ "$STATUS" = "409" ]; then
+    echo "  Team already exists: ${TEAM_NAME} (skipped)"
+  else
+    echo "  Warning: team ${TEAM_NAME} returned HTTP ${STATUS}"
+  fi
+done
+
+kill $PF_PID 2>/dev/null || true
+wait $PF_PID 2>/dev/null || true
+
 echo ""
 echo "================================================================"
 echo "  AgentShield CPE2E Deploy — COMPLETE"
