@@ -30,7 +30,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # ── Image tags ────────────────────────────────────────────────────────────────
 REGISTRY_API_TAG="0.2.8"
 DEPLOY_CONTROLLER_TAG="0.1.3"
-STUDIO_TAG="0.1.7"
+STUDIO_TAG="0.1.8"
 DECLARATIVE_RUNNER_TAG="0.1.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

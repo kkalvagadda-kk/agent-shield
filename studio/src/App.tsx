@@ -6,6 +6,9 @@ import CanvasPage from "./pages/CanvasPage";
 import CreateAgentPage from "./pages/CreateAgentPage";
 import DeployAgentPage from "./pages/DeployAgentPage";
 import ProvidersPage from "./pages/ProvidersPage";
+import WorkflowsPage from "./pages/WorkflowsPage";
+import ToolsPage from "./pages/ToolsPage";
+import SkillsPage from "./pages/SkillsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -29,6 +32,30 @@ export default function App() {
               <span className="text-slate-400 text-sm font-normal">Studio</span>
             </div>
             <NavLink
+              to="/workflows"
+              className={({ isActive }) =>
+                `text-sm font-medium transition-colors ${isActive ? "text-white" : "text-slate-400 hover:text-slate-200"}`
+              }
+            >
+              Workflows
+            </NavLink>
+            <NavLink
+              to="/tools"
+              className={({ isActive }) =>
+                `text-sm font-medium transition-colors ${isActive ? "text-white" : "text-slate-400 hover:text-slate-200"}`
+              }
+            >
+              Tools
+            </NavLink>
+            <NavLink
+              to="/skills"
+              className={({ isActive }) =>
+                `text-sm font-medium transition-colors ${isActive ? "text-white" : "text-slate-400 hover:text-slate-200"}`
+              }
+            >
+              Skills
+            </NavLink>
+            <NavLink
               to="/"
               end
               className={({ isActive }) =>
@@ -45,14 +72,6 @@ export default function App() {
             >
               Providers
             </NavLink>
-            <NavLink
-              to="/canvas"
-              className={({ isActive }) =>
-                `text-sm font-medium transition-colors ${isActive ? "text-white" : "text-slate-400 hover:text-slate-200"}`
-              }
-            >
-              Canvas
-            </NavLink>
           </nav>
           <main className="flex-1">
             <Routes>
@@ -60,8 +79,11 @@ export default function App() {
               <Route path="/agents/new" element={<CreateAgentPage />} />
               <Route path="/agents/:name/deploy" element={<DeployAgentPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
-              <Route path="/canvas" element={<CanvasPage />} />
+              <Route path="/workflows" element={<WorkflowsPage />} />
+              <Route path="/workflows/new" element={<CanvasPage />} />
               <Route path="/workflows/:id" element={<CanvasPage />} />
+              <Route path="/tools" element={<ToolsPage />} />
+              <Route path="/skills" element={<SkillsPage />} />
             </Routes>
           </main>
         </div>

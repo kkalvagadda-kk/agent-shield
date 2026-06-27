@@ -6,6 +6,7 @@ import {
   BackgroundVariant,
   Controls,
   MiniMap,
+  MarkerType,
   addEdge,
   type Connection,
 } from '@xyflow/react';
@@ -112,7 +113,7 @@ export default function Canvas() {
         {
           ...connection,
           type: 'smoothstep',
-          animated: true,
+          animated: false,
           data: { condition: '' },
           label: '',
         },
@@ -138,10 +139,15 @@ export default function Canvas() {
             nodes={store.nodes}
             edges={store.edges.map((e) => ({
               ...e,
+              animated: false,
               style:
                 e.id === store.selectedEdgeId
                   ? { stroke: '#3b82f6', strokeWidth: 2.5 }
                   : { stroke: '#94a3b8', strokeWidth: 2 },
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: e.id === store.selectedEdgeId ? '#3b82f6' : '#94a3b8',
+              },
             }))}
             onNodesChange={store.onNodesChange}
             onEdgesChange={store.onEdgesChange}
@@ -160,8 +166,8 @@ export default function Canvas() {
             nodeTypes={nodeTypes}
             defaultEdgeOptions={{
               type: 'smoothstep',
-              animated: true,
               style: { stroke: '#94a3b8', strokeWidth: 2 },
+              markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8' },
             }}
             edgesFocusable
             fitView

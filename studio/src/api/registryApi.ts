@@ -91,6 +91,9 @@ export interface RegistryTool {
   display_name: string | null;
   description: string | null;
   type: string;
+  risk_level?: 'low' | 'medium' | 'high';
+  owner_team?: string;
+  status?: string;
   config: Record<string, unknown>;
 }
 
@@ -224,6 +227,7 @@ export interface Workflow {
   status: string;
   created_at: string;
   updated_at: string;
+  definition?: { nodes: unknown[]; edges: unknown[] };
 }
 
 export interface WorkflowDefinition {
@@ -257,6 +261,16 @@ export const deployWorkflow = async (
   return data;
 };
 
+export const listWorkflows = async (params?: { team?: string }): Promise<Paginated<Workflow>> => {
+  const { data } = await http.get<Paginated<Workflow>>('/workflows/', { params });
+  return data;
+};
+
+export const getWorkflow = async (id: string): Promise<Workflow> => {
+  const { data } = await http.get<Workflow>(`/workflows/${id}`);
+  return data;
+};
+
 // ---------------------------------------------------------------------------
 // Auth Configs (T156)
 // ---------------------------------------------------------------------------
@@ -279,10 +293,52 @@ export const listTools = async (params?: { team?: string }): Promise<Paginated<R
   return data;
 };
 
+export interface CreateToolPayload {
+  name: string;
+  display_name?: string;
+  description?: string;
+  type: 'http';
+  risk_level: 'low' | 'medium' | 'high';
+  owner_team?: string;
+  http_method?: string;
+  http_url?: string;
+}
+
+export const createTool = async (payload: CreateToolPayload): Promise<RegistryTool> => {
+  const { data } = await http.post<RegistryTool>('/tools/', payload);
+  return data;
+};
+
+export const deleteTool = async (id: string): Promise<void> => {
+  await http.delete(`/tools/${id}`);
+};
+
 // ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------
 export const listSkills = async (params?: { team?: string }): Promise<Paginated<Skill>> => {
   const { data } = await http.get<Paginated<Skill>>('/skills/', { params });
   return data;
+};
+
+export const createSkill = async (payload: {
+  name: string;
+  team: string;
+  description?: string;
+  tool_ids: string[];
+}): Promise<Skill> => {
+  const { data } = await http.post<Skill>('/skills/', payload);
+  return data;
+};
+
+export const updateSkill = async (
+  id: string,
+  payload: Partial<{ name: string; description: string; tool_ids: string[] }>
+): Promise<Skill> => {
+  const { data } = await http.put<Skill>(`/skills/${id}`, payload);
+  return data;
+};
+
+export const deleteSkill = async (id: string): Promise<void> => {
+  await http.delete(`/skills/${id}`);
 };

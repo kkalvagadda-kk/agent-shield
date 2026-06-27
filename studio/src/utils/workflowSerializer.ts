@@ -63,7 +63,7 @@ export function deserializeWorkflow(definition: WorkflowDefinition): {
       label: e.condition ?? '',
       data: { condition: e.condition ?? '' },
       type: 'smoothstep',
-      animated: true,
+      animated: false,
     })),
   };
 }
