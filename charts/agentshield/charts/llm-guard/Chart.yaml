@@ -1,6 +1,6 @@
 apiVersion: v2
 name: llm-guard
-description: AgentShield llm-guard service (stub — not yet implemented)
+description: LLM Guard input/output scanner (protectai/llm-guard-api)
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "0.4.0"

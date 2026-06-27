@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import {
   ReactFlow,
@@ -53,6 +54,7 @@ function defaultConfigForType(type: 'agent' | 'end') {
 // ---------------------------------------------------------------------------
 export default function Canvas() {
   const store = useWorkflowStore();
+  const navigate = useNavigate();
   const [showFirstSaveModal, setShowFirstSaveModal] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -191,6 +193,7 @@ export default function Canvas() {
           onSaved={(id, name, team) => {
             store.markSaved(id, name, team);
             setShowFirstSaveModal(false);
+            navigate(`/workflows/${id}`, { replace: true });
           }}
         />
       )}

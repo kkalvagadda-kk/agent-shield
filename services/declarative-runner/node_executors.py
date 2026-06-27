@@ -2,9 +2,10 @@
 Node executors for the declarative workflow runner.
 
 Each class handles one node type from the workflow JSON definition:
-  - AgentNodeExecutor  — wraps http_tool nodes as tools and runs an LLM agent
-  - HttpToolNodeExecutor — makes an httpx HTTP call with {{variable}} substitution
-  - EndNodeExecutor    — maps state fields to output per output_mapping config
+  - AgentNodeExecutor       — wraps tool nodes as tools and runs an LLM agent
+  - HttpToolNodeExecutor    — makes an httpx HTTP call with {{variable}} substitution
+  - PythonToolNodeExecutor  — calls python-executor microservice to run sandboxed code
+  - EndNodeExecutor         — maps state fields to output per output_mapping config
 """
 from __future__ import annotations
 
@@ -173,6 +174,64 @@ class HttpToolNodeExecutor:
 
 
 # ---------------------------------------------------------------------------
+# PythonToolNodeExecutor
+# ---------------------------------------------------------------------------
+
+class PythonToolNodeExecutor:
+    """Calls the python-executor microservice to run sandboxed user-supplied Python code.
+
+    The python-executor receives {code, args, timeout_ms} and returns {result, error}.
+    This keeps arbitrary code execution isolated from the declarative runner process.
+    """
+
+    def __init__(self, node_config: dict, executor_url: str = "http://python-executor:8080") -> None:
+        self.node_config = node_config
+        self.name: str = node_config.get("name", "python_tool")
+        self.python_code: str = node_config.get("python_code", "")
+        self.risk: str = node_config.get("risk", "low")
+        self.executor_url: str = executor_url
+        self.timeout_ms: int = node_config.get("timeout_ms", 10_000)
+
+    def as_tool_callable(self) -> Any:
+        """Return an agentshield @tool-compatible callable that invokes the python-executor."""
+        executor = self
+
+        async def python_tool_fn(**kwargs: Any) -> str:
+            """Call the python-executor microservice to run the tool code."""
+            payload = {
+                "code": executor.python_code,
+                "args": kwargs,
+                "timeout_ms": executor.timeout_ms,
+            }
+            async with httpx.AsyncClient(timeout=executor.timeout_ms / 1000.0 + 5) as client:
+                resp = await client.post(f"{executor.executor_url}/execute", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+
+            if data.get("error"):
+                raise RuntimeError(f"python_tool error: {data['error']}")
+            return data.get("result", "")
+
+        python_tool_fn.__name__ = self.name
+        python_tool_fn.__doc__ = f"Run Python tool '{self.name}'. Pass required arguments as keyword args."
+        python_tool_fn.risk = self.risk
+        python_tool_fn.tool_name = self.name
+
+        # Generic signature — accepts freeform kwargs since we don't statically parse the code
+        params = [
+            inspect.Parameter(
+                "kwargs",
+                inspect.Parameter.VAR_KEYWORD,
+                annotation=str,
+            )
+        ]
+        python_tool_fn.__signature__ = inspect.Signature(params, return_annotation=str)
+        python_tool_fn.__annotations__ = {}
+
+        return python_tool_fn
+
+
+# ---------------------------------------------------------------------------
 # AgentNodeExecutor
 # ---------------------------------------------------------------------------
 
@@ -184,9 +243,9 @@ class AgentNodeExecutor:
     The agent is invoked via ``agentshield_sdk.Runner``.
     """
 
-    def __init__(self, node_config: dict, http_tool_executors: list[HttpToolNodeExecutor]) -> None:
+    def __init__(self, node_config: dict, tool_executors: list) -> None:
         self.node_config = node_config
-        self.http_tool_executors = http_tool_executors
+        self.tool_executors = tool_executors
         self._runner: Any = None  # lazily initialised on first execute() call
 
     async def _get_runner(self) -> Any:
@@ -196,7 +255,7 @@ class AgentNodeExecutor:
 
         from agentshield_sdk import Agent, Runner
 
-        tools = [ex.as_tool_callable() for ex in self.http_tool_executors]
+        tools = [ex.as_tool_callable() for ex in self.tool_executors]
 
         agent = Agent(
             name=self.node_config.get("name", "agent"),
@@ -213,7 +272,7 @@ class AgentNodeExecutor:
         logger.info(
             "AgentNodeExecutor ready: agent=%s tools=%s",
             agent.name,
-            [t.tool_name for t in tools],
+            [getattr(t, "tool_name", getattr(t, "__name__", "?")) for t in tools],
         )
         return self._runner
 

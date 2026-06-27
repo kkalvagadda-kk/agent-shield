@@ -22,12 +22,13 @@ export default function CanvasPage() {
       return;
     }
     if (workflow) {
-      const { nodes, edges } = deserializeWorkflow(
-        workflow.definition as WorkflowDefinition
-      );
-      store.setNodes(nodes);
-      store.setEdges(edges);
       store.markSaved(workflow.id, workflow.name, workflow.team);
+      const def = workflow.current_definition?.definition;
+      if (def) {
+        const { nodes, edges } = deserializeWorkflow(def as WorkflowDefinition);
+        store.setNodes(nodes);
+        store.setEdges(edges);
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workflow, id]);

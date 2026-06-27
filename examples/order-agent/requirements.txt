@@ -1,0 +1,2 @@
+# agentshield-sdk is installed from the local sdk/ directory at build time
+# Add any agent-specific dependencies here

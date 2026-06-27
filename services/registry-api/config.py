@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     kubernetes_namespace_prefix: str = "agents"
 
     # ------------------------------------------------------------------ #
+    # Encryption                                                           #
+    # ------------------------------------------------------------------ #
+    # Fernet key for encrypting LLM provider credentials at rest.
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    agentshield_encryption_key: str = ""
+
+    # ------------------------------------------------------------------ #
     # Server                                                               #
     # ------------------------------------------------------------------ #
     port: int = 8000

@@ -775,6 +775,135 @@ curl -X POST http://localhost:8080/chat \
 
 ---
 
+### Phase 8b: Python Tool Executor
+
+**Goal:** Add a `python` tool type so declarative agents can call sandboxed Python code alongside HTTP tools. The python-executor microservice isolates user code in a subprocess with a hard timeout, keeping arbitrary execution away from the runner process.
+
+**Tasks:**
+
+1. **(0.5d) New microservice `services/python-executor/`**:
+   - `main.py` — FastAPI; `POST /execute` accepts `{code, args, timeout_ms}`; forks a `multiprocessing.spawn` subprocess; calls `run_tool(args)` defined in user code; hard-kills on timeout; returns `{result, error}`. `GET /health` for liveness.
+   - `requirements.txt` — `fastapi>=0.115`, `uvicorn[standard]>=0.30`
+   - `Dockerfile` — `FROM python:3.12-slim`
+
+2. **(0.5d) [P] Alembic migration `0005_add_python_tool.py`**:
+   - `ALTER TABLE tools ADD COLUMN python_code TEXT`
+   - Update `ck_tools_type` CHECK constraint to `('native','http','mcp_tool','python')`
+
+3. **(0.5d) [P] Update Registry API** (`models.py`, `schemas.py`):
+   - Add `python_code: str | None` column to Tool model and all Tool schemas
+   - Update `ToolCreate` type pattern to accept `python`
+
+4. **(0.5d) [P] Add `PythonToolNodeExecutor`** to `services/declarative-runner/node_executors.py`:
+   - Sends `POST {executor_url}/execute` with `{code, args, timeout_ms}`; returns string result
+   - Same `as_tool_callable()` interface as `HttpToolNodeExecutor`
+
+5. **(0.5d) [P] Update declarative runner dispatch** (`workflow_executor.py`, `config.py`):
+   - `_tool_dict_to_executor()` branches on `type=python` → `PythonToolNodeExecutor`
+   - `config.py` adds `PYTHON_EXECUTOR_URL` setting
+
+6. **(0.5d) [P] Helm: python-executor Deployment + Service** (`charts/agentshield/charts/python-executor/`)
+   - New subchart added to umbrella `Chart.yaml`
+
+7. **(0.5d) [P] Update deploy-controller** `manifest_builder.py`:
+   - Inject `PYTHON_EXECUTOR_URL` env var into declarative runner pods
+
+**Image bumps:** `python-executor:0.1.0` (new), `registry-api:0.2.11`, `declarative-runner:0.1.1`, `deploy-controller:0.1.4`
+
+**Verification:**
+```bash
+# Direct executor test
+kubectl port-forward svc/agentshield-python-executor -n agentshield-platform 8081:8080 &
+curl -X POST http://localhost:8081/execute \
+  -H "Content-Type: application/json" \
+  -d '{"code":"def run_tool(args):\n    return str(int(args[\"a\"])+int(args[\"b\"]))", "args":{"a":5,"b":3}}'
+# Expect: {"result":"8","error":null}
+
+# Register a python tool via Registry API
+curl -X POST http://localhost:8000/api/v1/tools/ \
+  -H "Content-Type: application/json" \
+  -d '{"name":"test_calc","type":"python","risk_level":"low","python_code":"def run_tool(args):\n    return str(eval(args[\"expr\"]))"}'
+# Expect: 201 Created with type=python
+```
+
+---
+
+### Phase 8c: Default Resources + Studio Python Tool UI
+
+**Goal:** Populate the platform with a curated set of default tools, skills, agents, and starter workflows so Studio is populated on first boot. Add Python tool creation support to the Studio UI.
+
+**Tasks:**
+
+1. **(1d) `scripts/seed-defaults.sh`** — idempotent seed script (409 = skip):
+   - **6 tools**: web_search (Serper.dev POST), weather_lookup (Open-Meteo GET), ip_geolocation (ip-api.com GET), slack_notify (Slack webhook POST), http_echo (httpbin.org GET), calculator (Python, AST-safe arithmetic)
+   - **2 skills**: `web_research_skill` (web_search + weather_lookup + ip_geolocation), `notification_skill` (slack_notify)
+   - **5 agents**: research-assistant, calculator-bot, slack-notifier (all `declarative`); echo-agent, order-agent (both `sdk`)
+   - **3 starter workflows**: research-workflow, calculator-workflow, notification-workflow — each 1 agent node → end node
+
+2. **(0.5d) [P] Update `studio/src/pages/ToolsPage.tsx`**:
+   - Tool type radio selector (http / python)
+   - When `python` selected: show `<textarea>` for `run_tool(args: dict) -> str` code with starter template; hide HTTP URL/method fields
+   - Update `CreateToolPayload` type in `registryApi.ts` to include `type: 'http' | 'python'` and `python_code?: string`
+
+3. **(0.5d) Update `scripts/deploy-cpe2e.sh`**:
+   - Build python-executor image; add step `[8/8] Seeding default resources…` calling `seed-defaults.sh`; update all image tags; add python-executor rollout wait
+
+**Image bumps:** `studio:0.1.12`
+
+**Verification:**
+```bash
+# After deploy + seed, all 6 tools are visible
+curl -s http://localhost:8000/api/v1/tools/ | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); [print(t['name'], t['type']) for t in d['items']]"
+# web_search http / weather_lookup http / ip_geolocation http
+# slack_notify http / http_echo http / calculator python
+
+# 2 skills
+curl -s "http://localhost:8000/api/v1/skills/?team=platform" | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); print(d['total'], 'skills')"
+# 2 skills
+
+# Studio: Tools page shows python type badge, and python_code textarea in create form
+# Studio: Workflows page shows 3 seeded workflows
+```
+
+---
+
+### Phase 8d: Studio Edit/Detail UX (Product Plan Gap Fill)
+
+**Goal:** Close the CRUD gap on ToolsPage and AgentListPage. The backend has supported `PUT /api/v1/tools/{id}` and `PUT /api/v1/agents/{name}` since Phase 4/2 respectively. The Studio UI never exposed them — the original tasks for these pages only specified list + create + delete, and the pattern was established later by Skills and Providers pages.
+
+**Root cause:** UX review after Phase 8c seed seeded 6 tools and 5 agents, making the missing edit/view-detail highly visible. No ability to inspect python_code on an existing tool, fix a description, or archive an agent.
+
+**Tasks:**
+
+1. **(0.5d) `ToolsPage.tsx` + `registryApi.ts`**:
+   - Extend `RegistryTool` interface: add `http_method`, `http_url`, `python_code` as top-level optional fields (they're in `ToolResponse` but missing from the TS type)
+   - Add `updateTool(id, payload)` → `PUT /api/v1/tools/{id}`
+   - Rename `CreateToolForm` → `ToolForm({ tool: RegistryTool | null, ... })`
+   - Edit mode: `name` and `type` fields are read-only; all other fields pre-populated from existing tool; `python_code` textarea shows actual stored code
+   - Add **Edit** (Pencil) button per row, alongside existing Delete
+
+2. **(0.5d) `AgentListPage.tsx` + `registryApi.ts`**:
+   - Add `updateAgent(name, { description?, status? })` → `PUT /api/v1/agents/{name}`
+   - Add `deleteAgent(name)` → `DELETE /api/v1/agents/{name}` (soft-delete, sets status=deprecated)
+   - Add inline `AgentEditForm` card: description textarea + status dropdown (active/archived/deprecated)
+   - Add **Edit** (Pencil) and **Delete** (Trash2) buttons per row
+
+**Image bump:** `studio:0.1.13`
+
+**Verification:**
+```bash
+# After deploy:
+kubectl port-forward svc/agentshield-studio -n agentshield-platform 5173:80 &
+# Tools page: click Edit on "calculator" → see python_code textarea with AST code; change description → Save → toast success
+# Tools page: click Edit on "web_search" → see http_method=POST, http_url=https://google.serper.dev/search
+# Agents page: click Edit on "research-assistant" → see description; change it → Save → row updates
+# Agents page: click Delete on "order-agent" → row disappears (soft-delete)
+```
+
+---
+
 ## Critical Path
 
 ```
@@ -790,15 +919,25 @@ Week 1 (Data Layer)
     │                                                              │
     │                                                         Week 6 (SDK v1)
     │                                                              │
-    │                                                         Week 7 (Studio v0)
+    │                                                         Week 7 (Studio v0 + Declarative Runner)
+    │                                                              │
+    │                                                         Phase 8b (Python Tool Executor)
+    │                                                              │
+    │                                                         Phase 8c (Default Resources + Studio Python UI)
+    │                                                              │
+    │                                                         Phase 8d (Studio Edit/Detail UX — gap fill)
+    │                                                              │
+    │                                                         Checkpoint E2E
 ```
 
-**Sequential:** All weeks 1→7 are on the critical path for the full exit criteria.
+**Sequential:** Weeks 1→7 + Phase 8b → 8c are on the critical path before the E2E checkpoint.
 
-**Parallelizable within weeks:**
-- Week 3: Safety Orchestrator development (backend dev) can run in parallel with Langfuse setup (platform eng)
-- Week 5: Portkey deployment (platform eng) can be done in parallel with Approval flow development (backend dev)
-- Week 7: Studio frontend (frontend dev) can run in parallel with Declarative Runner (backend dev) after Week 6 SDK is complete
+**Parallelizable within phases:**
+- Week 3: Safety Orchestrator development can run in parallel with Langfuse setup
+- Week 5: Portkey deployment can run in parallel with Approval flow development
+- Week 7: Studio frontend can run in parallel with Declarative Runner after SDK is complete
+- Phase 8b: migration, Registry API update, PythonToolNodeExecutor, Helm chart, and manifest_builder update are all parallel (touch different files)
+- Phase 8c: Studio ToolsPage update is parallel to seed-defaults.sh script
 
 ---
 
@@ -942,7 +1081,8 @@ agent-platform/
 │           ├── appsmith/
 │           ├── langfuse/
 │           ├── opa/
-│           └── studio/
+│           ├── studio/
+│           └── python-executor/       ← Phase 8b
 ├── infra/
 │   ├── namespaces/
 │   ├── network-policies/
@@ -985,11 +1125,20 @@ agent-platform/
 │   │   ├── schemas.py
 │   │   ├── tests/
 │   │   └── Dockerfile
-│   └── declarative-runner/
-│       ├── main.py
-│       ├── workflow_executor.py
-│       ├── node_executors.py
+│   ├── declarative-runner/
+│   │   ├── main.py
+│   │   ├── workflow_executor.py
+│   │   ├── node_executors.py        ← HttpToolNodeExecutor + PythonToolNodeExecutor
+│   │   ├── config.py               ← REGISTRY_API_URL, PYTHON_EXECUTOR_URL
+│   │   └── Dockerfile
+│   └── python-executor/            ← Phase 8b (new)
+│       ├── main.py                 ← POST /execute, subprocess sandbox
+│       ├── requirements.txt
 │       └── Dockerfile
+├── scripts/
+│   ├── deploy-cpe2e.sh             ← full E2E deploy (8 steps incl. seed)
+│   ├── seed-defaults.sh            ← Phase 8c: idempotent default resource seed
+│   └── ...
 ├── sdk/
 │   └── agentshield_sdk/
 │       ├── __init__.py

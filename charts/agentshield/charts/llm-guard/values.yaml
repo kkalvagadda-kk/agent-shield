@@ -1,0 +1,6 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/protectai/llm-guard-api
+  tag: "0.4.0"
+  pullPolicy: IfNotPresent

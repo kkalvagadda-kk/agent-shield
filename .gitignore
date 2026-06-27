@@ -45,3 +45,9 @@ coverage.xml
 # Logs
 *.log
 excalidraw.log
+
+# SDK build artifacts
+sdk/agentshield_sdk/__pycache__/
+sdk/dist/
+sdk/*.egg-info/
+examples/order-agent/__pycache__/

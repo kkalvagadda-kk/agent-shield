@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # deploy-cpe2e.sh — Checkpoint E2E deploy (fresh cluster or after restart)
 #
-# Creates all required secrets, builds Phase-8 images, and deploys the full
+# Creates all required secrets, builds Phase-8b/8c images, and deploys the full
 # AgentShield stack needed for the E2E checkpoint:
-#   - registry-api (0.2.6)
-#   - deploy-controller (0.1.2 — Phase 8 declarative runner support)
-#   - studio (0.1.6 — Phase 8 canvas)
-#   - PostgreSQL, Redis, Keycloak, MinIO (infra)
+#   - registry-api:0.2.11  (migration 0005: python tool type + python_code column)
+#   - deploy-controller:0.1.4 (PYTHON_EXECUTOR_URL injection into runner pods)
+#   - studio:0.1.12        (python_code textarea in ToolsPage)
+#   - declarative-runner:0.1.1 (PythonToolNodeExecutor)
+#   - python-executor:0.1.0 (new sandboxed Python code runner)
+#   - PostgreSQL, Redis (infra)
+#
+# Seeded by step 8: 6 tools, 2 skills, 3 workflows, 5 agents
 #
 # Usage: bash scripts/deploy-cpe2e.sh
 set -euo pipefail
@@ -28,10 +32,11 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.10"
-DEPLOY_CONTROLLER_TAG="0.1.3"
-STUDIO_TAG="0.1.8"
-DECLARATIVE_RUNNER_TAG="0.1.0"
+REGISTRY_API_TAG="0.2.11"
+DEPLOY_CONTROLLER_TAG="0.1.6"
+STUDIO_TAG="0.1.13"
+DECLARATIVE_RUNNER_TAG="0.1.1"
+PYTHON_EXECUTOR_TAG="0.1.0"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -40,28 +45,31 @@ echo "==> AgentShield CPE2E Deploy — $(date)"
 echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
-echo "[1/6] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (canvas redesign — skills API + migration 0004)"
+echo "[1/8] Building images..."
+echo "  → registry-api:${REGISTRY_API_TAG} (migration 0005: python_code column + python tool type)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
-echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (manifest_builder REGISTRY_API_URL injection)"
+echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (manifest_builder: inject PYTHON_EXECUTOR_URL)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
-echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (conditional routing + tool/skill resolution)"
+echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (PythonToolNodeExecutor support)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" services/declarative-runner/
 
-echo "  → studio:${STUDIO_TAG} (canvas redesign — agent-only canvas, tool/skill selectors)"
+echo "  → studio:${STUDIO_TAG} (python_code textarea in ToolsPage; edit/delete for Tools + Agents)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
+
+echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"
+docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR_TAG}" services/python-executor/
 
 # ── Step 2: Namespaces ────────────────────────────────────────────────────────
 echo ""
-echo "[2/6] Applying namespaces..."
+echo "[2/8] Applying namespaces..."
 kubectl apply -f infra/namespaces/agentshield-platform.yaml
 kubectl apply -f infra/namespaces/agents-platform.yaml
 
 # ── Step 3: Secrets (all required by chart templates) ─────────────────────────
 echo ""
-echo "[3/6] Creating secrets..."
+echo "[3/8] Creating secrets..."
 
 # Core platform secrets consumed by registry-api init containers + deployment
 kubectl create secret generic agentshield-secrets \
@@ -137,12 +145,12 @@ echo "  All secrets applied."
 
 # ── Step 4: Helm dependency update ───────────────────────────────────────────
 echo ""
-echo "[4/6] Updating Helm dependencies..."
+echo "[4/8] Updating Helm dependencies..."
 helm dependency update "$CHART" 2>/dev/null || true
 
 # ── Step 5: Helm upgrade ──────────────────────────────────────────────────────
 echo ""
-echo "[5/6] Helm upgrade/install '${RELEASE}'..."
+echo "[5/8] Helm upgrade/install '${RELEASE}'..."
 
 # Clean up stale realm-init job if it exists (hook fails on re-deploy otherwise)
 kubectl delete job "${RELEASE}-realm-init" -n "$NAMESPACE" --ignore-not-found=true
@@ -155,9 +163,11 @@ helm upgrade --install "$RELEASE" "$CHART" \
   --set "registry-api.image.tag=${REGISTRY_API_TAG}" \
   --set "studio.image.tag=${STUDIO_TAG}" \
   --set "deploy-controller.declarativeRunnerTag=${DECLARATIVE_RUNNER_TAG}" \
+  --set "python-executor.image.tag=${PYTHON_EXECUTOR_TAG}" \
   \
   --set deploy-controller.enabled=true \
   --set studio.enabled=true \
+  --set python-executor.enabled=true \
   --set safety-orchestrator.enabled=false \
   --set llm-guard.enabled=false \
   --set presidio.enabled=false \
@@ -181,16 +191,17 @@ helm upgrade --install "$RELEASE" "$CHART" \
 
 # ── Step 6: Wait for rollouts ─────────────────────────────────────────────────
 echo ""
-echo "[6/6] Waiting for rollouts..."
+echo "[6/8] Waiting for rollouts..."
 kubectl rollout status statefulset/agentshield-postgresql -n "$NAMESPACE" --timeout=5m
 kubectl rollout status statefulset/agentshield-redis-master -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --timeout=5m
 kubectl rollout status deployment/agentshield-deploy-controller -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3m
+kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --timeout=3m
 
 # ── Step 7: Seed default teams ────────────────────────────────────────────────
 echo ""
-echo "[7/7] Seeding default teams..."
+echo "[7/8] Seeding default teams..."
 REGISTRY_URL="http://localhost:8000"
 kubectl port-forward svc/agentshield-registry-api -n "$NAMESPACE" 8000:8000 &
 PF_PID=$!
@@ -213,6 +224,18 @@ done
 kill $PF_PID 2>/dev/null || true
 wait $PF_PID 2>/dev/null || true
 
+# ── Step 8: Seed default resources ───────────────────────────────────────────
+echo ""
+echo "[8/8] Seeding default resources (tools, skills, agents, workflows)..."
+kubectl port-forward svc/agentshield-registry-api -n "$NAMESPACE" 8001:8000 &
+PF2_PID=$!
+sleep 3
+
+REGISTRY_URL="http://localhost:8001" bash scripts/seed-defaults.sh || true
+
+kill $PF2_PID 2>/dev/null || true
+wait $PF2_PID 2>/dev/null || true
+
 echo ""
 echo "================================================================"
 echo "  AgentShield CPE2E Deploy — COMPLETE"
@@ -221,7 +244,9 @@ echo ""
 kubectl get pods -n "$NAMESPACE" --no-headers | sort
 echo ""
 echo "Port-forward commands:"
-echo "  Registry API:  kubectl port-forward svc/agentshield-registry-api -n ${NAMESPACE} 8000:8000"
-echo "  Studio:        kubectl port-forward svc/agentshield-studio       -n ${NAMESPACE} 5173:80"
+echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api   -n ${NAMESPACE} 8000:8000"
+echo "  Studio:            kubectl port-forward svc/agentshield-studio         -n ${NAMESPACE} 5173:80"
+echo "  Python Executor:   kubectl port-forward svc/agentshield-python-executor -n ${NAMESPACE} 8081:8080"
 echo ""
+echo "Default resources seeded: 6 tools (5 HTTP + 1 Python), 2 skills, 3 workflows, 5 agents"
 echo "Next: bash scripts/smoke-test-cpe2e-studio.sh"

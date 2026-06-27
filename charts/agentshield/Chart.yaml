@@ -73,28 +73,28 @@ dependencies:
     condition: registry-api.enabled
 
   - name: deploy-controller
-    version: "0.1.3"
+    version: "0.1.6"
     repository: "file://charts/deploy-controller"
     condition: deploy-controller.enabled
 
   - name: safety-orchestrator
-    version: "0.1.0"
+    version: "0.1.1"
     repository: "file://charts/safety-orchestrator"
     condition: safety-orchestrator.enabled
 
   # ── Safety scanners (local sub-charts) ────────────────────────────────────
   - name: llm-guard
-    version: "0.1.0"
+    version: "0.1.1"
     repository: "file://charts/llm-guard"
     condition: llm-guard.enabled
 
   - name: presidio
-    version: "0.1.0"
+    version: "0.1.1"
     repository: "file://charts/presidio"
     condition: presidio.enabled
 
   - name: nemo
-    version: "0.1.0"
+    version: "0.1.1"
     repository: "file://charts/nemo"
     condition: nemo.enabled
 
@@ -115,3 +115,9 @@ dependencies:
     version: "0.1.1"
     repository: "file://charts/studio"
     condition: studio.enabled
+
+  # ── Python tool executor (local sub-chart) ───────────────────────────────
+  - name: python-executor
+    version: "0.1.0"
+    repository: "file://charts/python-executor"
+    condition: python-executor.enabled

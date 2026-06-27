@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentshield-sdk"
+version = "0.1.0"
+description = "AgentShield SDK — build governed, observable AI agents with LangGraph"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "langgraph>=0.3",
+    "langchain-anthropic>=0.3",
+    "langchain-aws>=0.2",
+    "langchain-core>=0.3",
+    "langfuse>=3.0",
+    "httpx>=0.27",
+    "click>=8.1",
+    "prometheus-client>=0.20",
+    "psycopg[asyncio]>=3.1",
+    "langgraph-checkpoint-postgres>=2.0",
+    "pydantic>=2.0",
+    "sse-starlette>=2.1",
+]
+
+[project.scripts]
+agentshield = "agentshield_sdk.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentshield_sdk*"]

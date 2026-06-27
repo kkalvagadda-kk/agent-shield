@@ -14,6 +14,7 @@ spec:
       labels:
         {{- include "registry-api.labels" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "registry-api.fullname" . }}
       {{- with ((.Values.global).imagePullSecrets | default list) }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -79,6 +80,11 @@ spec:
                   key: webhook-url
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
+            - name: AGENTSHIELD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-encryption
+                  key: key
       containers:
         - name: registry-api
           image: "{{ include "registry-api.imageRegistry" . }}/agentshield/registry-api:{{ .Values.image.tag | default "latest" }}"
@@ -119,6 +125,11 @@ spec:
                   key: webhook-url
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
+            - name: AGENTSHIELD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-encryption
+                  key: key
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}

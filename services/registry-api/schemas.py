@@ -349,7 +349,7 @@ class ToolCreate(BaseModel):
     description: str | None = None
     category: str | None = None
     tags: list[str] | None = None
-    type: str = Field(..., pattern="^(native|http|mcp_tool)$")
+    type: str = Field(..., pattern="^(native|http|mcp_tool|python)$")
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     risk_level: str = Field("low", pattern="^(low|medium|high|critical)$")
@@ -364,6 +364,8 @@ class ToolCreate(BaseModel):
     # MCP-specific
     mcp_server_id: uuid.UUID | None = None
     mcp_tool_name: str | None = None
+    # Python-specific
+    python_code: str | None = None
 
 
 class ToolUpdate(BaseModel):
@@ -383,6 +385,7 @@ class ToolUpdate(BaseModel):
     http_timeout_ms: int | None = None
     mcp_server_id: uuid.UUID | None = None
     mcp_tool_name: str | None = None
+    python_code: str | None = None
 
 
 class ToolResponse(BaseModel):
@@ -407,6 +410,7 @@ class ToolResponse(BaseModel):
     http_timeout_ms: int | None
     mcp_server_id: uuid.UUID | None
     mcp_tool_name: str | None
+    python_code: str | None
     created_at: datetime
     updated_at: datetime
 

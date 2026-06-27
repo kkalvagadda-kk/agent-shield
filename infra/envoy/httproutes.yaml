@@ -1,0 +1,72 @@
+# Envoy Gateway — HTTPRoutes
+#
+# Static routes (applied once):
+#   /api/v1/*        → registry-api.agentshield-platform:8080
+#   /health          → registry-api (no JWT required — liveness check)
+#
+# Dynamic routes (created by deploy controller per agent deployment):
+#   /agents/{name}/chat        → {agent-name}-{env}.agents-{team}:8080
+#   /agents/{name}/chat/stream → {agent-name}-{env}.agents-{team}:8080
+#
+# Phase 9 update: deploy controller will update per-agent routes to point at
+#   safety-orchestrator.agentshield-platform:8080 instead of agent pods directly.
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: registry-api-route
+  namespace: agentshield-platform
+spec:
+  parentRefs:
+    - name: agentshield-gateway
+      namespace: agentshield-platform
+  rules:
+    # All /api/v1/* traffic goes to registry-api (JWT enforced via SecurityPolicy above)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1/
+      backendRefs:
+        - name: registry-api
+          namespace: agentshield-platform
+          port: 8080
+
+    # Health endpoint — no JWT, used by load balancers and infra monitoring
+    - matches:
+        - path:
+            type: Exact
+            value: /health
+      backendRefs:
+        - name: registry-api
+          namespace: agentshield-platform
+          port: 8080
+
+---
+# Per-agent HTTPRoute template — the deploy controller creates one of these
+# for each agent deployment using the Kubernetes custom objects API.
+#
+# Phase 7: backendRef points directly to the agent pod's K8s Service.
+# Phase 9: backendRef updated to safety-orchestrator; safety scans input then
+#          forwards to agent pod via internal cluster DNS.
+#
+# apiVersion: gateway.networking.k8s.io/v1
+# kind: HTTPRoute
+# metadata:
+#   name: agent-{agent-name}-route
+#   namespace: agentshield-platform
+#   labels:
+#     agentshield.io/agent-name: "{agent-name}"
+#     agentshield.io/managed-by: deploy-controller
+# spec:
+#   parentRefs:
+#     - name: agentshield-gateway
+#       namespace: agentshield-platform
+#   rules:
+#     - matches:
+#         - path:
+#             type: PathPrefix
+#             value: /agents/{agent-name}/
+#       backendRefs:
+#         - name: {agent-name}-{environment}      # K8s Service name in agents-{team} namespace
+#           namespace: agents-{team}
+#           port: 8080

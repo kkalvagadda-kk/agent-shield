@@ -181,7 +181,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Approval | A human decision on a high-risk action | action, risk_level, status, reviewer, session_id, opa_decision_id | Belongs to agent; links to trace; session_id references pii_mappings for reviewer de-anonymization; opa_decision_id links to OPADecision that triggered it |
 | OPADecision | Audit log entry for every OPA policy evaluation | id, agent_name, tool_name, decision (allow/deny/require_approval), policy_version, deny_reason, thread_id, trace_id | Written on every tool-call authorization; 1:0..1 with Approval (every require_approval decision has a linked Approval row) |
 | OPAPolicy | Auto-generated policy for an agent | tool_allowlist, risk_classification, allow_deanonymize_tools (list) | 1:1 with agent; derived from agent-tool bindings |
-| Tool | A reusable, independently-managed tool definition | name, type (native/http/mcp), input_schema, risk_level, auth_config_id | Many-to-many with agents; belongs to optional auth config |
+| Tool | A reusable, independently-managed tool definition | name, type (native/http/mcp_tool/python), input_schema, risk_level, auth_config_id, python_code | Many-to-many with agents; belongs to optional auth config. Python tools store executable `run_tool(args) -> str` code in `python_code` column; executed by the Python Executor microservice in a sandboxed subprocess. |
 | Skill | A named bundle of tools reusable across agents | name, team, description, tool_ids[] (references Tools), status | Selected on AgentNode in Studio; flattened to constituent tools at declarative runner startup |
 | AuthConfig | Credential configuration decoupled from tool definition | type (api_key/oauth2/bearer/mtls), k8s_secret_ref, owner_team | Referenced by many tools |
 | MCPServer | A registered MCP server whose tools are auto-discovered | server_url, transport, auth_config_id, status | Has many tools (discovered); referenced by agents |
@@ -257,8 +257,9 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Deploy Controller | Reconcile K8s state with desired state from Registry | K8s manifests (generated) | Registry API, K8s API |
 | Appsmith | UI for approval queue, agent registry, dashboards, ops | Dashboard config | Registry API, Postgres |
 | AgentShield Studio | Visual drag-and-drop agent builder (React + React Flow) | Workflow definitions (JSON) | Registry API, Tool Registry |
-| Declarative Runner | Generic pod that interprets visual workflow JSON at runtime | Runtime execution of no-code agents | Postgres, Safety Orchestrator, Langfuse, Tool Registry |
-| Tool Registry | First-class CRUD for tools (native, HTTP, MCP server) and auth configs | Tool definitions, auth configs, agent-tool bindings | Postgres, K8s Secrets |
+| Declarative Runner | Generic pod that interprets visual workflow JSON at runtime | Runtime execution of no-code agents | Postgres, Safety Orchestrator, Langfuse, Tool Registry, Python Executor |
+| Python Executor | Sandboxed Python code runner — receives `{code, args}`, executes `run_tool(args)` in a subprocess, returns `{result, error}` | Subprocess isolation, per-call timeout | None (stateless microservice) |
+| Tool Registry | First-class CRUD for tools (native, HTTP, MCP server, Python) and auth configs | Tool definitions, auth configs, agent-tool bindings | Postgres, K8s Secrets |
 | MCP Proxy | Manages connections to registered MCP servers, discovers tools, proxies calls | MCP server sessions, tool cache | MCP servers (remote), Tool Registry |
 | Langfuse | Tracing, cost tracking, eval scoring, dashboards | Traces, scores, datasets | Postgres, ClickHouse, Redis, MinIO |
 | Postgres | Relational storage (5 databases) | All persistent state | PgBouncer (pooling) |
@@ -373,6 +374,13 @@ GET    /health                 — Liveness
 GET    /ready                  — Readiness (all scanners reachable)
 ```
 
+**Phase 9 Implementation Notes:**
+- `scanner_clients.py`: per-scanner in-process `CircuitBreaker` (5 failures → 30s open); exponential-backoff retry (100ms / 500ms / 2s). When circuit is open, raises immediately so the orchestrator returns `blocked=true` fail-closed.
+- `orchestrator.py`: Presidio runs first (PII anonymization before scanning); then LLM Guard + NeMo fanned out in parallel via `asyncio.gather`; 5s overall `asyncio.wait_for` timeout. Any exception or timeout → blocked.
+- `pii_store.py`: standalone SQLAlchemy async session connecting to the shared Postgres `pii_mappings` table; TTL defaults 24h; entries purged on demand.
+- `policy_generator.py` (registry-api): called from `deploy_agent` after deployment record created; non-fatal in dev if K8s is unreachable. Risk→action map: low→allow, medium→log, high→require_approval, critical→deny.
+- PodDisruptionBudgets (`minAvailable: 1`) on all 4 safety chart deployments (LLM Guard, Presidio, NeMo, Safety Orchestrator).
+
 #### Agent Contract (SDK provides automatically)
 
 ```
@@ -458,7 +466,9 @@ Each Agent node config supports an `output_mapping` object that tells the runner
 
 ```
 # Tool CRUD
-POST   /api/v1/tools                    — Create tool definition (type: native|http|mcp_tool)
+POST   /api/v1/tools                    — Create tool definition (type: native|http|mcp_tool|python)
+                                          Python tools additionally accept python_code: str
+                                          (defines run_tool(args: dict) -> str function body)
 GET    /api/v1/tools                    — List tools (filter: team, type, category, risk_level)
 GET    /api/v1/tools/{id}              — Get tool + schema + usage stats
 PUT    /api/v1/tools/{id}              — Update tool (creates new semver version)
@@ -622,9 +632,11 @@ Only `agent` and `end` node types exist. `http_tool` nodes are gone from the can
 
 **Startup tool resolution**: Before building the graph, the runner fetches tool and skill definitions from the Registry API:
 1. For each `skill_id` on an agent node → `GET /api/v1/skills/{id}` → collect its `tool_ids[]`
-2. For each resolved `tool_id` → `GET /api/v1/tools/{id}` → fetch the HTTP tool definition
-3. Build `HttpToolExecutor` callables from fetched configs; wrap as LangGraph `@tool` functions
-4. Pass to `create_react_agent(llm, tools=[...])` for that agent node
+2. For each resolved `tool_id` → `GET /api/v1/tools/{id}` → fetch the tool definition
+3. Build executor callables from fetched configs based on `type`:
+   - `type=http` → `HttpToolExecutor` — makes an httpx call with `{{variable}}` substitution
+   - `type=python` → `PythonToolExecutor` — POSTs `{code, args}` to `http://python-executor:8080/execute`; the Python Executor microservice runs `run_tool(args)` in a sandboxed subprocess and returns the string result
+4. Pass executor callables to `create_react_agent(llm, tools=[...])` for that agent node
 
 **Agent Node:**
 - Creates a temporary `create_react_agent(llm, tools, checkpointer)` from node config + fetched tools
@@ -729,6 +741,55 @@ Studio Approval Gate nodes and OPA tool risk classification are **complementary,
 
 ---
 
+## Default Resource Catalog
+
+AgentShield ships with a curated set of default tools, skills, agents, and workflows seeded at install time via `scripts/seed-defaults.sh`. The script is idempotent (409 = already exists → skip) and is called as step 8 in `scripts/deploy-cpe2e.sh`.
+
+### Default Tools
+
+| Name | Type | API / Execution | Credentials |
+|------|------|----------------|-------------|
+| `web-search` | http | `POST https://google.serper.dev/search` | `X-API-KEY: {{serper_api_key}}` in header |
+| `weather-lookup` | http | `GET https://api.open-meteo.com/v1/forecast?latitude={{latitude}}&longitude={{longitude}}&current_weather=true` | Free, no key |
+| `ip-geolocation` | http | `GET http://ip-api.com/json/{{ip}}` | Free, no key |
+| `slack-notify` | http | `POST {{webhook_url}}` body `{"text":"{{message}}"}` | Webhook URL passed as `{{webhook_url}}` at call time |
+| `http-echo` | http | `GET https://httpbin.org/anything/{{path}}` | Free, no key — useful for testing |
+| `calculator` | python | `run_tool({"expression": "(5+3)*2"})` → AST-safe arithmetic via `ast` module | None — pure Python, no external API |
+
+### Default Skills
+
+| Name | Team | Bundled Tools |
+|------|------|--------------|
+| `web-research-skill` | platform | web-search, weather-lookup, ip-geolocation |
+| `notification-skill` | platform | slack-notify |
+
+### Default Agents
+
+**Declarative agents** (run via declarative runner; each paired with a starter workflow):
+
+| Name | Instructions summary | Tools / Skills |
+|------|---------------------|----------------|
+| `research-assistant` | Search the web, look up weather when location mentioned, geolocate IPs, summarize findings | skill: web-research-skill |
+| `calculator-bot` | Never calculate in your head — always use the calculator tool | tool: calculator |
+| `slack-notifier` | When asked to send a message, use slack-notify; confirm what was sent | skill: notification-skill |
+
+**SDK reference agents** (agent_type=sdk, Registry entry only — code lives in source):
+
+| Name | Source | Description |
+|------|--------|-------------|
+| `echo-agent` | `services/echo-agent/` | Minimal HTTP server — /health + /ready only. Reference implementation. |
+| `order-agent` | `examples/order-agent/` | Order lookup + refund with HITL approval gate. SDK example. |
+
+### Default Workflows (starter canvases for declarative agents)
+
+| Workflow | Nodes | Edge |
+|----------|-------|------|
+| `research-workflow` | research-assistant → end | unconditional |
+| `calculator-workflow` | calculator-bot → end | unconditional |
+| `notification-workflow` | slack-notifier → end | unconditional |
+
+---
+
 ## Future Improvements
 
 ### Conditional Routing Enhancements (Studio Canvas)
@@ -783,6 +844,8 @@ A Monaco editor embedded in Studio allows users to write `agent.py` directly in 
 - First-save modal: workflow name + team assignment
 - One-click Deploy → declarative runner pod (no container build)
 - Declarative Runner pod: fetches tool/skill definitions from Registry API at startup; uses `add_conditional_edges` for routing
+- **Tools page**: list + create + **edit** (inline form pre-populated with existing fields; `name` and `type` read-only in edit; python_code textarea for python tools) + delete
+- **Agents page**: list + register + **edit** (inline form; editable: description, status) + **delete** (soft-delete → status=deprecated) + deploy
 
 **Exit criteria**: A developer can create an agent with `Agent(instructions, tools)` and deploy via SDK path. A product team member can build a multi-agent workflow visually in Studio, link tools from the Registry, set routing conditions between agents, and deploy with one click. Both paths produce governed agents (safety scan, OPA, HITL, tracing).
 

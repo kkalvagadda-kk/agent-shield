@@ -94,6 +94,11 @@ export interface RegistryTool {
   risk_level?: 'low' | 'medium' | 'high';
   owner_team?: string;
   status?: string;
+  // HTTP tool fields (top-level in ToolResponse)
+  http_method?: string;
+  http_url?: string;
+  // Python tool fields
+  python_code?: string;
   config: Record<string, unknown>;
 }
 
@@ -133,6 +138,18 @@ export const createAgent = async (body: {
 }): Promise<Agent> => {
   const { data } = await http.post<Agent>("/agents/", body);
   return data;
+};
+
+export const updateAgent = async (
+  name: string,
+  body: { description?: string; status?: string }
+): Promise<Agent> => {
+  const { data } = await http.put<Agent>(`/agents/${name}`, body);
+  return data;
+};
+
+export const deleteAgent = async (name: string): Promise<void> => {
+  await http.delete(`/agents/${name}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -219,15 +236,25 @@ export const deleteProvider = async (id: string): Promise<void> => {
 // ---------------------------------------------------------------------------
 // Workflows
 // ---------------------------------------------------------------------------
+export interface WorkflowVersion {
+  id: string;
+  workflow_id: string;
+  version_number: number;
+  definition: { nodes: unknown[]; edges: unknown[] };
+  change_summary: string | null;
+  created_at: string;
+}
+
 export interface Workflow {
   id: string;
   name: string;
   team: string;
   description: string | null;
   status: string;
+  current_version_number?: number | null;
+  current_definition?: WorkflowVersion | null;
   created_at: string;
   updated_at: string;
-  definition?: { nodes: unknown[]; edges: unknown[] };
 }
 
 export interface WorkflowDefinition {
@@ -261,8 +288,8 @@ export const deployWorkflow = async (
   return data;
 };
 
-export const listWorkflows = async (params?: { team?: string }): Promise<Paginated<Workflow>> => {
-  const { data } = await http.get<Paginated<Workflow>>('/workflows/', { params });
+export const listWorkflows = async (params?: { team?: string }): Promise<Workflow[]> => {
+  const { data } = await http.get<Workflow[]>('/workflows/', { params });
   return data;
 };
 
@@ -297,15 +324,26 @@ export interface CreateToolPayload {
   name: string;
   display_name?: string;
   description?: string;
-  type: 'http';
+  type: 'http' | 'python';
   risk_level: 'low' | 'medium' | 'high';
   owner_team?: string;
+  // HTTP-specific
   http_method?: string;
   http_url?: string;
+  // Python-specific
+  python_code?: string;
 }
 
 export const createTool = async (payload: CreateToolPayload): Promise<RegistryTool> => {
   const { data } = await http.post<RegistryTool>('/tools/', payload);
+  return data;
+};
+
+export const updateTool = async (
+  id: string,
+  payload: Partial<CreateToolPayload & { display_name: string; description: string; owner_team: string }>
+): Promise<RegistryTool> => {
+  const { data } = await http.put<RegistryTool>(`/tools/${id}`, payload);
   return data;
 };
 

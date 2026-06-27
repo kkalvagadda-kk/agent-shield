@@ -1,0 +1,14 @@
+{{- /* PodDisruptionBudgets — prevents simultaneous eviction of all safety scanner pods during node drains (NFR-017a) */ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "safety-orchestrator.fullname" . }}
+  labels:
+    app.kubernetes.io/name: safety-orchestrator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: safety-orchestrator
+      app.kubernetes.io/instance: {{ .Release.Name }}

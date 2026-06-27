@@ -7,22 +7,30 @@ import {
   type SortingState,
   useReactTable,
 } from "@tanstack/react-table";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bot,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   Loader2,
+  Pencil,
   Plus,
   RefreshCw,
   Rocket,
   Search,
+  Trash2,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listAgents, type Agent } from "../api/registryApi";
-import { cn } from "../lib/utils";
+import { toast } from "sonner";
+import {
+  deleteAgent,
+  listAgents,
+  updateAgent,
+  type Agent,
+} from "../api/registryApi";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   active:      { label: "Active",      cls: "bg-green-100 text-green-700" },
@@ -35,13 +43,28 @@ const col = createColumnHelper<Agent>();
 
 export default function AgentListPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["agents"],
     queryFn: () => listAgents(200, 0),
     refetchInterval: 15_000,
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (name: string) => deleteAgent(name),
+    onSuccess: () => {
+      toast.success("Agent deleted.");
+      qc.invalidateQueries({ queryKey: ["agents"] });
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      toast.error(msg ?? "Failed to delete agent.");
+    },
   });
 
   const columns = [
@@ -91,17 +114,48 @@ export default function AgentListPage() {
     col.display({
       id: "actions",
       header: "",
-      cell: (info) => (
-        <div className="flex justify-end">
-          <button
-            onClick={() => navigate(`/agents/${info.row.original.name}/deploy`)}
-            className="btn-primary py-1.5 text-xs"
-          >
-            <Rocket size={12} />
-            Deploy
-          </button>
-        </div>
-      ),
+      cell: (info) => {
+        const agent = info.row.original;
+        return (
+          <div className="flex items-center justify-end gap-3">
+            <button
+              onClick={() => navigate(`/agents/${agent.name}/deploy`)}
+              className="btn-primary py-1.5 text-xs"
+            >
+              <Rocket size={12} />
+              Deploy
+            </button>
+            <button
+              onClick={() => {
+                setEditingAgent(agent);
+              }}
+              className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 transition-colors"
+            >
+              <Pencil size={12} />
+              Edit
+            </button>
+            <button
+              onClick={() => {
+                if (confirm(`Delete agent "${agent.name}"? This soft-deletes it (status → deprecated).`)) {
+                  deleteMutation.mutate(agent.name);
+                }
+              }}
+              disabled={
+                deleteMutation.isPending &&
+                deleteMutation.variables === agent.name
+              }
+              className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-800 disabled:opacity-50 transition-colors"
+            >
+              {deleteMutation.isPending && deleteMutation.variables === agent.name ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Trash2 size={12} />
+              )}
+              Delete
+            </button>
+          </div>
+        );
+      },
     }),
   ];
 
@@ -137,6 +191,18 @@ export default function AgentListPage() {
           </button>
         </div>
       </div>
+
+      {/* Inline edit form */}
+      {editingAgent && (
+        <AgentEditForm
+          agent={editingAgent}
+          onClose={() => setEditingAgent(null)}
+          onSaved={() => {
+            setEditingAgent(null);
+            qc.invalidateQueries({ queryKey: ["agents"] });
+          }}
+        />
+      )}
 
       {/* Search + stats row */}
       <div className="flex items-center justify-between mb-3 gap-3">
@@ -232,6 +298,127 @@ export default function AgentListPage() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Inline edit form
+// ---------------------------------------------------------------------------
+function AgentEditForm({
+  agent,
+  onClose,
+  onSaved,
+}: {
+  agent: Agent;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [description, setDescription] = useState(agent.description ?? "");
+  const [agentStatus, setAgentStatus] = useState(agent.status);
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      updateAgent(agent.name, {
+        description: description || undefined,
+        status: agentStatus,
+      }),
+    onSuccess: () => {
+      toast.success("Agent updated.");
+      onSaved();
+    },
+    onError: (err: unknown) => {
+      const msg = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      toast.error(msg ?? "Failed to update agent.");
+    },
+  });
+
+  return (
+    <div className="card mb-6 relative">
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 text-slate-400 hover:text-slate-700"
+      >
+        <X size={16} />
+      </button>
+      <h2 className="text-lg font-semibold text-slate-900 mb-5">
+        Edit Agent — {agent.name}
+      </h2>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          mutation.mutate();
+        }}
+        className="space-y-4"
+      >
+        <div className="grid grid-cols-2 gap-4">
+          {/* Name — read-only */}
+          <div className="space-y-1">
+            <label className="label">Name</label>
+            <input
+              className="input bg-slate-50 text-slate-500 cursor-not-allowed font-mono"
+              value={agent.name}
+              disabled
+            />
+          </div>
+          {/* Team — read-only */}
+          <div className="space-y-1">
+            <label className="label">Team</label>
+            <input
+              className="input bg-slate-50 text-slate-500 cursor-not-allowed"
+              value={agent.team}
+              disabled
+            />
+          </div>
+        </div>
+
+        {/* Description */}
+        <div className="space-y-1">
+          <label className="label">Description</label>
+          <textarea
+            className="input resize-y"
+            rows={3}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="What does this agent do?"
+          />
+        </div>
+
+        {/* Status */}
+        <div className="space-y-1">
+          <label className="label">Status</label>
+          <select
+            className="input"
+            value={agentStatus}
+            onChange={(e) => setAgentStatus(e.target.value)}
+          >
+            <option value="active">Active</option>
+            <option value="archived">Archived</option>
+            <option value="deprecated">Deprecated</option>
+          </select>
+        </div>
+
+        <div className="flex justify-end gap-3 pt-2 border-t border-slate-100">
+          <button type="button" onClick={onClose} className="btn-secondary">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={mutation.isPending}
+            className="btn-primary"
+          >
+            {mutation.isPending ? (
+              <>
+                <Loader2 size={14} className="animate-spin" /> Saving…
+              </>
+            ) : (
+              "Save Changes"
+            )}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

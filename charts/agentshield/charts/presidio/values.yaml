@@ -1,0 +1,13 @@
+replicaCount: 1
+
+analyzer:
+  image:
+    repository: mcr.microsoft.com/presidio/presidio-analyzer
+    tag: "2.2.354"
+    pullPolicy: IfNotPresent
+
+anonymizer:
+  image:
+    repository: mcr.microsoft.com/presidio/presidio-anonymizer
+    tag: "2.2.354"
+    pullPolicy: IfNotPresent

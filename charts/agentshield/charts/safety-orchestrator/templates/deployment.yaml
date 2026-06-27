@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "safety-orchestrator.fullname" . }}
+  labels:
+    app.kubernetes.io/name: safety-orchestrator
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount | default 2 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: safety-orchestrator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: safety-orchestrator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: safety-orchestrator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: 8080
+          env:
+            - name: LLMGUARD_URL
+              value: {{ .Values.llmguardUrl | default (printf "http://%s-llm-guard.%s:8000" .Release.Name .Release.Namespace) | quote }}
+            - name: PRESIDIO_ANALYZER_URL
+              value: {{ .Values.presidioAnalyzerUrl | default (printf "http://%s-presidio-analyzer.%s:3000" .Release.Name .Release.Namespace) | quote }}
+            - name: PRESIDIO_ANONYMIZER_URL
+              value: {{ .Values.presidioAnonymizerUrl | default (printf "http://%s-presidio-anonymizer.%s:3001" .Release.Name .Release.Namespace) | quote }}
+            - name: NEMO_URL
+              value: {{ .Values.nemoUrl | default (printf "http://%s-nemo.%s:8080" .Release.Name .Release.Namespace) | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | default "postgres-passwords" }}
+                  key: registry-api-url
+            - name: PII_TTL_HOURS
+              value: {{ .Values.piiTtlHours | default 24 | quote }}
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30

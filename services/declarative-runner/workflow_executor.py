@@ -56,7 +56,7 @@ from agentshield_sdk.checkpointer import get_checkpointer  # type: ignore[import
 from agentshield_sdk.safety_client import SafetyBlockedError, scan_input, scan_output  # type: ignore[import]
 from agentshield_sdk.streaming import stream_events  # type: ignore[import]
 
-from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecutor
+from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecutor, PythonToolNodeExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,8 @@ class WorkflowExecutor:
         # Pre-fetched tool executors keyed by agent node id.
         # Populated by setup(); empty until then so the graph can still be
         # built synchronously with old-schema workflows.
-        self._agent_tool_executors: dict[str, list[HttpToolNodeExecutor]] = {}
+        # Entries may be HttpToolNodeExecutor OR PythonToolNodeExecutor instances.
+        self._agent_tool_executors: dict[str, list] = {}
 
         # Build an initial graph with MemorySaver so the object is usable
         # synchronously.  Callers should await executor.setup() to replace this
@@ -139,11 +140,26 @@ class WorkflowExecutor:
                     logger.warning("Could not fetch tool %s: %s", tool_id, exc)
             return tools
 
-    def _tool_dict_to_executor(self, tool: dict) -> HttpToolNodeExecutor:
-        """Convert a ToolResponse dict from the Registry API to an HttpToolNodeExecutor."""
+    def _tool_dict_to_executor(self, tool: dict):
+        """Convert a ToolResponse dict from the Registry API to a tool executor.
+
+        Returns HttpToolNodeExecutor for type=http and PythonToolNodeExecutor for type=python.
+        """
+        from config import PYTHON_EXECUTOR_URL
+
+        tool_type = tool.get("type", "http")
+
+        if tool_type == "python":
+            config = {
+                "name": tool.get("name", "python_tool"),
+                "python_code": tool.get("python_code", ""),
+                "risk": tool.get("risk_level", "low"),
+                "timeout_ms": tool.get("http_timeout_ms") or 10_000,
+            }
+            return PythonToolNodeExecutor(config, executor_url=PYTHON_EXECUTOR_URL)
+
+        # Default: HTTP tool
         config = dict(tool.get("config", {}))
-        # Normalise field names: Registry API uses http_url/http_method;
-        # HttpToolNodeExecutor expects endpoint/method.
         if "endpoint" not in config:
             config["endpoint"] = tool.get("config", {}).get("endpoint") or tool.get("http_url", "")
         if "method" not in config:
@@ -388,7 +404,7 @@ class WorkflowExecutor:
             node_config: dict = node["config"]
 
             if node_type == "agent":
-                # Use pre-fetched executors if available, else empty list
+                # Use pre-fetched executors if available (mix of Http + Python), else empty list
                 tool_executors = self._agent_tool_executors.get(node_id, [])
                 executor = AgentNodeExecutor(node_config, tool_executors)
                 builder.add_node(node_id, executor.execute)
@@ -470,10 +486,10 @@ class WorkflowExecutor:
                 continue
 
             if node_type == "agent":
-                http_tool_executors = self._collect_http_tool_executors(
+                legacy_tool_executors = self._collect_http_tool_executors(
                     node_id, nodes_by_id, edges, agent_owned_ids
                 )
-                executor = AgentNodeExecutor(node_config, http_tool_executors)
+                executor = AgentNodeExecutor(node_config, legacy_tool_executors)
                 builder.add_node(node_id, executor.execute)
 
             elif node_type == "http_tool":

@@ -95,6 +95,7 @@ def build_deployment(
     agent: dict,
     version: dict,
     opa_image: str,
+    registry_api_url: str = "http://agentshield-registry-api.agentshield-platform:8000",
 ) -> k8s_client.V1Deployment:
     """
     Build a V1Deployment manifest for the given agent deployment record.
@@ -165,17 +166,18 @@ def build_deployment(
             k8s_client.V1EnvVar(name="WORKFLOW_JSON", value=workflow_json_b64)
         )
 
-    # --- REGISTRY_API_URL (declarative runner tool/skill resolution) ---
+    # --- REGISTRY_API_URL (plain value — not sensitive, needed by declarative runner) ---
     env_vars.append(
-        k8s_client.V1EnvVar(
-            name="REGISTRY_API_URL",
-            value_from=k8s_client.V1EnvVarSource(
-                secret_key_ref=k8s_client.V1SecretKeySelector(
-                    name="agentshield-secrets",
-                    key="registry-api-url",
-                )
-            ),
-        )
+        k8s_client.V1EnvVar(name="REGISTRY_API_URL", value=registry_api_url)
+    )
+
+    # --- PYTHON_EXECUTOR_URL (declarative runner python tool execution) ---
+    python_executor_url = deployment.get(
+        "python_executor_url",
+        "http://agentshield-python-executor.agentshield-platform:8080",
+    )
+    env_vars.append(
+        k8s_client.V1EnvVar(name="PYTHON_EXECUTOR_URL", value=python_executor_url)
     )
 
     # --- Agent container ---

@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: deploy-controller
-          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Chart.AppVersion }}"
+          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: IfNotPresent
           env:
             - name: REGISTRY_API_URL

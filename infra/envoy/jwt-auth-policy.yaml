@@ -1,0 +1,62 @@
+# Envoy Gateway — JWT SecurityPolicy
+# Validates Bearer tokens issued by Keycloak before requests reach backend services.
+# Phase 7: covers the registry-api HTTPRoute.
+# Phase 9 update: add the safety-orchestrator HTTPRoute to the targetRefs.
+#
+# Prerequisites:
+#   - Keycloak realm "agentshield" must be running
+#   - JWKS endpoint reachable from Envoy pods
+#   - Replace KEYCLOAK_HOST below with the actual Keycloak external hostname
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: jwt-auth-registry-api
+  namespace: agentshield-platform
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: registry-api-route
+  jwt:
+    providers:
+      - name: keycloak
+        # Replace with actual Keycloak hostname (internal or external).
+        # Internal cluster DNS if Keycloak is co-located: http://keycloak.agentshield-platform:8080
+        issuer: "https://keycloak.agentshield.internal/realms/agentshield"
+        audiences:
+          - agentshield-studio
+          - agentshield-sdk
+        remoteJWKS:
+          uri: "https://keycloak.agentshield.internal/realms/agentshield/protocol/openid-connect/certs"
+          # Cache for 5 minutes; Keycloak rotates keys infrequently
+          cacheDuration: 5m
+        claimToHeaders:
+          - claim: sub
+            header: X-User-Id
+          - claim: preferred_username
+            header: X-Username
+          - claim: agentshield_team
+            header: X-Team
+
+---
+# Separate policy for agent chat routes — applied per-agent via deploy controller.
+# The deploy controller creates one SecurityPolicy per HTTPRoute it creates.
+# Template (not applied directly):
+#
+# apiVersion: gateway.envoyproxy.io/v1alpha1
+# kind: SecurityPolicy
+# metadata:
+#   name: jwt-auth-{agent-name}
+#   namespace: agentshield-platform
+# spec:
+#   targetRefs:
+#     - group: gateway.networking.k8s.io
+#       kind: HTTPRoute
+#       name: agent-{agent-name}-route
+#   jwt:
+#     providers:
+#       - name: keycloak
+#         issuer: "https://keycloak.agentshield.internal/realms/agentshield"
+#         remoteJWKS:
+#           uri: "https://keycloak.agentshield.internal/realms/agentshield/protocol/openid-connect/certs"

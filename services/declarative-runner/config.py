@@ -51,6 +51,10 @@ AGENTSHIELD_LANGFUSE_HOST: str = os.getenv(
 # Used by the declarative runner to fetch tool and skill definitions at startup.
 REGISTRY_API_URL: str = os.environ.get("REGISTRY_API_URL", "http://agentshield-registry-api.agentshield-platform:8000")
 
+# --- Python Executor ---
+# Used by PythonToolNodeExecutor to run sandboxed user-supplied Python code.
+PYTHON_EXECUTOR_URL: str = os.environ.get("PYTHON_EXECUTOR_URL", "http://python-executor.agentshield-platform:8080")
+
 # --- Dev mode ---
 # True when OPA URL is the default localhost value and not explicitly configured.
 _OPA_URL_EXPLICITLY_SET: bool = bool(os.getenv("AGENTSHIELD_OPA_URL"))

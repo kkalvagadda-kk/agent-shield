@@ -1,6 +1,6 @@
 apiVersion: v2
 name: presidio
-description: AgentShield presidio service (stub — not yet implemented)
+description: Microsoft Presidio PII analyzer and anonymizer
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.1.1
+appVersion: "2.2.354"

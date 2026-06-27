@@ -107,7 +107,9 @@ async def reconcile(
             )
 
         # 1. Build the K8s manifest
-        manifest = build_deployment(deployment, agent, version, settings.opa_image)
+        manifest = build_deployment(
+            deployment, agent, version, settings.opa_image, settings.registry_api_url
+        )
 
         # 2. Ensure the OPA policy ConfigMap exists (empty default so pod doesn't crashloop)
         await loop.run_in_executor(
@@ -138,17 +140,25 @@ async def reconcile(
             lambda: k8s.create_or_update_service(namespace, svc_manifest),
         )
 
-        # 5. Create / update the Envoy HTTPRoute for this agent in agentshield-platform ns
+        # 5. Create / update the Envoy HTTPRoute (best-effort — Envoy Gateway may not be
+        #    deployed in all environments; 403/404 logged as warning, not a fatal error)
         httproute_manifest = build_httproute(
             agent_name=agent_name,
             environment=environment,
             namespace=namespace,
             team=team,
         )
-        await loop.run_in_executor(
-            None,
-            lambda: k8s.apply_httproute("agentshield-platform", httproute_manifest),
-        )
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: k8s.apply_httproute("agentshield-platform", httproute_manifest),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "HTTPRoute creation skipped for %s (Envoy Gateway may not be installed): %s",
+                agent_name,
+                exc,
+            )
 
         # 6. Poll until at least 1 replica is available (up to _POLL_TIMEOUT_SECONDS)
         deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS

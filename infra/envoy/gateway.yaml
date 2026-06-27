@@ -1,0 +1,39 @@
+# Envoy Gateway — GatewayClass + Gateway
+# Phase 7: install via `kubectl apply -f infra/envoy/gateway.yaml`
+# Requires: Envoy Gateway controller deployed (helm install envoy-gateway ...)
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: agentshield-envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  description: "Envoy Gateway for AgentShield platform ingress"
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentshield-gateway
+  namespace: agentshield-platform
+spec:
+  gatewayClassName: agentshield-envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All   # allows HTTPRoutes from agentshield-platform AND agents-* namespaces
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: agentshield-tls
+            namespace: agentshield-platform
+      allowedRoutes:
+        namespaces:
+          from: All

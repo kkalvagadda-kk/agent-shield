@@ -665,7 +665,7 @@ class Tool(Base):
     __tablename__ = "tools"
     __table_args__ = (
         CheckConstraint(
-            "type IN ('native','http','mcp_tool')",
+            "type IN ('native','http','mcp_tool','python')",
             name="ck_tools_type",
         ),
         CheckConstraint(
@@ -712,6 +712,8 @@ class Tool(Base):
     http_headers: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     http_body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
     http_timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Python tool fields
+    python_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     # MCP tool fields
     mcp_server_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,

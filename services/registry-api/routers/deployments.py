@@ -22,9 +22,15 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from crypto import decrypt_json
 from db import get_db
-from models import Agent, AgentVersion, Deployment
+from k8s import upsert_secret
+from models import Agent, AgentVersion, Deployment, LLMProvider
+from policy_generator import generate_and_store
 from schemas import DeploymentCreate, DeploymentResponse, PaginatedResponse, RollbackRequest
+
+# Namespace where LLM credential secrets are stored
+_PLATFORM_NAMESPACE = "agentshield-platform"
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +174,42 @@ async def deploy_agent(
             ),
         )
 
+    # Resolve LLM provider and write K8s Secret if configured
+    llm_secret_name = None
+    llm_env_keys = None
+    llm_provider_type = None
+    llm_provider_model = None
+
+    if agent.llm_provider_id:
+        provider_result = await db.execute(
+            select(LLMProvider).where(LLMProvider.id == agent.llm_provider_id)
+        )
+        provider = provider_result.scalar_one_or_none()
+        if provider:
+            credentials = decrypt_json(provider.credentials_encrypted)
+            secret_name = f"agentshield-llm-{provider.id}"
+            try:
+                await upsert_secret(secret_name, _PLATFORM_NAMESPACE, credentials)
+                llm_secret_name = secret_name
+                llm_env_keys = list(credentials.keys())
+                llm_provider_type = provider.provider
+                llm_provider_model = provider.default_model
+                logger.info(
+                    "deploy_agent: wrote LLM secret %s for provider '%s'",
+                    secret_name,
+                    provider.name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "deploy_agent: failed to write LLM secret for provider '%s': %s",
+                    provider.name,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to write LLM credentials secret: {exc}",
+                )
+
     deployment = Deployment(
         agent_id=agent.id,
         version_id=version.id,
@@ -176,6 +218,10 @@ async def deploy_agent(
         replicas=body.replicas,
         canary_percent=None,
         k8s_namespace=_derive_k8s_namespace(agent),
+        llm_secret_name=llm_secret_name,
+        llm_env_keys=llm_env_keys,
+        llm_provider_type=llm_provider_type,
+        llm_provider_model=llm_provider_model,
     )
     db.add(deployment)
     await db.flush()
@@ -183,13 +229,22 @@ async def deploy_agent(
 
     logger.info(
         "deploy_agent: created deployment %s for agent '%s' version %d "
-        "(env=%s, replicas=%d)",
+        "(env=%s, replicas=%d, llm_provider=%s)",
         deployment.id,
         name,
         version.version_number,
         body.environment,
         body.replicas,
+        llm_provider_type or "none",
     )
+
+    # Generate OPA policy from version tools (non-fatal — deploy proceeds regardless)
+    k8s_ns = deployment.k8s_namespace or "agents-platform"
+    try:
+        await generate_and_store(db, agent.id, name, version, namespace=k8s_ns)
+    except Exception as exc:
+        logger.warning("Policy generation failed for agent '%s' (non-fatal): %s", name, exc)
+
     return DeploymentResponse.model_validate(deployment)
 
 

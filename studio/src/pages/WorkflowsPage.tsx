@@ -34,7 +34,7 @@ export default function WorkflowsPage() {
     queryFn: () => listWorkflows(),
   });
 
-  const workflows: Workflow[] = data?.items ?? [];
+  const workflows: Workflow[] = data ?? [];
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">

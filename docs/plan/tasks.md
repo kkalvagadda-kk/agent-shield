@@ -93,11 +93,11 @@ _Note: T132–T136 must be completed before starting Phase 5 (teams endpoint) an
 - [X] [T032] Registry API Deployment template: 2 replicas, env vars from Secrets, alembic init container — `charts/agentshield/charts/registry-api/templates/deployment.yaml`
 - [X] [T033] Registry API Service template: ClusterIP on port 8000 — `charts/agentshield/charts/registry-api/templates/service.yaml`
 
-- [ ] [T132] Full approvals router with `session_id` and `opa_decision_id` fields: POST /approvals, GET /approvals, PATCH /approvals/{id} (approve/reject with optimistic lock), GET /approvals/{id} (Gaps C-01, C-17, C-18) — `services/registry-api/routers/approvals.py`
-- [ ] [T133] [P] OPA decisions router: POST /opa-decisions (create audit log entry), GET /opa-decisions?agent=&decision= (query audit log) (Gap C-17) — `services/registry-api/routers/opa_decisions.py`
-- [ ] [T134] [P] Agent quarantine endpoints: POST /agents/{name}/quarantine (sets agent status=quarantined, scales pod to 0), DELETE /agents/{name}/quarantine (restores); mount in agents router (Gap C-19) — `services/registry-api/routers/agents.py`
-- [ ] [T135] [P] Teams router: POST /teams, GET /teams, GET /teams/{id}, PUT /teams/{id}, GET /teams/{id}/agents — team is a first-class entity with name, namespace, keycloak_role_id fields (Gap M-11) — `services/registry-api/routers/teams.py`
-- [ ] [T136] Alembic migration for `teams` table with indexes on name and keycloak_role_id; add `team_id` FK to `agents` table (Gap M-11) — `services/registry-api/alembic/versions/0002_add_teams.py`
+- [X] [T132] Full approvals router with `session_id` and `opa_decision_id` fields: POST /approvals, GET /approvals, PATCH /approvals/{id} (approve/reject with optimistic lock), GET /approvals/{id} (Gaps C-01, C-17, C-18) — `services/registry-api/routers/approvals.py`
+- [X] [T133] [P] OPA decisions router: POST /opa-decisions (create audit log entry), GET /opa-decisions?agent=&decision= (query audit log) (Gap C-17) — `services/registry-api/routers/opa_decisions.py`
+- [X] [T134] [P] Agent quarantine endpoints: POST /agents/{name}/quarantine (sets agent status=quarantined, scales pod to 0), DELETE /agents/{name}/quarantine (restores); mount in agents router (Gap C-19) — `services/registry-api/routers/agents.py`
+- [X] [T135] [P] Teams router: POST /teams, GET /teams, GET /teams/{id}, PUT /teams/{id}, GET /teams/{id}/agents — team is a first-class entity with name, namespace, keycloak_role_id fields (Gap M-11) — `services/registry-api/routers/teams.py`
+- [X] [T136] Alembic migration for `teams` table with indexes on name and keycloak_role_id; add `team_id` FK to `agents` table (Gap M-11) — `services/registry-api/alembic/versions/0002_add_teams.py`
 
 **Verification:** `curl -X POST http://registry-api:8000/api/v1/agents -d '{"name":"echo-agent","team":"platform"}'` returns 201; `/health` returns `{"status":"ok"}`; GET /teams returns empty list
 
@@ -174,7 +174,7 @@ _Depends on: Phase 2 complete (Registry API running with DB models); T132–T136
 - [X] [T046] Tools router: POST/GET /tools, GET/PUT/DELETE /tools/{id}, GET /tools/{id}/agents, POST /tools/{id}/test — `services/registry-api/routers/tools.py`
 - [X] [T047] [P] Auth configs router: POST/GET /auth-configs, PUT/DELETE /auth-configs/{id} — `services/registry-api/routers/auth_configs.py`
 - [X] [T048] [P] Agent-tool bindings router: POST/DELETE/GET /agents/{name}/tools — `services/registry-api/routers/agent_tools.py`
-- [ ] [T049] ⚠️ **Deferred to Phase 9** — OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py` _(skip in Phase 4; complete when Phase 9 Safety work begins)_
+- [X] [T049] ⚠️ **Completed in Phase 9** — OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py`
 - [X] [T050] Alembic migration for Tool, AuthConfig, MCPServer, AgentToolBinding tables — already created in `0001_initial_schema.py`
 - [X] [T051] Mount new routers in main.py and wire policy_generator call on deploy/version create (policy_generator wiring skipped until T049 completes in Phase 9) — `services/registry-api/main.py`
 
@@ -326,13 +326,67 @@ _Parallel streams: Declarative runner backend (T109–T114) vs Studio canvas fro
 
 ---
 
+## Phase 8b — Python Tool Executor
+_Depends on: Phase 8 complete (declarative runner exists and resolves tools from Registry API)_
+_Parallel streams: microservice + migration + runner changes can overlap; Helm chart after microservice_
+
+- [X] [T179] `services/python-executor/main.py` — FastAPI microservice: `POST /execute` accepts `{code: str, args: dict, timeout_ms: int = 10000}`; forks a subprocess that defines + calls `run_tool(args)` from user-supplied code; hard-kills subprocess on timeout; returns `{result: str, error: str | null}`; `GET /health` returns 200 — `services/python-executor/main.py`
+- [X] [T180] [P] `services/python-executor/requirements.txt` (`fastapi>=0.115`, `uvicorn[standard]>=0.30`) + `Dockerfile` (`FROM python:3.12-slim`) — `services/python-executor/`
+- [X] [T181] [P] Alembic migration `0005_add_python_tool.py`: `ALTER TABLE tools ADD COLUMN python_code TEXT`; update `type` CHECK constraint to include `'python'` — `services/registry-api/alembic/versions/0005_add_python_tool.py`
+- [X] [T182] [P] Update `services/registry-api/models.py`: add `python_code = Column(Text, nullable=True)` to Tool; update type CHECK constraint string. Update `services/registry-api/schemas.py`: add `python_code: str | None = None` to `ToolCreate`, `ToolUpdate`, `ToolResponse` — `services/registry-api/models.py`, `schemas.py`
+- [X] [T183] Add `PythonToolNodeExecutor` class to `services/declarative-runner/node_executors.py`: constructor takes `tool_name`, `description`, `python_code`, `executor_url`, `risk`, `timeout_ms`; `as_tool_callable()` returns async function that POSTs `{code, args, timeout_ms}` to `executor_url/execute` and returns the `result` string — `services/declarative-runner/node_executors.py`
+- [X] [T184] [P] Update `services/declarative-runner/workflow_executor.py` `_tool_dict_to_executor()`: branch on `t["type"] == "python"` → instantiate `PythonToolNodeExecutor`; existing `http` path unchanged. Update `services/declarative-runner/config.py`: add `python_executor_url: str = "http://python-executor:8080"` — `services/declarative-runner/workflow_executor.py`, `config.py`
+- [X] [T185] [P] Helm: add python-executor `Deployment` (1 replica, port 8080, image from `global.registry`/python-executor:`pythonExecutorTag`) and `Service` (ClusterIP port 8080) to `charts/agentshield/` — either new subchart or templates directly in umbrella chart — `charts/agentshield/`
+- [X] [T186] [P] Update `services/deploy-controller/manifest_builder.py`: inject `PYTHON_EXECUTOR_URL=http://python-executor.agentshield-platform:8080` env var into declarative-runner pods (same pattern as `REGISTRY_API_URL`). Add `PYTHON_EXECUTOR_IMAGE` to `charts/agentshield/charts/deploy-controller/templates/deployment.yaml` — `services/deploy-controller/manifest_builder.py`, `charts/agentshield/charts/deploy-controller/templates/deployment.yaml`
+
+**Image bumps for this phase:**
+- `python-executor`: new at **0.1.0**
+- `registry-api`: 0.2.10 → **0.2.11** (migration 0005 + python_code field)
+- `declarative-runner`: 0.1.0 → **0.1.1** (PythonToolNodeExecutor)
+- `deploy-controller`: 0.1.3 → **0.1.4** (PYTHON_EXECUTOR_URL injection)
+
+**Verification:** `kubectl port-forward svc/python-executor -n agentshield-platform 8081:8080`; `curl -X POST http://localhost:8081/execute -H "Content-Type: application/json" -d '{"code":"def run_tool(args):\n return str(int(args[\"a\"]) + int(args[\"b\"]))", "args":{"a":5,"b":3}}'` → `{"result":"8","error":null}`; `POST /api/v1/tools` with `type=python` and `python_code` → 201; declarative runner resolves python tool and calls executor on agent invocation
+
+---
+
+## Phase 8c — Default Resources + Studio Python Tool UI
+_Depends on: Phase 8b complete (python tool type exists in Registry API and declarative runner); Phase 8 complete (Studio canvas with ToolsPage)_
+
+- [X] [T187] `scripts/seed-defaults.sh` — idempotent seed script: port-forwards registry-api on 8001; POSTs 6 tools (web-search, weather-lookup, ip-geolocation, slack-notify, http-echo as `type=http`; calculator as `type=python`); captures UUIDs from responses; POSTs 2 skills (`web-research-skill` → [web-search, weather-lookup, ip-geolocation], `notification-skill` → [slack-notify]); POSTs 3 starter workflows (research-workflow, calculator-workflow, notification-workflow — each is 1 agent node + end node with appropriate tool_ids/skill_ids); POSTs 5 agent Registry entries (research-assistant, calculator-bot, slack-notifier as `declarative`; echo-agent, order-agent as `sdk`); all operations 409-safe; kills port-forward on exit — `scripts/seed-defaults.sh`
+- [X] [T188] [P] Update `studio/src/pages/ToolsPage.tsx`: when tool type selector is set to `python`, replace the HTTP-specific fields (URL, method, headers, body template) with a `<textarea>` for `python_code`; label reads "Python Code — define `run_tool(args: dict) -> str`"; pre-populated with a starter template; included in the createTool API payload — `studio/src/pages/ToolsPage.tsx`
+- [X] [T189] Update `scripts/deploy-cpe2e.sh`: add python-executor build step (`docker build -t registry.internal/agentshield/python-executor:0.1.0`); add step `[8/8] Seeding default resources…` calling `bash scripts/seed-defaults.sh`; fix step-count labels (`[7/7]` → `[7/8]`); bump image tags: registry-api=0.2.11, declarative-runner=0.1.1, deploy-controller=0.1.4, studio=0.1.12 — `scripts/deploy-cpe2e.sh`
+
+### Phase 8d — Studio Edit/Detail UX
+
+_Identified as product plan gap: backend supports PUT for both Tools and Agents, but Studio UI had no edit or view-detail flow. Skills and Providers already had this pattern; Tools and Agents were missed._
+
+- [X] [T190] `studio/src/pages/ToolsPage.tsx` — add edit support: (1) extend `RegistryTool` interface in `registryApi.ts` with `http_method`, `http_url`, `python_code` top-level fields; add `updateTool(id, payload)` calling `PUT /api/v1/tools/{id}`; (2) add `editingTool: RegistryTool | null` state to `ToolsPage`; (3) rename `CreateToolForm` → `ToolForm({ tool, onClose, onSaved })` — when `tool` is provided (edit mode): `name` and `tool_type` are read-only, all other fields pre-populated; submit calls `updateTool`; (4) add `Pencil` Edit button per row next to Delete — clicking sets `editingTool` — `studio/src/pages/ToolsPage.tsx`, `studio/src/api/registryApi.ts`
+- [X] [T191] `studio/src/pages/AgentListPage.tsx` — add edit + delete support: (1) add `updateAgent(name, body)` calling `PUT /api/v1/agents/{name}` and `deleteAgent(name)` calling `DELETE /api/v1/agents/{name}` to `registryApi.ts`; (2) add `editingAgent: Agent | null` state; (3) add inline `AgentEditForm` card (same pattern as SkillsPage) showing editable `description` textarea and `status` dropdown (active/archived/deprecated), with save/cancel; (4) add `Pencil` Edit and `Trash2` Delete buttons per row in the actions column — `studio/src/pages/AgentListPage.tsx`, `studio/src/api/registryApi.ts`
+
+**Image bumps for this phase:**
+- `studio`: 0.1.11 → **0.1.12** (python_code textarea in ToolsPage)
+
+**Verification:**
+```bash
+# All 6 tools present (5 http + 1 python)
+curl -s http://localhost:8000/api/v1/tools/ | python3 -c \
+  "import sys,json; d=json.load(sys.stdin); [print(t['name'], t['type']) for t in d['items']]"
+# 2 skills, 3 workflows, 5 agents
+curl -s "http://localhost:8000/api/v1/skills/?team=platform" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'], 'skills')"
+curl -s http://localhost:8000/api/v1/workflows/ | python3 -c "import sys,json; print(len(json.load(sys.stdin)), 'workflows')"
+# Studio: Tools page shows python_code textarea when type=python is selected
+# Calculator workflow in Studio canvas has agent with calculator tool_id wired
+```
+
+---
+
 ## Checkpoint E2E — Create → Deploy → Invoke
 _Gate: Phases 4–8 must be complete. Run before starting Phase 9._
 _What you prove: Create agent via Studio UI → register order-agent with SDK → deploy → invoke via Envoy with JWT → see response → trigger high-risk tool → approve via Studio → stream resumes._
 
-- [ ] [CPE-a] E2E demo deploy script: enable studio, deploy-controller, envoy-gateway in umbrella chart; run helm upgrade; wait for studio pod Ready; register and push order-agent example image — `scripts/deploy-cpe2e.sh`
-- [ ] [CPE-b] Studio UI smoke test: kubectl port-forward studio; navigate to Create Agent form, fill name=smoke-agent team=platform, submit; verify GET /api/v1/agents returns smoke-agent; navigate to Deploy page, enter echo image tag, deploy; poll until status=Running — `scripts/smoke-test-cpe2e-studio.sh`
-- [ ] [CPE-c] Full E2E invoke smoke test: deploy order-agent SDK example; POST /agents/order-agent/chat via Envoy with valid Keycloak JWT; assert 200 response with order status; send chat triggering issue_refund; assert SSE stream emits approval_requested event; PATCH /approvals/{id} to approved; assert SSE stream resumes with approval_decided then done — `scripts/smoke-test-cpe2e-invoke.sh`
+- [X] [CPE-a] E2E demo deploy script: enable studio, deploy-controller, envoy-gateway in umbrella chart; run helm upgrade; wait for studio pod Ready; register and push order-agent example image — `scripts/deploy-cpe2e.sh`
+- [X] [CPE-b] Studio UI smoke test: kubectl port-forward studio; navigate to Create Agent form, fill name=smoke-agent team=platform, submit; verify GET /api/v1/agents returns smoke-agent; navigate to Deploy page, enter echo image tag, deploy; poll until status=Running — `scripts/smoke-test-cpe2e-studio.sh`
+- [X] [CPE-c] Full E2E invoke smoke test: deploy order-agent SDK example; POST /agents/order-agent/chat via Envoy with valid Keycloak JWT; assert 200 response with order status; send chat triggering issue_refund; assert SSE stream emits approval_requested event; PATCH /approvals/{id} to approved; assert SSE stream resumes with approval_decided then done — `scripts/smoke-test-cpe2e-invoke.sh`
 
 > **To run:** `bash scripts/deploy-cpe2e.sh` → `bash scripts/smoke-test-cpe2e-studio.sh && bash scripts/smoke-test-cpe2e-invoke.sh`
 > **Pass criteria:** Agent visible in Studio, deployed pod Running, full chat invoke succeeds, HITL pause/resume works end-to-end
@@ -343,28 +397,28 @@ _What you prove: Create agent via Studio UI → register order-agent with SDK �
 _Depends on: Phase 1 (Postgres for PII mappings), Phase 3 (Deploy Controller for routing); can start in parallel with Phase 10 after CPE gate passes_
 _Also complete T049 (deferred from Phase 4) in this phase — OPA policy generator needs safety context to be useful_
 
-- [ ] [T052] Settings class reading LLMGUARD_URL, PRESIDIO_ANALYZER_URL, PRESIDIO_ANONYMIZER_URL, NEMO_URL, DATABASE_URL — `services/safety-orchestrator/config.py`
-- [ ] [T053] Pydantic schemas: ScanInputRequest, ScanInputResponse, ScanOutputRequest, ScanOutputResponse, ReadinessResponse — `services/safety-orchestrator/schemas.py`
-- [ ] [T054] Async HTTP clients for LLM Guard, Presidio Analyzer, Presidio Anonymizer, and NeMo using httpx.AsyncClient — `services/safety-orchestrator/scanner_clients.py`
-- [ ] [T055] PII store: writes Presidio anonymization mappings to pii_mappings table; lookup for de-anonymization — `services/safety-orchestrator/pii_store.py`
-- [ ] [T056] Orchestrator: asyncio.gather fan-out to all scanners with 5s timeout; fail-closed on any error or timeout; merges scores — `services/safety-orchestrator/orchestrator.py`
-- [ ] [T057] FastAPI app: POST /api/v1/scan/input, POST /api/v1/scan/output, GET /health, GET /ready (scanner ping checks) — `services/safety-orchestrator/main.py`
-- [ ] [T058] requirements.txt pinning fastapi, uvicorn, httpx, sqlalchemy[asyncio], asyncpg, pydantic-settings — `services/safety-orchestrator/requirements.txt`
-- [ ] [T059] Dockerfile: python:3.12-slim, install requirements — `services/safety-orchestrator/Dockerfile`
-- [ ] [T060] [P] LLM Guard Helm chart: Deployment (2 replicas, 4Gi memory), ClusterIP Service on port 8000, env vars for scanner config — `charts/agentshield/charts/llm-guard/templates/deployment.yaml`
-- [ ] [T061] [P] LLM Guard Chart.yaml — `charts/agentshield/charts/llm-guard/Chart.yaml`
-- [ ] [T062] [P] Presidio Deployment: presidio-analyzer (port 3000) and presidio-anonymizer (port 3001) containers — `charts/agentshield/charts/presidio/templates/deployment.yaml`
-- [ ] [T063] [P] Presidio Chart.yaml and Service templates for analyzer and anonymizer — `charts/agentshield/charts/presidio/Chart.yaml`
-- [ ] [T064] [P] NeMo Guardrails Deployment (1 replica, 2Gi memory) with YARA rules ConfigMap mounted at /app/rules/ — `charts/agentshield/charts/nemo/templates/deployment.yaml`
-- [ ] [T065] [P] NeMo Chart.yaml and YARA rules ConfigMap template — `charts/agentshield/charts/nemo/Chart.yaml`
-- [ ] [T066] [P] Safety Orchestrator Helm Chart.yaml — `charts/agentshield/charts/safety-orchestrator/Chart.yaml`
-- [ ] [T067] [P] Safety Orchestrator Deployment template: 2 replicas, env vars for scanner URLs and Postgres — `charts/agentshield/charts/safety-orchestrator/templates/deployment.yaml`. Acts as input proxy between Envoy and agent pods — network-enforced input scanning. Also handles output scan requests from agent pods.
-- [ ] [T068] [P] Safety Orchestrator Service template: ClusterIP on port 8080 — `charts/agentshield/charts/safety-orchestrator/templates/service.yaml`
-- [ ] [T146] PodDisruptionBudget templates for all safety scanner deployments: minAvailable=1 for LLM Guard, Presidio, NeMo, and Safety Orchestrator itself — prevents simultaneous eviction during node drains (Gap C-16, NFR-017a) — `charts/agentshield/charts/safety-orchestrator/templates/pdb.yaml`
-- [ ] [T147] [P] Safety Orchestrator retry and circuit-breaker config: update `scanner_clients.py` with exponential backoff (3 retries, 100ms/500ms/2s), per-scanner circuit breaker (5 failures → open, 30s reset), fail-closed response (blocked=true) when circuit is open (Gap M-13) — `services/safety-orchestrator/scanner_clients.py`
+- [X] [T052] Settings class reading LLMGUARD_URL, PRESIDIO_ANALYZER_URL, PRESIDIO_ANONYMIZER_URL, NEMO_URL, DATABASE_URL — `services/safety-orchestrator/config.py`
+- [X] [T053] Pydantic schemas: ScanInputRequest, ScanInputResponse, ScanOutputRequest, ScanOutputResponse, ReadinessResponse — `services/safety-orchestrator/schemas.py`
+- [X] [T054] Async HTTP clients for LLM Guard, Presidio Analyzer, Presidio Anonymizer, and NeMo using httpx.AsyncClient — `services/safety-orchestrator/scanner_clients.py`
+- [X] [T055] PII store: writes Presidio anonymization mappings to pii_mappings table; lookup for de-anonymization — `services/safety-orchestrator/pii_store.py`
+- [X] [T056] Orchestrator: asyncio.gather fan-out to all scanners with 5s timeout; fail-closed on any error or timeout; merges scores — `services/safety-orchestrator/orchestrator.py`
+- [X] [T057] FastAPI app: POST /api/v1/scan/input, POST /api/v1/scan/output, GET /health, GET /ready (scanner ping checks) — `services/safety-orchestrator/main.py`
+- [X] [T058] requirements.txt pinning fastapi, uvicorn, httpx, sqlalchemy[asyncio], asyncpg, pydantic-settings — `services/safety-orchestrator/requirements.txt`
+- [X] [T059] Dockerfile: python:3.12-slim, install requirements — `services/safety-orchestrator/Dockerfile`
+- [X] [T060] [P] LLM Guard Helm chart: Deployment (2 replicas, 4Gi memory), ClusterIP Service on port 8000, env vars for scanner config — `charts/agentshield/charts/llm-guard/templates/deployment.yaml`
+- [X] [T061] [P] LLM Guard Chart.yaml — `charts/agentshield/charts/llm-guard/Chart.yaml`
+- [X] [T062] [P] Presidio Deployment: presidio-analyzer (port 3000) and presidio-anonymizer (port 3001) containers — `charts/agentshield/charts/presidio/templates/deployment.yaml`
+- [X] [T063] [P] Presidio Chart.yaml and Service templates for analyzer and anonymizer — `charts/agentshield/charts/presidio/Chart.yaml`
+- [X] [T064] [P] NeMo Guardrails Deployment (1 replica, 2Gi memory) with YARA rules ConfigMap mounted at /app/rules/ — `charts/agentshield/charts/nemo/templates/deployment.yaml`
+- [X] [T065] [P] NeMo Chart.yaml and YARA rules ConfigMap template — `charts/agentshield/charts/nemo/Chart.yaml`
+- [X] [T066] [P] Safety Orchestrator Helm Chart.yaml — `charts/agentshield/charts/safety-orchestrator/Chart.yaml`
+- [X] [T067] [P] Safety Orchestrator Deployment template: 2 replicas, env vars for scanner URLs and Postgres — `charts/agentshield/charts/safety-orchestrator/templates/deployment.yaml`. Acts as input proxy between Envoy and agent pods — network-enforced input scanning. Also handles output scan requests from agent pods.
+- [X] [T068] [P] Safety Orchestrator Service template: ClusterIP on port 8080 — `charts/agentshield/charts/safety-orchestrator/templates/service.yaml`
+- [X] [T146] PodDisruptionBudget templates for all safety scanner deployments: minAvailable=1 for LLM Guard, Presidio, NeMo, and Safety Orchestrator itself — prevents simultaneous eviction during node drains (Gap C-16, NFR-017a) — `charts/agentshield/charts/safety-orchestrator/templates/pdb.yaml`
+- [X] [T147] [P] Safety Orchestrator retry and circuit-breaker config: update `scanner_clients.py` with exponential backoff (3 retries, 100ms/500ms/2s), per-scanner circuit breaker (5 failures → open, 30s reset), fail-closed response (blocked=true) when circuit is open (Gap M-13) — `services/safety-orchestrator/scanner_clients.py`
 
 **Also complete in this phase (deferred from Phase 4):**
-- [ ] [T049] OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py` _(then update T051 wiring in main.py to wire policy_generator call on deploy)_
+- [X] [T049] OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py` _(wired into deploy_agent endpoint in routers/deployments.py; apply_configmap added to k8s.py)_
 
 **Also update Envoy HTTPRoutes (deferred from Phase 7):**
 After Safety Orchestrator is running, update T087 HTTPRoutes so `/agents/{name}/chat` routes through `safety-orchestrator.agentshield-platform:8080` rather than directly to agent pods.
@@ -377,9 +431,9 @@ After Safety Orchestrator is running, update T087 HTTPRoutes so `/agents/{name}/
 _Gate: Phase 9 must be complete. Run before starting Phase 10._
 _What you prove: All 3 scanners healthy; injection blocked; PII redacted; fail-closed behaviour confirmed; agent requests now routed through safety._
 
-- [ ] [CP3a] Helm upgrade script: enable safety-orchestrator, llm-guard, presidio, nemo — `scripts/deploy-cp3.sh`
-- [ ] [CP3b] Scanner readiness smoke test: GET /ready on safety-orchestrator asserts all 3 scanners "up"; individual health checks on LLM Guard, Presidio, NeMo — `scripts/smoke-test-cp3-scanners.sh`
-- [ ] [CP3c] Safety behaviour smoke test: POST known injection payload → assert blocked=true; POST PII text → assert sanitized_text has redacted values; POST clean text → assert blocked=false, sanitized_text unchanged; POST to /scan/input with LLM Guard pod stopped → assert blocked=true (fail-closed) — `scripts/smoke-test-cp3-safety.sh`
+- [X] [CP3a] Helm upgrade script: enable safety-orchestrator, llm-guard, presidio, nemo — `scripts/deploy-cp3.sh`
+- [X] [CP3b] Scanner readiness smoke test: GET /ready on safety-orchestrator asserts all 3 scanners "up"; individual health checks on LLM Guard, Presidio, NeMo — `scripts/smoke-test-cp3-scanners.sh` (5/5 PASS)
+- [X] [CP3c] Safety behaviour smoke test: POST known injection payload → assert blocked=true; POST PII text → assert sanitized_text has redacted values; POST clean text → assert blocked=false, sanitized_text unchanged; POST to /scan/input with LLM Guard pod stopped → assert blocked=true (fail-closed) — `scripts/smoke-test-cp3-safety.sh` (5/5 PASS)
 
 > **To run:** `bash scripts/deploy-cp3.sh` → wait for scanner pods (LLM Guard ~3min model load) → `bash scripts/smoke-test-cp3-scanners.sh && bash scripts/smoke-test-cp3-safety.sh`
 > **Pass criteria:** Injection blocked, PII redacted, fail-closed confirmed
@@ -448,29 +502,34 @@ _What you prove: Complete request lifecycle — JWT auth via Envoy, safety scan,
 
 ## Summary
 
-**Total tasks:** 179 (164 implementation T001–T164 + 15 checkpoint CP1a–CP4c + CPE-a–CPE-c)
+**Total tasks:** 192 (177 implementation T001–T191 + 15 checkpoint CP1a–CP4c + CPE-a–CPE-c)
 
 | Phase | Tasks | Parallel | Status | Notes |
 |-------|-------|---------|--------|-------|
 | Phase 1 — Infra Setup | T001–T016, T130–T131 (18) | T006–T016, T131 (12) | ✅ Core done; T130–T131 pending | Sub-chart values all parallel |
-| Phase 2 — Registry API | T017–T033, T132–T136 (22) | T022–T024, T133–T135 (6) | ✅ Core done; T132–T136 pending | Must finish T132–T136 before Ph5+Ph7 |
+| Phase 2 — Registry API | T017–T033, T132–T136 (22) | T022–T024, T133–T135 (6) | ✅ Done | All routers implemented and mounted |
 | **Checkpoint 1** | CP1a–CP1c (3) | — | Pending | Deploy data layer + Registry API |
 | Phase 3 — Deploy Controller | T034–T043, T137–T139 (13) | None | ✅ Done | Timeout worker + reopen endpoint done |
 | **Checkpoint 2** | CP2a–CP2c (3) | — | ✅ Done | First agent deployed; OPA sidecar verified |
 | Phase 3b — Ops & Runbooks | T140–T145 (6) | T141–T145 (5) | ✅ Done | Scripts + runbooks |
-| Phase 4 — Tool Registry | T044–T051 (8) | T047–T048 (2) | Pending | T049 deferred to Phase 9 |
-| Phase 5 — Studio UI MVP | T115–T116, T118, T126–T129, T162–T164 (10) | T163–T164, T127–T129 (5) | Pending | 3-screen app; canvas in Phase 8 |
-| Phase 6 — SDK v1 | T089–T108, T151–T154 (24) | T107–T108, T152–T154 (5) | Pending | T152+T154 deferred to Phase 10 |
-| Phase 7 — Basic HITL | T077–T088, T148–T150 (15) | T085–T087 (3) | Pending | No Redis/Slack/Portkey yet; T078–T079, T083–T084, T148–T150 deferred to Phase 11 |
-| Phase 8 — Declarative Runner + Canvas | T109–T114, T117, T119–T125, T155–T156 (16) | T117, T119–T125, T155–T156 (9) | Pending | Backend sequential; canvas frontend all parallel |
-| **Checkpoint E2E** | CPE-a–CPE-c (3) | — | Pending | Create → deploy → invoke E2E demo |
-| Phase 9 — Safety Orchestrator | T052–T068, T146–T147 (19) + T049 | T060–T068, T147 (10) | Pending | T049 (deferred from Phase 4) also done here |
-| **Checkpoint 3** | CP3a–CP3c (3) | — | Pending | Safety pipeline live; fail-closed confirmed |
+| Phase 4 — Tool Registry | T044–T051 (8) | T047–T048 (2) | ✅ Done | T049 deferred to Phase 9 |
+| Phase 5 — Studio UI MVP | T115–T116, T118, T126–T129, T162–T164 (10) | T163–T164, T127–T129 (5) | ✅ Done | 3-screen app + canvas |
+| Phase 5b — LLM Provider Config | T165–T178 (14) | T175–T177 (3) | ✅ Done | Fernet encryption + K8s RBAC + Studio Providers page |
+| Phase 6 — SDK v1 | T089–T108, T151–T154 (24) | T107–T108, T152–T154 (5) | ✅ Done | T152+T154 deferred to Phase 10 |
+| Phase 7 — Basic HITL | T077–T088, T148–T150 (15) | T085–T087 (3) | ✅ Done | T078–T079, T083–T084, T148–T150 deferred to Phase 11 |
+| Phase 8 — Declarative Runner + Canvas | T109–T114, T117, T119–T125, T155–T156 (16) | T117, T119–T125, T155–T156 (9) | ✅ Done | Backend + canvas frontend; skills CRUD; conditional routing |
+| **Phase 8b — Python Tool Executor** | T179–T186 (8) | T180–T182, T184–T186 (6) | ✅ Done | New tool type; python-executor microservice; PythonToolNodeExecutor |
+| **Phase 8c — Default Resources** | T187–T189 (3) | T188 (1) | ✅ Done | 6 tools, 2 skills, 3 workflows, 5 agents seeded; Studio python_code UI |
+| **Phase 8d — Studio Edit/Detail UX** | T190–T191 (2) | — | ✅ Done | ToolsPage + AgentListPage edit/delete — product plan gap fill |
+| **Checkpoint E2E** | CPE-a–CPE-c (3) | — | Pending | Create → deploy → invoke E2E demo; runs after defaults seeded |
+| Phase 9 — Safety Orchestrator | T052–T068, T146–T147 (19) + T049 | T060–T068, T147 (10) | ✅ Done | T049 also completed; scanner charts linted; OPA generator wired to deploy |
+| **Checkpoint 3** | CP3a–CP3c (3) | — | ✅ Done | Safety pipeline live; fail-closed confirmed (5/5 each) |
 | Phase 10 — OPA + Langfuse + Tracing | T069–T076, T152, T154 (10) | T072–T073, T075–T076 (4) | Pending | OPA policy ConfigMaps + Langfuse charts + SDK tracing |
 | Phase 11 — Complete HITL + Portkey | T078–T079, T083–T084, T148–T150 (7) | T084, T149–T150 (3) | Pending | Redis pub/sub + Slack + Portkey |
 | Phase 12 — Dashboards | T157–T161 (5) | T158–T161 (4) | Pending | Langfuse dashboards + Appsmith import files |
 | **Checkpoint 4** | CP4a–CP4c (3) | — | Pending | Full governed: JWT + safety + HITL + Langfuse trace |
 
-**Parallelism highlights:** Phase 8 canvas frontend (9 parallel tasks), Phase 1 sub-chart values (12 parallel tasks), Phase 9 scanner Helm charts (10 parallel tasks)
+**Parallelism highlights:** Phase 8b (6 of 8 parallel), Phase 8 canvas frontend (9 parallel tasks), Phase 1 sub-chart values (12 parallel tasks), Phase 9 scanner Helm charts (10 parallel tasks)
 **Gap coverage:** 32 gap-tagged tasks cover 14 critical gaps and 17 major gaps; see `docs/plan/gaps.md` for full register
-**E2E milestone:** Functional end-to-end (create → deploy → invoke → approve) visible after Phase 7/8 + Checkpoint E2E — before any scanner integration
+**E2E milestone:** Functional end-to-end (create → deploy → invoke → approve) visible after Phase 8b/8c + Checkpoint E2E — before any scanner integration
+**Python tool execution:** Phase 8b adds `type=python` tools running sandboxed code via `python-executor` microservice; same governance pipeline as HTTP tools

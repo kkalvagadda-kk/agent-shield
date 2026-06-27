@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import axios from 'axios';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { X } from 'lucide-react';
@@ -58,7 +59,11 @@ export default function FirstSaveModal({ onClose, onSaved }: FirstSaveModalProps
       toast.success(`Workflow "${workflow.name}" saved`);
       onSaved(workflow.id, workflow.name, workflow.team);
     } catch (err) {
-      toast.error(`Failed to save: ${String(err)}`);
+      if (axios.isAxiosError(err) && err.response?.status === 409) {
+        setNameError(`"${name}" already exists for team "${team}" — choose a different name`);
+      } else {
+        toast.error(`Failed to save: ${String(err)}`);
+      }
     } finally {
       setIsSaving(false);
     }

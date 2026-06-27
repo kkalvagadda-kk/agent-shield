@@ -1,0 +1,16 @@
+replicaCount: 2
+
+image:
+  repository: registry.internal/agentshield/safety-orchestrator
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+existingSecret: postgres-passwords
+piiTtlHours: 24
+
+# Scanner URLs — default to sibling chart service names in the same namespace.
+# Override if scanners are deployed in a different release or namespace.
+llmguardUrl: ""
+presidioAnalyzerUrl: ""
+presidioAnonymizerUrl: ""
+nemoUrl: ""

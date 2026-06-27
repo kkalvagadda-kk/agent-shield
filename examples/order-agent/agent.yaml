@@ -1,0 +1,13 @@
+name: order-agent
+team: commerce
+description: Order management agent with lookup and refund capabilities
+agent_type: sdk
+
+tools:
+  - name: lookup_order
+    risk: low
+    description: Look up order status by order ID
+
+  - name: issue_refund
+    risk: high
+    description: Issue refund for an order — requires human approval before executing
