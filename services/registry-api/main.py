@@ -17,9 +17,11 @@ Routers mounted
   /api/v1/approvals       — approvals CRUD     (Phase 2)
   /api/v1/opa-decisions   — OPA audit log      (Phase 2)
   /api/v1/teams           — teams CRUD         (Phase 2)
-  /api/v1/tools           — tools stub         (Phase 4)
-  /api/v1/auth-configs    — auth-configs stub  (Phase 4)
-  /api/v1/agent-tools     — agent-tools stub   (Phase 4)
+  /api/v1/tools           — tools CRUD
+  /api/v1/auth-configs    — auth-configs CRUD
+  /api/v1/agent-tools     — agent-tool bindings
+  /api/v1/llm-providers   — LLM provider CRUD (Fernet-encrypted credentials)
+  /api/v1/skills          — skills CRUD (canvas redesign)
 
 System endpoints
 ----------------
@@ -35,7 +37,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import APIRouter, FastAPI, Response, status
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -43,10 +45,13 @@ from config import settings
 from db import AsyncSessionLocal, engine
 from routers.agents import router as agents_router
 from routers.approvals import router as approvals_router
+from routers.auth_configs import router as auth_configs_router
 from routers.deployments import global_deployments_router, router as deployments_router
+from routers.llm_providers import router as llm_providers_router
 from routers.opa_decisions import router as opa_decisions_router
 from routers.skills import router as skills_router
 from routers.teams import router as teams_router
+from routers.tools import router as tools_router
 from routers.versions import router as versions_router, versions_global_router
 from routers.workflows import router as workflows_router
 
@@ -59,12 +64,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Stub routers — empty APIRouters so main.py won't need editing in Phase 4
-# ---------------------------------------------------------------------------
-tools_router = APIRouter(prefix="/api/v1/tools", tags=["tools"])
-auth_configs_router = APIRouter(prefix="/api/v1/auth-configs", tags=["auth-configs"])
-agent_tools_router = APIRouter(prefix="/api/v1/agent-tools", tags=["agent-tools"])
+from routers.agent_tools import router as agent_tools_router
 
 
 # ---------------------------------------------------------------------------
@@ -142,10 +142,11 @@ def create_app() -> FastAPI:
     # --- Skills router (canvas redesign) ---
     app.include_router(skills_router)
 
-    # --- Stub routers (Phase 4 will fill these in) ---
+    # --- Tool, auth-config, agent-tool, LLM provider routers ---
     app.include_router(tools_router)
     app.include_router(auth_configs_router)
     app.include_router(agent_tools_router)
+    app.include_router(llm_providers_router)
 
     # --- System endpoints ---
     @app.get(

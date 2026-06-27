@@ -562,6 +562,43 @@ class SkillResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# LLM Provider
+# ---------------------------------------------------------------------------
+class LLMCredentials(BaseModel):
+    """Credentials payload — encrypted at rest, never returned in responses."""
+    api_key: str | None = None
+    aws_access_key_id: str | None = None
+    aws_secret_access_key: str | None = None
+    aws_region: str | None = None
+
+
+class LLMProviderCreate(BaseModel):
+    name: str = Field(..., max_length=128)
+    provider: Literal["anthropic", "bedrock"]
+    default_model: str = Field(..., max_length=256)
+    credentials: LLMCredentials
+    team: str = Field(..., max_length=128)
+
+
+class LLMProviderUpdate(BaseModel):
+    name: str | None = Field(None, max_length=128)
+    default_model: str | None = Field(None, max_length=256)
+    credentials: LLMCredentials | None = None
+
+
+class LLMProviderResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    provider: str
+    default_model: str
+    team: str
+    created_at: datetime
+    updated_at: datetime
+    # credentials_encrypted is intentionally excluded — never returned
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
 # Error  (matches ErrorResponse in OpenAPI spec)
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
@@ -627,6 +664,11 @@ __all__ = [
     "SkillCreate",
     "SkillUpdate",
     "SkillResponse",
+    # LLMProvider
+    "LLMCredentials",
+    "LLMProviderCreate",
+    "LLMProviderUpdate",
+    "LLMProviderResponse",
     # Error
     "ErrorResponse",
 ]
