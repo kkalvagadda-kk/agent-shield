@@ -100,7 +100,7 @@ dependencies:
 
   # ── LLM routing ───────────────────────────────────────────────────────────
   - name: portkey
-    version: "0.1.0"
+    version: "0.1.x"
     repository: "file://charts/portkey"
     condition: portkey.enabled
 

@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     presidio_enabled: bool = True
     nemo_enabled: bool = True
 
+    # Langfuse observability — leave empty to disable tracing.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

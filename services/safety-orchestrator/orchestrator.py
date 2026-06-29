@@ -19,6 +19,7 @@ Output scan flow:
 
 import asyncio
 import logging
+from typing import Any
 
 from config import settings
 from pii_store import PiiStore
@@ -31,6 +32,24 @@ from schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Langfuse client — initialised lazily; None if SDK unavailable or keys not set.
+_langfuse: Any = None
+
+
+def _lf():
+    global _langfuse
+    if _langfuse is None and settings.langfuse_public_key:
+        try:
+            from langfuse import Langfuse
+            _langfuse = Langfuse(
+                public_key=settings.langfuse_public_key,
+                secret_key=settings.langfuse_secret_key,
+                host=settings.langfuse_host or None,
+            )
+        except Exception as exc:
+            logger.warning("Langfuse init failed (tracing disabled): %s", exc)
+    return _langfuse
 
 _SCAN_TIMEOUT = 5.0  # seconds for entire fan-out
 
@@ -53,14 +72,29 @@ class SafetyOrchestrator:
     # ------------------------------------------------------------------
 
     async def scan_input(self, req: ScanInputRequest) -> ScanInputResponse:
+        lf = _lf()
+        trace = span = None
         try:
-            return await asyncio.wait_for(self._scan_input_inner(req), timeout=_SCAN_TIMEOUT)
+            if lf:
+                trace = lf.trace(name="safety-scan-input", session_id=req.session_id,
+                                 metadata={"agent": req.agent_name})
+                span = trace.span(name="scan-input")
+        except Exception:
+            pass
+        try:
+            result = await asyncio.wait_for(self._scan_input_inner(req), timeout=_SCAN_TIMEOUT)
         except asyncio.TimeoutError:
             logger.warning("Input scan timed out for session=%s agent=%s", req.session_id, req.agent_name)
-            return ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
+            result = ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
         except Exception as exc:
             logger.error("Input scan error: %s", exc)
-            return ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+            result = ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+        try:
+            if span:
+                span.end(output={"blocked": result.blocked, "reason": result.reason})
+        except Exception:
+            pass
+        return result
 
     async def _scan_input_inner(self, req: ScanInputRequest) -> ScanInputResponse:
         scan_text = req.message
@@ -134,14 +168,29 @@ class SafetyOrchestrator:
     # ------------------------------------------------------------------
 
     async def scan_output(self, req: ScanOutputRequest) -> ScanOutputResponse:
+        lf = _lf()
+        trace = span = None
         try:
-            return await asyncio.wait_for(self._scan_output_inner(req), timeout=_SCAN_TIMEOUT)
+            if lf:
+                trace = lf.trace(name="safety-scan-output", session_id=req.session_id,
+                                 metadata={"agent": req.agent_name})
+                span = trace.span(name="scan-output")
+        except Exception:
+            pass
+        try:
+            result = await asyncio.wait_for(self._scan_output_inner(req), timeout=_SCAN_TIMEOUT)
         except asyncio.TimeoutError:
             logger.warning("Output scan timed out for session=%s", req.session_id)
-            return ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
+            result = ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
         except Exception as exc:
             logger.error("Output scan error: %s", exc)
-            return ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+            result = ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+        try:
+            if span:
+                span.end(output={"blocked": result.blocked, "reason": result.reason})
+        except Exception:
+            pass
+        return result
 
     async def _scan_output_inner(self, req: ScanOutputRequest) -> ScanOutputResponse:
         scores: dict[str, float] = {}

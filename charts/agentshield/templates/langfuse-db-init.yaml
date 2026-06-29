@@ -1,0 +1,61 @@
+{{- if (index .Values "langfuse" "enabled") }}
+# Pre-install/upgrade Job that creates the `langfuse` database if it doesn't exist.
+# The PostgreSQL initdb scripts in the postgresql sub-chart only run on the very
+# first PVC init, so this hook ensures the DB is present on fresh installs even
+# when the PVC was pre-formatted or the initdb scripts were skipped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-langfuse-db-init
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: db-init
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              PG_URL="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:5432/postgres"
+
+              echo "Waiting for PostgreSQL..."
+              until psql "${PG_URL}" -c "SELECT 1" -q 2>/dev/null; do
+                echo "  not ready yet, retrying..."
+                sleep 3
+              done
+
+              echo "Creating database langfuse (idempotent)..."
+              psql "${PG_URL}" -c "CREATE DATABASE langfuse;" 2>/dev/null \
+                && echo "  langfuse database created." \
+                || echo "  langfuse database already exists, ok."
+
+              echo "Ensuring langfuse_user has access..."
+              psql "${PG_URL}" -c "CREATE ROLE langfuse_user WITH LOGIN;" 2>/dev/null || true
+              psql "${PG_URL}" -c "GRANT ALL PRIVILEGES ON DATABASE langfuse TO langfuse_user;" 2>/dev/null || true
+              psql "postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:5432/langfuse" \
+                -c "GRANT ALL ON SCHEMA public TO langfuse_user;" 2>/dev/null || true
+
+              echo "DB init complete."
+          env:
+            - name: PG_HOST
+              value: {{ .Release.Name }}-postgresql
+            - name: PG_USER
+              value: postgres
+            - name: PG_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-passwords
+                  key: keycloak
+{{- end }}

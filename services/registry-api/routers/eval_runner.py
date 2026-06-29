@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
 from models import EvalRun, EvalRunResult, PlaygroundDataset
+from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
 from schemas import (
     EvalRunCreate,
     EvalRunResponse,
@@ -85,6 +86,13 @@ async def create_eval_run(
     )
     db.add(eval_run)
     await db.flush()
+
+    trace_eval_run_created(
+        run_id=str(eval_run.id),
+        agent_name=body.agent_name,
+        dataset_id=str(body.dataset_id),
+        user_id=caller,
+    )
 
     # Stub: K8s Job creation deferred — log intent
     logger.info(
@@ -150,6 +158,13 @@ async def create_eval_run_result(
     db: AsyncSession = Depends(get_db),
 ) -> EvalRunResultResponse:
     await _resolve_eval_run(eval_run_id, db)  # 404 guard
+    trace_span_id = trace_eval_run_result(
+        run_id=str(eval_run_id),
+        item_idx=body.dataset_item_idx,
+        score=body.judge_score,
+        passed=body.passed,
+        agent_name="",
+    )
     result_row = EvalRunResult(
         eval_run_id=eval_run_id,
         dataset_item_idx=body.dataset_item_idx,
@@ -158,6 +173,7 @@ async def create_eval_run_result(
         judge_score=body.judge_score,
         judge_reasoning=body.judge_reasoning,
         passed=body.passed,
+        langfuse_trace_id=trace_span_id,
     )
     db.add(result_row)
     await db.flush()
@@ -189,6 +205,11 @@ async def update_eval_run(
         run.overall_score = body.overall_score
     if body.status in ("completed", "failed"):
         run.completed_at = datetime.now(tz=timezone.utc)
+        trace_eval_run_completed(
+            run_id=str(eval_run_id),
+            status=body.status,
+            overall_score=body.overall_score,
+        )
     await db.flush()
     logger.info(
         "update_eval_run: id=%s status=%s score=%s",

@@ -16,7 +16,7 @@ dependencies:
   version: 25.2.0
 - name: langfuse
   repository: https://langfuse.github.io/langfuse-k8s
-  version: 1.5.36
+  version: 1.5.37
 - name: clickhouse
   repository: https://charts.bitnami.com/bitnami
   version: 9.4.4
@@ -43,7 +43,7 @@ dependencies:
   version: 0.1.1
 - name: portkey
   repository: file://charts/portkey
-  version: 0.1.0
+  version: 0.1.1
 - name: opa
   repository: file://charts/opa
   version: 0.1.0
@@ -53,5 +53,5 @@ dependencies:
 - name: python-executor
   repository: file://charts/python-executor
   version: 0.1.0
-digest: sha256:7ac6de9f59d54485f1ff5360fd68fc4dbd5575fee4d4df7b9fbe3967fa8eaead
-generated: "2026-06-27T14:57:47.763624-05:00"
+digest: sha256:130e626db050f73b6d5ea846834926f8dd1da6f5db6f52c81f8e40d7d5315654
+generated: "2026-06-29T14:23:23.453147-05:00"

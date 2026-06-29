@@ -45,6 +45,20 @@ spec:
               value: {{ .Values.presidioEnabled | toString | quote }}
             - name: NEMO_ENABLED
               value: {{ .Values.nemoEnabled | toString | quote }}
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-api-keys
+                  key: public-key
+                  optional: true
+            - name: LANGFUSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-api-keys
+                  key: secret-key
+                  optional: true
+            - name: LANGFUSE_HOST
+              value: "http://{{ .Release.Name }}-langfuse-web:3000"
           resources:
             requests:
               memory: "256Mi"

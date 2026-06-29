@@ -324,51 +324,127 @@ keycloak:
 langfuse:
   enabled: true
 
+  # Langfuse application config (maps to langfuse.* in the subchart)
   langfuse:
     salt:
-      existingSecret: langfuse-api-keys
-      existingSecretKey: salt
-    nextAuthSecret:
-      existingSecret: langfuse-api-keys
-      existingSecretKey: nextauth-secret
+      secretKeyRef:
+        name: langfuse-api-keys
+        key: salt
+    encryptionKey:
+      secretKeyRef:
+        name: langfuse-api-keys
+        key: encryption-key
+    nextauth:
+      # Update to ingress URL in production; localhost:4000 matches port-forward for CPE2E
+      url: "http://localhost:4000"
+      secret:
+        secretKeyRef:
+          name: langfuse-api-keys
+          key: nextauth-secret
+    features:
+      telemetryEnabled: false   # self-hosted, no external reporting
+    # Auto-bootstrap org/project/user on first boot so platform services can
+    # trace immediately without manual Langfuse UI setup.
+    additionalEnv:
+      # LANGFUSE_INIT_ORG_ID is required in v3 to activate the init variables.
+      - name: LANGFUSE_INIT_ORG_ID
+        value: "00000000-0000-0000-0000-agentshield01"
+      - name: LANGFUSE_INIT_ORG_NAME
+        value: "AgentShield"
+      - name: LANGFUSE_INIT_PROJECT_ID
+        value: "00000000-0000-0000-0001-agentshield01"
+      - name: LANGFUSE_INIT_PROJECT_NAME
+        value: "AgentShield Platform"
+      - name: LANGFUSE_INIT_PROJECT_PUBLIC_KEY
+        valueFrom:
+          secretKeyRef:
+            name: langfuse-api-keys
+            key: public-key
+      - name: LANGFUSE_INIT_PROJECT_SECRET_KEY
+        valueFrom:
+          secretKeyRef:
+            name: langfuse-api-keys
+            key: secret-key
+      - name: LANGFUSE_INIT_USER_EMAIL
+        value: "admin@agentshield.local"
+      - name: LANGFUSE_INIT_USER_PASSWORD
+        value: "AdminPass2024"
+      - name: LANGFUSE_INIT_USER_NAME
+        value: "AgentShield Admin"
 
-    database:
-      host: agentshield-pgbouncer
-      port: 5432
-      name: langfuse
-      user: langfuse_user
-      password:
-        existingSecret: postgres-passwords
-        existingSecretKey: langfuse
+  # PostgreSQL — use existing platform PostgreSQL directly (no PgBouncer for CPE2E)
+  postgresql:
+    deploy: false
+    host: agentshield-postgresql
+    port: 5432
+    auth:
+      username: langfuse_user
+      database: langfuse
+      existingSecret: postgres-passwords
+      secretKeys:
+        userPasswordKey: langfuse
+        adminPasswordKey: langfuse
 
-    clickhouse:
+  # Redis — use existing platform Redis (Valkey)
+  redis:
+    deploy: false
+    host: agentshield-redis-master
+    port: 6379
+    auth:
+      existingSecret: redis-password
+      existingSecretPasswordKey: redis-password
+
+  # ClickHouse — minimal single-shard deployment. Langfuse v3 requires ClickHouse for
+  # the event ingestion pipeline. Resources overridden for CPE2E/local cluster.
+  # IMPORTANT: Bitnami sub-chart names the service agentshield-clickhouse (no "langfuse" prefix).
+  # Apply infra/langfuse/clickhouse-alias-svc.yaml so that the Langfuse-derived hostname
+  # agentshield-langfuse-clickhouse resolves to the real service.
+  # For production, remove resourcesPreset/resources overrides and increase persistence.
+  clickhouse:
+    deploy: true
+    auth:
+      username: "langfuse"
+      password: "ChLangfuse2024"
+    shards: 1
+    replicaCount: 1
+    resourcesPreset: "none"
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+    persistence:
       enabled: true
-      host: agentshield-clickhouse
-      port: 8123
-      user: langfuse
-      password:
-        existingSecret: langfuse-clickhouse-password
-        existingSecretKey: password
+      size: 5Gi
+    zookeeper:
+      enabled: false
 
-    s3:
+  # S3/MinIO — lightweight media/export storage companion for Langfuse
+  s3:
+    deploy: true
+    bucket: "langfuse-media"
+    region: "auto"
+    forcePathStyle: true
+    accessKeyId:
+      value: "langfuse-admin"
+    secretAccessKey:
+      value: "LangfuseMinio2024"
+    auth:
+      rootUser: "langfuse-admin"
+      rootPassword: "LangfuseMinio2024"
+    resourcesPreset: "none"
+    resources:
+      requests:
+        cpu: "50m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    persistence:
       enabled: true
-      endpoint: http://agentshield-minio:9000
-      bucket: langfuse-media
-      region: us-east-1
-      accessKeyId:
-        existingSecret: minio-credentials
-        existingSecretKey: root-user
-      secretAccessKey:
-        existingSecret: minio-credentials
-        existingSecretKey: root-password
-      forcePathStyle: true
-
-    redis:
-      host: agentshield-redis-master
-      port: 6379
-      password:
-        existingSecret: redis-password
-        existingSecretKey: redis-password
+      size: 5Gi
 
   web:
     replicaCount: 1
@@ -379,26 +455,9 @@ langfuse:
   worker:
     replicaCount: 1
 
-# ── ClickHouse (Bitnami) — Langfuse trace backend ─────────────────────────────
+# ── ClickHouse (top-level Bitnami chart) — disabled; Langfuse uses its own sub-chart ──
 clickhouse:
-  enabled: true
-
-  auth:
-    username: langfuse
-    existingSecret: langfuse-clickhouse-password
-    existingSecretKey: password
-
-  shards: 1
-  replicaCount: 1
-
-  persistence:
-    enabled: true
-    size: 20Gi
-
-  service:
-    ports:
-      http: 8123
-      tcp: 9000
+  enabled: false
 
 # ── Appsmith (Community Edition) ──────────────────────────────────────────────
 appsmith:

@@ -10,6 +10,7 @@
 #   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
 #   - declarative-runner:0.1.1 (PythonToolNodeExecutor)
 #   - python-executor:0.1.0 (sandboxed Python code runner)
+#   - Langfuse:3.x         (LLM observability — auto-bootstrapped, internal to platform)
 #   - PostgreSQL, Redis (infra)
 #
 # Seeded by step 8: 6 tools, 2 skills, 3 workflows, 5 agents
@@ -133,12 +134,18 @@ kubectl create secret generic keycloak-user-passwords \
   --from-literal=agent-reviewer="${KC_REVIEWER_PASS}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Langfuse tracing keys — public-key AND secret-key both required
+# Langfuse tracing keys + NextAuth/encryption secrets
+# public-key/secret-key are used to auto-bootstrap the AgentShield project on first boot
+# and are shared with registry-api/safety-orchestrator for SDK tracing.
+LANGFUSE_SALT="$(openssl rand -base64 32 2>/dev/null || echo 'agentshield-dev-salt-placeholder-32')"
+LANGFUSE_ENC_KEY="$(openssl rand -hex 32 2>/dev/null || echo 'a1b2c3d4e5f6789012345678901234560123456789012345678901234567890b')"
 kubectl create secret generic langfuse-api-keys \
   -n "$NAMESPACE" \
-  --from-literal=public-key="pk-lf-placeholder-dev-00000000" \
-  --from-literal=secret-key="sk-lf-placeholder-dev-00000000" \
-  --from-literal=nextauth-secret="cp1-placeholder-nextauth-32chars!!" \
+  --from-literal=public-key="pk-lf-agentshield-dev-local-0001" \
+  --from-literal=secret-key="sk-lf-agentshield-dev-local-0001" \
+  --from-literal=nextauth-secret="agentshield-nextauth-dev-2024-sec" \
+  --from-literal=salt="${LANGFUSE_SALT}" \
+  --from-literal=encryption-key="${LANGFUSE_ENC_KEY}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # Slack webhook (registry-api reads webhook-url key)
@@ -155,6 +162,11 @@ echo "  All secrets applied."
 echo ""
 echo "[4/8] Updating Helm dependencies..."
 helm dependency update "$CHART" 2>/dev/null || true
+
+# Apply Langfuse-specific infra (ClickHouse alias Service).
+# Bitnami ClickHouse sub-chart names its service <release>-clickhouse but Langfuse
+# derives the host as <release>-langfuse-clickhouse. The alias bridges that gap.
+kubectl apply -f infra/langfuse/clickhouse-alias-svc.yaml 2>/dev/null || true
 
 # ── Step 5: Helm upgrade ──────────────────────────────────────────────────────
 echo ""
@@ -185,7 +197,7 @@ helm upgrade --install "$RELEASE" "$CHART" \
   --set nemo.enabled=false \
   --set portkey.enabled=false \
   --set opa.enabled=false \
-  --set langfuse.enabled=false \
+  --set langfuse.enabled=true \
   --set clickhouse.enabled=false \
   --set appsmith.enabled=false \
   --set minio.enabled=false \
@@ -209,6 +221,8 @@ kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --tim
 kubectl rollout status deployment/agentshield-deploy-controller -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --timeout=3m
+kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
+kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
 
 # ── Step 7: Seed default teams ────────────────────────────────────────────────
 echo ""
@@ -255,9 +269,17 @@ echo ""
 kubectl get pods -n "$NAMESPACE" --no-headers | sort
 echo ""
 echo "Port-forward commands:"
-echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api   -n ${NAMESPACE} 8000:8000"
-echo "  Studio:            kubectl port-forward svc/agentshield-studio         -n ${NAMESPACE} 5173:80"
-echo "  Python Executor:   kubectl port-forward svc/agentshield-python-executor -n ${NAMESPACE} 8081:8080"
+echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api    -n ${NAMESPACE} 8000:8000"
+echo "  Studio:            kubectl port-forward svc/agentshield-studio          -n ${NAMESPACE} 5173:80"
+echo "  Python Executor:   kubectl port-forward svc/agentshield-python-executor  -n ${NAMESPACE} 8081:8080"
+echo "  Langfuse UI:       kubectl port-forward svc/agentshield-langfuse-web    -n ${NAMESPACE} 4000:3000"
+echo ""
+echo "Langfuse default credentials:"
+echo "  URL:      http://localhost:4000"
+echo "  Email:    admin@agentshield.local"
+echo "  Password: AdminPass2024"
+echo "  Project:  AgentShield Platform"
+echo "  API Keys: pk-lf-agentshield-dev-local-0001 / sk-lf-agentshield-dev-local-0001"
 echo ""
 echo "Default resources seeded: 6 tools (5 HTTP + 1 Python), 2 skills, 3 workflows, 5 agents"
 echo "Next: bash scripts/smoke-test-cpe2e-studio.sh"
