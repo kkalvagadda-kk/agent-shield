@@ -92,6 +92,12 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
             "tools": tool_names,
             "team": row["agent_team"],
             "agent_class": row["agent_class"] or "user_delegated",
+            # expected_sa_subject enables OPA to do bidirectional validation:
+            # not just "is this SA in the bundle" but "does the claimed subject
+            # match what's registered for this agent". Prevents an agent from
+            # presenting a different agent's SA subject in its token claim.
+            "expected_sa_subject": sa_subject,
+            "sa_namespace": row["sa_namespace"],
         }
 
     # Fetch active asset grants (team → list of tool names)

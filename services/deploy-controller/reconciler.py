@@ -55,6 +55,7 @@ async def _run_preflight_checks(
             return f"grant check failed: {exc}"
 
     # Check 2: all tools have active grant for deployer's team
+    # FAIL CLOSED: grant check errors are blocking, not skipped.
     tool_snapshot = version.get("tool_snapshot") or []
     if tool_snapshot:
         missing: list[str] = []
@@ -71,26 +72,30 @@ async def _run_preflight_checks(
                 active = [g for g in grants if not g.get("revoked_at")]
                 if not active:
                     missing.append(tool.get("name", str(tool_id)))
-            except Exception:
-                pass  # non-fatal: if grant check fails, skip this tool
+            except Exception as exc:
+                return f"grant check failed for team {deployer_team}: {exc}"
         if missing:
             return (
                 f"tool grants missing for deployer team {deployer_team}: {missing}"
             )
 
-    # Check 3: eval_passed
+    # Check 3: eval must not have explicitly failed
+    # (eval_passed=None means eval not yet run — allowed for now; False = hard block)
     if version.get("eval_passed") is False:
         return "version eval has not passed"
 
     # Check 4: no critical-risk tool in snapshot
+    # Checks both risk_level (registry schema) and risk (older tool snapshot schema)
     if tool_snapshot:
         critical = [
-            t.get("name", "") for t in tool_snapshot if t.get("risk_level") == "critical"
+            t.get("name", "")
+            for t in tool_snapshot
+            if t.get("risk_level") == "critical" or t.get("risk") == "critical"
         ]
         if critical:
             return f"critical risk tools not deployable: {critical}"
 
-    # Check 5: agent identity provisioning — handled in reconcile() step 1; pass through
+    # Check 5: agent identity provisioning — handled in reconcile() step 1
     return None
 
 

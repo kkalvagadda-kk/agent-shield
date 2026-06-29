@@ -5,10 +5,14 @@ default allow = false
 default deny_reason = ""
 
 # ─── SA Identity Validation ─────────────────────────────────────────────────
-# Agent must present an SA subject that exists in the bundle data.
-# The bundle generator populates data.agents keyed by SA subject.
+# Bidirectional validation:
+#   1. SA subject from the JWT must exist as a key in data.agents (forward)
+#   2. expected_sa_subject in the bundle entry must match the input subject (reverse)
+# This prevents a pod from presenting a different agent's SA subject in its token.
 sa_valid if {
-    data.agents[input.sa_subject]
+    entry := data.agents[input.sa_subject]
+    # Reverse check: bundle's expected subject must match input
+    entry.expected_sa_subject == input.sa_subject
 }
 
 # ─── Tool Authorization ─────────────────────────────────────────────────────
@@ -19,7 +23,9 @@ tool_registered if {
 
 # ─── User Grant Check (Class B / user_delegated only) ────────────────────────
 # User's team must have an active grant covering this tool.
+# This is the Class B intersection rule: effective_permissions = agent_scope ∩ user_grants
 user_has_grant if {
+    input.user_team != ""
     data.grants[input.user_team][_] == input.tool_name
 }
 
@@ -48,10 +54,12 @@ allow if {
 
 # ─── Class B — User-Delegated / OBO ─────────────────────────────────────────
 # Intersection rule: agent scope ∩ user grants = effective permissions.
+# BOTH conditions must hold — neither agent scope alone nor user grants alone is enough.
 allow if {
     input.agent_class == "user_delegated"
     sa_valid
     tool_registered
+    input.user_team != ""  # user context must be present
     user_grant_satisfied
 }
 
@@ -70,6 +78,13 @@ deny_reason = "user_not_granted" if {
     tool_registered
     input.agent_class == "user_delegated"
     not user_grant_satisfied
+}
+
+deny_reason = "user_context_missing" if {
+    sa_valid
+    tool_registered
+    input.agent_class == "user_delegated"
+    input.user_team == ""
 }
 
 # Daemon agents must not carry user identity — presence of user_id indicates

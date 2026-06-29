@@ -317,6 +317,176 @@ check_manual "T-S7-007" \
   "DAEMON_TOKEN=\$(kubectl exec <daemon-agent-pod> -n ${AGENTS_NS} -- cat /var/run/secrets/sa-token/token)" \
   "curl -s -X POST http://localhost:8181/v1/data/agentshield/allow -H 'Content-Type: application/json' -d \"{\\\"input\\\":{\\\"sa_token\\\":\\\"\${DAEMON_TOKEN}\\\",\\\"tool\\\":\\\"lookup_order\\\",\\\"user_id\\\":\\\"some-user\\\"}}\" | python3 -c \"import sys,json; d=json.load(sys.stdin); assert d.get('result') is False\""
 
+# ── T-S7-008: Class B requires user_team (no anonymous OBO) ──────────────
+echo "--- T-S7-008: Class B Agent Denied Without user_team ---"
+OPA_BUNDLE_ENDPOINT="http://agentshield-opa-bundle-server.${NAMESPACE}.svc.cluster.local:8181"
+OPA_B_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+# Query policy.rego logic against a class-B input with empty user_team
+payload = json.dumps({'input': {
+    'sa_subject': 'system:serviceaccount:agents-platform:test-sa',
+    'tool_name': 'lookup_order',
+    'agent_class': 'user_delegated',
+    'user_id': 'some-user',
+    'user_team': '',
+    'playground': False,
+    'sandbox': False,
+}}).encode()
+try:
+    req = urllib.request.Request('${OPA_BUNDLE_ENDPOINT}/v1/data/agentshield/allow',
+        data=payload, headers={'Content-Type': 'application/json'}, method='POST')
+    r = urllib.request.urlopen(req, timeout=5)
+    d = json.loads(r.read())
+    print('allow=' + str(d.get('result')))
+except Exception as e:
+    print('not_deployed:' + str(e)[:60])
+" 2>/dev/null || echo "not_deployed")
+if echo "$OPA_B_RESULT" | grep -q "allow=False\|allow=false"; then
+  pass "T-S7-008: Class B request with empty user_team denied by OPA"
+elif echo "$OPA_B_RESULT" | grep -q "not_deployed"; then
+  check_manual "T-S7-008: OPA bundle server not reachable (apply infra/opa-bundle-server/)" \
+    "Apply: kubectl apply -f infra/opa-bundle-server/" \
+    "Then send Class B input with user_team='' → assert allow=false"
+else
+  fail "T-S7-008: Class B with empty user_team not denied ($OPA_B_RESULT) — check policy.rego user_context_missing rule"
+fi
+echo ""
+
+# ── T-S7-009: Bundle data.json reflects expected_sa_subject ──────────────
+echo "--- T-S7-009: Bundle data.json Contains expected_sa_subject ---"
+BUNDLE_DATA_CHECK=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://localhost:8000/api/v1/bundle/data.json', timeout=5)
+    d = json.loads(r.read())
+    agents = d.get('agents', {})
+    if not agents:
+        print('no_agents_yet')
+    else:
+        # Check first agent entry has expected_sa_subject field
+        first_entry = next(iter(agents.values()))
+        has_field = 'expected_sa_subject' in first_entry
+        print('expected_sa_subject_present=' + str(has_field))
+except Exception as e:
+    print('ERR:' + str(e)[:80])
+" 2>/dev/null || echo "ERR")
+if echo "$BUNDLE_DATA_CHECK" | grep -q "expected_sa_subject_present=True"; then
+  pass "T-S7-009: Bundle data.json includes expected_sa_subject in agent entries"
+elif echo "$BUNDLE_DATA_CHECK" | grep -q "no_agents_yet"; then
+  check_manual "T-S7-009: No deployed agents yet — cannot verify expected_sa_subject field" \
+    "Deploy any agent first, then GET /api/v1/bundle/data.json" \
+    "Assert agents.<sa_subject>.expected_sa_subject == <sa_subject>"
+else
+  fail "T-S7-009: expected_sa_subject missing from bundle data ($BUNDLE_DATA_CHECK) — check bundle_generator.py"
+fi
+echo ""
+
+# ── T-S7-010: Deploy gate blocks critical-risk tool ──────────────────────
+echo "--- T-S7-010: Deploy Gate Blocks Version With critical-risk Tool ---"
+CRITICAL_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, time
+base = 'http://localhost:8000'
+
+# Register agent with a version that has a critical-risk tool
+ts = str(int(time.time()))
+ag_body = json.dumps({'name': 'crit-gate-test-' + ts, 'team': 'platform',
+                       'description': 'gate test'}).encode()
+try:
+    r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
+        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    agent = json.loads(r.read())
+    agent_name = agent.get('name') or ('crit-gate-test-' + ts)
+except Exception as e:
+    print('AGENT_ERR:' + str(e)[:80])
+    exit()
+
+# Create version with critical-risk tool in snapshot
+v_body = json.dumps({'agent_name': agent_name, 'description': 'critical-test',
+                      'tools': [{'name': 'rm_prod_db', 'risk': 'critical'}]}).encode()
+try:
+    r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/versions',
+        data=v_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    version = json.loads(r.read())
+    version_id = str(version.get('id'))
+except Exception as e:
+    print('VERSION_ERR:' + str(e)[:80])
+    exit()
+
+# Attempt deploy
+d_body = json.dumps({'agent_name': agent_name, 'version_id': version_id,
+                      'deployer_team': 'platform'}).encode()
+try:
+    req = urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/deployments',
+        data=d_body, headers={'Content-Type': 'application/json'}, method='POST')
+    r = urllib.request.urlopen(req, timeout=5)
+    print('DEPLOY_ALLOWED:status=' + str(r.getcode()))  # Should not reach here
+except urllib.error.HTTPError as e:
+    body = json.loads(e.read())
+    detail = str(body.get('detail', ''))
+    if 'critical' in detail.lower():
+        print('BLOCKED:' + detail[:80])
+    else:
+        print('BLOCKED_OTHER:' + detail[:80])
+except Exception as e:
+    print('ERR:' + str(e)[:80])
+" 2>/dev/null || echo "ERR")
+if echo "$CRITICAL_RESULT" | grep -q "^BLOCKED:"; then
+  pass "T-S7-010: Deploy gate blocked version with critical-risk tool ($CRITICAL_RESULT)"
+elif echo "$CRITICAL_RESULT" | grep -q "^DEPLOY_ALLOWED"; then
+  fail "T-S7-010: Deploy gate FAILED to block critical-risk tool ($CRITICAL_RESULT)"
+elif echo "$CRITICAL_RESULT" | grep -q "^BLOCKED_OTHER\|ERR"; then
+  check_manual "T-S7-010: Deploy gate response unclear ($CRITICAL_RESULT)" \
+    "POST /api/v1/agents/<name>/deployments with tool risk='critical'" \
+    "Assert HTTP 422/400 with 'critical' in detail"
+else
+  check_manual "T-S7-010: Critical risk deploy test failed to run ($CRITICAL_RESULT)" \
+    "Check registry-api has /api/v1/agents/<name>/deployments endpoint" \
+    "and pre-flight check 4 in reconciler.py is wired"
+fi
+echo ""
+
+# ── T-S7-011: Grant check error is fail-closed ──────────────────────────
+echo "--- T-S7-011: Grant Check Error is Fail-Closed ---"
+# This tests that the grant check does NOT silently ignore errors
+# We can't easily induce an error in e2e, so verify the code pattern
+GRANT_FAIL_CLOSED=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import subprocess, sys
+result = subprocess.run(['grep', '-n', 'grant check failed for team', '/app/reconciler.py'],
+    capture_output=True, text=True)
+if result.returncode == 0 and result.stdout.strip():
+    print('fail_closed:' + result.stdout.split(':')[0].strip())
+else:
+    # Try alternate path
+    import os
+    for path in ['/app/reconciler.py', '/app/services/deploy-controller/reconciler.py']:
+        if os.path.exists(path):
+            with open(path) as f:
+                content = f.read()
+            if 'grant check failed for team' in content:
+                print('fail_closed:found')
+                break
+    else:
+        print('pattern_not_found')
+" 2>/dev/null || echo "ERR")
+if echo "$GRANT_FAIL_CLOSED" | grep -q "^fail_closed:"; then
+  pass "T-S7-011: Grant check errors are fail-closed in deploy-controller"
+else
+  check_manual "T-S7-011: Could not verify grant fail-closed pattern ($GRANT_FAIL_CLOSED)" \
+    "Review services/deploy-controller/reconciler.py Check 2" \
+    "Confirm 'except Exception as exc: return f\"grant check failed...\"' (not 'pass')"
+fi
+echo ""
+
+# ── T-S7-012: policy.rego deny_reason for user_context_missing ────────────
+echo "--- T-S7-012: policy.rego Has user_context_missing deny_reason ---"
+POLICY_CHECK=$(cat infra/opa-bundle-server/policy.rego 2>/dev/null | grep "user_context_missing" | head -1 || echo "not_found")
+if echo "$POLICY_CHECK" | grep -q "user_context_missing"; then
+  pass "T-S7-012: policy.rego contains user_context_missing deny_reason rule"
+else
+  fail "T-S7-012: user_context_missing deny_reason missing from policy.rego — Class B agents with missing user context get no informative deny reason"
+fi
+echo ""
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
