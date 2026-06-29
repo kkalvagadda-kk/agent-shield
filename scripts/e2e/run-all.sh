@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # AgentShield E2E Master Runner
 #
-# Runs all 12 test suites in order and aggregates suite-level pass/fail.
+# Runs all 13 test suites in order and aggregates suite-level pass/fail.
 # Suites 5-12 are stubs — they print a clear "NOT YET IMPLEMENTED" message
 # and exit 0 so the runner continues (they don't fail the suite).
+# Suite 13 (Observability) is a CRITICAL gate — failure means the platform is dark.
 #
 # Usage:
 #   bash scripts/e2e/run-all.sh
@@ -58,6 +59,7 @@ run_suite "Suite 9:  Eval Runner"               "suite-9-eval.sh"
 run_suite "Suite 10: Multi-Agent Handoff"       "suite-10-multi-agent.sh"
 run_suite "Suite 11: Resilience"                "suite-11-resilience.sh"
 run_suite "Suite 12: Quarantine"                "suite-12-quarantine.sh"
+run_suite "Suite 13: Observability (CRITICAL)"  "suite-13-observability.sh"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

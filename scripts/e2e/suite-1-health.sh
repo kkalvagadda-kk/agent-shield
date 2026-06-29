@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Suite 1: Platform Health & Bootstrapping
-# Tests T-S1-001 through T-S1-006
+# Tests T-S1-001 through T-S1-009
 #
 # Usage:
 #   bash scripts/e2e/suite-1-health.sh
@@ -154,6 +154,90 @@ else
   check_manual "T-S1-006: Safety Orchestrator (API pod unavailable)" \
     "kubectl port-forward svc/agentshield-safety-orchestrator -n $NAMESPACE 8082:8080 &" \
     "curl http://localhost:8082/health → 200; curl http://localhost:8082/ready → valid JSON with 'scanners' key"
+fi
+echo ""
+
+# ── T-S1-007: Langfuse Web Pod Ready ─────────────────────────────────────
+echo "--- T-S1-007: Langfuse Web Pod Ready ---"
+LF_POD=$(kubectl get pods -n "$NAMESPACE" -l 'app.kubernetes.io/name=langfuse-web' \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -z "$LF_POD" ]; then
+  # Try broader selector — chart may use different label
+  LF_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep "langfuse-web" | awk '{print $1}' | head -1 || true)
+fi
+if [ -n "$LF_POD" ]; then
+  LF_HEALTH=$(kubectl exec -n "$NAMESPACE" "$LF_POD" -- sh -c \
+    "wget -qO- http://localhost:3000/api/public/health 2>/dev/null || echo ERR" 2>/dev/null || echo "ERR")
+  if echo "$LF_HEALTH" | grep -q '"status":"OK"'; then
+    pass "T-S1-007: Langfuse web /api/public/health returned OK"
+  else
+    fail "T-S1-007: Langfuse web health check failed: $LF_HEALTH"
+  fi
+else
+  check_manual "T-S1-007: Langfuse web pod not found" \
+    "kubectl port-forward svc/agentshield-langfuse-web -n $NAMESPACE 4000:3000 &" \
+    "curl http://localhost:4000/api/public/health → {\"status\":\"OK\"}"
+fi
+echo ""
+
+# ── T-S1-008: Langfuse Project Auto-Bootstrapped ──────────────────────────
+echo "--- T-S1-008: Langfuse Project Auto-Bootstrapped ---"
+LF_SVC="http://agentshield-langfuse-web.${NAMESPACE}.svc.cluster.local:3000"
+LF_PK="pk-lf-agentshield-dev-local-0001"
+LF_SK="sk-lf-agentshield-dev-local-0001"
+if [ -n "${API_POD:-}" ]; then
+  LF_PROJ=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, base64
+creds = base64.b64encode(b'${LF_PK}:${LF_SK}').decode()
+req = urllib.request.Request(
+    '${LF_SVC}/api/public/projects',
+    headers={'Authorization': 'Basic ' + creds}
+)
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    body = json.loads(r.read())
+    projects = body.get('data', [])
+    found = any(p.get('id') == '00000000-0000-0000-0001-agentshield01' for p in projects)
+    print('ok' if found else 'not-found')
+except Exception as e:
+    print('ERR:' + str(e)[:80])
+" 2>/dev/null || echo "ERR")
+  if [ "$LF_PROJ" = "ok" ]; then
+    pass "T-S1-008: Langfuse project 'AgentShield Platform' auto-bootstrapped with correct ID"
+  else
+    fail "T-S1-008: Langfuse project bootstrap check failed: $LF_PROJ"
+  fi
+else
+  check_manual "T-S1-008: Langfuse bootstrap (API pod unavailable)" \
+    "curl -u pk-lf-agentshield-dev-local-0001:sk-lf-agentshield-dev-local-0001 http://localhost:4000/api/public/projects" \
+    "Assert response has project with id=00000000-0000-0000-0001-agentshield01"
+fi
+echo ""
+
+# ── T-S1-009: Langfuse Alias Services Resolve ─────────────────────────────
+echo "--- T-S1-009: Langfuse ClickHouse and S3 Alias Services Resolve ---"
+if [ -n "${API_POD:-}" ]; then
+  LF_DNS=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import socket
+results = []
+for host in ['agentshield-langfuse-clickhouse', 'agentshield-langfuse-s3']:
+    fqdn = host + '.${NAMESPACE}.svc.cluster.local'
+    try:
+        socket.getaddrinfo(fqdn, None, socket.AF_INET)
+        results.append(host + ':ok')
+    except Exception as e:
+        results.append(host + ':NXDOMAIN')
+print(' '.join(results))
+" 2>/dev/null || echo "ERR")
+  if echo "$LF_DNS" | grep -q "NXDOMAIN\|ERR"; then
+    fail "T-S1-009: Langfuse alias service DNS resolution failed: $LF_DNS"
+  else
+    pass "T-S1-009: ClickHouse and S3 alias services resolve ($LF_DNS)"
+  fi
+else
+  check_manual "T-S1-009: Alias service DNS check (API pod unavailable)" \
+    "kubectl exec -n $NAMESPACE <any-pod> -- getent hosts agentshield-langfuse-clickhouse" \
+    "kubectl exec -n $NAMESPACE <any-pod> -- getent hosts agentshield-langfuse-s3"
 fi
 echo ""
 

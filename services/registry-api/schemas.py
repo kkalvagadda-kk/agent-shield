@@ -832,6 +832,47 @@ class EvalRunResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# AgentRun — central invocation primitive
+# ---------------------------------------------------------------------------
+class AgentRunCreate(BaseModel):
+    agent_name: str
+    agent_version_id: uuid.UUID | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    input: str | None = None
+    langfuse_trace_id: str | None = None
+    context: Literal["production", "playground"] = "production"
+
+
+class AgentRunUpdate(BaseModel):
+    output: str | None = None
+    langfuse_trace_id: str | None = None
+    cost_usd: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: int | None = None
+    status: Literal["running", "completed", "failed", "blocked"] | None = None
+
+
+class AgentRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    agent_name: str
+    agent_version_id: uuid.UUID | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    langfuse_trace_id: str | None = None
+    cost_usd: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    latency_ms: int | None = None
+    status: str
+    context: str
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
 # Error  (matches ErrorResponse in OpenAPI spec)
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
@@ -929,6 +970,10 @@ __all__ = [
     "EvalRunResultResponse",
     "EvalRunStatusUpdate",
     "EvalRunResponse",
+    # Agent Run (observability primitive)
+    "AgentRunCreate",
+    "AgentRunUpdate",
+    "AgentRunResponse",
     # Error
     "ErrorResponse",
 ]

@@ -1136,6 +1136,51 @@ class EvalRunResult(Base):
 
 
 # ---------------------------------------------------------------------------
+# agent_runs — central invocation primitive for all agent calls
+# ---------------------------------------------------------------------------
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running','completed','failed','blocked')",
+            name="ck_agent_runs_status",
+        ),
+        CheckConstraint(
+            "context IN ('production','playground')",
+            name="ck_agent_runs_context",
+        ),
+        Index("ix_agent_runs_agent_name", "agent_name"),
+        Index("ix_agent_runs_session_id", "session_id"),
+        Index("ix_agent_runs_started_at", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    agent_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    input: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)
+    langfuse_trace_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    cost_usd: Mapped[Optional[float]] = mapped_column(nullable=True)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="running"
+    )
+    context: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="production"
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -1165,4 +1210,5 @@ __all__ = [
     "PlaygroundDataset",
     "EvalRun",
     "EvalRunResult",
+    "AgentRun",
 ]

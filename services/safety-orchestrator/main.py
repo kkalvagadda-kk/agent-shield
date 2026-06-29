@@ -2,7 +2,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, Request, Response
+from fastapi.responses import JSONResponse
 
 from config import settings
 from orchestrator import SafetyOrchestrator
@@ -69,12 +70,29 @@ async def ready() -> ReadinessResponse:
 
 
 @app.post("/api/v1/scan/input", response_model=ScanInputResponse)
-async def scan_input(req: ScanInputRequest) -> ScanInputResponse:
+async def scan_input(
+    req: ScanInputRequest,
+    response: Response,
+    x_agentshield_trace_id: str | None = Header(None, alias="X-AgentShield-Trace-ID"),
+) -> ScanInputResponse:
     assert _orchestrator
-    return await _orchestrator.scan_input(req)
+    result = await _orchestrator.scan_input(req, trace_id=x_agentshield_trace_id)
+    # Echo trace ID so callers can stitch spans
+    out_trace_id = x_agentshield_trace_id or req.session_id or ""
+    if out_trace_id:
+        response.headers["X-AgentShield-Trace-ID"] = out_trace_id
+    return result
 
 
 @app.post("/api/v1/scan/output", response_model=ScanOutputResponse)
-async def scan_output(req: ScanOutputRequest) -> ScanOutputResponse:
+async def scan_output(
+    req: ScanOutputRequest,
+    response: Response,
+    x_agentshield_trace_id: str | None = Header(None, alias="X-AgentShield-Trace-ID"),
+) -> ScanOutputResponse:
     assert _orchestrator
-    return await _orchestrator.scan_output(req)
+    result = await _orchestrator.scan_output(req, trace_id=x_agentshield_trace_id)
+    out_trace_id = x_agentshield_trace_id or req.session_id or ""
+    if out_trace_id:
+        response.headers["X-AgentShield-Trace-ID"] = out_trace_id
+    return result

@@ -34,17 +34,19 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Response, status
+from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from config import settings
 from db import AsyncSessionLocal, engine
 from routers.admin import router as admin_router
+from routers.agent_runs import router as agent_runs_router
 from routers.agents import router as agents_router
 from routers.approvals import router as approvals_router
 from routers.auth_configs import router as auth_configs_router
@@ -132,6 +134,18 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # --- Trace ID propagation middleware ---
+    # Reads X-AgentShield-Trace-ID from request; generates one if absent.
+    # Injects into request.state and echoes in response header so callers
+    # can stitch spans across service boundaries.
+    @app.middleware("http")
+    async def trace_id_middleware(request: Request, call_next):
+        trace_id = request.headers.get("X-AgentShield-Trace-ID") or str(uuid.uuid4())
+        request.state.trace_id = trace_id
+        response = await call_next(request)
+        response.headers["X-AgentShield-Trace-ID"] = trace_id
+        return response
+
     # --- Phase 1 routers ---
     app.include_router(agents_router)
     app.include_router(versions_router)
@@ -154,6 +168,9 @@ def create_app() -> FastAPI:
     app.include_router(agent_tools_router)
     app.include_router(llm_providers_router)
     app.include_router(admin_router)
+
+    # --- Agent Runs router (observability primitive) ---
+    app.include_router(agent_runs_router)
 
     # --- Playground routers (Phase 9.3 + 10.1 + 10.3) ---
     # Note: playground_approvals and playground share the /api/v1/playground prefix

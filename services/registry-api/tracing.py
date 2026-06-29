@@ -87,3 +87,35 @@ def trace_eval_run_completed(run_id: str, status: str, overall_score: float | No
         lf.flush()
     except Exception as exc:
         logger.debug("Langfuse trace_eval_run_completed error: %s", exc)
+
+
+def trace_platform_action(
+    trace_id: str,
+    action: str,
+    user_id: str | None = None,
+    agent_name: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Emit a Langfuse trace for a platform write action (deploy, approve, etc.).
+
+    trace_id comes from the X-AgentShield-Trace-ID request header so the trace
+    is stitchable with downstream safety-scan spans that carry the same ID.
+    """
+    lf = get_langfuse()
+    if not lf:
+        return
+    try:
+        lf.trace(
+            id=trace_id,
+            name=f"platform.{action}",
+            user_id=user_id,
+            metadata={
+                **(metadata or {}),
+                "agent_name": agent_name,
+                "action": action,
+            },
+            tags=["platform", action],
+        )
+        lf.flush()
+    except Exception as exc:
+        logger.debug("Langfuse trace_platform_action error: %s", exc)

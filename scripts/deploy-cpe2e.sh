@@ -4,7 +4,7 @@
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
 #   - registry-api:0.2.18  (+ grant audit endpoint, AdminApprovalAuthorityPage, FK 500→409)
-#   - safety-orchestrator:0.1.2 (scanner enable flags; pass-through when all disabled)
+#   - safety-orchestrator:0.1.3 (per-scanner Langfuse spans + trace_id propagation)
 #   - deploy-controller:0.1.7 (Phase 9.1 ensure_service_account wired in)
 #   - studio:0.1.18        (+ AdminApprovalAuthorityPage, Approvers nav link)
 #   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
@@ -35,7 +35,8 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.18"
+REGISTRY_API_TAG="0.2.19"
+SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.7"
 STUDIO_TAG="0.1.18"
 EVAL_RUNNER_TAG="0.1.0"
@@ -50,8 +51,11 @@ echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (grant audit endpoint, approval authority API)"
+echo "  → registry-api:${REGISTRY_API_TAG} (agent_runs table, trace middleware, observability)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
+
+echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
+docker build -t "registry.internal/agentshield/safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG}" services/safety-orchestrator/
 
 echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (pre-flight gate in reconciler)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/

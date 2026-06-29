@@ -19,6 +19,7 @@ Output scan flow:
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from config import settings
@@ -71,32 +72,76 @@ class SafetyOrchestrator:
     # Input scanning
     # ------------------------------------------------------------------
 
-    async def scan_input(self, req: ScanInputRequest) -> ScanInputResponse:
+    async def scan_input(
+        self, req: ScanInputRequest, trace_id: str | None = None
+    ) -> ScanInputResponse:
         lf = _lf()
         trace = span = None
+        t0 = time.monotonic()
         try:
             if lf:
-                trace = lf.trace(name="safety-scan-input", session_id=req.session_id,
-                                 metadata={"agent": req.agent_name})
-                span = trace.span(name="scan-input")
+                trace = lf.trace(
+                    id=trace_id or None,
+                    name="safety-scan-input",
+                    session_id=req.session_id,
+                    metadata={"agent_name": req.agent_name},
+                )
+                span = trace.span(
+                    name="safety-scan-input",
+                    input={"message": req.message[:200] if req.message else ""},
+                )
         except Exception:
             pass
         try:
-            result = await asyncio.wait_for(self._scan_input_inner(req), timeout=_SCAN_TIMEOUT)
+            result = await asyncio.wait_for(
+                self._scan_input_inner(req, trace=trace),
+                timeout=_SCAN_TIMEOUT,
+            )
         except asyncio.TimeoutError:
             logger.warning("Input scan timed out for session=%s agent=%s", req.session_id, req.agent_name)
             result = ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
         except Exception as exc:
             logger.error("Input scan error: %s", exc)
             result = ScanInputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+        latency_ms = int((time.monotonic() - t0) * 1000)
         try:
             if span:
-                span.end(output={"blocked": result.blocked, "reason": result.reason})
+                span.end(output={
+                    "blocked": result.blocked,
+                    "reason": result.reason,
+                    "latency_ms": latency_ms,
+                })
+            if lf:
+                lf.flush()
         except Exception:
             pass
         return result
 
-    async def _scan_input_inner(self, req: ScanInputRequest) -> ScanInputResponse:
+    async def _emit_scanner_span(
+        self, trace: Any, scanner_name: str, input_text: str,
+        result: dict, latency_ms: int
+    ) -> None:
+        """Emit a child span for a single scanner call with latency."""
+        try:
+            if trace:
+                span = trace.span(
+                    name=f"safety-scan-{scanner_name}",
+                    input={"text": input_text[:200]},
+                    output={
+                        "blocked": result.get("is_blocked", False) or result.get("blocked", False),
+                        "risk_score": result.get("risk_score", 0.0),
+                        "reason": result.get("reason", ""),
+                        "latency_ms": latency_ms,
+                    },
+                    metadata={"scanner": scanner_name},
+                )
+                span.end()
+        except Exception:
+            pass
+
+    async def _scan_input_inner(
+        self, req: ScanInputRequest, trace: Any = None
+    ) -> ScanInputResponse:
         scan_text = req.message
         pii_detected = False
         anonymized_text: str | None = None
@@ -104,6 +149,7 @@ class SafetyOrchestrator:
         # Step 1: PII detection + anonymization (Presidio)
         if settings.presidio_enabled:
             try:
+                t0 = time.monotonic()
                 entities = await self._presidio.analyze(req.message)
                 if entities:
                     pii_detected = True
@@ -119,6 +165,11 @@ class SafetyOrchestrator:
                             anonymized_text=entity.get("anonymized", anonymized_text),
                             entity_type=entity.get("entity_type", "UNKNOWN"),
                         )
+                await self._emit_scanner_span(
+                    trace, "presidio", req.message,
+                    {"blocked": False, "pii_detected": pii_detected},
+                    int((time.monotonic() - t0) * 1000),
+                )
             except Exception as exc:
                 logger.error("Presidio scan failed: %s", exc)
                 return ScanInputResponse(allowed=False, blocked=True, reason="presidio-error")
@@ -130,17 +181,22 @@ class SafetyOrchestrator:
 
         tasks: list = []
         task_labels: list[str] = []
+        task_t0s: list[float] = []
 
         if settings.llmguard_enabled:
+            task_t0s.append(time.monotonic())
             tasks.append(self._llm_guard.scan(scan_text))
             task_labels.append("llm_guard")
         if settings.nemo_enabled:
+            task_t0s.append(time.monotonic())
             tasks.append(self._nemo.check(scan_text))
             task_labels.append("nemo")
 
         if tasks:
+            scan_t0 = time.monotonic()
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for label, result in zip(task_labels, results):
+                latency = int((time.monotonic() - scan_t0) * 1000)
                 if isinstance(result, Exception):
                     logger.error("%s scan failed: %s", label, result)
                     return ScanInputResponse(allowed=False, blocked=True, reason=f"{label}-error")
@@ -148,6 +204,7 @@ class SafetyOrchestrator:
                     score = result.get("risk_score", 0.0)
                     scores[label] = score
                     blocked_flag = result.get("is_blocked", False) or result.get("blocked", False)
+                    await self._emit_scanner_span(trace, label, scan_text, result, latency)
                     if blocked_flag or score >= 0.8:
                         return ScanInputResponse(
                             allowed=False, blocked=True, reason=f"{label}-violation", scores=scores
@@ -167,40 +224,65 @@ class SafetyOrchestrator:
     # Output scanning
     # ------------------------------------------------------------------
 
-    async def scan_output(self, req: ScanOutputRequest) -> ScanOutputResponse:
+    async def scan_output(
+        self, req: ScanOutputRequest, trace_id: str | None = None
+    ) -> ScanOutputResponse:
         lf = _lf()
         trace = span = None
+        t0 = time.monotonic()
         try:
             if lf:
-                trace = lf.trace(name="safety-scan-output", session_id=req.session_id,
-                                 metadata={"agent": req.agent_name})
-                span = trace.span(name="scan-output")
+                trace = lf.trace(
+                    id=trace_id or None,
+                    name="safety-scan-output",
+                    session_id=req.session_id,
+                    metadata={"agent_name": req.agent_name},
+                )
+                span = trace.span(
+                    name="safety-scan-output",
+                    input={"message": req.message[:200] if req.message else ""},
+                )
         except Exception:
             pass
         try:
-            result = await asyncio.wait_for(self._scan_output_inner(req), timeout=_SCAN_TIMEOUT)
+            result = await asyncio.wait_for(
+                self._scan_output_inner(req, trace=trace),
+                timeout=_SCAN_TIMEOUT,
+            )
         except asyncio.TimeoutError:
             logger.warning("Output scan timed out for session=%s", req.session_id)
             result = ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-timeout")
         except Exception as exc:
             logger.error("Output scan error: %s", exc)
             result = ScanOutputResponse(allowed=False, blocked=True, reason="safety-scan-error")
+        latency_ms = int((time.monotonic() - t0) * 1000)
         try:
             if span:
-                span.end(output={"blocked": result.blocked, "reason": result.reason})
+                span.end(output={
+                    "blocked": result.blocked,
+                    "reason": result.reason,
+                    "latency_ms": latency_ms,
+                })
+            if lf:
+                lf.flush()
         except Exception:
             pass
         return result
 
-    async def _scan_output_inner(self, req: ScanOutputRequest) -> ScanOutputResponse:
+    async def _scan_output_inner(
+        self, req: ScanOutputRequest, trace: Any = None
+    ) -> ScanOutputResponse:
         scores: dict[str, float] = {}
 
         # Step 1: LLM Guard output scan
         if settings.llmguard_enabled:
             try:
+                t0 = time.monotonic()
                 guard_result = await self._llm_guard.scan(req.message)
+                latency = int((time.monotonic() - t0) * 1000)
                 score = guard_result.get("risk_score", 0.0)
                 scores["llm_guard"] = score
+                await self._emit_scanner_span(trace, "llm_guard", req.message, guard_result, latency)
                 if guard_result.get("is_blocked", False) or score >= 0.8:
                     return ScanOutputResponse(
                         allowed=False, blocked=True, reason="llmguard-output-violation", scores=scores

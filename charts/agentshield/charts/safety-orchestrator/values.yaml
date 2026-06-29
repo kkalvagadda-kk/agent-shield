@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: registry.internal/agentshield/safety-orchestrator
-  tag: "0.1.2"
+  tag: "0.1.3"
   pullPolicy: IfNotPresent
 
 existingSecret: postgres-passwords
