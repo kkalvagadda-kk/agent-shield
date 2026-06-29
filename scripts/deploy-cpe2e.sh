@@ -163,9 +163,9 @@ echo ""
 echo "[4/8] Updating Helm dependencies..."
 helm dependency update "$CHART" 2>/dev/null || true
 
-# Apply Langfuse-specific infra (ClickHouse alias Service).
-# Bitnami ClickHouse sub-chart names its service <release>-clickhouse but Langfuse
-# derives the host as <release>-langfuse-clickhouse. The alias bridges that gap.
+# Apply Langfuse-specific infra (ClickHouse + S3 alias Services).
+# Bitnami sub-charts name services <release>-{chart} but Langfuse derives
+# <release>-langfuse-{chart}. These alias Services bridge that naming gap.
 kubectl apply -f infra/langfuse/clickhouse-alias-svc.yaml 2>/dev/null || true
 
 # ── Step 5: Helm upgrade ──────────────────────────────────────────────────────
@@ -223,6 +223,20 @@ kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3
 kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
+
+# Create langfuse-media bucket in the Langfuse MinIO (s3) pod.
+# MinIO starts with no buckets; Langfuse needs this bucket for event blob storage.
+echo "  Creating langfuse-media bucket in MinIO..."
+MINIO_POD=$(kubectl get pod -n "$NAMESPACE" --no-headers | grep "agentshield-s3-" | awk '{print $1}' | head -1)
+if [ -n "$MINIO_POD" ]; then
+  kubectl exec -n "$NAMESPACE" "$MINIO_POD" -- \
+    mc alias set local http://localhost:9000 langfuse-admin LangfuseMinio2024 2>/dev/null || true
+  kubectl exec -n "$NAMESPACE" "$MINIO_POD" -- \
+    mc mb local/langfuse-media 2>/dev/null || true
+  echo "  langfuse-media bucket ready."
+else
+  echo "  Warning: Langfuse MinIO pod not found — create bucket manually."
+fi
 
 # ── Step 7: Seed default teams ────────────────────────────────────────────────
 echo ""
