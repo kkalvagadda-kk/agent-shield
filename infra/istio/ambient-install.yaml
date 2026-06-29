@@ -1,0 +1,29 @@
+# Istio Ambient Mesh installation values
+#
+# Install via:
+#   helm repo add istio https://istio-release.storage.googleapis.com/charts
+#   helm repo update
+#   helm install istio-base istio/base -n istio-system --create-namespace --version 1.22.0
+#   helm install istiod istio/istiod -n istio-system -f infra/istio/ambient-install.yaml --version 1.22.0
+#   helm install istio-ztunnel istio/ztunnel -n istio-system --version 1.22.0
+#
+# No ingress gateway changes — AgentShield uses Envoy Gateway for ingress,
+# not Istio's gateway. ztunnel handles only east-west mesh traffic (L4 mTLS).
+#
+# Phase 9.1: Option C (ztunnel only, no Waypoints).
+# Phase 11 (future): Option B migration — add Waypoints + centralized OPA.
+
+profile: ambient
+
+pilot:
+  env:
+    # Enable ambient mesh mode
+    PILOT_ENABLE_AMBIENT: "true"
+
+meshConfig:
+  # Disable sidecar injection globally — we're using ambient (ztunnel), not sidecars
+  defaultConfig:
+    proxyMetadata:
+      ISTIO_META_DNS_CAPTURE: "false"
+  # Access logging to stdout for audit trail
+  accessLogFile: /dev/stdout

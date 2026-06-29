@@ -1,0 +1,33 @@
+# Istio Ambient Mesh namespace labels
+#
+# Applied after `istioctl install --set profile=ambient` (or equivalent Helm install).
+# Labels tell ztunnel to enroll pods in the mesh and handle L4 mTLS automatically.
+# No Waypoints in Phase 9.1 (Option C). Future Phase 11 adds Waypoints (Option B).
+#
+# Apply: kubectl apply -f infra/istio/namespace-labels.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: platform
+    kubernetes.io/metadata.name: agentshield-platform
+    # Enroll in Istio Ambient Mesh (ztunnel L4 mTLS, no sidecars)
+    istio.io/dataplane-mode: ambient
+  annotations:
+    agentshield.io/description: AgentShield platform services
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agent-team
+    kubernetes.io/metadata.name: agents-platform
+    istio.io/dataplane-mode: ambient
+  annotations:
+    agentshield.io/team: platform
+    agentshield.io/description: Agent pods for team 'platform'
