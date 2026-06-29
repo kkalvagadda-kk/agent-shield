@@ -39,6 +39,12 @@ spec:
                   key: registry-api-url
             - name: PII_TTL_HOURS
               value: {{ .Values.piiTtlHours | default 24 | quote }}
+            - name: LLMGUARD_ENABLED
+              value: {{ .Values.llmguardEnabled | toString | quote }}
+            - name: PRESIDIO_ENABLED
+              value: {{ .Values.presidioEnabled | toString | quote }}
+            - name: NEMO_ENABLED
+              value: {{ .Values.nemoEnabled | toString | quote }}
           resources:
             requests:
               memory: "256Mi"

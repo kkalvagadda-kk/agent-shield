@@ -493,6 +493,14 @@ deploy-controller:
 safety-orchestrator:
   enabled: true
 
+  # Scanner enable flags — set to false to make the orchestrator skip that
+  # scanner entirely (pass-through, no fail-closed). Should match the
+  # corresponding sub-chart's enabled flag so the orchestrator doesn't
+  # try to call a service that isn't running.
+  llmguardEnabled: true
+  presidioEnabled: true
+  nemoEnabled: true
+
   replicaCount: 2
 
   image:

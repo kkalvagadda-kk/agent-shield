@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:DevPass2024@agentshield-postgresql:5432/agentshield"
     pii_ttl_hours: int = 24
 
+    # Scanner enable flags — set to false to skip a scanner entirely (pass-through, no fail-close).
+    # When all three are false the orchestrator is a pure pass-through.
+    llmguard_enabled: bool = True
+    presidio_enabled: bool = True
+    nemo_enabled: bool = True
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

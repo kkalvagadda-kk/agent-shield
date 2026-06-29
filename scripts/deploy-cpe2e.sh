@@ -4,6 +4,7 @@
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
 #   - registry-api:0.2.18  (+ grant audit endpoint, AdminApprovalAuthorityPage, FK 500→409)
+#   - safety-orchestrator:0.1.2 (scanner enable flags; pass-through when all disabled)
 #   - deploy-controller:0.1.7 (Phase 9.1 ensure_service_account wired in)
 #   - studio:0.1.18        (+ AdminApprovalAuthorityPage, Approvers nav link)
 #   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
@@ -176,6 +177,9 @@ helm upgrade --install "$RELEASE" "$CHART" \
   --set studio.enabled=true \
   --set python-executor.enabled=true \
   --set safety-orchestrator.enabled=false \
+  --set safety-orchestrator.llmguardEnabled=false \
+  --set safety-orchestrator.presidioEnabled=false \
+  --set safety-orchestrator.nemoEnabled=false \
   --set llm-guard.enabled=false \
   --set presidio.enabled=false \
   --set nemo.enabled=false \

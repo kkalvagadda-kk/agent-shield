@@ -2,7 +2,7 @@ replicaCount: 2
 
 image:
   repository: registry.internal/agentshield/safety-orchestrator
-  tag: "0.1.0"
+  tag: "0.1.2"
   pullPolicy: IfNotPresent
 
 existingSecret: postgres-passwords
@@ -14,3 +14,10 @@ llmguardUrl: ""
 presidioAnalyzerUrl: ""
 presidioAnonymizerUrl: ""
 nemoUrl: ""
+
+# Scanner enable flags — when false the orchestrator skips that scanner entirely
+# (pass-through, no fail-closed). Set automatically by the umbrella chart based
+# on whether the corresponding sub-chart is enabled.
+llmguardEnabled: true
+presidioEnabled: true
+nemoEnabled: true

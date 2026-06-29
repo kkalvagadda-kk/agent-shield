@@ -1,0 +1,23 @@
+enabled: false
+
+image:
+  repository: portkeyai/gateway
+  tag: "1.9.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8787
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Optional: set LOG_STORE, ANALYTICS_STORE, etc. for enterprise features
+env: {}
