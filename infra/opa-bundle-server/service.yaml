@@ -15,3 +15,22 @@ spec:
       port: 80
       targetPort: 80
       protocol: TCP
+---
+# Alias with Helm release prefix — used by e2e suite-1 and OPA sidecar bundle URL
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentshield-opa-bundle-server
+  namespace: agentshield-platform
+  labels:
+    app: opa-bundle-server
+    component: authorization
+spec:
+  type: ClusterIP
+  selector:
+    app: opa-bundle-server
+  ports:
+    - name: http
+      port: 8181
+      targetPort: 80
+      protocol: TCP

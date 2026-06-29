@@ -5,6 +5,7 @@ metadata:
   namespace: agentshield-platform
   labels:
     app: opa-bundle-server
+    app.kubernetes.io/name: opa-bundle-server
     component: authorization
 spec:
   replicas: 2
@@ -15,8 +16,40 @@ spec:
     metadata:
       labels:
         app: opa-bundle-server
+        app.kubernetes.io/name: opa-bundle-server
         component: authorization
     spec:
+      initContainers:
+        # Fetch bundle from registry-api on startup before nginx begins serving
+        - name: bundle-init
+          image: alpine/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              REGISTRY_URL="${REGISTRY_API_URL:-http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000}"
+              mkdir -p /data/agentshield
+              echo "Fetching initial bundle from $REGISTRY_URL..."
+              curl -sf "${REGISTRY_URL}/api/v1/bundle/data.json" -o /data/agentshield/data.json \
+                || (echo "Warning: bundle data fetch failed, using fallback" && echo '{"agents":{},"grants":{}}' > /data/agentshield/data.json)
+              curl -sf "${REGISTRY_URL}/api/v1/bundle/policy.rego" -o /data/agentshield/policy.rego \
+                || (echo "Warning: policy fetch failed, using fallback" && echo 'package agentshield.agent' > /data/agentshield/policy.rego)
+              echo "Initial bundle written."
+          env:
+            - name: REGISTRY_API_URL
+              value: "http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000"
+          volumeMounts:
+            - name: bundle-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+
       containers:
         - name: nginx
           image: nginx:1.27-alpine
@@ -24,13 +57,8 @@ spec:
             - containerPort: 80
               name: http
           volumeMounts:
-            - name: policy
-              mountPath: /usr/share/nginx/html/bundles/agentshield/policy.rego
-              subPath: policy.rego
-              readOnly: true
-            - name: data
-              mountPath: /usr/share/nginx/html/bundles/agentshield/data.json
-              subPath: data.json
+            - name: bundle-data
+              mountPath: /usr/share/nginx/html/bundles
               readOnly: true
             - name: nginx-conf
               mountPath: /etc/nginx/conf.d/default.conf
@@ -55,13 +83,41 @@ spec:
               port: 80
             initialDelaySeconds: 3
             periodSeconds: 5
+
+        - name: bundle-sync
+          image: alpine/curl:8.5.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              REGISTRY_URL="${REGISTRY_API_URL:-http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000}"
+              echo "bundle-sync: starting poll loop (every 30s)"
+              while true; do
+                sleep 30
+                curl -sf "${REGISTRY_URL}/api/v1/bundle/data.json" -o /data/agentshield/data.json.tmp \
+                  && mv /data/agentshield/data.json.tmp /data/agentshield/data.json \
+                  && echo "bundle-sync: data.json refreshed at $(date -u +%H:%M:%S)"
+                curl -sf "${REGISTRY_URL}/api/v1/bundle/policy.rego" -o /data/agentshield/policy.rego.tmp \
+                  && mv /data/agentshield/policy.rego.tmp /data/agentshield/policy.rego \
+                  && echo "bundle-sync: policy.rego refreshed at $(date -u +%H:%M:%S)"
+              done
+          env:
+            - name: REGISTRY_API_URL
+              value: "http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000"
+          volumeMounts:
+            - name: bundle-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+
       volumes:
-        - name: policy
-          configMap:
-            name: opa-bundle-policy
-        - name: data
-          configMap:
-            name: opa-bundle-data
+        - name: bundle-data
+          emptyDir: {}
         - name: nginx-conf
           configMap:
             name: opa-bundle-server-nginx-conf

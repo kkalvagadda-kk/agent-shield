@@ -172,6 +172,13 @@ helm dependency update "$CHART" 2>/dev/null || true
 # <release>-langfuse-{chart}. These alias Services bridge that naming gap.
 kubectl apply -f infra/langfuse/clickhouse-alias-svc.yaml 2>/dev/null || true
 
+# Apply OPA Bundle Server infra (nginx + bundle-sync sidecar).
+# The bundle-sync sidecar polls registry-api /api/v1/bundle every 30s so
+# OPA sidecars always have fresh policy + data without ConfigMap patches.
+kubectl apply -f infra/opa-bundle-server/configmap-nginx-conf.yaml 2>/dev/null || true
+kubectl apply -f infra/opa-bundle-server/service.yaml 2>/dev/null || true
+kubectl apply -f infra/opa-bundle-server/deployment.yaml 2>/dev/null || true
+
 # ── Step 5: Helm upgrade ──────────────────────────────────────────────────────
 echo ""
 echo "[5/8] Helm upgrade/install '${RELEASE}'..."

@@ -11,10 +11,20 @@ data:
 
         root /usr/share/nginx/html;
 
-        location /bundles/ {
-            # OPA bundle polling — serve with appropriate cache control
+        location /bundles/agentshield/data.json {
             add_header Cache-Control "no-cache, must-revalidate";
             add_header Content-Type "application/json";
+            try_files $uri =404;
+        }
+
+        location /bundles/agentshield/policy.rego {
+            add_header Cache-Control "no-cache, must-revalidate";
+            add_header Content-Type "text/plain";
+            try_files $uri =404;
+        }
+
+        location /bundles/ {
+            add_header Cache-Control "no-cache, must-revalidate";
             try_files $uri $uri/ =404;
         }
 

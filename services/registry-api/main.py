@@ -47,6 +47,7 @@ from config import settings
 from db import AsyncSessionLocal, engine
 from routers.admin import router as admin_router
 from routers.agent_runs import router as agent_runs_router
+from routers.bundle import router as bundle_router
 from routers.agents import router as agents_router
 from routers.approvals import router as approvals_router
 from routers.auth_configs import router as auth_configs_router
@@ -171,6 +172,9 @@ def create_app() -> FastAPI:
 
     # --- Agent Runs router (observability primitive) ---
     app.include_router(agent_runs_router)
+
+    # --- Bundle router (live OPA data.json + policy.rego for bundle server) ---
+    app.include_router(bundle_router)
 
     # --- Playground routers (Phase 9.3 + 10.1 + 10.3) ---
     # Note: playground_approvals and playground share the /api/v1/playground prefix
