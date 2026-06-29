@@ -21,3 +21,25 @@ spec:
     - name: native
       port: 9004
       targetPort: 9004
+---
+# Alias for the Langfuse MinIO (S3) sub-chart.
+# Bitnami names the service agentshield-s3 but Langfuse derives agentshield-langfuse-s3.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentshield-langfuse-s3
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: s3
+    app.kubernetes.io/instance: agentshield
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+    - name: console
+      port: 9001
+      targetPort: 9001
