@@ -3,9 +3,12 @@ Playground run endpoints — allows testing agents without a full deploy.
 
 Endpoints
 ---------
-  POST /api/v1/playground/runs          — start a playground run
-  GET  /api/v1/playground/runs          — list runs for the caller
-  GET  /api/v1/playground/runs/{id}/stream — SSE stream of run output
+  POST /api/v1/playground/runs               — start a playground run
+  GET  /api/v1/playground/runs               — list runs for the caller
+  GET  /api/v1/playground/runs/{id}/stream   — SSE stream of run output
+  GET  /api/v1/playground/runs/{id}/trace    — fetch Langfuse trace for a run
+  POST /api/v1/playground/runs/{id}/save-to-dataset — save run to a dataset
+  POST /api/v1/playground/runs/{id}/feedback — submit thumbs-up/down feedback
 """
 
 from __future__ import annotations
@@ -19,11 +22,12 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Agent, PlaygroundRun
+from models import Agent, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
 from schemas import PlaygroundRunCreate, PlaygroundRunResponse
 
@@ -214,3 +218,219 @@ async def stream_playground_run(
             "X-AgentShield-Sandbox": "true",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/playground/runs/{run_id}/trace
+# ---------------------------------------------------------------------------
+@router.get(
+    "/runs/{run_id}/trace",
+    summary="Fetch Langfuse trace for a playground run",
+)
+async def get_playground_run_trace(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the Langfuse trace URL and trace ID for a completed playground run."""
+    import os
+    import urllib.error
+    import urllib.request as urlreq
+
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    result = await db.execute(
+        select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Playground run '{run_id}' not found")
+
+    if not run.langfuse_trace_id:
+        return {
+            "run_id": run_id,
+            "trace_id": None,
+            "trace_url": None,
+            "status": run.status,
+            "message": "No Langfuse trace associated with this run yet",
+        }
+
+    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+
+    trace_url = f"{lf_host}/trace/{run.langfuse_trace_id}"
+    trace_data: dict[str, Any] = {}
+
+    if lf_pk and lf_sk:
+        import base64
+        creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
+        try:
+            req = urlreq.Request(
+                f"{lf_host}/api/public/traces/{run.langfuse_trace_id}",
+                headers={"Authorization": f"Basic {creds}"},
+            )
+            with urlreq.urlopen(req, timeout=5) as r:
+                trace_data = json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                trace_data = {"warning": "trace not yet ingested by Langfuse"}
+            else:
+                logger.debug("Langfuse trace fetch error %s: %s", exc.code, exc)
+        except Exception as exc:
+            logger.debug("Langfuse trace fetch failed: %s", exc)
+
+    return {
+        "run_id": run_id,
+        "trace_id": run.langfuse_trace_id,
+        "trace_url": trace_url,
+        "status": run.status,
+        "langfuse": trace_data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/playground/runs/{run_id}/save-to-dataset
+# ---------------------------------------------------------------------------
+class SaveToDatasetRequest(BaseModel):
+    dataset_id: uuid.UUID
+    label: Optional[str] = None
+
+
+@router.post(
+    "/runs/{run_id}/save-to-dataset",
+    status_code=status.HTTP_201_CREATED,
+    summary="Save a playground run as a dataset item",
+)
+async def save_run_to_dataset(
+    run_id: str,
+    body: SaveToDatasetRequest,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Append the run's input/output as a new item in the target dataset."""
+    try:
+        parsed_run_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    run_result = await db.execute(
+        select(PlaygroundRun).where(PlaygroundRun.id == parsed_run_id)
+    )
+    run = run_result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Playground run '{run_id}' not found")
+
+    ds_result = await db.execute(
+        select(PlaygroundDataset).where(PlaygroundDataset.id == body.dataset_id)
+    )
+    dataset = ds_result.scalar_one_or_none()
+    if not dataset:
+        raise HTTPException(status_code=404, detail=f"Dataset '{body.dataset_id}' not found")
+
+    new_item = {
+        "id": str(uuid.uuid4()),
+        "source_run_id": run_id,
+        "agent_name": run.agent_name,
+        "input": run.input_message,
+        "label": body.label,
+        "langfuse_trace_id": run.langfuse_trace_id,
+        "added_at": datetime.now(timezone.utc).isoformat(),
+        "added_by": x_user_sub or "unknown",
+    }
+
+    dataset.items = (dataset.items or []) + [new_item]
+    await db.commit()
+    await db.refresh(dataset)
+
+    return {
+        "dataset_id": str(body.dataset_id),
+        "item_id": new_item["id"],
+        "items_count": len(dataset.items),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/playground/runs/{run_id}/feedback
+# ---------------------------------------------------------------------------
+class RunFeedbackRequest(BaseModel):
+    score: int  # 1 = thumbs up, -1 = thumbs down
+    comment: Optional[str] = None
+
+
+@router.post(
+    "/runs/{run_id}/feedback",
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit feedback for a playground run",
+)
+async def submit_run_feedback(
+    run_id: str,
+    body: RunFeedbackRequest,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Record thumbs-up/down feedback. If run has a Langfuse trace_id, also
+    pushes a score to Langfuse so it appears in the observability dashboard."""
+    import os
+    import urllib.request as urlreq
+
+    if body.score not in (1, -1):
+        raise HTTPException(status_code=422, detail="score must be 1 (thumbs up) or -1 (thumbs down)")
+
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    run_result = await db.execute(
+        select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+    )
+    run = run_result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Playground run '{run_id}' not found")
+
+    langfuse_score_id: Optional[str] = None
+
+    if run.langfuse_trace_id:
+        lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+        lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+        lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+
+        if lf_pk and lf_sk:
+            import base64
+            creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
+            score_payload = json.dumps({
+                "traceId": run.langfuse_trace_id,
+                "name": "user-feedback",
+                "value": float(body.score),
+                "comment": body.comment or ("thumbs up" if body.score == 1 else "thumbs down"),
+                "source": "HUMAN_ANNOTATION",
+                "dataType": "NUMERIC",
+            }).encode()
+            try:
+                req = urlreq.Request(
+                    f"{lf_host}/api/public/scores",
+                    data=score_payload,
+                    headers={
+                        "Authorization": f"Basic {creds}",
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urlreq.urlopen(req, timeout=5) as r:
+                    score_resp = json.loads(r.read())
+                    langfuse_score_id = score_resp.get("id")
+            except Exception as exc:
+                logger.debug("Langfuse score push failed: %s", exc)
+
+    return {
+        "run_id": run_id,
+        "score": body.score,
+        "comment": body.comment,
+        "langfuse_trace_id": run.langfuse_trace_id,
+        "langfuse_score_id": langfuse_score_id,
+        "submitted_by": x_user_sub or "unknown",
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
