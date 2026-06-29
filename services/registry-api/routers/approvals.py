@@ -4,9 +4,9 @@ AgentShield Registry API — Approvals router.
 Endpoints
 ---------
   POST  /api/v1/approvals/           — create approval request (called by Safety Orchestrator)
-  GET   /api/v1/approvals/           — list approvals (filterable by status, agent)
+  GET   /api/v1/approvals/           — list approvals (production context, scoped to authority)
   GET   /api/v1/approvals/{id}       — get single approval (reviewer fetches before deciding)
-  PATCH /api/v1/approvals/{id}       — approve/reject with optimistic lock
+  PATCH /api/v1/approvals/{id}       — approve/reject with optimistic lock (authority-gated)
 """
 
 from __future__ import annotations
@@ -16,14 +16,18 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Approval
+from models import Approval, ApprovalAuthority
 from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, PaginatedResponse
+
+# Roles that always have authority to see/decide production approvals,
+# even without a specific per-resource ApprovalAuthority record.
+_ADMIN_ROLES = {"platform_admin", "team_lead"}
 
 
 class ReopenRequest(BaseModel):
@@ -43,6 +47,29 @@ async def _resolve(approval_id: uuid.UUID, db: AsyncSession) -> Approval:
             detail=f"Approval '{approval_id}' not found.",
         )
     return row
+
+
+async def _get_authority_tool_names(caller: str, db: AsyncSession) -> list[str]:
+    """Return tool names this caller has active ApprovalAuthority over."""
+    q = select(ApprovalAuthority.resource_id).where(
+        ApprovalAuthority.resource_type == "tool",
+        ApprovalAuthority.revoked_at.is_(None),
+        ApprovalAuthority.approver_user_id == caller,
+    )
+    result = await db.execute(q)
+    return [row[0] for row in result.all()]
+
+
+async def _has_authority_for_tool(caller: str, tool_name: str, db: AsyncSession) -> bool:
+    """Check if caller has active ApprovalAuthority for a specific tool."""
+    q = select(ApprovalAuthority).where(
+        ApprovalAuthority.resource_type == "tool",
+        ApprovalAuthority.resource_id == tool_name,
+        ApprovalAuthority.revoked_at.is_(None),
+        ApprovalAuthority.approver_user_id == caller,
+    )
+    result = await db.execute(q)
+    return result.scalar_one_or_none() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -75,13 +102,34 @@ async def create_approval(
         expires_at=expires_at,
         session_id=body.session_id,
         opa_decision_id=body.opa_decision_id,
+        context=body.context,
     )
     db.add(approval)
     await db.flush()
+
+    # Notify approvers — look up ApprovalAuthority records for this tool
+    # (Slack notification deferred to Phase 11; log for now)
+    if body.context == "production":
+        auth_q = select(ApprovalAuthority).where(
+            ApprovalAuthority.resource_type == "tool",
+            ApprovalAuthority.resource_id == body.tool_name,
+            ApprovalAuthority.revoked_at.is_(None),
+        )
+        auth_result = await db.execute(auth_q)
+        authorities = auth_result.scalars().all()
+        approvers = [
+            a.approver_user_id or f"role:{a.approver_role}" for a in authorities
+        ]
+        if approvers:
+            logger.info(
+                "create_approval: would notify approvers %s for tool=%s approval_id=%s",
+                approvers, body.tool_name, approval.id,
+            )
+
     logger.info(
-        "create_approval: id=%s agent=%s tool=%s risk=%s expires=%s",
+        "create_approval: id=%s agent=%s tool=%s risk=%s context=%s expires=%s",
         approval.id, approval.agent_name, approval.tool_name,
-        approval.risk_level, approval.expires_at,
+        approval.risk_level, approval.context, approval.expires_at,
     )
     return ApprovalResponse.model_validate(approval)
 
@@ -103,15 +151,44 @@ async def list_approvals(
     thread_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ApprovalResponse]:
+    """List production approvals. When X-User-Sub is provided, filters to
+    only show approvals the caller has authority over. Without the header,
+    returns all production approvals (admin fallback)."""
     q = select(Approval).order_by(Approval.created_at.desc())
+
+    # Always restrict to production context
+    q = q.where(Approval.context == "production")
+
     if agent_name:
         q = q.where(Approval.agent_name == agent_name)
     if status_filter:
         q = q.where(Approval.status == status_filter)
     if thread_id:
         q = q.where(Approval.thread_id == thread_id)
+
+    if x_user_sub:
+        # Scope to tools where caller has authority OR there's an authority record
+        # for an admin role (hardcoded admin roles get all-access)
+        auth_tool_names = await _get_authority_tool_names(x_user_sub, db)
+
+        # Also include tools with role-based authority (platform_admin/team_lead)
+        role_q = select(ApprovalAuthority.resource_id).where(
+            ApprovalAuthority.resource_type == "tool",
+            ApprovalAuthority.revoked_at.is_(None),
+            ApprovalAuthority.approver_role.in_(list(_ADMIN_ROLES)),
+        )
+        role_result = await db.execute(role_q)
+        role_tool_names = [row[0] for row in role_result.all()]
+
+        visible_tools = list(set(auth_tool_names + role_tool_names))
+        if visible_tools:
+            q = q.where(Approval.tool_name.in_(visible_tools))
+        else:
+            # Caller has no authority records — return empty (not an admin)
+            return PaginatedResponse(items=[], total=0)
 
     count_q = q.with_only_columns(Approval.id)
     total = len((await db.execute(count_q)).all())
@@ -147,16 +224,38 @@ async def get_approval(
 @router.patch(
     "/{approval_id}",
     response_model=ApprovalResponse,
-    summary="Approve or reject (optimistic lock)",
+    summary="Approve or reject (optimistic lock, authority-gated)",
 )
 async def decide_approval(
     approval_id: uuid.UUID,
     body: ApprovalDecision,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
-    """Submit approve/reject. `version` in the request body must match the current
-    row version to prevent concurrent reviewers from overwriting each other."""
+    """Submit approve/reject. Caller must have an active ApprovalAuthority
+    record for this approval's tool_name. 'system' bypasses authority check
+    (testing only). `version` must match current row version (optimistic lock)."""
     approval = await _resolve(approval_id, db)
+
+    # Authority check — only for production approvals
+    if approval.context == "production":
+        caller = x_user_sub or body.reviewer_id
+        if caller and caller != "system":
+            has_auth = await _has_authority_for_tool(caller, approval.tool_name, db)
+            if not has_auth:
+                # Check if caller has a role-based authority record
+                role_q = select(ApprovalAuthority).where(
+                    ApprovalAuthority.resource_type == "tool",
+                    ApprovalAuthority.resource_id == approval.tool_name,
+                    ApprovalAuthority.revoked_at.is_(None),
+                    ApprovalAuthority.approver_role.in_(list(_ADMIN_ROLES)),
+                )
+                role_result = await db.execute(role_q)
+                if role_result.scalar_one_or_none() is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="not_authorized_to_decide",
+                    )
 
     if approval.status != "pending":
         raise HTTPException(

@@ -1,9 +1,24 @@
 # AgentShield — Architecture Specification
 
 **Status**: PROPOSED — Pending team review  
-**Date**: 2026-06-24  
+**Date**: 2026-06-27  
 **Author**: Karthik + Claude  
-**Version**: 1.1.0
+**Version**: 1.2.0
+
+## Component Specifications
+
+This document is the high-level overview. Detailed implementation specs live in `docs/design/`:
+
+| Spec | Covers | Status |
+|------|--------|--------|
+| [authorization-model-spec.md](design/authorization-model-spec.md) | Agent machine identity (K8s SA tokens + Istio Ambient), OPA policy enforcement, asset lifecycle (private → publish → grant), deploy gate, HITL approval authority (per-agent/tool/skill), Playground authorization | Draft |
+| [playground-spec.md](design/playground-spec.md) | Interactive test console, sandbox mode (grant-bypass), per-run trace panel, LLM-as-Judge, dataset curation, eval runner, version comparison, Playground HITL (self-approval), Playground namespace | Draft |
+
+Requirements that drove these specs:
+- `docs/authorization-model.md` — authorization requirements (REQ-AUTH, REQ-PUB, REQ-DEPLOY, REQ-RT, REQ-AUDIT)
+- `docs/decisions.md` — architecture decisions (D16–D19 cover auth model choices)
+
+---
 
 ## Problem Statement
 
@@ -43,6 +58,25 @@ A product/ops team member creates an agent workflow using drag-and-drop in Agent
 2. **Given** a visual workflow exists, **When** user edits agent instructions or changes tool associations and redeploys, **Then** new version serves within 60s (no container build needed).
 3. **Given** a visual agent is deployed, **When** a high-risk tool is called, **Then** the same HITL approval flow fires as for SDK-built agents.
 4. **Given** a multi-agent workflow, **When** the first agent's output contains a routing keyword, **Then** the declarative runner routes to the correct downstream agent via conditional edge.
+
+---
+
+### User Story 1c — Developer Tests Agent in Playground (Priority: P2)
+
+A developer or product team member opens the Playground tab in Studio, sends a message to an agent version, and sees the full response plus an inline trace — all without touching production traffic.
+
+**Why this priority**: Closes the inner loop for agent iteration. Without a test surface, every change requires a full deploy-and-curl cycle. The Playground makes agent development self-service.
+
+**Independent Test**: Send a message to a deployed agent in sandbox mode. Verify: response streams via SSE, trace panel shows LLM call + tool call + safety scan scores, no real tool side effects occur.
+
+**Acceptance Scenarios**:
+
+1. **Given** a deployed or draft agent, **When** developer opens the Playground tab and sends a message, **Then** the response streams in real time (SSE) and a trace panel expands showing all LLM calls, tool invocations, safety scan scores, and OPA decisions for that run.
+2. **Given** sandbox mode is enabled, **When** developer sends a message, **Then** tool calls return mocked responses, no external APIs are called, and the trace panel marks each tool call as `[sandbox]`.
+3. **Given** a test message was run, **When** developer clicks "Save to Dataset", **Then** the input/output pair is appended to a named Langfuse dataset and visible in the Eval Runner.
+4. **Given** a passing run, **When** LLM-as-Judge scoring completes (async, <10s), **Then** a score badge appears on the run; developer can click thumbs-up/down to override and the feedback is stored.
+5. **Given** two versions of an agent exist, **When** developer enters comparison mode and sends a message, **Then** both versions run in parallel and outputs, trace depth, and token cost appear side by side.
+6. **Given** an eval suite exists for this agent, **When** developer clicks "Run Evals" in the Playground, **Then** promptfoo executes against the selected version, and pass/fail results per assertion appear inline within 60s.
 
 ---
 
@@ -131,8 +165,8 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-005 | P0 | Scan all outputs for PII leakage | Output passes through scanners before user sees it |
 | FR-005a | P0 | De-anonymize PII placeholders in tool call args, gated by OPA allow_deanonymize policy per tool | Tool receives real PII value; LLM context retains placeholder; OPA deny blocks substitution |
 | FR-006 | P0 | Evaluate OPA policy before every tool call | Allow/deny within 5ms |
-| FR-007 | P0 | Route high-risk actions to approval queue | Agent pauses, record created, reviewer notified |
-| FR-008 | P0 | One-click approve/reject in Appsmith | Decision stored, agent resumes within 5s |
+| FR-007 | P0 | Route high-risk actions to approval queue; approval rights scoped per-agent/tool/skill | Agent pauses, record created, only authorized reviewers notified — see [authorization-model-spec.md](design/authorization-model-spec.md) §7 |
+| FR-008 | P0 | Approve/reject via ops dashboard; Playground HITL self-approved by asset owner | Decision stored, agent resumes within 5s |
 | FR-009 | P0 | Auto-reject on timeout (30min default) | Agent resumes with denial, event logged |
 | FR-010 | P0 | Full trace capture for every request | Trace in Langfuse within 10s of completion |
 | FR-011 | P0 | Run eval suite in CI on every PR | PR blocked if assertions fail |
@@ -142,8 +176,19 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-015 | P1 | Cost tracking per agent/team/model | Visible in Langfuse dashboard |
 | FR-016 | P1 | Weekly Garak vulnerability scan | Scheduled CI, alert on findings |
 | FR-017 | P1 | Chunked scanning for inputs >512 tokens | Each chunk scanned independently |
-| FR-018 | P2 | LLM-as-Judge automated scoring | Async evaluator on all traces |
+| FR-018 | P2 | LLM-as-Judge automated scoring | Async evaluator on all traces; score surfaced inline in Playground within 10s of run completion |
 | FR-019 | P2 | Time-based policy constraints | Rego rules reference current time |
+| FR-027 | P2 | Agent machine identity via K8s SA tokens + Istio Ambient mTLS | OPA policy keyed on SA subject, not agent name string — see [authorization-model-spec.md](design/authorization-model-spec.md) |
+| FR-028 | P2 | Asset lifecycle: private → pending_review → published with admin approval | Publish gate, risk-tiered approval, explicit team grants |
+| FR-029 | P2 | Deploy gate: team ownership + tool grants + eval passed checks | All 5 pre-flight checks must pass before deployment record is created |
+| FR-030 | P2 | HITL approval authority scoped per-agent/tool/skill | Reviewers see only requests within their granted scope; self-approval prohibited in production |
+| FR-020 | P2 | Playground: interactive test console in Studio | Message streams via SSE; works for both declarative and SDK agents |
+| FR-021 | P2 | Playground: per-run trace panel | Every run shows LLM calls, tool calls, safety scores, OPA decisions inline — no Langfuse context-switch needed |
+| FR-022 | P2 | Playground: sandbox mode | Tool calls return mocked responses; no external side effects; trace labels each call `[sandbox]` |
+| FR-023 | P2 | Playground: dataset curation | User saves any input/output pair to a named Langfuse dataset from the Playground UI |
+| FR-024 | P2 | Playground: LLM-as-Judge feedback override | User can thumbs-up/down a judge score; override stored as Langfuse annotation |
+| FR-025 | P2 | Playground: on-demand eval runner | Run a promptfoo eval suite against a specific agent version from Studio; pass/fail per assertion shown inline |
+| FR-026 | P2 | Playground: side-by-side version comparison | Run the same prompt against two agent versions in parallel; compare output, trace depth, token cost |
 
 ### Non-Functional Requirements
 
@@ -170,22 +215,31 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Slack | Outbound | Webhook | Approval notifications |
 | Container Registry | Inbound/Outbound | HTTPS | Image storage for agent builds |
 | Git (CI system) | Inbound | Webhook | Version registration, eval results |
+| Langfuse Public API | Internal | HTTPS | Playground trace retrieval + dataset sync (Registry API → Langfuse; credentials stay server-side) |
 
 ### Key Entities
 
 | Entity | Description | Key Attributes | Relationships |
 |--------|-------------|---------------|---------------|
-| Agent | A registered AI agent | name, team, description, status | Has many versions, deployments, approvals; references many tools |
-| AgentVersion | A specific build of an agent | image_tag, tools[], eval_passed | Belongs to agent, deployed as deployment |
-| Deployment | An active deployment of a version | status, replicas, canary_percent | Links agent to version in an environment |
-| Approval | A human decision on a high-risk action | action, risk_level, status, reviewer, session_id, opa_decision_id | Belongs to agent; links to trace; session_id references pii_mappings for reviewer de-anonymization; opa_decision_id links to OPADecision that triggered it |
-| OPADecision | Audit log entry for every OPA policy evaluation | id, agent_name, tool_name, decision (allow/deny/require_approval), policy_version, deny_reason, thread_id, trace_id | Written on every tool-call authorization; 1:0..1 with Approval (every require_approval decision has a linked Approval row) |
-| OPAPolicy | Auto-generated policy for an agent | tool_allowlist, risk_classification, allow_deanonymize_tools (list) | 1:1 with agent; derived from agent-tool bindings |
-| Tool | A reusable, independently-managed tool definition | name, type (native/http/mcp_tool/python), input_schema, risk_level, auth_config_id, python_code | Many-to-many with agents; belongs to optional auth config. Python tools store executable `run_tool(args) -> str` code in `python_code` column; executed by the Python Executor microservice in a sandboxed subprocess. |
-| Skill | A named bundle of tools reusable across agents | name, team, description, tool_ids[] (references Tools), status | Selected on AgentNode in Studio; flattened to constituent tools at declarative runner startup |
+| Agent | A registered AI agent | name, team, description, agent_class (daemon/user_delegated), status (private/pending_review/published) | Has many versions, deployments, approvals; references many tools |
+| AgentVersion | A specific build of an agent | image_tag, tools[], eval_passed, adversarial_eval_passed | Belongs to agent, deployed as deployment |
+| Deployment | An active deployment of a version | status, replicas, canary_percent, agent_identity_id | Links agent to version; machine identity provisioned at first deploy |
+| AgentIdentity | Machine identity for a deployed agent (K8s SA + SPIFFE) | k8s_service_account, sa_subject, issued_at, revoked_at | 1:1 with Deployment; sa_subject is the OPA policy key — see [authorization-model-spec.md](design/authorization-model-spec.md) |
+| Approval | A human decision on a high-risk action | status, context (production/playground), user_id, reviewer_id, expires_at | Production: routed to authorized reviewers; Playground: self-approved by asset owner |
+| ApprovalAuthority | Who can approve HITL for a given resource | resource_type (agent/tool/skill), resource_id, approver_user_id, approver_role | Scoped per-resource; admin-managed |
+| OPADecision | Audit log for every OPA policy evaluation | agent_identity_id, tool_name, decision, deny_reason, user_id, context (production/playground) | Written on every tool-call authorization |
+| OPAPolicy | Centralized bundle (OPA Bundle Server) | registered_agents (SA-keyed), team_grants | One bundle for all agents; sidecars poll every 30s; replaces per-agent ConfigMaps |
+| PublishRequest | Tracks asset transition from private to shared | asset_id, dependency_declaration, highest_risk_level, status | Created on publish; admin approves/rejects |
+| AssetGrant | A team's access to a published asset | asset_id, grantee_team, granted_by, expires_at, revoked_at | Required for binding, deployment, and runtime OPA grant check |
+| Tool | A reusable, independently-managed tool definition | name, type (native/http/mcp_tool/python), input_schema, risk_level, auth_config_id, python_code, test_fixture | Many-to-many with agents; Python tools executed by Python Executor microservice |
+| Skill | A named bundle of tools reusable across agents | name, team, description, tool_ids[], status | Selected on AgentNode in Studio; flattened to constituent tools at runtime |
 | AuthConfig | Credential configuration decoupled from tool definition | type (api_key/oauth2/bearer/mtls), k8s_secret_ref, owner_team | Referenced by many tools |
 | MCPServer | A registered MCP server whose tools are auto-discovered | server_url, transport, auth_config_id, status | Has many tools (discovered); referenced by agents |
-| Workflow | A visual agent workflow definition (Studio canvas) | name, team, definition (JSON), version_count | Deployed as a declarative runner pod; definition carries node/edge graph with tool_ids and skill_ids per agent node |
+| Workflow | A visual agent workflow definition (Studio canvas) | name, team, definition (JSON), version_count | Deployed as a declarative runner pod |
+| PlaygroundRun | A single test execution from the Playground UI | run_id, user_id, team, sandbox, context='playground', langfuse_trace_id, judge_score | User-scoped and private — see [playground-spec.md](design/playground-spec.md) |
+| PlaygroundFeedback | User thumbs-up/down override on a judge score | run_id, rating, comment, reviewer | Stored as Langfuse score annotation |
+| PlaygroundDataset | A named collection of saved input/output pairs | dataset_name, owner_user_id, langfuse_dataset_id | User-scoped (not team-scoped); items stored in Langfuse |
+| EvalRun | An on-demand promptfoo eval execution | eval_run_id, user_id, k8s_namespace='agentshield-playground', status, assertions | Runs in playground namespace; Job uses triggering user's identity |
 
 ---
 
@@ -256,7 +310,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Registry API | CRUD for agents/versions/deployments, webhook receiver | Agent metadata, version state | Postgres (agentshield DB) |
 | Deploy Controller | Reconcile K8s state with desired state from Registry | K8s manifests (generated) | Registry API, K8s API |
 | Appsmith | UI for approval queue, agent registry, dashboards, ops | Dashboard config | Registry API, Postgres |
-| AgentShield Studio | Visual drag-and-drop agent builder (React + React Flow) | Workflow definitions (JSON) | Registry API, Tool Registry |
+| AgentShield Studio | Visual drag-and-drop agent builder (React + React Flow) with embedded Playground tab for interactive testing, trace inspection, eval runs, and dataset curation | Workflow definitions (JSON), playground session state | Registry API, Tool Registry, Langfuse API, Python Executor |
 | Declarative Runner | Generic pod that interprets visual workflow JSON at runtime | Runtime execution of no-code agents | Postgres, Safety Orchestrator, Langfuse, Tool Registry, Python Executor |
 | Python Executor | Sandboxed Python code runner — receives `{code, args}`, executes `run_tool(args)` in a subprocess, returns `{result, error}` | Subprocess isolation, per-call timeout | None (stateless microservice) |
 | Tool Registry | First-class CRUD for tools (native, HTTP, MCP server, Python) and auth configs | Tool definitions, auth configs, agent-tool bindings | Postgres, K8s Secrets |
@@ -462,6 +516,105 @@ Each Agent node config supports an `output_mapping` object that tells the runner
 - Values are JSONPath expressions (applied against structured LLM output) or regex patterns (applied against free text)
 - Extracted values are stored in `state["outputs"][node_id]` and addressable by subsequent nodes
 
+#### Playground API (Registry API extensions)
+
+```
+# Run a test message against an agent or workflow
+POST   /api/v1/playground/run
+  Body: {
+    target_type: "workflow" | "agent",   — workflow uses declarative runner; agent uses SDK pod
+    target_id: "<workflow_id | agent_name>",
+    version: "<version_tag>",            — optional; defaults to latest deployed
+    message: "<user message>",
+    sandbox: true | false,               — if true, tool calls return mocked responses
+    session_id: "<uuid>"                 — optional; pass to continue a multi-turn conversation
+  }
+  Returns: SSE stream (same protocol as /chat/stream: text_delta, tool_call_start/end,
+           approval_requested, done events) + a run_id for trace retrieval
+  Note: sandbox=true routes to POST /api/v1/workflows/{id}/test (declarative) or a
+        mock tool layer injected by the SDK agent (SDK path); no real tool calls fire
+
+# Get trace for a completed playground run
+GET    /api/v1/playground/runs/{run_id}/trace
+  Returns: {
+    run_id, agent_name, version, duration_ms, total_tokens, cost_usd,
+    sandbox: bool,
+    spans: [
+      {
+        type: "llm_call" | "tool_call" | "safety_scan" | "opa_decision" | "handoff",
+        name, started_at, duration_ms,
+        input, output,                   — redacted to placeholders if PII
+        metadata: {                      — type-specific fields
+          model, input_tokens, output_tokens,   — llm_call
+          tool_name, risk_level, result,        — tool_call
+          scanner, score, blocked,              — safety_scan
+          decision, policy_version,             — opa_decision
+        }
+      }
+    ],
+    judge_score: float | null,           — null until async scoring completes
+    judge_reasoning: str | null
+  }
+
+# Save a run's input/output pair to a Langfuse dataset
+POST   /api/v1/playground/runs/{run_id}/save-to-dataset
+  Body: { dataset_name: "<name>" }       — creates dataset if it doesn't exist
+  Returns: { dataset_id, item_id }
+
+# Submit user feedback (thumbs up/down) overriding judge score
+POST   /api/v1/playground/runs/{run_id}/feedback
+  Body: { rating: "positive" | "negative", comment: "<optional>" }
+  Stores as a Langfuse score annotation on the trace; overrides judge_score display in UI
+
+# List saved datasets for a team
+GET    /api/v1/playground/datasets?team=<team>
+  Returns: [{ dataset_name, item_count, created_at, last_updated }]
+
+# Run eval suite on-demand against an agent version
+POST   /api/v1/playground/evals/run
+  Body: {
+    agent_name: "<name>",
+    version: "<version_tag>",
+    suite: "<promptfoo config name | dataset_name>",
+    baseline_version: "<version_tag>"   — optional; enables diff view
+  }
+  Returns: { eval_run_id }              — poll GET below for results
+
+# Get eval run results
+GET    /api/v1/playground/evals/{eval_run_id}
+  Returns: {
+    status: "running" | "complete" | "failed",
+    summary: { total, passed, failed, pass_rate },
+    assertions: [
+      {
+        test_case, prompt, expected, actual,
+        passed: bool, score: float,
+        baseline_actual: str | null,     — present only if baseline_version provided
+        baseline_passed: bool | null
+      }
+    ]
+  }
+
+# Compare two versions side-by-side
+POST   /api/v1/playground/compare
+  Body: {
+    agent_name: "<name>",
+    version_a: "<version_tag>",
+    version_b: "<version_tag>",
+    message: "<user message>",
+    sandbox: bool
+  }
+  Returns: { run_id_a, run_id_b }       — fetch traces independently via /runs/{id}/trace
+```
+
+**Playground trace panel data flow:**
+1. Studio sends `POST /playground/run` → gets `run_id` + streams SSE tokens into chat panel
+2. On SSE `done` event, Studio calls `GET /playground/runs/{run_id}/trace` → populates trace panel
+3. Registry API fetches the Langfuse trace by `run_id` (stored as `external_id` in Langfuse) and reshapes it into the above schema — Studio never calls Langfuse directly
+4. Judge scoring runs async: Registry API polls Langfuse for the score and updates its local `playground_runs` table; Studio polls `GET /trace` every 3s until `judge_score` is non-null (max 30s)
+
+---
+
 #### Tool Registry API
 
 ```
@@ -577,9 +730,9 @@ Same governance as Tier 2 — the `AgentGraph` wrapper injects safety, tracing, 
 
 | App | Purpose | Tech |
 |-----|---------|------|
-| AgentShield Studio | Agent creation (visual builder) | React, React Flow, TypeScript |
+| AgentShield Studio | Agent creation (visual builder) + Playground (interactive testing, evals) | React, React Flow, TypeScript |
 | Appsmith | Operations (registry, deploy, approvals, dashboards) | Appsmith (low-code) |
-| Registry API | Backend for both UIs | FastAPI, Postgres |
+| Registry API | Backend for both UIs + Playground API + Eval runner orchestration | FastAPI, Postgres |
 | Deploy Controller | Reconciles K8s state | Python, K8s client |
 
 ---
@@ -869,6 +1022,31 @@ A Monaco editor embedded in Studio allows users to write `agent.py` directly in 
 
 **Exit criteria**: Visual builder supports multi-step workflows with approval gates and branching. SDK-built agents support multi-agent handoffs and custom guardrails. Canary deploys and alerting operational.
 
+---
+
+### Phase 2.5 — Agent Playground (Weeks 10-13, overlaps Phase 2)
+
+> **Full spec**: [`docs/design/playground-spec.md`](design/playground-spec.md)
+
+The Playground is a tab in Studio — not a separate deployment. It shares Registry API, Langfuse, and the existing `/chat/stream` endpoint. Runs in a dedicated `agentshield-playground` namespace; all governance (safety scanning, OPA, HITL) still applies.
+
+| Week | Deliverable |
+|------|-------------|
+| 10 | Playground tab: interactive chat panel (SSE), sandbox mode toggle, Class A/B daemon handling |
+| 11 | Inline trace panel: LLM calls, tool calls, safety scores, OPA decisions; Registry API proxies Langfuse |
+| 12 | Dataset curation, LLM-as-Judge async scoring (FR-018), user feedback override |
+| 13 | On-demand eval runner (K8s Job + promptfoo), side-by-side version comparison |
+
+Key design choices — see spec for detail and rationale:
+- **User-scoped, private**: runs are visible only to the user who created them
+- **Any owned version testable** regardless of publication status (private/pending_review/published)
+- **Sandbox grant-bypass**: OPA skips the team grant check in sandbox mode; agent scope still enforced
+- **Playground HITL**: self-approved by asset owner via an inline panel; no Slack notification; separate from the production approval queue
+- **Eval Jobs use the triggering user's identity**; daemon agents run with playground SA (no user JWT)
+- All traces tagged `context=playground` in Langfuse; excluded from production cost dashboards
+
+**Exit criteria**: Developer opens an agent in Playground, sends a test message in sandbox mode, sees the inline trace, self-approves any HITL, saves the run to a dataset, runs an eval suite, and compares two versions — all without leaving Studio and without touching production traffic.
+
 ### Phase 3 — Maturity & Ecosystem (Weeks 13+)
 
 | Week | Deliverable |
@@ -879,14 +1057,37 @@ A Monaco editor embedded in Studio allows users to write `agent.py` directly in 
 | 16+ | Ongoing maturity items (below) |
 
 **Ongoing**:
-- LLM-as-Judge automated scoring
-- Post-hoc annotation queues
+- LLM-as-Judge automated scoring (Phase 2.5 delivers inline Playground scoring; post-hoc annotation queues on all production traces are Phase 3+)
 - SDK extraction (contract-based mode for non-Python teams)
 - Admission webhook for contract validation
 - Studio import/export formats
 - Multi-cluster support investigation
 
 ---
+
+## Authorization Model
+
+> **Full spec**: [`docs/design/authorization-model-spec.md`](design/authorization-model-spec.md)  
+> **Requirements**: [`docs/authorization-model.md`](authorization-model.md)
+
+Authorization covers three lifecycle stages: authoring (private workspace), control plane (publish + grant + deploy gate), and data plane (runtime enforcement). The current implementation has OPA risk labels but no identity-based enforcement, no publish/grant lifecycle, and no deploy gate. This section describes the target state.
+
+**Agent identity** — each deployed agent gets a dedicated K8s ServiceAccount. Istio Ambient Mesh (ztunnel) provides L4 mTLS between pods using SPIFFE/SVID certificates minted per-SA. OPA policy is keyed on the SA subject string (`system:serviceaccount:agentshield:agent-{name}-sa`), not the agent name — a rogue pod that sends the correct name but can't present the matching SA token gets denied.
+
+**Agent classes** — every agent is classified at publish time:
+- **Class A (Daemon)**: no user present; runs on its own machine identity; rejects any request carrying a user JWT
+- **Class B (User-Delegated)**: user identity threaded to every tool call; OPA enforces the intersection rule: `effective_permissions = agent_registered_scope ∩ user_granted_permissions`
+
+**Asset lifecycle** — assets move through `private → pending_review → published`. Admin approval gates the transition and grants access to specific teams. A team must have an active grant to every tool in an agent's dependency graph before deployment is permitted.
+
+**HITL approval authority** — approval rights are scoped per-agent, per-tool, or per-skill via an `approval_authority` table. Reviewers see only requests within their granted scope. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
+
+**Implementation phasing** (3 phases — see spec for detail):
+- Phase 1: OPA Bundle Server + K8s SA tokens + agent_class field (replaces per-agent ConfigMaps)
+- Phase 2: publish/grant lifecycle + deploy gate in Registry API
+- Phase 3: migrate from OPA sidecar per-pod to centralized Waypoint + OPA (Option B — no intermediate phase)
+
+Key decisions captured in [`docs/decisions.md`](decisions.md) (D16–D19).
 
 ---
 

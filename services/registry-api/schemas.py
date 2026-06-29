@@ -74,12 +74,14 @@ class AgentCreate(BaseModel):
     team: str = Field(..., max_length=128)
     description: str | None = None
     agent_type: str = Field("sdk", pattern="^(sdk|declarative)$")
+    agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentUpdate(BaseModel):
     description: str | None = None
     status: str | None = Field(None, pattern="^(active|archived|deprecated)$")
+    agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
     metadata: dict[str, Any] | None = None
 
 
@@ -90,6 +92,8 @@ class AgentResponse(BaseModel):
     description: str | None
     status: str
     agent_type: str
+    agent_class: str | None
+    publish_status: str
     created_at: datetime
     updated_at: datetime
     created_by: str | None
@@ -110,12 +114,35 @@ class AgentResponse(BaseModel):
                 "description": data.description,
                 "status": data.status,
                 "agent_type": data.agent_type,
+                "agent_class": data.agent_class,
+                "publish_status": data.publish_status,
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,
                 "created_by": data.created_by,
                 "metadata": data.metadata_,
             }
         return data
+
+
+# ---------------------------------------------------------------------------
+# AgentIdentity
+# ---------------------------------------------------------------------------
+class AgentIdentityCreate(BaseModel):
+    sa_subject: str = Field(..., max_length=512)
+    sa_namespace: str = Field(..., max_length=256)
+    deployment_id: uuid.UUID | None = None
+
+
+class AgentIdentityResponse(BaseModel):
+    id: uuid.UUID
+    agent_name: str
+    deployment_id: uuid.UUID | None
+    sa_subject: str
+    sa_namespace: str
+    provisioned_at: datetime
+    revoked_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +271,7 @@ class ApprovalCreate(BaseModel):
     )
     session_id: Optional[uuid.UUID] = None
     opa_decision_id: Optional[uuid.UUID] = None
+    context: str = Field("production", pattern="^(production|playground)$")
 
 
 class ApprovalDecision(BaseModel):
@@ -277,6 +305,7 @@ class ApprovalResponse(BaseModel):
     version: int
     session_id: Optional[uuid.UUID] = None
     opa_decision_id: Optional[uuid.UUID] = None
+    context: str = "production"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -603,6 +632,206 @@ class LLMProviderResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Publish Request  (Phase 9.2 — asset lifecycle)
+# ---------------------------------------------------------------------------
+class PublishRequestCreate(BaseModel):
+    asset_id: uuid.UUID
+    asset_type: str  # tool/agent/skill/workflow
+    highest_risk_level: str  # low/medium/high
+    dependency_declaration: dict = {}
+
+
+class PublishRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    asset_id: uuid.UUID
+    asset_type: str
+    submitted_by: str
+    submitted_at: datetime
+    status: str
+    highest_risk_level: str
+    dependency_declaration: dict
+    reviewed_by: Optional[str]
+    reviewed_at: Optional[datetime]
+    review_notes: Optional[str]
+
+
+class PublishRequestApprove(BaseModel):
+    grantee_teams: list[str]
+    expires_at: Optional[datetime] = None
+
+
+class PublishRequestReject(BaseModel):
+    notes: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Asset Grant  (Phase 9.2)
+# ---------------------------------------------------------------------------
+class AssetGrantCreate(BaseModel):
+    asset_id: uuid.UUID
+    asset_type: str
+    grantee_team: str
+    expires_at: Optional[datetime] = None
+
+
+class AssetGrantResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    asset_id: uuid.UUID
+    asset_type: str
+    grantee_team: str
+    granted_by: str
+    granted_at: datetime
+    expires_at: Optional[datetime]
+    revoked_at: Optional[datetime]
+
+
+# ---------------------------------------------------------------------------
+# Approval Authority  (Phase 9.2)
+# ---------------------------------------------------------------------------
+class GrantAuditResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    admin_id: str
+    action: str
+    asset_id: uuid.UUID
+    grantee_team: str
+    timestamp: datetime
+
+
+class ApprovalAuthorityCreate(BaseModel):
+    resource_type: str  # agent/tool/skill
+    resource_id: str
+    approver_user_id: Optional[str] = None
+    approver_role: Optional[str] = None
+
+
+class ApprovalAuthorityResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    resource_type: str
+    resource_id: str
+    approver_user_id: Optional[str]
+    approver_role: Optional[str]
+    granted_by: str
+    granted_at: datetime
+    revoked_at: Optional[datetime]
+
+
+# ---------------------------------------------------------------------------
+# Agent publish endpoint body  (Phase 9.2)
+# ---------------------------------------------------------------------------
+class AgentPublishRequest(BaseModel):
+    dependency_declaration: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# Playground Run  (Phase 10.1)
+# ---------------------------------------------------------------------------
+class PlaygroundRunCreate(BaseModel):
+    agent_name: str
+    agent_version_id: Optional[uuid.UUID] = None
+    input_message: str
+
+
+class PlaygroundRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: str
+    agent_name: str
+    agent_version_id: Optional[uuid.UUID]
+    context: str
+    sandbox: bool
+    input_message: Optional[str]
+    status: str
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+
+
+# ---------------------------------------------------------------------------
+# Playground Dataset  (Phase 10.3)
+# ---------------------------------------------------------------------------
+class PlaygroundDatasetCreate(BaseModel):
+    name: str = Field(..., max_length=256)
+    items: list[Any] = Field(default_factory=list)
+
+
+class PlaygroundDatasetUpdate(BaseModel):
+    name: Optional[str] = Field(None, max_length=256)
+    items: Optional[list[Any]] = None
+
+
+class PlaygroundDatasetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    owner_user_id: str
+    name: str
+    items: list[Any]
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Eval Run  (Phase 10.3)
+# ---------------------------------------------------------------------------
+class EvalRunCreate(BaseModel):
+    agent_name: str
+    agent_version_id: Optional[uuid.UUID] = None
+    dataset_id: uuid.UUID
+
+
+class EvalRunResultCreate(BaseModel):
+    dataset_item_idx: int
+    input_message: Optional[str] = None
+    response: Optional[str] = None
+    judge_score: Optional[float] = None
+    judge_reasoning: Optional[str] = None
+    passed: Optional[bool] = None
+
+
+class EvalRunResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    eval_run_id: uuid.UUID
+    dataset_item_idx: int
+    input_message: Optional[str]
+    response: Optional[str]
+    judge_score: Optional[float]
+    judge_reasoning: Optional[str]
+    passed: Optional[bool]
+    created_at: datetime
+
+
+class EvalRunStatusUpdate(BaseModel):
+    status: str
+    total_items: Optional[int] = None
+    passed_count: Optional[int] = None
+    failed_count: Optional[int] = None
+    overall_score: Optional[float] = None
+
+
+class EvalRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: str
+    agent_name: str
+    agent_version_id: Optional[uuid.UUID]
+    dataset_id: uuid.UUID
+    status: str
+    total_items: Optional[int]
+    passed_count: Optional[int]
+    failed_count: Optional[int]
+    overall_score: Optional[float]
+    started_at: Optional[datetime]
+    completed_at: Optional[datetime]
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Error  (matches ErrorResponse in OpenAPI spec)
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
@@ -673,6 +902,33 @@ __all__ = [
     "LLMProviderCreate",
     "LLMProviderUpdate",
     "LLMProviderResponse",
+    # Publish Request (Phase 9.2)
+    "PublishRequestCreate",
+    "PublishRequestResponse",
+    "PublishRequestApprove",
+    "PublishRequestReject",
+    # Asset Grant (Phase 9.2)
+    "AssetGrantCreate",
+    "AssetGrantResponse",
+    # Approval Authority (Phase 9.2)
+    "GrantAuditResponse",
+    "ApprovalAuthorityCreate",
+    "ApprovalAuthorityResponse",
+    # Agent publish (Phase 9.2)
+    "AgentPublishRequest",
+    # Playground Run (Phase 10.1)
+    "PlaygroundRunCreate",
+    "PlaygroundRunResponse",
+    # Playground Dataset (Phase 10.3)
+    "PlaygroundDatasetCreate",
+    "PlaygroundDatasetUpdate",
+    "PlaygroundDatasetResponse",
+    # Eval Run (Phase 10.3)
+    "EvalRunCreate",
+    "EvalRunResultCreate",
+    "EvalRunResultResponse",
+    "EvalRunStatusUpdate",
+    "EvalRunResponse",
     # Error
     "ErrorResponse",
 ]

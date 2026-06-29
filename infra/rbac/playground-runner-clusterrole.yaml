@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: playground-runner
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/log", "serviceaccounts"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: playground-runner-registry-api
+subjects:
+- kind: ServiceAccount
+  name: registry-api
+  namespace: agentshield-platform
+roleRef:
+  kind: ClusterRole
+  name: playground-runner
+  apiGroup: rbac.authorization.k8s.io

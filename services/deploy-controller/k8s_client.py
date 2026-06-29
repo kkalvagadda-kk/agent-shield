@@ -147,3 +147,39 @@ class K8sClient:
                 logger.warning("HTTPRoute %s/%s not found; skipping delete", namespace, name)
             else:
                 raise
+
+    def ensure_service_account(self, agent_name: str, namespace: str) -> str:
+        """Idempotently create a per-agent K8s ServiceAccount.
+
+        Returns the full SA subject string:
+            system:serviceaccount:{namespace}:{sa_name}
+        """
+        sa_name = f"agent-{agent_name}-sa"
+        try:
+            self.core_v1.read_namespaced_service_account(name=sa_name, namespace=namespace)
+            logger.debug("ServiceAccount %s/%s already exists", namespace, sa_name)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            sa = k8s_client.V1ServiceAccount(
+                metadata=k8s_client.V1ObjectMeta(
+                    name=sa_name,
+                    namespace=namespace,
+                    labels={
+                        "agentshield.io/agent-name": agent_name,
+                        "agentshield.io/managed-by": "deploy-controller",
+                    },
+                )
+            )
+            self.core_v1.create_namespaced_service_account(namespace=namespace, body=sa)
+            logger.info("Created ServiceAccount %s/%s", namespace, sa_name)
+
+        return f"system:serviceaccount:{namespace}:{sa_name}"
+
+    def patch_configmap_data(
+        self, namespace: str, name: str, key: str, value: str
+    ) -> None:
+        """Patch a single key in a ConfigMap's data field (used by bundle generator)."""
+        patch = {"data": {key: value}}
+        self.core_v1.patch_namespaced_config_map(name=name, namespace=namespace, body=patch)
+        logger.info("Patched ConfigMap %s/%s key='%s'", namespace, name, key)

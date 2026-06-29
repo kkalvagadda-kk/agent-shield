@@ -286,3 +286,90 @@ All three produce agents governed by the same safety, OPA, HITL, and tracing pip
 **Phase 1 scope:** Tool CRUD API + HTTP tool type + agent-tool binding + OPA policy generation. Studio Tool Picker populates from registry in Week 7.  
 **Phase 2 scope:** MCP server registration + auto-discovery + auth configs + `notifications/tools/list_changed` subscription.  
 **Phase 3 scope:** Tool versioning (semver), deprecation workflow, impact analysis UI, tool catalog/marketplace.
+
+---
+
+## Decision 16: Agent Machine Identity Mechanism
+
+**Context:** The requirements mandate that OPA policy be keyed on a cryptographic agent identity, not an agent name string (REQ-RT-2). A rogue pod that knows an agent's name must not be able to pass policy. Three options were evaluated for how agents acquire machine identity.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: K8s Projected SA Tokens** | Each agent gets a dedicated ServiceAccount. OPA sidecar validates projected SA tokens via TokenReview API. | Fast to ship, no new infrastructure. SDK must send token explicitly — a compromised SDK can skip it. |
+| **B: Istio Waypoint + OPA ext_authz** | Istio Ambient Mesh with Waypoint Proxies intercepts all outbound traffic; Waypoint calls centralized OPA via ext_authz gRPC. Machine identity = SPIFFE SVID (automatic from Istio). | SDK bypass is structurally impossible. Istio is a significant new operational dependency; adds ~1ms per tool call. |
+| **C: Istio Ambient L4 + OPA Sidecar (Hybrid)** | Istio Ambient (ztunnel only, no Waypoints) provides SPIFFE SVIDs via L4 mTLS. OPA sidecar stays but policy is keyed on SPIFFE URI read from pod cert mount by SDK. OPA bundle server replaces per-agent ConfigMaps. | SPIFFE identity without Waypoint complexity. SDK still calls OPA voluntarily, but identity is cryptographic. Migration path to Option B is clean (SPIFFE already in place). |
+
+**Choice: Option C (Istio Ambient L4 + OPA Sidecar) for v1 — migrate to Option B as a future improvement.**
+
+**Rationale:** Option C ships a meaningful security improvement (cryptographic SPIFFE identity replaces name strings) without adding Waypoint operational complexity in v1. The key insight: because v1 keys everything on SPIFFE URIs, migrating to Option B later requires zero policy changes — it's a pure infrastructure swap (add Waypoints, point ext_authz at centralized OPA, remove sidecars from pods, remove SDK OPA call). Option A was rejected because K8s SA tokens still trust the SDK to send them; Option B was deferred (not rejected) due to operational risk of shipping Istio + Waypoints + ext_authz in one increment.
+
+---
+
+## Decision 17: OPA Policy Distribution
+
+**Context:** Today, OPA policies are generated dynamically and stored as per-agent Kubernetes ConfigMaps (`{agent_name}-policy`). This does not scale past ~100 agents (ConfigMap proliferation, no versioning, no audit trail for policy changes).
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Per-agent ConfigMaps (current)** | `policy_generator.py` creates a ConfigMap per deploy. OPA sidecar loads from `/policies/` mount. | Zero new infra. No central view. No policy versioning. SPIFFE-keyed policy requires one ConfigMap per SPIFFE URI. |
+| **B: OPA Bundle Server** | Single OPA bundle containing all agents in `data.json` (keyed by SPIFFE URI) + one `policy.rego`. Sidecars pull from bundle server on startup + poll every 30s. | One policy file to audit. Versioned via git. Scales to 1000+ agents. Adds one HTTP service (bundle server). |
+
+**Choice: Option B (OPA Bundle Server)**
+
+**Rationale:** The SPIFFE-keyed policy model (Decision 16) requires a shared data structure across all agents (`data.registered_agents[spiffe_uri]`), which per-agent ConfigMaps cannot cleanly express. A bundle server also enables git-backed policy history and lets a security team audit the single Rego file rather than hunting across 50+ ConfigMaps. The bundle server is operationally simple — it's nginx serving a git-synced directory, or OPA in bundle-server mode.
+
+---
+
+## Decision 18: Publish / Grant Workflow Placement
+
+**Context:** The requirements introduce a publish lifecycle (private → pending_review → published) and an explicit team grant model. These could live in registry-api or a new dedicated authorization service.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Extend registry-api** | Add `publish_requests`, `asset_grants`, `grant_audit` tables to existing Postgres schema. New endpoints in registry-api. | No new service. Consistent with existing agent/tool/deployment CRUD. Slightly grows registry-api's surface area. |
+| **B: New authorization service** | Separate service owns grant/publish data. Registry-api calls it for visibility checks. | Cleaner separation of concerns. Adds network hop on every list/bind request. Two services to deploy and operate. |
+
+**Choice: Option A (extend registry-api)**
+
+**Rationale:** The grant model is tightly coupled to asset visibility, which registry-api already owns. Adding a service boundary introduces a network dependency on every list and bind operation without meaningful benefit at the current scale. The control plane load (admin approvals, grant checks) is low-frequency compared to the data plane (tool calls). Revisit when the auth model becomes complex enough to warrant isolation.
+
+---
+
+## Decision 19: Authorization Migration Phasing
+
+**Context:** Option C (Istio Ambient + OPA sidecar) was chosen as the v1 implementation with Option B (Istio Waypoint + centralized OPA ext_authz) as the future target. The question was whether to phase Option B rollout: first deploy ztunnel-only (no Waypoints) as a risk-reduction step, then add Waypoints in a second deployment.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: ztunnel first, Waypoints second** | Install Istio Ambient (ztunnel) as a standalone phase to validate Istio in the cluster before adding Waypoints. Authorization is unchanged during Phase 1. | Lower operational risk; two separate deployment events; authorization gap persists through Phase 1. |
+| **B: Skip intermediate phase — go directly to Waypoints** | When migrating from Option C to Option B, deploy Waypoints directly alongside ztunnel in a single operation. Shadow mode (log-only Waypoint + running sidecars) provides the safety net instead of a separate phase. | One deployment event; shorter migration window; shadow mode de-risks the cutover instead of a separate install phase. |
+
+**Choice: Option B — deploy Waypoints directly, no ztunnel-only intermediate phase.**
+
+**Rationale:** The ztunnel-only intermediate phase provides operational comfort but zero authorization improvement — the same gap exists during it as exists today. By the time we migrate to Option B, Istio Ambient (ztunnel + istiod) is already running as part of Option C Phase 1. The Waypoint add-on is incremental to a cluster that already has Istio. The shadow mode step (run Waypoint in log-only mode alongside existing sidecars, compare decisions for 24–48h, then switch enforcement on) provides stronger safety guarantees than a separate phase because it directly validates decision parity before cutover, rather than relying on the absence of Istio-related failures.
+
+---
+
+## Summary of Locked Decisions
+
+| # | Area | Choice |
+|---|------|--------|
+| 1 | Inter-service communication | REST + async events (Postgres LISTEN/NOTIFY) |
+| 2 | Agent deployment model | Agent-per-Pod (K8s Deployment per agent) |
+| 3 | Safety service architecture | Thin orchestrator + independent scanners |
+| 4 | Safety placement | Before Portkey (never skip scanning on cache hits) |
+| 5 | Identity provider | Self-hosted Keycloak |
+| 6 | Namespace isolation | Single namespace, NetworkPolicy per agent pod |
+| 7 | Registry UI | Appsmith (Phase 1), Studio (Phase 2+) |
+| 8 | SDK coupling | Required now, contract-based later |
+| 9 | Database | Single Postgres + PgBouncer |
+| 10 | Checkpoint storage | Postgres (not Redis) |
+| 11 | Object storage | MinIO |
+| 12 | Secret management | K8s Secrets + RBAC |
+| 13 | Frontend agent SDK | TypeScript SDK |
+| 14 | Visual agent builder | Studio (React + ReactFlow) |
+| 15 | Tool registry | First-class Tool Registry (3 types: native, HTTP, MCP) |
+| 16 | Agent machine identity | Istio Ambient L4 (SPIFFE SVIDs) + OPA sidecar; migrate to Waypoint ext_authz in future |
+| 17 | OPA policy distribution | OPA Bundle Server (nginx + git-sync); replace per-agent ConfigMaps |
+| 18 | Publish/grant workflow | Extend registry-api (no new service) |
+| 19 | Authorization migration phasing | Option C now; migrate directly to full Option B (Waypoints + centralized OPA). No ztunnel-only intermediate phase. |

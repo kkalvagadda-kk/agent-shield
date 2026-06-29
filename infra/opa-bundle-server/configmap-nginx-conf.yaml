@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-bundle-server-nginx-conf
+  namespace: agentshield-platform
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        root /usr/share/nginx/html;
+
+        location /bundles/ {
+            # OPA bundle polling — serve with appropriate cache control
+            add_header Cache-Control "no-cache, must-revalidate";
+            add_header Content-Type "application/json";
+            try_files $uri $uri/ =404;
+        }
+
+        location /health {
+            return 200 "ok\n";
+            add_header Content-Type text/plain;
+        }
+    }

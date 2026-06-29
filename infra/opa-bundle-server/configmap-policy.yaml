@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-bundle-policy
+  namespace: agentshield-platform
+  annotations:
+    # Managed by: infra/opa-bundle-server/policy.rego (source of truth)
+    # Do not edit this ConfigMap directly; changes will be overwritten on next deploy.
+data:
+  policy.rego: |
+    package agentshield
+
+    default allow = false
+    default deny_reason = ""
+
+    sa_valid if {
+        data.agents[input.sa_subject]
+    }
+
+    tool_registered if {
+        data.agents[input.sa_subject].tools[_] == input.tool_name
+    }
+
+    user_has_grant if {
+        data.grants[input.user_team][_] == input.tool_name
+    }
+
+    grant_bypassed if {
+        input.playground == true
+        input.sandbox    == true
+    }
+
+    user_grant_satisfied if { user_has_grant }
+    user_grant_satisfied if { grant_bypassed }
+
+    allow if {
+        input.agent_class == "daemon"
+        sa_valid
+        tool_registered
+        not input.user_id
+    }
+
+    allow if {
+        input.agent_class == "user_delegated"
+        sa_valid
+        tool_registered
+        user_grant_satisfied
+    }
+
+    deny_reason = "agent_unauthenticated" if {
+        not sa_valid
+    }
+
+    deny_reason = "tool_not_registered" if {
+        sa_valid
+        not tool_registered
+    }
+
+    deny_reason = "user_not_granted" if {
+        sa_valid
+        tool_registered
+        input.agent_class == "user_delegated"
+        not user_grant_satisfied
+    }
+
+    deny_reason = "daemon_user_context_rejected" if {
+        input.agent_class == "daemon"
+        sa_valid
+        tool_registered
+        input.user_id
+    }

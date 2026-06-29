@@ -3,28 +3,39 @@ AgentShield Registry API — Agents router.
 
 Endpoints
 ---------
-  POST   /api/v1/agents                    — register a new agent
-  GET    /api/v1/agents                    — list agents (filterable, paginated)
-  GET    /api/v1/agents/{name}             — get agent by name
-  PUT    /api/v1/agents/{name}             — update agent fields
-  DELETE /api/v1/agents/{name}             — soft-delete (set status=deprecated)
-  POST   /api/v1/agents/{name}/quarantine  — emergency quarantine (sets status=quarantined)
-  DELETE /api/v1/agents/{name}/quarantine  — lift quarantine (restores to active)
+  POST   /api/v1/agents                      — register a new agent
+  GET    /api/v1/agents                      — list agents (filterable, paginated)
+  GET    /api/v1/agents/{name}               — get agent by name
+  PUT    /api/v1/agents/{name}               — update agent fields
+  DELETE /api/v1/agents/{name}               — soft-delete (set status=deprecated)
+  POST   /api/v1/agents/{name}/quarantine    — emergency quarantine
+  DELETE /api/v1/agents/{name}/quarantine    — lift quarantine
+  POST   /api/v1/agents/{name}/publish       — submit publish request (Phase 9.2)
+  GET    /api/v1/agents/{name}/identities    — list agent machine identities
+  POST   /api/v1/agents/{name}/identities    — record a new K8s SA identity
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Agent
-from schemas import AgentCreate, AgentResponse, AgentUpdate, PaginatedResponse
+from models import Agent, AgentIdentity, AgentTool, PublishRequest, Tool
+from schemas import (
+    AgentCreate,
+    AgentIdentityCreate,
+    AgentIdentityResponse,
+    AgentPublishRequest,
+    AgentResponse,
+    AgentUpdate,
+    PaginatedResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +70,7 @@ async def create_agent(
         team=body.team,
         description=body.description,
         agent_type=body.agent_type,
+        agent_class=body.agent_class,
         metadata_=body.metadata,
     )
     db.add(agent)
@@ -291,3 +303,145 @@ async def lift_quarantine(
 
     logger.info("lift_quarantine: agent '%s' (id=%s) restored to active", name, agent.id)
     return AgentResponse.model_validate(agent)
+
+
+# ---------------------------------------------------------------------------
+# POST /{name}/publish  — submit a publish request (Phase 9.2)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{name}/publish",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit publish request for an agent",
+)
+async def publish_agent(
+    name: str,
+    body: AgentPublishRequest,
+    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Submit a publish request for the named agent.
+
+    - Rejects (422) if any tool assigned to the agent has risk_level='critical'.
+    - Sets agent.publish_status = 'pending_review'.
+    - Returns 202 with the new publish_request_id.
+    """
+    result = await db.execute(select(Agent).where(Agent.name == name))
+    agent = result.scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Agent '{name}' not found.",
+        )
+
+    # Load all tools assigned to this agent
+    tools_result = await db.execute(
+        select(Tool)
+        .join(AgentTool, AgentTool.tool_id == Tool.id)
+        .where(AgentTool.agent_id == agent.id)
+    )
+    tools = tools_result.scalars().all()
+
+    # Block if any tool has critical risk
+    if any(t.risk_level == "critical" for t in tools):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error": "critical_risk_not_publishable"},
+        )
+
+    # Determine highest risk level across assigned tools
+    risk_order = {"low": 0, "medium": 1, "high": 2}
+    highest = "low"
+    for t in tools:
+        if risk_order.get(t.risk_level, 0) > risk_order.get(highest, 0):
+            highest = t.risk_level
+
+    # Create the publish request record
+    pr = PublishRequest(
+        asset_id=agent.id,
+        asset_type="agent",
+        submitted_by=x_user_sub,
+        highest_risk_level=highest,
+        dependency_declaration=body.dependency_declaration,
+    )
+    db.add(pr)
+
+    # Transition agent to pending_review
+    agent.publish_status = "pending_review"
+    agent.updated_at = datetime.now(tz=timezone.utc)
+
+    await db.flush()
+    await db.refresh(pr)
+
+    logger.info(
+        "publish_agent: agent='%s' (id=%s) publish_request_id=%s submitted_by=%s",
+        name,
+        agent.id,
+        pr.id,
+        x_user_sub,
+    )
+    return {"publish_request_id": str(pr.id)}
+
+
+# ---------------------------------------------------------------------------
+# GET /{name}/identities  — list machine identities for an agent
+# ---------------------------------------------------------------------------
+@router.get(
+    "/{name}/identities",
+    response_model=List[AgentIdentityResponse],
+    summary="List agent machine identities",
+)
+async def list_agent_identities(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+) -> List[AgentIdentityResponse]:
+    """Return all provisioned K8s SA identities for the given agent."""
+    result = await db.execute(select(Agent).where(Agent.name == name))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found.")
+
+    rows = await db.execute(
+        select(AgentIdentity)
+        .where(AgentIdentity.agent_name == name)
+        .order_by(AgentIdentity.provisioned_at.desc())
+    )
+    return [AgentIdentityResponse.model_validate(r) for r in rows.scalars().all()]
+
+
+# ---------------------------------------------------------------------------
+# POST /{name}/identities  — record a new K8s SA identity (called by deploy-controller)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{name}/identities",
+    response_model=AgentIdentityResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record a new agent machine identity",
+)
+async def create_agent_identity(
+    name: str,
+    body: AgentIdentityCreate,
+    db: AsyncSession = Depends(get_db),
+) -> AgentIdentityResponse:
+    """Record a new K8s ServiceAccount identity for the agent.
+
+    Called by the deploy-controller immediately after creating the SA.
+    Any existing non-revoked identity for the same sa_subject is left in place
+    (idempotent: the controller may retry on failure).
+    """
+    result = await db.execute(select(Agent).where(Agent.name == name))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found.")
+
+    identity = AgentIdentity(
+        agent_name=name,
+        deployment_id=body.deployment_id,
+        sa_subject=body.sa_subject,
+        sa_namespace=body.sa_namespace,
+    )
+    db.add(identity)
+    await db.flush()
+    await db.refresh(identity)
+
+    logger.info(
+        "create_agent_identity: agent='%s' sa_subject='%s'", name, body.sa_subject
+    )
+    return AgentIdentityResponse.model_validate(identity)

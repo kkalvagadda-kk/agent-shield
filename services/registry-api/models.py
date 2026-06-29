@@ -148,6 +148,66 @@ class Agent(Base):
         "LLMProvider", back_populates="agents", foreign_keys=[llm_provider_id]
     )
 
+    # Authorization model fields (Phase 9.1)
+    # agent_class determines which OPA flow applies at runtime
+    agent_class: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    # publish_status tracks authoring lifecycle; separate from operational status
+    publish_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'private'")
+    )
+
+    identities: Mapped[list["AgentIdentity"]] = relationship(
+        "AgentIdentity", back_populates="agent", cascade="all, delete-orphan",
+        foreign_keys="AgentIdentity.agent_name",
+        primaryjoin="Agent.name == AgentIdentity.agent_name",
+    )
+
+
+# ---------------------------------------------------------------------------
+# agent_identities  (machine identity provisioned at first deploy)
+# ---------------------------------------------------------------------------
+class AgentIdentity(Base):
+    __tablename__ = "agent_identities"
+    __table_args__ = (
+        Index("idx_agent_identities_agent_name", "agent_name"),
+        # Only one active (non-revoked) identity per SA subject
+        Index(
+            "idx_agent_identities_sa_subject_active",
+            "sa_subject",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    agent_name: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("agents.name", ondelete="CASCADE"),
+        nullable=False,
+    )
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("deployments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Full K8s SA subject: system:serviceaccount:{namespace}:{sa-name}
+    sa_subject: Mapped[str] = mapped_column(String(512), nullable=False)
+    sa_namespace: Mapped[str] = mapped_column(String(256), nullable=False)
+    provisioned_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+
+    agent: Mapped[Agent] = relationship(
+        "Agent", back_populates="identities",
+        foreign_keys=[agent_name],
+        primaryjoin="AgentIdentity.agent_name == Agent.name",
+    )
+
 
 # ---------------------------------------------------------------------------
 # workflows  (declared before agent_versions to satisfy FK ordering)
@@ -306,7 +366,7 @@ class Deployment(Base):
             name="ck_deployments_env",
         ),
         CheckConstraint(
-            "status IN ('pending','deploying','running','failed','rolled_back','terminated')",
+            "status IN ('pending','deploying','running','failed','rolled_back','terminated','gate_failed')",
             name="ck_deployments_status",
         ),
         CheckConstraint(
@@ -487,6 +547,10 @@ class Approval(Base):
         _UUID,
         ForeignKey("opa_decisions.id"),
         nullable=True,
+    )
+    # Context: 'production' (default, routed via approval_authority) or 'playground' (self-approve)
+    context: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'production'")
     )
 
     # Relationships
@@ -830,6 +894,248 @@ class Skill(Base):
 
 
 # ---------------------------------------------------------------------------
+# publish_requests  (Phase 9.2 — asset lifecycle)
+# ---------------------------------------------------------------------------
+class PublishRequest(Base):
+    __tablename__ = "publish_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('tool','agent','skill','workflow')",
+            name="ck_publish_requests_asset_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending_review','approved','rejected')",
+            name="ck_publish_requests_status",
+        ),
+        CheckConstraint(
+            "highest_risk_level IN ('low','medium','high')",
+            name="ck_publish_requests_risk_level",
+        ),
+        Index("idx_publish_requests_asset", "asset_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    asset_id: Mapped[uuid.UUID] = mapped_column(_UUID, nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    submitted_by: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pending_review'")
+    )
+    highest_risk_level: Mapped[str] = mapped_column(String(16), nullable=False)
+    dependency_declaration: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'")
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# asset_grants  (Phase 9.2 — asset lifecycle)
+# ---------------------------------------------------------------------------
+class AssetGrant(Base):
+    __tablename__ = "asset_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "asset_type IN ('tool','agent','skill','workflow')",
+            name="ck_asset_grants_asset_type",
+        ),
+        Index("idx_asset_grants_lookup", "asset_id", "grantee_team", "revoked_at", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    asset_id: Mapped[uuid.UUID] = mapped_column(_UUID, nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    grantee_team: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_by: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# grant_audit  (Phase 9.2 — append-only audit log)
+# ---------------------------------------------------------------------------
+class GrantAudit(Base):
+    __tablename__ = "grant_audit"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('created','revoked','expired')",
+            name="ck_grant_audit_action",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    admin_id: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    asset_id: Mapped[uuid.UUID] = mapped_column(_UUID, nullable=False)
+    grantee_team: Mapped[str] = mapped_column(Text, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
+# approval_authority  (Phase 9.2 — per-resource approver registry)
+# ---------------------------------------------------------------------------
+class ApprovalAuthority(Base):
+    __tablename__ = "approval_authority"
+    __table_args__ = (
+        CheckConstraint(
+            "resource_type IN ('agent','tool','skill')",
+            name="ck_approval_authority_resource_type",
+        ),
+        CheckConstraint(
+            "approver_user_id IS NOT NULL OR approver_role IS NOT NULL",
+            name="ck_approval_authority_approver",
+        ),
+        Index("idx_approval_authority_resource", "resource_type", "resource_id", "revoked_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    resource_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    resource_id: Mapped[str] = mapped_column(Text, nullable=False)
+    approver_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approver_role: Mapped[str | None] = mapped_column(Text, nullable=True)
+    granted_by: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+
+
+# ---------------------------------------------------------------------------
+# playground_runs  (Phase 10.1 — per-user agent test runs)
+# ---------------------------------------------------------------------------
+class PlaygroundRun(Base):
+    __tablename__ = "playground_runs"
+    __table_args__ = (
+        Index("idx_playground_runs_user_id", "user_id"),
+        Index("idx_playground_runs_agent", "agent_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("agent_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    context: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'playground'")
+    )
+    sandbox: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    input_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'running'")
+    )
+
+
+# ---------------------------------------------------------------------------
+# playground_datasets  (Phase 10.1 — named collections of test items)
+# ---------------------------------------------------------------------------
+class PlaygroundDataset(Base):
+    __tablename__ = "playground_datasets"
+    __table_args__ = (
+        Index("idx_playground_datasets_owner", "owner_user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    items: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
+# eval_runs  (Phase 10.3 — evaluation run metadata)
+# ---------------------------------------------------------------------------
+class EvalRun(Base):
+    __tablename__ = "eval_runs"
+    __table_args__ = (
+        Index("idx_eval_runs_user_id", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, nullable=True
+    )
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID,
+        ForeignKey("playground_datasets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pending'")
+    )
+    total_items: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    passed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    failed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    overall_score: Mapped[float | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
+# eval_run_results  (Phase 10.3 — per-item evaluation results)
+# ---------------------------------------------------------------------------
+class EvalRunResult(Base):
+    __tablename__ = "eval_run_results"
+    __table_args__ = (
+        Index("idx_eval_run_results_eval_run_id", "eval_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    eval_run_id: Mapped[uuid.UUID] = mapped_column(_UUID, nullable=False)
+    dataset_item_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    judge_score: Mapped[float | None] = mapped_column(nullable=True)
+    judge_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -851,4 +1157,12 @@ __all__ = [
     "AgentTool",
     "LLMProvider",
     "Skill",
+    "PublishRequest",
+    "AssetGrant",
+    "GrantAudit",
+    "ApprovalAuthority",
+    "PlaygroundRun",
+    "PlaygroundDataset",
+    "EvalRun",
+    "EvalRunResult",
 ]

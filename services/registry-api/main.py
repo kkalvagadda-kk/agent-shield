@@ -22,6 +22,7 @@ Routers mounted
   /api/v1/agent-tools     — agent-tool bindings
   /api/v1/llm-providers   — LLM provider CRUD (Fernet-encrypted credentials)
   /api/v1/skills          — skills CRUD (canvas redesign)
+  /api/v1/playground      — playground runs, approvals, datasets, eval-runner (Phase 9.3/10.x)
 
 System endpoints
 ----------------
@@ -43,12 +44,17 @@ from sqlalchemy import text
 
 from config import settings
 from db import AsyncSessionLocal, engine
+from routers.admin import router as admin_router
 from routers.agents import router as agents_router
 from routers.approvals import router as approvals_router
 from routers.auth_configs import router as auth_configs_router
+from routers.datasets import router as datasets_router
 from routers.deployments import global_deployments_router, router as deployments_router
+from routers.eval_runner import router as eval_runner_router
 from routers.llm_providers import router as llm_providers_router
 from routers.opa_decisions import router as opa_decisions_router
+from routers.playground import router as playground_router
+from routers.playground_approvals import router as playground_approvals_router
 from routers.skills import router as skills_router
 from routers.teams import router as teams_router
 from routers.tools import router as tools_router
@@ -147,6 +153,15 @@ def create_app() -> FastAPI:
     app.include_router(auth_configs_router)
     app.include_router(agent_tools_router)
     app.include_router(llm_providers_router)
+    app.include_router(admin_router)
+
+    # --- Playground routers (Phase 9.3 + 10.1 + 10.3) ---
+    # Note: playground_approvals and playground share the /api/v1/playground prefix
+    # Mount playground first (runs endpoints), then approvals, datasets, eval-runner
+    app.include_router(playground_router)
+    app.include_router(playground_approvals_router)
+    app.include_router(datasets_router)
+    app.include_router(eval_runner_router)
 
     # --- System endpoints ---
     @app.get(

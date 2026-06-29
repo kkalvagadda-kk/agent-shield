@@ -1,10 +1,37 @@
-# AgentShield Phase 1 — Implementation Plan (Weeks 1–7)
+# AgentShield — Implementation Plan
 
 **Goal:** Deploy a fully governed AI agent platform on Kubernetes where developers can create agents via SDK or Studio UI, with every request safety-scanned, OPA-evaluated, HITL-approved when high-risk, and fully traced in Langfuse.
 
 **Architecture:** Platform services live in the `agentshield-platform` namespace; each team's agents run in an isolated `agents-{team}` namespace with NetworkPolicy default-deny. The critical path flows: Envoy → Safety Orchestrator (input scan, network-enforced) → Agent Pod (sanitized input). The agent SDK then calls Portkey for LLM inference, OPA sidecar for tool authorization, and Safety Orchestrator again for output scanning. LangGraph PostgresSaver checkpoints state for HITL resume. The SDK provides an OpenAI-style `Agent()` API that transparently wires all governance; Studio v0 provides a React Flow canvas that serializes to JSON and deploys a declarative runner pod using the same governance pipeline.
 
-**Tech Stack:** Python 3.12, FastAPI 0.115, LangGraph 0.3, Alembic 1.14, LLM Guard 0.5, Presidio 2.2, OPA 0.69, Envoy 1.32, Portkey OSS (latest), Keycloak 24, Langfuse 3.x, React 18, React Flow 12, TypeScript 5.x, Helm 3.16, ArgoCD 2.12
+**Tech Stack:** Python 3.12, FastAPI 0.115, LangGraph 0.3, Alembic 1.14, LLM Guard 0.5, Presidio 2.2, OPA 0.69, Istio Ambient 1.22, Envoy 1.32, Portkey OSS (latest), Keycloak 24, Langfuse 3.x, React 18, React Flow 12, TypeScript 5.x, Helm 3.16, ArgoCD 2.12
+
+---
+
+## Phase Status
+
+| Phase | Scope | Status |
+|---|---|---|
+| Week 1 | Data layer + identity + namespaces | **COMPLETE** |
+| Week 2 | Registry API + Deploy Controller + Appsmith | **COMPLETE** |
+| Week 3 | Safety Orchestrator + scanners | **COMPLETE** |
+| Week 4 | OPA sidecar + policy generation + Langfuse | **COMPLETE** |
+| Week 5 | HITL approval flow + Portkey + Envoy Gateway | **COMPLETE** |
+| Week 6 | SDK v1 | **COMPLETE** |
+| Week 7 | Studio v0 + Declarative Runner | **COMPLETE** |
+| Phase 8b | Python Tool Executor | **COMPLETE** |
+| Phase 8c | Default resources + Studio Python Tool UI | **COMPLETE** |
+| Phase 8d | Studio Edit/Detail UX | **COMPLETE** |
+| **Phase 9.1** | **Machine identity — K8s SA tokens + OPA Bundle Server + Istio Ambient** | **NEXT** |
+| Phase 9.2 | Asset lifecycle — publish/grant/deploy gate | Planned |
+| Phase 9.3 | HITL authority model — per-resource approval rights | Planned |
+| Phase 10.1 | Playground — infrastructure + API | Planned |
+| Phase 10.2 | Playground — Studio console tab | Planned |
+| Phase 10.3 | Playground — eval runner + datasets | Planned |
+
+Design specs (implementation source of truth):
+- [`docs/design/authorization-model-spec.md`](../design/authorization-model-spec.md) — identity, OPA, asset lifecycle, HITL authority
+- [`docs/design/playground-spec.md`](../design/playground-spec.md) — interactive console, sandbox, eval runner, HITL self-approval
 
 ---
 
@@ -904,33 +931,369 @@ kubectl port-forward svc/agentshield-studio -n agentshield-platform 5173:80 &
 
 ---
 
+### Phase 9.1: Machine Identity Foundation
+
+> **STATUS: NEXT** — spec: `docs/design/authorization-model-spec.md` §3–6, §15
+
+**Goal:** Every agent pod runs under its own K8s Service Account with a projected bound SA token. OPA evaluates policies from a centralized bundle server (not per-agent ConfigMaps). Istio Ambient Mesh provides L4 mTLS between pods — no sidecars needed for mesh connectivity. Policy keys on SA subject, not agent name string.
+
+**Key decisions:**
+- Option C: Istio Ambient ztunnel (L4 mTLS only, no Waypoints). Future migration to Option B (Waypoints + centralized OPA) is planned but not now.
+- OPA Bundle Server: nginx 2 replicas serving `/bundles/agentshield/data.json` + `policy.rego`; sidecars poll every 30s.
+- One bundle serves all agents; data.json maps SA subject → tool_snapshot + team_grants.
+- SA subject format: `system:serviceaccount:agents-{team}:agent-{name}-sa`
+
+**Tasks:**
+
+1. **(0.5d) Install Istio Ambient Mesh** on cluster:
+   - `infra/istio/ambient-install.yaml` — Helm values for `istiod` + `ztunnel` (no ingress gateway changes)
+   - Label namespaces: `infra/istio/namespace-labels.yaml` — adds `istio.io/dataplane-mode: ambient` to `agentshield-platform` and `agents-*`
+   - Verify: `kubectl get pods -n istio-system` (istiod + ztunnel running)
+
+2. **(1d) Deploy OPA Bundle Server**:
+   - `infra/opa-bundle-server/deployment.yaml` — nginx 2 replicas, mounts ConfigMap at `/usr/share/nginx/html/bundles/agentshield/`
+   - `infra/opa-bundle-server/configmap-policy.yaml` — `policy.rego` with SA-keyed rules (see spec §15)
+   - `infra/opa-bundle-server/configmap-data.yaml` — initial `data.json` (empty; populated by bundle generator)
+   - `infra/opa-bundle-server/service.yaml` — ClusterIP `opa-bundle-server:80`
+   - Update OPA sidecar args in `manifest_builder.py`: `--bundle=http://opa-bundle-server/bundles/agentshield` (pull every 30s)
+
+3. **(0.5d) Alembic migration 0006 — auth model foundation**:
+   - `services/registry-api/alembic/versions/0006_auth_model_foundation.py`
+   - New ENUM types: `agent_class_enum('daemon','user_delegated')`, `asset_status_enum('private','pending_review','published','deprecated')`
+   - `ALTER TABLE agents ADD COLUMN agent_class agent_class_enum, ADD COLUMN status asset_status_enum NOT NULL DEFAULT 'private'`
+   - New table `agent_identities`: `id UUID PK`, `agent_name TEXT FK agents(name)`, `deployment_id UUID FK deployments(id)`, `sa_subject TEXT NOT NULL`, `sa_namespace TEXT NOT NULL`, `provisioned_at TIMESTAMPTZ`, `revoked_at TIMESTAMPTZ`
+   - Update `models.py` and `schemas.py` for `AgentIdentity`; `AgentCreate` adds optional `agent_class`
+
+4. **(1d) Deploy Controller — per-agent SA creation + projected token volume**:
+   - `services/deploy-controller/k8s_client.py` — new `create_service_account(agent_name, team_namespace)` creates SA `agent-{name}-sa` in `agents-{team}`
+   - `services/deploy-controller/reconciler.py` — after deployment create: call `create_service_account()`; POST to `registry-api/api/v1/agents/{name}/identities` to record `AgentIdentity` with `sa_subject`
+   - `services/deploy-controller/manifest_builder.py` — add projected volume to Deployment spec:
+     ```yaml
+     volumes:
+     - name: sa-token
+       projected:
+         sources:
+         - serviceAccountToken:
+             audience: agentshield-opa
+             expirationSeconds: 3600
+             path: token
+     volumeMounts:
+     - name: sa-token
+       mountPath: /var/run/secrets/sa-token
+       readOnly: true
+     ```
+   - Set `serviceAccountName: agent-{name}-sa` on pod spec
+   - Remove `configMap: {name: {agent-name}-policy}` volume (bundle server replaces it)
+
+5. **(1d) Bundle generator — Registry API**:
+   - `services/registry-api/bundle_generator.py` — `generate_bundle_data()`: queries DB for all deployed agents, their tool_snapshot, and active asset_grants; generates:
+     ```json
+     {
+       "agents": {
+         "system:serviceaccount:agents-platform:agent-order-agent-sa": {
+           "tools": ["lookup_order", "issue_refund"],
+           "team": "platform",
+           "agent_class": "user_delegated"
+         }
+       },
+       "grants": {
+         "team-a": ["lookup_order", "issue_refund"],
+         "platform": ["lookup_order", "issue_refund", "web_search"]
+       }
+     }
+     ```
+   - Called from `reconciler.py` after each deployment; writes to `opa-bundle-server` ConfigMap via K8s API
+   - New Registry API endpoint: `POST /api/v1/admin/bundle/regenerate` (manual trigger)
+   - New Registry API endpoint: `GET /api/v1/agents/{name}/identities` — list agent identities
+
+6. **(0.5d) Updated OPA policy.rego**:
+   - Replace per-agent Rego with unified bundle policy at `infra/opa-bundle-server/policy.rego`
+   - Key rules:
+     ```rego
+     package agentshield
+
+     default allow = false
+     default deny_reason = ""
+
+     # SA token validation: subject must exist in bundle data
+     sa_valid if {
+         data.agents[input.sa_subject]
+     }
+
+     # Tool in agent's registered snapshot
+     tool_registered if {
+         data.agents[input.sa_subject].tools[_] == input.tool_name
+     }
+
+     # User team has active grant to tool
+     user_has_grant if {
+         data.grants[input.user_team][_] == input.tool_name
+     }
+
+     # Playground sandbox: bypass user grant check (agent scope still enforced)
+     grant_bypassed if {
+         input.playground == true
+         input.sandbox    == true
+     }
+
+     user_grant_satisfied if { user_has_grant }
+     user_grant_satisfied if { grant_bypassed }
+
+     # Class A (daemon): no user check
+     allow if {
+         input.agent_class == "daemon"
+         sa_valid
+         tool_registered
+         not input.user_id   # daemon must not carry user identity
+     }
+
+     # Class B (user-delegated): intersection rule
+     allow if {
+         input.agent_class == "user_delegated"
+         sa_valid
+         tool_registered
+         user_grant_satisfied
+     }
+
+     deny_reason = "agent_unauthenticated" if { not sa_valid }
+     deny_reason = "tool_not_registered" if { sa_valid; not tool_registered }
+     deny_reason = "user_not_granted" if {
+         sa_valid; tool_registered
+         input.agent_class == "user_delegated"
+         not user_grant_satisfied
+     }
+     deny_reason = "daemon_user_context_rejected" if {
+         input.agent_class == "daemon"
+         input.user_id != ""
+     }
+     ```
+
+7. **(0.5d) Update SDK opa_client.py**:
+   - `sdk/agentshield_sdk/opa_client.py` — read SA token from `/var/run/secrets/sa-token/token`; update `check_tool()` OPA input:
+     ```python
+     {
+         "sa_token": token,       # full JWT
+         "sa_subject": sa_subject, # parsed from token
+         "tool_name": tool_name,
+         "args": args,
+         "agent_class": os.environ["AGENTSHIELD_AGENT_CLASS"],
+         "user_id": user_context.user_id if user_context else "",
+         "user_team": user_context.user_team if user_context else "",
+         "playground": os.environ.get("AGENTSHIELD_PLAYGROUND", "false") == "true",
+         "sandbox": os.environ.get("AGENTSHIELD_SANDBOX", "false") == "true",
+     }
+     ```
+   - OPA policy path changes from per-agent to `http://localhost:8181/v1/data/agentshield`
+
+**Image bumps:** `registry-api:0.2.12`, `deploy-controller:0.1.5`
+
+**Verification:**
+```bash
+# 1. SA created for deployed agent
+kubectl get sa agent-order-agent-sa -n agents-platform
+# Expect: ServiceAccount exists
+
+# 2. Pod has projected SA token volume
+kubectl get pod -n agents-platform -l agent=order-agent -o jsonpath='{.items[0].spec.volumes}' | jq '.[] | select(.name=="sa-token")'
+# Expect: projected volume with serviceAccountToken audience=agentshield-opa
+
+# 3. OPA bundle server responding
+kubectl port-forward svc/opa-bundle-server -n agentshield-platform 8080:80
+curl http://localhost:8080/bundles/agentshield/data.json | jq '.agents | keys'
+# Expect: ["system:serviceaccount:agents-platform:agent-order-agent-sa"]
+
+# 4. OPA allows Class B call with valid SA
+kubectl port-forward pod/order-agent-xxx -n agents-platform 8181:8181
+curl -X POST http://localhost:8181/v1/data/agentshield \
+  -d '{"input":{"sa_subject":"system:serviceaccount:agents-platform:agent-order-agent-sa","tool_name":"lookup_order","agent_class":"user_delegated","user_id":"alice","user_team":"platform","playground":false,"sandbox":false}}'
+# Expect: {"result":{"allow":true}}
+
+# 5. Unknown SA subject is denied
+curl -X POST http://localhost:8181/v1/data/agentshield \
+  -d '{"input":{"sa_subject":"system:serviceaccount:agents-platform:agent-rogue-sa","tool_name":"lookup_order","agent_class":"user_delegated","user_id":"alice","user_team":"platform","playground":false,"sandbox":false}}'
+# Expect: {"result":{"allow":false,"deny_reason":"agent_unauthenticated"}}
+
+# 6. Playground sandbox bypasses grant
+curl -X POST http://localhost:8181/v1/data/agentshield \
+  -d '{"input":{"sa_subject":"system:serviceaccount:agents-platform:agent-order-agent-sa","tool_name":"lookup_order","agent_class":"user_delegated","user_id":"alice","user_team":"no-grants-team","playground":true,"sandbox":true}}'
+# Expect: {"result":{"allow":true}}  ← grant_bypassed fires
+```
+
+**Dependencies:** Phases 1–8 complete. Istio must be installed before labeling namespaces.
+
+---
+
+### Phase 9.2: Asset Lifecycle
+
+> **STATUS: PLANNED** — spec: `docs/design/authorization-model-spec.md` §8–12, §14
+
+**Goal:** Assets move through `private → pending_review → published`. Team grants gate deployment. Deploy controller runs 5 pre-flight checks. Studio gains a publish button and admin grants UI.
+
+**Tasks:**
+
+1. **(0.5d) Alembic migration 0007 — asset lifecycle tables**:
+   - `publish_requests`: id, asset_type, asset_id, requester_user_id, status (pending/approved/rejected), dependency_snapshot JSONB, risk_tier, reviewer_user_id, reviewed_at, reviewer_notes, created_at
+   - `asset_grants`: id, asset_type, asset_id, grantee_team, granted_by, granted_at, expires_at, revoked_at, revoked_by
+   - `approval_authority`: id, resource_type, resource_id, approver_user_id, approver_role, granted_by, granted_at, revoked_at
+   - `asset_visible()` SQL function: returns TRUE if (status='published' AND team has grant) OR (status='private' AND created_by=caller) OR (status='pending_review' AND caller is platform_admin)
+
+2. **(1.5d) Registry API — publish + grant endpoints**:
+   - `POST /api/v1/agents/{name}/publish` — snapshot dependencies, determine risk_tier, create publish_request, transition agent.status→pending_review
+   - `GET /api/v1/admin/publish-requests?status=pending` — list pending reviews (admin only)
+   - `PATCH /api/v1/admin/publish-requests/{id}` — approve/reject; on approve: transition status→published
+   - `POST /api/v1/admin/grants` — create asset_grant for team
+   - `GET /api/v1/admin/grants` — list active grants
+   - `DELETE /api/v1/admin/grants/{id}` — revoke grant
+   - `GET/POST/DELETE /api/v1/admin/approval-authority` — manage HITL reviewer assignments
+
+3. **(1d) Deploy Controller — pre-flight gate**:
+   - `services/deploy-controller/reconciler.py` — before creating deployment, run 5 checks via Registry API:
+     1. Deployer team == agent.team (or cross-team grant exists)
+     2. All tools in version.tool_snapshot have active grant for deployer's team
+     3. `eval_passed = true`
+     4. No tool with risk_level='critical' in snapshot
+     5. Agent identity provisioned (if not, provision now)
+   - On any check failure: set deployment.status='gate_failed', deployment.gate_failure_reason='...'; return without creating K8s Deployment
+
+4. **(1d) Studio — publish + admin pages**:
+   - `studio/src/pages/AgentDetailPage.tsx` — add "Publish" button (calls POST /publish); shows current status chip (private/pending_review/published)
+   - `studio/src/pages/AdminPublishRequestsPage.tsx` — admin review queue; approve/reject with notes
+   - `studio/src/pages/AdminGrantsPage.tsx` — team grants management table
+
+**Image bumps:** `registry-api:0.2.13`, `deploy-controller:0.1.6`, `studio:0.1.14`
+
+---
+
+### Phase 9.3: HITL Authority Model
+
+> **STATUS: PLANNED** — spec: `docs/design/authorization-model-spec.md` §16, Flow 7 + 7a
+
+**Goal:** Approval notifications are scoped to authorized reviewers per resource. Production HITL dashboard filters by caller's authority. Playground HITL uses self-approval (no Slack, inline Studio panel).
+
+**Tasks:**
+
+1. **(0.5d) Alembic migration 0008 — extend approvals table**:
+   - `ALTER TABLE approvals ADD COLUMN context TEXT NOT NULL DEFAULT 'production'`
+   - `ALTER TABLE approvals ADD COLUMN expires_at TIMESTAMPTZ`
+   - `ALTER TABLE approvals ADD COLUMN reviewer_notes TEXT`
+   - `ALTER TABLE approvals ADD COLUMN session_id TEXT`
+
+2. **(1d) Registry API — scoped approval routing**:
+   - `services/registry-api/routers/approvals.py`:
+     - On approval create: lookup `approval_authority` for (resource_type, resource_id); send Slack DM only to matching approvers (not broadcast)
+     - `GET /api/v1/approvals?status=pending` — filter to caller's scope: join with approval_authority where approver_user_id=caller OR approver_role in caller's Keycloak roles
+     - `POST /api/v1/approvals/{id}/decide` — verify caller in approval_authority for that resource; set context='production'
+   - `services/registry-api/routers/playground_approvals.py`:
+     - `GET /api/v1/playground/approvals?status=pending` — returns approvals where approval.user_id=caller AND context='playground'
+     - `POST /api/v1/playground/approvals/{id}/decide` — verify `caller == approval.user_id` (self-approval only); no Slack
+
+3. **(1d) Studio — HITL dashboard page**:
+   - `studio/src/pages/HITLDashboardPage.tsx` — production approval queue, filtered to reviewer's scope; approve/deny with notes
+   - `studio/src/pages/PlaygroundPage.tsx` — inline HITL panel (appears when SSE `approval_requested` event fires; shows tool, risk, redacted args; approve/deny calls POST /api/v1/playground/approvals/{id}/decide)
+   - Studio nav: "Approvals" badge shows count of pending production approvals for current reviewer
+
+**Image bumps:** `registry-api:0.2.14`, `studio:0.1.15`
+
+---
+
+### Phase 10.1: Playground Infrastructure + API
+
+> **STATUS: PLANNED** — spec: `docs/design/playground-spec.md` §3–5, §8
+
+**Goal:** Users can send a message to any agent version they own (regardless of publish status) from Studio. Runs execute in `agentshield-playground` namespace with a per-user SA. Safety and OPA both adapt to playground context.
+
+**Tasks:**
+
+1. **(0.5d) Playground namespace + per-user SA**:
+   - `infra/namespaces/agentshield-playground.yaml` — namespace with `istio.io/dataplane-mode: ambient`
+   - `services/registry-api/playground_sa.py` — `ensure_playground_sa(username)`: lazily creates `playground-runner-{username}-sa` in agentshield-playground on first playground run; idempotent
+   - RBAC: `infra/rbac/playground-runner-clusterrole.yaml` — allows pod create/delete in agentshield-playground
+
+2. **(0.5d) Alembic migration 0009 — playground tables**:
+   - `playground_runs`: id UUID PK, user_id TEXT NOT NULL, agent_name TEXT NOT NULL, agent_version_id UUID FK, context TEXT NOT NULL DEFAULT 'playground', sandbox BOOLEAN NOT NULL DEFAULT true, input_message TEXT, langfuse_trace_id TEXT, started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ, status TEXT NOT NULL DEFAULT 'running'
+   - `playground_datasets`: id UUID PK, owner_user_id TEXT NOT NULL, name TEXT NOT NULL, items JSONB NOT NULL DEFAULT '[]', created_at TIMESTAMPTZ
+
+3. **(1d) Registry API — playground run endpoints**:
+   - `POST /api/v1/playground/runs` — validate `agent.created_by == caller`; ensure_playground_sa; mint scoped user token (TTL=30min) via Keycloak token exchange; create playground_run record; return `{run_id, stream_url}`
+   - `GET /api/v1/playground/runs/{id}/stream` — SSE proxy: forward to agent pod with headers `X-AgentShield-Playground: true`, `X-AgentShield-Sandbox: true`, `Authorization: Bearer <scoped-token>`; tag Langfuse trace with `context=playground`
+   - `GET /api/v1/playground/runs` — list caller's runs
+   - X-AgentShield-Playground propagation: Safety Orchestrator reads header → sets `context='playground'` on scan record; agent pod reads env `AGENTSHIELD_PLAYGROUND=true` (injected at pod start for playground runs)
+
+**Image bumps:** `registry-api:0.2.15`
+
+---
+
+### Phase 10.2: Studio Playground Tab
+
+> **STATUS: PLANNED** — spec: `docs/design/playground-spec.md` §2, §7
+
+**Goal:** Studio has a Playground page where users pick an agent version (any they own), chat with it, see traces, and handle HITL approvals inline.
+
+**Tasks:**
+
+1. **(1.5d) PlaygroundPage + components**:
+   - `studio/src/pages/PlaygroundPage.tsx` — main layout: version selector left panel, chat center, trace panel right panel
+   - `studio/src/components/playground/VersionSelector.tsx` — dropdown of user's agents + versions (any status); shows agent_class chip; daemon mode chip for daemon agents
+   - `studio/src/components/playground/ChatPane.tsx` — chat input + SSE response rendering (text_delta, tool_call_start, tool_call_end events); "daemon mode" indicator when agent_class='daemon' (no user identity field shown)
+   - `studio/src/components/playground/HitlPanel.tsx` — slides in on SSE `approval_requested` event; shows `{tool_name, risk, args_redacted}`; approve/deny buttons → `POST /api/v1/playground/approvals/{id}/decide`; closes on `approval_decided` event
+   - `studio/src/components/playground/TracePanel.tsx` — Langfuse trace embed; filtered to `context=playground` + current run
+   - `studio/src/api/playgroundApi.ts` — API client: `startRun()`, `streamRun()`, `decideApproval()`
+   - Route: `/playground` added to `App.tsx`; "Playground" link in Studio nav sidebar
+
+**Image bump:** `studio:0.1.16`
+
+---
+
+### Phase 10.3: Eval Runner + Datasets
+
+> **STATUS: PLANNED** — spec: `docs/design/playground-spec.md` §9–11
+
+**Goal:** Users curate datasets, run batch evals against agent versions, and see LLM-as-Judge scores. Eval runs are K8s Jobs in agentshield-playground namespace.
+
+**Tasks:**
+
+1. **(0.5d) Dataset CRUD**:
+   - Registry API: `GET/POST/PATCH/DELETE /api/v1/playground/datasets`
+   - Studio: `studio/src/pages/DatasetsPage.tsx` — list + create + edit datasets (JSONL input items)
+
+2. **(1d) Eval runner Job**:
+   - `services/eval-runner/main.py` — K8s Job image; reads `DATASET_ID` + `AGENT_NAME` + `AGENT_VERSION_ID` + `EVAL_USER_TOKEN` env vars; calls agent SSE endpoint for each dataset item; collects responses
+   - `services/eval-runner/judge.py` — LLM-as-Judge: calls configured judge LLM (via Registry API LLMProvider); scores each response pass/fail with reasoning
+   - `services/eval-runner/Dockerfile`
+   - `services/registry-api/routers/eval_runner.py` — `POST /api/v1/playground/eval-runs`: creates K8s Job in agentshield-playground with per-user SA; injects EVAL_USER_TOKEN (TTL=30min); returns `{eval_run_id}`
+   - New table `eval_run_results`: id, eval_run_id FK, dataset_item_id, response TEXT, judge_score FLOAT, judge_reasoning TEXT, passed BOOLEAN
+
+3. **(0.5d) Eval results UI**:
+   - `studio/src/pages/EvalResultsPage.tsx` — shows pass/fail per dataset item; judge reasoning; overall score; link back to Langfuse trace
+   - Link from PlaygroundPage: "Run Eval" button → starts eval job + redirects to results
+
+**Image bumps:** `registry-api:0.2.16`, `eval-runner:0.1.0`, `studio:0.1.17`
+
+---
+
 ## Critical Path
 
 ```
-Week 1 (Data Layer)
+Weeks 1–8d (all COMPLETE: data layer → SDK → Studio → Python exec → UX)
     │
-    ├── Week 2 (Registry + Deploy) ──────────────────────────────┐
-    │       │                                                      │
-    │       ├── Week 3 (Safety) ────────────────────────┐        │
-    │       │                                             │        │
-    │       └── Week 4 (OPA + Langfuse) ─────────────┐  │        │
-    │                                                  │  │        │
-    │                                                  └──┴── Week 5 (Approval + Portkey + Envoy)
-    │                                                              │
-    │                                                         Week 6 (SDK v1)
-    │                                                              │
-    │                                                         Week 7 (Studio v0 + Declarative Runner)
-    │                                                              │
-    │                                                         Phase 8b (Python Tool Executor)
-    │                                                              │
-    │                                                         Phase 8c (Default Resources + Studio Python UI)
-    │                                                              │
-    │                                                         Phase 8d (Studio Edit/Detail UX — gap fill)
-    │                                                              │
-    │                                                         Checkpoint E2E
+    │                                                         Checkpoint E2E ✓
+    │
+    ├── Phase 9.1 (Machine Identity: K8s SA + OPA Bundle + Istio Ambient)  ← CURRENT
+    │       │
+    │       └── Phase 9.2 (Asset Lifecycle: publish/grant/deploy gate)
+    │               │
+    │               └── Phase 9.3 (HITL Authority: per-resource approvers)
+    │                       │
+    │                       ├── Phase 10.1 (Playground Infra + API)
+    │                       │       │
+    │                       │       └── Phase 10.2 (Studio Playground Tab)
+    │                       │               │
+    │                       │               └── Phase 10.3 (Eval Runner + Datasets)
+    │                       │
+    │                       └── Phase 11 (Future: Waypoints + centralized OPA — Option B migration)
 ```
 
-**Sequential:** Weeks 1→7 + Phase 8b → 8c are on the critical path before the E2E checkpoint.
+**Sequential critical path:** 9.1 → 9.2 → 9.3 → 10.1 → 10.2 → 10.3
 
 **Parallelizable within phases:**
 - Week 3: Safety Orchestrator development can run in parallel with Langfuse setup
@@ -938,6 +1301,9 @@ Week 1 (Data Layer)
 - Week 7: Studio frontend can run in parallel with Declarative Runner after SDK is complete
 - Phase 8b: migration, Registry API update, PythonToolNodeExecutor, Helm chart, and manifest_builder update are all parallel (touch different files)
 - Phase 8c: Studio ToolsPage update is parallel to seed-defaults.sh script
+- Phase 9.1: OPA bundle server infra (tasks 1–2), Alembic migration (task 3), and bundle generator (task 5) can all run in parallel
+- Phase 9.2: Studio publish UI can be built in parallel with Registry API + deploy controller gate
+- Phase 10.1 + 10.2: Studio Playground Tab dev can start once `/api/v1/playground/runs` endpoint is live
 
 ---
 

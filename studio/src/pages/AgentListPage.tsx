@@ -13,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
+  ExternalLink,
   Loader2,
   Pencil,
   Plus,
@@ -118,6 +119,13 @@ export default function AgentListPage() {
         const agent = info.row.original;
         return (
           <div className="flex items-center justify-end gap-3">
+            <button
+              onClick={() => navigate(`/agents/${agent.name}`)}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors"
+            >
+              <ExternalLink size={12} />
+              Details
+            </button>
             <button
               onClick={() => navigate(`/agents/${agent.name}/deploy`)}
               className="btn-primary py-1.5 text-xs"

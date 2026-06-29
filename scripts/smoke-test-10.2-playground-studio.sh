@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# smoke-test-10.2-playground-studio.sh
+# Manual verification checklist for Phase 10.2 Studio Playground.
+# Cannot be automated (browser UI navigation) — serves as a structured QA guide.
+
+echo "== Phase 10.2 Studio Playground — Manual Verification Checklist =="
+echo ""
+echo "Port-forward Studio if needed:"
+echo "  kubectl port-forward svc/agentshield-studio -n agentshield-platform 5173:80"
+echo ""
+echo "Checklist — mark each item as you verify in the browser:"
+echo ""
+echo "  [ ] Navigate to /playground in Studio"
+echo "  [ ] Nav bar shows: Playground | Datasets | HITL Queue links"
+echo "  [ ] Left panel: VersionSelector dropdown loads agents"
+echo "  [ ] Select an agent — agent name + sandbox chip appear"
+echo "  [ ] ChatPane shows 'no agent selected' placeholder before picking agent"
+echo "  [ ] Type a message in ChatPane input and press Enter or click Send"
+echo "  [ ] Message appears in chat as user bubble"
+echo "  [ ] Assistant bubble appears and SSE stream text fills in"
+echo "  [ ] TracePanel (right) shows [text_delta] events as they arrive"
+echo "  [ ] TracePanel collapse/expand toggle works"
+echo "  [ ] Navigate to /playground/datasets"
+echo "  [ ] 'New Dataset' modal opens with name + items textarea"
+echo "  [ ] Create dataset with 2 JSONL items — appears in table"
+echo "  [ ] 'Run Eval' button on dataset row opens agent-picker modal"
+echo "  [ ] Select agent + Start Eval → navigates to /playground/eval-runs/{id}"
+echo "  [ ] EvalResultsPage shows status chip + score summary"
+echo "  [ ] 'Back to Datasets' link returns to /playground/datasets"
+echo "  [ ] Navigate to /hitl — HITL Queue page loads"
+echo "  [ ] HITL Queue auto-refreshes label visible (30s)"
+echo ""
+echo "All items checked? Phase 10.2 Studio Playground is VERIFIED."

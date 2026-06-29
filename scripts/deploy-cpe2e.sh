@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # deploy-cpe2e.sh — Checkpoint E2E deploy (fresh cluster or after restart)
 #
-# Creates all required secrets, builds Phase-8b/8c images, and deploys the full
-# AgentShield stack needed for the E2E checkpoint:
-#   - registry-api:0.2.11  (migration 0005: python tool type + python_code column)
-#   - deploy-controller:0.1.4 (PYTHON_EXECUTOR_URL injection into runner pods)
-#   - studio:0.1.12        (python_code textarea in ToolsPage)
+# Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
+# the full AgentShield stack:
+#   - registry-api:0.2.18  (+ grant audit endpoint, AdminApprovalAuthorityPage, FK 500→409)
+#   - deploy-controller:0.1.7 (Phase 9.1 ensure_service_account wired in)
+#   - studio:0.1.18        (+ AdminApprovalAuthorityPage, Approvers nav link)
+#   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
 #   - declarative-runner:0.1.1 (PythonToolNodeExecutor)
-#   - python-executor:0.1.0 (new sandboxed Python code runner)
+#   - python-executor:0.1.0 (sandboxed Python code runner)
 #   - PostgreSQL, Redis (infra)
 #
 # Seeded by step 8: 6 tools, 2 skills, 3 workflows, 5 agents
@@ -32,9 +33,10 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.11"
-DEPLOY_CONTROLLER_TAG="0.1.6"
-STUDIO_TAG="0.1.13"
+REGISTRY_API_TAG="0.2.18"
+DEPLOY_CONTROLLER_TAG="0.1.7"
+STUDIO_TAG="0.1.18"
+EVAL_RUNNER_TAG="0.1.0"
 DECLARATIVE_RUNNER_TAG="0.1.1"
 PYTHON_EXECUTOR_TAG="0.1.0"
 
@@ -46,17 +48,20 @@ echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (migration 0005: python_code column + python tool type)"
+echo "  → registry-api:${REGISTRY_API_TAG} (grant audit endpoint, approval authority API)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
-echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (manifest_builder: inject PYTHON_EXECUTOR_URL)"
+echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (pre-flight gate in reconciler)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
 echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (PythonToolNodeExecutor support)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" services/declarative-runner/
 
-echo "  → studio:${STUDIO_TAG} (python_code textarea in ToolsPage; edit/delete for Tools + Agents)"
+echo "  → studio:${STUDIO_TAG} (AdminApprovalAuthorityPage, Approvers nav link)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
+
+echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"
+docker build -t "registry.internal/agentshield/eval-runner:${EVAL_RUNNER_TAG}" services/eval-runner/
 
 echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"
 docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR_TAG}" services/python-executor/
@@ -66,6 +71,8 @@ echo ""
 echo "[2/8] Applying namespaces..."
 kubectl apply -f infra/namespaces/agentshield-platform.yaml
 kubectl apply -f infra/namespaces/agents-platform.yaml
+kubectl apply -f infra/namespaces/agentshield-playground.yaml
+kubectl apply -f infra/rbac/playground-runner-clusterrole.yaml
 
 # ── Step 3: Secrets (all required by chart templates) ─────────────────────────
 echo ""

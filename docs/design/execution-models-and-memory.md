@@ -21,6 +21,8 @@ This document captures the full design for four first-class execution models and
 
 ### 2.1 Overview
 
+Stateless Agents: They process each request in complete isolation. They have zero memory of previous interactions, making them highly predictable and easy to scale (e.g., standard API translation utilities).Short-Term Stateful Agents: They maintain a memory of the current active session or conversation context. Once the user closes the window or the script ends, the memory is cleared.Long-Term / Semantic Memory Agents: They leverage vector databases and graph databases to store user preferences, historical errors, and past solutions indefinitely. They pull this context back into their active memory whenever a relevant scenario occurs.
+
 An **execution model** describes how an agent is invoked, how long it runs, and what relationship it has with time and external events. It is orthogonal to `agent_type` (sdk vs declarative), which describes implementation. Both can be set independently.
 
 | Model | Invoked by | Duration | State | Primary UX pattern |

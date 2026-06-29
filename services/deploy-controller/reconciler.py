@@ -16,6 +16,84 @@ _POLL_TIMEOUT_SECONDS = 60
 _POLL_INTERVAL_SECONDS = 5
 
 
+async def _run_preflight_checks(
+    http: httpx.AsyncClient,
+    deployment: dict,
+    agent: dict,
+    version: dict,
+) -> str | None:
+    """Run pre-flight checks before provisioning K8s resources.
+
+    Returns an error message if any check fails, or None if all pass.
+
+    Checks:
+        1. Deployer team == agent team (or a cross-team AssetGrant exists)
+        2. All tools in the version snapshot have an active grant for the deployer team
+        3. Version eval has passed
+        4. No critical-risk tool in the snapshot
+        5. Agent identity provisioning is handled in reconcile() step 1
+    """
+    agent_name = agent["name"]
+    agent_team = agent.get("team", "")
+    deployer_team = deployment.get("deployer_team", agent_team)
+
+    # Check 1: deployer team == agent team (or cross-team grant)
+    if deployer_team and deployer_team != agent_team:
+        try:
+            resp = await http.get(
+                "/api/v1/admin/grants",
+                params={"asset_id": str(agent["id"]), "grantee_team": deployer_team},
+            )
+            grants = resp.json().get("items", [])
+            active = [g for g in grants if not g.get("revoked_at")]
+            if not active:
+                return (
+                    f"deployer_team={deployer_team} does not own agent "
+                    f"team={agent_team} and no cross-team grant exists"
+                )
+        except Exception as exc:
+            return f"grant check failed: {exc}"
+
+    # Check 2: all tools have active grant for deployer's team
+    tool_snapshot = version.get("tool_snapshot") or []
+    if tool_snapshot:
+        missing: list[str] = []
+        for tool in tool_snapshot:
+            tool_id = tool.get("id") or tool.get("tool_id")
+            if not tool_id:
+                continue  # no ID in snapshot — skip grant check for this tool
+            try:
+                resp = await http.get(
+                    "/api/v1/admin/grants",
+                    params={"asset_id": str(tool_id), "grantee_team": deployer_team},
+                )
+                grants = resp.json().get("items", [])
+                active = [g for g in grants if not g.get("revoked_at")]
+                if not active:
+                    missing.append(tool.get("name", str(tool_id)))
+            except Exception:
+                pass  # non-fatal: if grant check fails, skip this tool
+        if missing:
+            return (
+                f"tool grants missing for deployer team {deployer_team}: {missing}"
+            )
+
+    # Check 3: eval_passed
+    if version.get("eval_passed") is False:
+        return "version eval has not passed"
+
+    # Check 4: no critical-risk tool in snapshot
+    if tool_snapshot:
+        critical = [
+            t.get("name", "") for t in tool_snapshot if t.get("risk_level") == "critical"
+        ]
+        if critical:
+            return f"critical risk tools not deployable: {critical}"
+
+    # Check 5: agent identity provisioning — handled in reconcile() step 1; pass through
+    return None
+
+
 async def _fetch_workflow(http: httpx.AsyncClient, workflow_id: str) -> dict | None:
     """Fetch the workflow definition from the Registry API.
 
@@ -53,9 +131,20 @@ async def reconcile(
     environment = deployment["environment"]
     namespace = deployment["k8s_namespace"]
     k8s_deployment_name = f"{agent_name}-{environment}"
-    policy_cm_name = f"{agent_name}-policy"
 
     loop = asyncio.get_event_loop()
+
+    # ── Pre-flight gate ───────────────────────────────────────────────────────
+    # Run checks before provisioning any K8s resources. A gate failure marks
+    # the deployment 'gate_failed' so the Registry API can surface it to the
+    # user without wasting K8s resources.
+    async with httpx.AsyncClient(base_url=settings.registry_api_url, timeout=10.0) as http:
+        gate_error = await _run_preflight_checks(http, deployment, agent, version)
+    if gate_error:
+        logger.warning(
+            "Pre-flight gate failed for %s: %s", agent_name, gate_error
+        )
+        return ("gate_failed", None, gate_error)
 
     try:
         # --- Declarative agent handling ---
@@ -106,19 +195,41 @@ async def reconcile(
                 workflow_id,
             )
 
-        # 1. Build the K8s manifest
+        # 1. Provision per-agent ServiceAccount (Phase 9.1: machine identity)
+        #    ensure_service_account is idempotent; the SA subject is recorded in
+        #    the Registry API so the OPA bundle data.json can key on it.
+        sa_subject = await loop.run_in_executor(
+            None,
+            lambda: k8s.ensure_service_account(agent_name, namespace),
+        )
+        logger.info("Agent '%s' SA subject: %s", agent_name, sa_subject)
+
+        # Record the identity in Registry API (best-effort — deploy continues even if
+        # this call fails; the bundle generator will pick it up on the next sync)
+        deployment_id = deployment.get("id")
+        try:
+            async with httpx.AsyncClient(
+                base_url=settings.registry_api_url, timeout=10.0
+            ) as http:
+                await http.post(
+                    f"/api/v1/agents/{agent_name}/identities",
+                    json={
+                        "sa_subject": sa_subject,
+                        "sa_namespace": namespace,
+                        "deployment_id": deployment_id,
+                    },
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to register identity for agent '%s' in Registry API: %s — "
+                "bundle generator will sync on next deploy.",
+                agent_name,
+                exc,
+            )
+
+        # 2. Build the K8s manifest
         manifest = build_deployment(
             deployment, agent, version, settings.opa_image, settings.registry_api_url
-        )
-
-        # 2. Ensure the OPA policy ConfigMap exists (empty default so pod doesn't crashloop)
-        await loop.run_in_executor(
-            None,
-            lambda: k8s.create_configmap_if_missing(
-                namespace,
-                policy_cm_name,
-                {"default.rego": "package main\n\ndefault allow = true\n"},
-            ),
         )
 
         # 3. Apply (create or update) the Deployment

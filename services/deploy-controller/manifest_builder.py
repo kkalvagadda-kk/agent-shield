@@ -1,5 +1,9 @@
 import kubernetes.client as k8s_client
 
+# Namespace where the OPA config ConfigMap lives (shared across all agents)
+_OPA_CONFIG_CM = "opa-sidecar-config"
+_OPA_CONFIG_NS = "agentshield-platform"
+
 
 def build_service(
     agent_name: str,
@@ -46,7 +50,6 @@ def build_httproute(
     """Build a gateway.networking.k8s.io/v1 HTTPRoute manifest as a plain dict.
 
     Routes /agents/{agent_name}/ → agent pod Service in agents-{team} namespace.
-    Phase 9 update: change backendRef to safety-orchestrator.agentshield-platform:8080.
     """
     svc_name = f"{agent_name}-{environment}"
     return {
@@ -100,31 +103,38 @@ def build_deployment(
     """
     Build a V1Deployment manifest for the given agent deployment record.
 
+    Phase 9.1 changes:
+    - OPA sidecar now polls the central bundle server (not per-agent ConfigMap).
+    - Pod runs under a per-agent ServiceAccount (agent-{name}-sa).
+    - Projected bound SA token is mounted at /var/run/secrets/sa-token/token
+      (audience=agentshield-opa, TTL=1h). The SDK opa_client reads it and
+      includes it in every OPA decision request so the policy can verify identity.
+    - agent_class env var injected so the SDK knows which OPA flow to use.
+
     Args:
         deployment: Deployment record from Registry API
         agent:      Agent record from GET /api/v1/agents/{name}
         version:    Version record from GET /api/v1/versions/{id}
         opa_image:  OPA sidecar image (e.g. openpolicyagent/opa:0.69.0-static)
-
-    Returns:
-        A kubernetes.client.V1Deployment ready to apply.
     """
     agent_name = agent["name"]
     environment = deployment["environment"]
     team = agent.get("team", "platform")
     namespace = deployment["k8s_namespace"]
     replicas = deployment.get("replicas", 1)
+    agent_class = agent.get("agent_class") or "user_delegated"
 
     k8s_name = f"{agent_name}-{environment}"
     image_tag = version["image_tag"]
     version_number = str(version.get("version_number", version.get("id", "unknown")))
-    policy_cm_name = f"{agent_name}-policy"
+    sa_name = f"agent-{agent_name}-sa"
 
     labels = {
         "app.kubernetes.io/name": agent_name,
         "app.kubernetes.io/version": version_number,
         "agentshield.io/team": team,
         "agentshield.io/environment": environment,
+        "agentshield.io/agent-class": agent_class,
     }
 
     # --- Base env vars ---
@@ -132,9 +142,19 @@ def build_deployment(
         k8s_client.V1EnvVar(name="AGENT_NAME", value=agent_name),
         k8s_client.V1EnvVar(name="AGENT_VERSION", value=version_number),
         k8s_client.V1EnvVar(name="OPA_URL", value="http://localhost:8181"),
+        # Phase 9.1: agent_class tells SDK which OPA authorization flow to use
+        k8s_client.V1EnvVar(name="AGENTSHIELD_AGENT_CLASS", value=agent_class),
+        # Phase 9.1: SA token path (projected volume, see volumes below)
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_SA_TOKEN_PATH",
+            value="/var/run/secrets/sa-token/token",
+        ),
+        # Playground context — false for production deployments
+        k8s_client.V1EnvVar(name="AGENTSHIELD_PLAYGROUND", value="false"),
+        k8s_client.V1EnvVar(name="AGENTSHIELD_SANDBOX", value="false"),
     ]
 
-    # --- LLM provider env vars (populated by Registry API at deploy time) ---
+    # --- LLM provider env vars ---
     llm_secret_name = deployment.get("llm_secret_name")
     llm_env_keys = deployment.get("llm_env_keys") or []
     llm_provider_type = deployment.get("llm_provider_type")
@@ -166,12 +186,10 @@ def build_deployment(
             k8s_client.V1EnvVar(name="WORKFLOW_JSON", value=workflow_json_b64)
         )
 
-    # --- REGISTRY_API_URL (plain value — not sensitive, needed by declarative runner) ---
     env_vars.append(
         k8s_client.V1EnvVar(name="REGISTRY_API_URL", value=registry_api_url)
     )
 
-    # --- PYTHON_EXECUTOR_URL (declarative runner python tool execution) ---
     python_executor_url = deployment.get(
         "python_executor_url",
         "http://agentshield-python-executor.agentshield-platform:8080",
@@ -185,6 +203,14 @@ def build_deployment(
         name=agent_name,
         image=image_tag,
         env=env_vars,
+        volume_mounts=[
+            # Phase 9.1: mount projected SA token for OPA identity check
+            k8s_client.V1VolumeMount(
+                name="sa-token",
+                mount_path="/var/run/secrets/sa-token",
+                read_only=True,
+            )
+        ],
         resources=k8s_client.V1ResourceRequirements(
             requests={"cpu": "100m", "memory": "256Mi"},
             limits={"cpu": "1000m", "memory": "1Gi"},
@@ -201,14 +227,23 @@ def build_deployment(
         ),
     )
 
-    # --- OPA sidecar ---
+    # --- OPA sidecar (Phase 9.1: bundle server pull, not ConfigMap mount) ---
     opa_container = k8s_client.V1Container(
         name="opa",
         image=opa_image,
-        args=["run", "--server", "--addr=0.0.0.0:8181", "-b", "/policies/"],
+        args=[
+            "run",
+            "--server",
+            "--addr=0.0.0.0:8181",
+            "--config-file=/config/opa-config.yaml",
+        ],
         ports=[k8s_client.V1ContainerPort(container_port=8181)],
         volume_mounts=[
-            k8s_client.V1VolumeMount(name="policy-bundle", mount_path="/policies")
+            k8s_client.V1VolumeMount(
+                name="opa-config",
+                mount_path="/config",
+                read_only=True,
+            )
         ],
         resources=k8s_client.V1ResourceRequirements(
             requests={"cpu": "10m", "memory": "32Mi"},
@@ -216,27 +251,51 @@ def build_deployment(
         ),
     )
 
-    # --- Policy bundle volume (ConfigMap) ---
-    policy_volume = k8s_client.V1Volume(
-        name="policy-bundle",
-        config_map=k8s_client.V1ConfigMapVolumeSource(name=policy_cm_name),
-    )
+    # --- Volumes ---
+    volumes = [
+        # Phase 9.1: projected bound SA token (audience=agentshield-opa, TTL=1h)
+        k8s_client.V1Volume(
+            name="sa-token",
+            projected=k8s_client.V1ProjectedVolumeSource(
+                sources=[
+                    k8s_client.V1VolumeProjection(
+                        service_account_token=k8s_client.V1ServiceAccountTokenProjection(
+                            audience="agentshield-opa",
+                            expiration_seconds=3600,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        ),
+        # Phase 9.1: OPA config for bundle server polling (shared ConfigMap)
+        k8s_client.V1Volume(
+            name="opa-config",
+            config_map=k8s_client.V1ConfigMapVolumeSource(
+                name=_OPA_CONFIG_CM,
+            ),
+        ),
+    ]
 
     pod_template = k8s_client.V1PodTemplateSpec(
         metadata=k8s_client.V1ObjectMeta(labels=labels),
         spec=k8s_client.V1PodSpec(
+            # Phase 9.1: run pod under the per-agent SA (provisions projected token)
+            service_account_name=sa_name,
             containers=[agent_container, opa_container],
-            volumes=[policy_volume],
+            volumes=volumes,
         ),
     )
 
     deployment_spec = k8s_client.V1DeploymentSpec(
         replicas=replicas,
-        selector=k8s_client.V1LabelSelector(match_labels={"app.kubernetes.io/name": agent_name}),
+        selector=k8s_client.V1LabelSelector(
+            match_labels={"app.kubernetes.io/name": agent_name}
+        ),
         template=pod_template,
     )
 
-    manifest = k8s_client.V1Deployment(
+    return k8s_client.V1Deployment(
         api_version="apps/v1",
         kind="Deployment",
         metadata=k8s_client.V1ObjectMeta(
@@ -246,5 +305,3 @@ def build_deployment(
         ),
         spec=deployment_spec,
     )
-
-    return manifest

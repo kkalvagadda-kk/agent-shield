@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-bundle-data
+  namespace: agentshield-platform
+  annotations:
+    # Managed by: services/registry-api/bundle_generator.py
+    # This ConfigMap is regenerated on every agent deploy/update.
+    # The initial state has empty agents and grants; the bundle generator populates it.
+data:
+  data.json: |
+    {
+      "agents": {},
+      "grants": {}
+    }

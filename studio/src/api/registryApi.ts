@@ -12,6 +12,8 @@ export interface Agent {
   description: string | null;
   status: string;
   agent_type: string;
+  publish_status: string;
+  agent_class: string | null;
   created_at: string;
   updated_at: string;
   created_by: string | null;
@@ -379,4 +381,162 @@ export const updateSkill = async (
 
 export const deleteSkill = async (id: string): Promise<void> => {
   await http.delete(`/skills/${id}`);
+};
+
+// ---------------------------------------------------------------------------
+// Publish Requests (Phase 9.2)
+// ---------------------------------------------------------------------------
+export interface PublishRequest {
+  id: string;
+  asset_id: string;
+  asset_type: string;
+  submitted_by: string;
+  submitted_at: string;
+  status: string;
+  highest_risk_level: string;
+  dependency_declaration: Record<string, unknown>;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_notes: string | null;
+}
+
+export const publishAgent = async (
+  name: string,
+  dependency_declaration?: Record<string, unknown>
+): Promise<{ publish_request_id: string }> => {
+  const { data } = await http.post<{ publish_request_id: string }>(
+    `/agents/${name}/publish`,
+    { dependency_declaration: dependency_declaration ?? {} }
+  );
+  return data;
+};
+
+export const listPublishRequests = async (params?: {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<Paginated<PublishRequest>> => {
+  const { data } = await http.get<Paginated<PublishRequest>>(
+    "/admin/publish-requests",
+    { params }
+  );
+  return data;
+};
+
+export const approvePublishRequest = async (
+  id: string,
+  body: { grantee_teams: string[]; expires_at?: string }
+): Promise<{ approved: boolean; grants_created: number }> => {
+  const { data } = await http.post<{ approved: boolean; grants_created: number }>(
+    `/admin/publish-requests/${id}/approve`,
+    body
+  );
+  return data;
+};
+
+export const rejectPublishRequest = async (
+  id: string,
+  notes?: string
+): Promise<{ rejected: boolean }> => {
+  const { data } = await http.post<{ rejected: boolean }>(
+    `/admin/publish-requests/${id}/reject`,
+    { notes: notes ?? "" }
+  );
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Asset Grants (Phase 9.2)
+// ---------------------------------------------------------------------------
+export interface AssetGrant {
+  id: string;
+  asset_id: string;
+  asset_type: string;
+  grantee_team: string;
+  granted_by: string;
+  granted_at: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export const listGrants = async (params?: {
+  asset_id?: string;
+  grantee_team?: string;
+  include_revoked?: boolean;
+  limit?: number;
+}): Promise<Paginated<AssetGrant>> => {
+  const { data } = await http.get<Paginated<AssetGrant>>("/admin/grants", { params });
+  return data;
+};
+
+export const createGrant = async (body: {
+  asset_id: string;
+  asset_type: string;
+  grantee_team: string;
+  expires_at?: string;
+}): Promise<AssetGrant> => {
+  const { data } = await http.post<AssetGrant>("/admin/grants", body);
+  return data;
+};
+
+export const revokeGrant = async (id: string): Promise<void> => {
+  await http.delete(`/admin/grants/${id}`);
+};
+
+export interface GrantAuditEntry {
+  id: string;
+  admin_id: string;
+  action: string;
+  asset_id: string;
+  grantee_team: string;
+  timestamp: string;
+}
+
+export const listGrantAudit = async (
+  grantId: string,
+  params?: { limit?: number; offset?: number }
+): Promise<Paginated<GrantAuditEntry>> => {
+  const { data } = await http.get<Paginated<GrantAuditEntry>>(
+    `/admin/grants/${grantId}/audit`,
+    { params }
+  );
+  return data;
+};
+
+export interface ApprovalAuthority {
+  id: string;
+  resource_type: string;
+  resource_id: string;
+  approver_user_id: string | null;
+  approver_role: string | null;
+  granted_by: string;
+  granted_at: string;
+  revoked_at: string | null;
+}
+
+export const listApprovalAuthority = async (params?: {
+  resource_type?: string;
+  resource_id?: string;
+  include_revoked?: boolean;
+  limit?: number;
+}): Promise<Paginated<ApprovalAuthority>> => {
+  const { data } = await http.get<Paginated<ApprovalAuthority>>(
+    "/admin/approval-authority",
+    { params }
+  );
+  return data;
+};
+
+export const createApprovalAuthority = async (body: {
+  resource_type: string;
+  resource_id: string;
+  approver_user_id?: string;
+  approver_role?: string;
+}): Promise<ApprovalAuthority> => {
+  const { data } = await http.post<ApprovalAuthority>("/admin/approval-authority", body);
+  return data;
+};
+
+export const revokeApprovalAuthority = async (id: string): Promise<void> => {
+  await http.delete(`/admin/approval-authority/${id}`);
 };

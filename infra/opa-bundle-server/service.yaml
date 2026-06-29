@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa-bundle-server
+  namespace: agentshield-platform
+  labels:
+    app: opa-bundle-server
+    component: authorization
+spec:
+  type: ClusterIP
+  selector:
+    app: opa-bundle-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP

@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from crypto import decrypt_json
 from db import get_db
 from k8s import upsert_secret
-from models import Agent, AgentVersion, Deployment, LLMProvider
+from models import Agent, AgentTool, AgentVersion, AssetGrant, Deployment, LLMProvider, Tool
 from policy_generator import generate_and_store
 from schemas import DeploymentCreate, DeploymentResponse, PaginatedResponse, RollbackRequest
 
@@ -135,13 +135,17 @@ def _derive_k8s_namespace(agent: Agent) -> str:
 async def deploy_agent(
     name: str,
     body: DeploymentCreate,
+    x_user_team: Optional[str] = Header(default=None, alias="X-User-Team"),
     db: AsyncSession = Depends(get_db),
 ) -> DeploymentResponse:
     """Create a new Deployment for a specific agent version.
 
-    Validations:
+    Validations (Phase 9.2 pre-flight gates):
     - Agent must exist (404).
     - Version must exist and belong to that agent (404).
+    - Deployer team must match agent owner team OR have a cross-team AssetGrant (403).
+    - All tools assigned to the agent must have an active AssetGrant for deployer's team (422).
+    - No tool may have risk_level='critical' (422).
     - Version must have ``eval_passed=True`` (422 if not).
 
     Returns 201 with the new Deployment in ``pending`` status (deploy-controller picks it up).
@@ -164,6 +168,65 @@ async def deploy_agent(
             ),
         )
 
+    # ── Pre-flight gate 1: deployer team check ────────────────────────────────
+    deployer_team = x_user_team or agent.team  # fallback keeps backwards compat
+    if deployer_team != agent.team:
+        # Check for an active cross-team grant on the agent
+        grant_result = await db.execute(
+            select(AssetGrant).where(
+                AssetGrant.asset_id == agent.id,
+                AssetGrant.grantee_team == deployer_team,
+                AssetGrant.revoked_at.is_(None),
+            )
+        )
+        cross_grant = grant_result.scalar_one_or_none()
+        if cross_grant is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": "deployer_not_in_owner_team"},
+            )
+
+    # ── Pre-flight gate 2 & 4: load agent tools, check grants + critical risk ─
+    tools_result = await db.execute(
+        select(Tool)
+        .join(AgentTool, AgentTool.tool_id == Tool.id)
+        .where(AgentTool.agent_id == agent.id)
+    )
+    agent_tools = tools_result.scalars().all()
+
+    # Gate 4: block critical-risk tools
+    critical_tools = [t.name for t in agent_tools if t.risk_level == "critical"]
+    if critical_tools:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "critical_risk_tool_not_deployable",
+                "offending_tools": critical_tools,
+            },
+        )
+
+    # Gate 2: verify active grants for all tools
+    missing_grants: list[str] = []
+    for tool in agent_tools:
+        grant_result = await db.execute(
+            select(AssetGrant).where(
+                AssetGrant.asset_id == tool.id,
+                AssetGrant.grantee_team == deployer_team,
+                AssetGrant.revoked_at.is_(None),
+            )
+        )
+        if grant_result.scalar_one_or_none() is None:
+            missing_grants.append(tool.name)
+    if missing_grants:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "tool_grants_missing",
+                "missing_grants": missing_grants,
+            },
+        )
+
+    # ── Pre-flight gate 3: eval gate (already existed) ────────────────────────
     # Eval gate — only passed versions may be deployed
     if not version.eval_passed:
         raise HTTPException(
