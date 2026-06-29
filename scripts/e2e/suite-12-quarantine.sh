@@ -363,6 +363,39 @@ except urllib.error.HTTPError as e:
 "
 echo ""
 
+# ── G5: Observability — Quarantine action should appear in audit trail ────────
+echo "--- G5-S12: X-AgentShield-Trace-ID propagated through quarantine endpoint ---"
+QUARANTINE_TRACE_ID="s12-g5-$(date +%s)"
+Q_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+# The trace_id_middleware adds trace_id to request.state and echoes in response
+req = urllib.request.Request('http://localhost:8000/api/v1/agents/${QUARANTINE_AGENT}/quarantine',
+    data=b'{}', headers={
+        'Content-Type': 'application/json',
+        'X-AgentShield-Trace-ID': '${QUARANTINE_TRACE_ID}',
+    }, method='POST')
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    trace_echo = r.headers.get('X-AgentShield-Trace-ID', 'MISSING')
+    print('echoed=' + trace_echo)
+except urllib.error.HTTPError as e:
+    # 409 = already quarantined — trace header still echoed
+    trace_echo = e.headers.get('X-AgentShield-Trace-ID', 'MISSING')
+    print('http_' + str(e.code) + '_echoed=' + trace_echo)
+except Exception as e:
+    print('ERR:' + str(e)[:60])
+" 2>/dev/null || echo "ERR")
+if echo "$Q_RESULT" | grep -q "echoed=${QUARANTINE_TRACE_ID}"; then
+  pass "G5-S12: X-AgentShield-Trace-ID echoed through quarantine endpoint"
+elif echo "$Q_RESULT" | grep -q "echoed=MISSING\|ERR"; then
+  fail "G5-S12: Trace ID not echoed in quarantine response ($Q_RESULT) — trace middleware not propagating"
+else
+  check_manual "G5-S12: Could not verify trace propagation ($Q_RESULT)" \
+    "curl -v -X POST /api/v1/agents/<name>/quarantine -H 'X-AgentShield-Trace-ID: test'" \
+    "Assert response headers contain X-AgentShield-Trace-ID: test"
+fi
+echo ""
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "======================================================="
 echo "  Suite 12 Results: PASS=${PASS}  FAIL=${FAIL}  MANUAL=${MANUAL}"

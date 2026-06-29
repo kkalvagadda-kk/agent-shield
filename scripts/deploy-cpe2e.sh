@@ -35,7 +35,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.19"
+REGISTRY_API_TAG="0.2.20"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.7"
 STUDIO_TAG="0.1.18"
@@ -51,7 +51,7 @@ echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (agent_runs table, trace middleware, observability)"
+echo "  → registry-api:${REGISTRY_API_TAG} (agent_runs, trace middleware, bundle endpoint, playground trace/feedback)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"

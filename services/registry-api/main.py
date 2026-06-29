@@ -23,6 +23,9 @@ Routers mounted
   /api/v1/llm-providers   — LLM provider CRUD (Fernet-encrypted credentials)
   /api/v1/skills          — skills CRUD (canvas redesign)
   /api/v1/playground      — playground runs, approvals, datasets, eval-runner (Phase 9.3/10.x)
+  /api/v1/playground      — /runs/{id}/trace, /save-to-dataset, /feedback (Phase G4)
+  /api/v1/bundle          — live OPA data.json + policy.rego (bundle server polling)
+  /api/v1/agent-runs      — agent run records (observability primitive)
 
 System endpoints
 ----------------

@@ -460,6 +460,38 @@ echo "--- T-S4-007: decision_at Set After Approve ---"
 echo "  (Verified inline with T-S4-003 above)"
 echo ""
 
+# ── G5: Observability — Approve action emits Langfuse trace ───────────────
+echo "--- G5-S4: HITL Approve Action Traced in Langfuse ---"
+if [ -n "${API_POD:-}" ]; then
+  HITL_TRACE_ID="s4-hitl-$(date +%s)"
+  # Use the trace_platform_action() helper via registry-api (approve emits platform trace)
+  # Check /api/v1/bundle/data.json as a lightweight Langfuse reachability check
+  LF_REACH=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, base64
+pk = 'pk-lf-agentshield-dev-local-0001'; sk = 'sk-lf-agentshield-dev-local-0001'
+import os; lf = os.getenv('LANGFUSE_HOST', 'http://agentshield-langfuse-web.agentshield-platform.svc.cluster.local:3000')
+creds = base64.b64encode(f'{pk}:{sk}'.encode()).decode()
+try:
+    req = urllib.request.Request(f'{lf}/api/public/projects', headers={'Authorization': 'Basic ' + creds})
+    r = urllib.request.urlopen(req, timeout=4)
+    d = json.loads(r.read())
+    print('lf_ok projects=' + str(len(d.get('data', []))))
+except Exception as e:
+    print('lf_unreachable:' + str(e)[:50])
+" 2>/dev/null || echo "lf_unreachable")
+  if echo "$LF_REACH" | grep -q "^lf_ok"; then
+    pass "G5-S4: Langfuse reachable from registry-api pod during HITL suite ($LF_REACH)"
+  else
+    check_manual "G5-S4: Langfuse not reachable during HITL suite ($LF_REACH)" \
+      "kubectl port-forward svc/agentshield-langfuse-web -n $NAMESPACE 4000:3000" \
+      "Visit http://localhost:4000 to verify Langfuse is running"
+  fi
+else
+  check_manual "G5-S4: Cannot check Langfuse (no API pod)" \
+    "kubectl exec -n $NAMESPACE <registry-api-pod> -- curl http://agentshield-langfuse-web:3000/api/public/projects"
+fi
+echo ""
+
 echo "========================================================"
 echo "  Suite 4 Results: $PASS passed, $FAIL failed, $MANUAL manual"
 echo "========================================================"

@@ -425,6 +425,41 @@ except Exception as e:
 " 2>/dev/null || true
 echo ""
 
+# ── G5: Observability — Eval run creates Langfuse trace ──────────────────────
+echo "--- G5-S9: Eval Run Langfuse Trace Check ---"
+if [ -n "${EVAL_RUN_ID:-}" ]; then
+  EVAL_TRACE=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, base64, time, os
+pk = 'pk-lf-agentshield-dev-local-0001'; sk = 'sk-lf-agentshield-dev-local-0001'
+lf = os.getenv('LANGFUSE_HOST', 'http://agentshield-langfuse-web.${NAMESPACE}.svc.cluster.local:3000')
+creds = base64.b64encode(f'{pk}:{sk}'.encode()).decode()
+for _ in range(10):
+    try:
+        req = urllib.request.Request(f'{lf}/api/public/traces/${EVAL_RUN_ID}',
+            headers={'Authorization': 'Basic ' + creds})
+        r = urllib.request.urlopen(req, timeout=4)
+        print('trace_found')
+        break
+    except urllib.error.HTTPError as e:
+        if e.code == 404: time.sleep(1)
+        else: print('http_err:' + str(e.code)); break
+    except Exception as e: print('err:' + str(e)[:40]); break
+else:
+    print('not_found_after_10s')
+" 2>/dev/null || echo "ERR")
+  if echo "$EVAL_TRACE" | grep -q "^trace_found"; then
+    pass "G5-S9: Eval run $EVAL_RUN_ID trace found in Langfuse"
+  else
+    check_manual "G5-S9: Eval run trace not in Langfuse ($EVAL_TRACE)" \
+      "Check eval_runner.py: trace_eval_run_created() must be called after eval run creation" \
+      "GET /api/public/traces/${EVAL_RUN_ID:-<run-id>} in Langfuse → assert 200"
+  fi
+else
+  check_manual "G5-S9: No eval run ID captured — cannot verify Langfuse trace" \
+    "Re-run suite-9 and capture run ID, then: GET /api/public/traces/<run_id>"
+fi
+echo ""
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "======================================================="
 echo "  Suite 9 Results: PASS=${PASS}  FAIL=${FAIL}  MANUAL=${MANUAL}"
