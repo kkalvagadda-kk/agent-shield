@@ -44,7 +44,7 @@ export default function PlaygroundPage() {
   };
 
   return (
-    <div className="flex h-[calc(100vh-56px)] overflow-hidden">
+    <div className="flex h-screen overflow-hidden">
       {/* Left panel — agent selector */}
       <div className="w-60 shrink-0 border-r border-slate-200 bg-white p-4 flex flex-col gap-4 overflow-y-auto">
         <div>
