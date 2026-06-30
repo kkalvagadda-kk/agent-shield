@@ -342,9 +342,33 @@ ERR")
   DEPLOY_STATUS=$(echo "$DEPLOY_OUT" | sed -n '1p')
   DEPLOY_ID=$(echo "$DEPLOY_OUT" | sed -n '2p')
 
+  DEPLOY_TRACE_ID=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+req = urllib.request.Request(
+    'http://localhost:8000/api/v1/agents/${SMOKE_AGENT}/deploy',
+    data=json.dumps({'version_id': '${VERSION_ID}', 'replicas': 1,
+                      'environment': 'production'}).encode(),
+    headers={'Content-Type': 'application/json', 'X-AgentShield-Trace-ID': 'g5-s2-deploy-${TS}'},
+    method='POST'
+)
+try:
+    r = urllib.request.urlopen(req, timeout=10)
+    # Header echoed back by trace middleware
+    print(r.headers.get('X-AgentShield-Trace-ID', ''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
   if [ "$DEPLOY_STATUS" = "201" ] || [ "$DEPLOY_STATUS" = "200" ]; then
     pass "T-S2-005: Deploy returned $DEPLOY_STATUS (deployment_id=${DEPLOY_ID})"
     DEPLOYED_SMOKE=true
+
+    # G5-001: verify trace ID echoed from deploy endpoint
+    if [ "${DEPLOY_TRACE_ID:-}" = "g5-s2-deploy-${TS}" ]; then
+      pass "G5-001: Deploy response echoed X-AgentShield-Trace-ID correctly"
+    else
+      fail "G5-001: Deploy response did not echo X-AgentShield-Trace-ID (got '${DEPLOY_TRACE_ID:-MISSING}') — trace middleware not active on deploy endpoint"
+    fi
 
     echo "  Polling for pod Running in $AGENTS_NS (up to 120s)..."
     DEADLINE=$(($(date +%s) + 120))

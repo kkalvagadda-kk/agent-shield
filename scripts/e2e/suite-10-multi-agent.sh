@@ -244,6 +244,44 @@ except Exception as e:
 done
 echo ""
 
+# ── G5-004: Multi-agent handoff uses shared X-AgentShield-Trace-ID ───────────
+echo "--- G5-004: Multi-Agent Handoff Shares Trace ID (session context) ---"
+# We can test the trace propagation contract without live agents:
+# verify that registry-api's trace middleware echoes X-AgentShield-Trace-ID
+# consistently on back-to-back requests with the same ID (simulating
+# agent-A → agent-B handoff through the platform).
+SHARED_TRACE="s10-g5-shared-$(date +%s)"
+TRACE_RESULTS=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+shared_id = '${SHARED_TRACE}'
+results = []
+# Simulate two agents making requests with the same trace ID (handoff pattern)
+for endpoint in ['/health', '/ready']:
+    req = urllib.request.Request(
+        'http://localhost:8000' + endpoint,
+        headers={'X-AgentShield-Trace-ID': shared_id}
+    )
+    try:
+        r = urllib.request.urlopen(req, timeout=5)
+        echoed = r.headers.get('X-AgentShield-Trace-ID', 'MISSING')
+        results.append(endpoint + '=' + echoed)
+    except Exception as e:
+        results.append(endpoint + '=ERR:' + str(e)[:30])
+# Both must echo the same shared trace ID
+all_match = all(r.endswith('=' + shared_id) for r in results)
+print('match=' + str(all_match) + ' ' + ' '.join(results))
+" 2>/dev/null || echo "ERR")
+if echo "$TRACE_RESULTS" | grep -q "match=True"; then
+  pass "G5-004: Registry API echoes shared X-AgentShield-Trace-ID on both handoff legs ($TRACE_RESULTS)"
+elif echo "$TRACE_RESULTS" | grep -q "ERR"; then
+  fail "G5-004: Trace propagation check failed ($TRACE_RESULTS)"
+else
+  check_manual "G5-004: Trace propagation partial ($TRACE_RESULTS)" \
+    "Submit two requests with same X-AgentShield-Trace-ID to registry-api" \
+    "Assert both responses echo the same trace ID (handoff stitching contract)"
+fi
+echo ""
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo "======================================================="
 echo "  Suite 10 Results: PASS=${PASS}  FAIL=${FAIL}  MANUAL=${MANUAL}"

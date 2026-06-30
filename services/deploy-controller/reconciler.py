@@ -84,6 +84,17 @@ async def _run_preflight_checks(
     if version.get("eval_passed") is False:
         return "version eval has not passed"
 
+    # Check 3b: high-risk agents require adversarial eval pass
+    # adversarial_eval_passed defaults to false; operators set it after running their
+    # adversarial test suite. This gate only applies to high-risk agents.
+    agent_risk = agent.get("risk_level", "low")
+    if agent_risk in ("high", "critical") and not version.get("adversarial_eval_passed", False):
+        return (
+            f"agent risk_level={agent_risk} requires adversarial eval: "
+            "set adversarial_eval_passed=true on the version after running "
+            "your adversarial test suite"
+        )
+
     # Check 4: no critical-risk tool in snapshot
     # Checks both risk_level (registry schema) and risk (older tool snapshot schema)
     if tool_snapshot:

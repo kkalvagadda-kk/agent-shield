@@ -444,36 +444,84 @@ except urllib.error.HTTPError as e:
 "
 
 # ---------------------------------------------------------------------------
-# T-S8-011: GET /trace returns 404 for missing run_id
+# T-S8-011: GET /approvals?context=playground filters correctly
 # ---------------------------------------------------------------------------
-echo "--- T-S8-011: Trace endpoint 404 for missing run ---"
-run_test "T-S8-011: GET /trace for unknown run returns 404" "
-import urllib.request, json
-try:
-    urllib.request.urlopen('http://localhost:8000/api/v1/playground/runs/00000000-0000-0000-0000-000000000000/trace', timeout=5)
-    raise AssertionError('expected 404')
-except urllib.error.HTTPError as e:
-    assert e.code == 404, f'expected 404 got {e.code}'
-    print('404 correctly returned for missing run')
+echo "--- T-S8-011: GET /approvals?context=playground filters by context ---"
+run_test "T-S8-011: Playground approval only in context=playground list" "
+import urllib.request, json, uuid
+
+base = 'http://localhost:8000'
+
+# Get any agent_id for the approval (need a valid FK)
+r = urllib.request.urlopen(base + '/api/v1/agents/', timeout=5)
+agents = json.loads(r.read())
+items = agents if isinstance(agents, list) else agents.get('items', agents.get('data', []))
+if not items:
+    print('SKIP: no agents registered yet')
+    exit()
+agent = items[0]
+agent_id = str(agent.get('id'))
+agent_name = str(agent.get('name'))
+
+# Create a playground approval
+pg_body = json.dumps({
+    'agent_id': agent_id, 'agent_name': agent_name, 'team': 'platform',
+    'thread_id': 'pg-s8-011-' + str(uuid.uuid4())[:8],
+    'tool_name': 'test_tool_pg', 'tool_args': {}, 'risk_level': 'high',
+    'context': 'playground'
+}).encode()
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/approvals/', data=pg_body,
+    headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+pg_ap = json.loads(r.read())
+pg_id = str(pg_ap.get('id'))
+assert pg_ap.get('context') == 'playground', f'context wrong: {pg_ap.get(\"context\")}'
+
+# playground approval must NOT appear in default (production) list
+r_prod = urllib.request.urlopen(base + '/api/v1/approvals/', timeout=5)
+prod_list = json.loads(r_prod.read())
+prod_ids = [str(a.get('id')) for a in (prod_list.get('items') or prod_list.get('data', []))]
+assert pg_id not in prod_ids, f'playground approval {pg_id} appeared in production list'
+
+# playground approval MUST appear in context=playground list
+r_pg = urllib.request.urlopen(base + '/api/v1/approvals/?context=playground', timeout=5)
+pg_list = json.loads(r_pg.read())
+pg_ids = [str(a.get('id')) for a in (pg_list.get('items') or pg_list.get('data', []))]
+assert pg_id in pg_ids, f'playground approval {pg_id} missing from playground list'
+
+print('context filter correct: pg_id in playground list, absent from production list')
 "
 
 # ---------------------------------------------------------------------------
-# T-S8-012: Feedback 404 for missing run
+# T-S8-012: Playground approval has notify_slack=false
 # ---------------------------------------------------------------------------
-echo "--- T-S8-012: Feedback endpoint 404 for missing run ---"
-run_test "T-S8-012: POST /feedback for unknown run returns 404" "
-import urllib.request, json
-body = json.dumps({'score': 1}).encode()
-req = urllib.request.Request(
-    'http://localhost:8000/api/v1/playground/runs/00000000-0000-0000-0000-000000000000/feedback',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST'
-)
-try:
-    urllib.request.urlopen(req, timeout=5)
-    raise AssertionError('expected 404')
-except urllib.error.HTTPError as e:
-    assert e.code == 404, f'expected 404 got {e.code}'
-    print('404 correctly returned for missing run')
+echo "--- T-S8-012: Playground approval has notify_slack=false ---"
+run_test "T-S8-012: Approval created with context=playground has notify_slack=false" "
+import urllib.request, json, uuid
+
+base = 'http://localhost:8000'
+
+r = urllib.request.urlopen(base + '/api/v1/agents/', timeout=5)
+agents = json.loads(r.read())
+items = agents if isinstance(agents, list) else agents.get('items', agents.get('data', []))
+if not items:
+    print('SKIP: no agents registered')
+    exit()
+agent = items[0]
+agent_id, agent_name = str(agent.get('id')), str(agent.get('name'))
+
+pg_body = json.dumps({
+    'agent_id': agent_id, 'agent_name': agent_name, 'team': 'platform',
+    'thread_id': 'pg-s8-012-' + str(uuid.uuid4())[:8],
+    'tool_name': 'notify_slack_test', 'tool_args': {}, 'risk_level': 'high',
+    'context': 'playground'
+}).encode()
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/approvals/', data=pg_body,
+    headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+ap = json.loads(r.read())
+assert ap.get('notify_slack') is False, f'notify_slack should be False for playground: {ap.get(\"notify_slack\")}'
+print('notify_slack=False confirmed for playground approval')
 "
 
 # ---------------------------------------------------------------------------

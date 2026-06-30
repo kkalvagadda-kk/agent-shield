@@ -156,8 +156,14 @@ async def _simulate_agent_stream(
 
 
 async def _complete_run(run_id_str: str) -> None:
-    """Background task: mark run as completed after stream ends."""
+    """Background task: mark run as completed after stream ends, then fire judge."""
+    import asyncio
     from db import AsyncSessionLocal
+
+    agent_name = "unknown"
+    input_message = ""
+    output_text = ""
+    team = "platform"
 
     async with AsyncSessionLocal() as session:
         try:
@@ -169,10 +175,29 @@ async def _complete_run(run_id_str: str) -> None:
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.now(tz=timezone.utc)
+                agent_name = run.agent_name
+                input_message = run.input_message or ""
                 await session.commit()
                 logger.debug("Marked playground run %s as completed", run_id_str)
         except Exception as exc:
             logger.warning("_complete_run: could not update run %s: %s", run_id_str, exc)
+            return
+
+    # Fire-and-forget LLM-as-Judge scorer (non-blocking, 30s timeout in judge.py)
+    if input_message:
+        try:
+            from judge import score_run
+            asyncio.create_task(
+                score_run(
+                    run_id=uuid.UUID(run_id_str),
+                    agent_name=agent_name,
+                    input_text=input_message,
+                    output_text=output_text,
+                    team=team,
+                )
+            )
+        except Exception as exc:
+            logger.debug("_complete_run: could not launch judge for run %s: %s", run_id_str, exc)
 
 
 @router.get(

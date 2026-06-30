@@ -20,6 +20,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -327,6 +328,9 @@ class AgentVersion(Base):
     eval_passed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
+    adversarial_eval_passed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     git_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -551,6 +555,11 @@ class Approval(Base):
     # Context: 'production' (default, routed via approval_authority) or 'playground' (self-approve)
     context: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'production'")
+    )
+    # Playground approvals must not trigger Slack/on-call notifications.
+    # Set automatically to false when context='playground' at creation time.
+    notify_slack: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
     )
 
     # Relationships
@@ -1050,6 +1059,11 @@ class PlaygroundRun(Base):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default=text("'running'")
     )
+    judge_score: Mapped[float | None] = mapped_column(
+        Numeric(4, 3), nullable=True
+    )
+    judge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    judge_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ---------------------------------------------------------------------------

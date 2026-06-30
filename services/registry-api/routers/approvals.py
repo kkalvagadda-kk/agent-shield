@@ -90,6 +90,9 @@ async def create_approval(
     now = datetime.now(tz=timezone.utc)
     expires_at = now + timedelta(seconds=body.timeout_seconds)
 
+    # Playground approvals must not trigger Slack/on-call notifications.
+    notify_slack = body.context != "playground"
+
     approval = Approval(
         agent_id=body.agent_id,
         agent_name=body.agent_name,
@@ -103,6 +106,7 @@ async def create_approval(
         session_id=body.session_id,
         opa_decision_id=body.opa_decision_id,
         context=body.context,
+        notify_slack=notify_slack,
     )
     db.add(approval)
     await db.flush()
@@ -149,18 +153,23 @@ async def list_approvals(
         pattern="^(pending|approved|rejected|timed_out)$",
     ),
     thread_id: Optional[str] = Query(None),
+    context: Optional[str] = Query(
+        None,
+        pattern="^(production|playground)$",
+        description="Filter by context. Defaults to 'production' when not specified.",
+    ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ApprovalResponse]:
-    """List production approvals. When X-User-Sub is provided, filters to
-    only show approvals the caller has authority over. Without the header,
-    returns all production approvals (admin fallback)."""
+    """List approvals. Defaults to production context. Pass context=playground
+    to list playground approvals (self-service, no reviewer authority required)."""
     q = select(Approval).order_by(Approval.created_at.desc())
 
-    # Always restrict to production context
-    q = q.where(Approval.context == "production")
+    # Default to production; explicit context param overrides
+    effective_context = context if context else "production"
+    q = q.where(Approval.context == effective_context)
 
     if agent_name:
         q = q.where(Approval.agent_name == agent_name)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Suite 1: Platform Health & Bootstrapping
-# Tests T-S1-001 through T-S1-009
+# Tests T-S1-001 through T-S1-010
 #
 # Usage:
 #   bash scripts/e2e/suite-1-health.sh
@@ -238,6 +238,59 @@ else
   check_manual "T-S1-009: Alias service DNS check (API pod unavailable)" \
     "kubectl exec -n $NAMESPACE <any-pod> -- getent hosts agentshield-langfuse-clickhouse" \
     "kubectl exec -n $NAMESPACE <any-pod> -- getent hosts agentshield-langfuse-s3"
+fi
+echo ""
+
+# ── T-S1-010: OPA Bundle Server Serves Live data.json ─────────────────────
+echo "--- T-S1-010: OPA Bundle Server Serves data.json with agents key ---"
+if [ -n "$API_POD" ]; then
+  OPA_BUNDLE_URL="http://agentshield-opa-bundle-server.${NAMESPACE}.svc.cluster.local:8181"
+  OPA_BUNDLE_CHECK=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('${OPA_BUNDLE_URL}/bundles/agentshield/data.json', timeout=5)
+    d = json.loads(r.read())
+    has_agents = 'agents' in d
+    has_grants = 'grants' in d
+    print('ok agents=' + str(has_agents) + ' grants=' + str(has_grants))
+except Exception as e:
+    print('not_deployed:' + str(e)[:70])
+" 2>/dev/null || echo "exec_failed")
+  if echo "$OPA_BUNDLE_CHECK" | grep -q "^ok agents=True"; then
+    pass "T-S1-010: OPA bundle server serves data.json with agents+grants keys ($OPA_BUNDLE_CHECK)"
+  elif echo "$OPA_BUNDLE_CHECK" | grep -q "not_deployed"; then
+    check_manual "T-S1-010: OPA bundle server not reachable ($OPA_BUNDLE_CHECK)" \
+      "Apply: kubectl apply -f infra/opa-bundle-server/" \
+      "Then: curl http://agentshield-opa-bundle-server.$NAMESPACE:8181/bundles/agentshield/data.json" \
+      "Assert JSON with 'agents' key"
+  else
+    fail "T-S1-010: OPA bundle server data.json missing agents key ($OPA_BUNDLE_CHECK)"
+  fi
+
+  # Sub-check: policy.rego endpoint also served
+  OPA_POLICY_CHECK=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    r = urllib.request.urlopen('${OPA_BUNDLE_URL}/bundles/agentshield/policy.rego', timeout=5)
+    body = r.read().decode()
+    has_package = 'package agentshield' in body
+    print('ok has_package=' + str(has_package))
+except Exception as e:
+    print('not_deployed:' + str(e)[:50])
+" 2>/dev/null || echo "exec_failed")
+  if echo "$OPA_POLICY_CHECK" | grep -q "^ok has_package=True"; then
+    pass "T-S1-010b: OPA bundle server serves policy.rego with correct package"
+  elif echo "$OPA_POLICY_CHECK" | grep -q "not_deployed"; then
+    check_manual "T-S1-010b: OPA bundle server policy.rego not reachable" \
+      "GET http://agentshield-opa-bundle-server.$NAMESPACE:8181/bundles/agentshield/policy.rego" \
+      "Assert 'package agentshield' in body"
+  else
+    fail "T-S1-010b: OPA bundle server policy.rego check failed ($OPA_POLICY_CHECK)"
+  fi
+else
+  check_manual "T-S1-010: OPA bundle server check (no API pod)" \
+    "kubectl exec -n $NAMESPACE <any-pod> -- curl http://agentshield-opa-bundle-server.$NAMESPACE:8181/bundles/agentshield/data.json" \
+    "Assert JSON with 'agents' and 'grants' keys"
 fi
 echo ""
 

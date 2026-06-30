@@ -153,6 +153,7 @@ class AgentVersionCreate(BaseModel):
     workflow_id: uuid.UUID | None = None
     tools: list[ToolDefinition] = Field(default_factory=list)
     eval_passed: bool = False
+    adversarial_eval_passed: bool = False
     git_sha: str | None = Field(None, max_length=64)
     git_branch: str | None = None
     notes: str | None = None
@@ -167,6 +168,7 @@ class AgentVersionCreate(BaseModel):
 
 class AgentVersionPatch(BaseModel):
     eval_passed: bool | None = None
+    adversarial_eval_passed: bool | None = None
     status: str | None = Field(
         None,
         pattern="^(pending|eval_passed|eval_failed|deployed|retired)$",
@@ -182,6 +184,7 @@ class AgentVersionResponse(BaseModel):
     workflow_id: uuid.UUID | None
     tools: list[ToolDefinition]
     eval_passed: bool
+    adversarial_eval_passed: bool
     git_sha: str | None
     git_branch: str | None
     notes: str | None
@@ -306,6 +309,7 @@ class ApprovalResponse(BaseModel):
     session_id: Optional[uuid.UUID] = None
     opa_decision_id: Optional[uuid.UUID] = None
     context: str = "production"
+    notify_slack: bool = True
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -473,6 +473,168 @@ assert r.status == 204, f'expected 204 got {r.status}'
 fi
 
 # ---------------------------------------------------------------------------
+# G3-T002: Deploy Gate Completeness (T-S6-LG-001 through T-S6-LG-004)
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== G3-T002: Deploy Gate — Adversarial Eval + Critical Tool Gates ==="
+echo ""
+
+TS6LG=$(date +%s)
+
+# T-S6-LG-001: High-risk agent blocked without adversarial eval
+echo "--- T-S6-LG-001: High-risk agent deploy blocked without adversarial_eval_passed ---"
+run_test "T-S6-LG-001: POST deploy for high-risk agent → 422 adversarial eval required" "
+import urllib.request, json, time
+base = 'http://localhost:8000'
+ts = '${TS6LG}'
+
+# Create agent with risk_level=high
+ag = json.dumps({'name': 'high-risk-gate-' + ts, 'team': 'platform',
+                  'description': 'gate test', 'risk_level': 'high'}).encode()
+try:
+    r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
+        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    agent = json.loads(r.read())
+    agent_name = agent.get('name')
+except urllib.error.HTTPError as e:
+    if e.code == 409:
+        agent_name = 'high-risk-gate-' + ts
+    else:
+        raise
+
+# Create version with adversarial_eval_passed=false (default)
+v = json.dumps({'agent_name': agent_name, 'description': 'v1',
+                 'tools': [{'name': 'search', 'risk': 'low'}],
+                 'adversarial_eval_passed': False}).encode()
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/agents/' + agent_name + '/versions',
+    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+version = json.loads(r.read())
+version_id = str(version.get('id'))
+
+# Attempt deploy — must be blocked
+d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
+                 'deployer_team': 'platform'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(
+        base + '/api/v1/agents/' + agent_name + '/deployments',
+        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    raise AssertionError('Expected 422 but deploy succeeded')
+except urllib.error.HTTPError as e:
+    body = json.loads(e.read())
+    detail = str(body.get('detail', ''))
+    assert e.code == 422, f'expected 422 got {e.code}: {detail}'
+    assert 'adversarial' in detail.lower(), f'expected \"adversarial\" in detail: {detail}'
+    print('BLOCKED 422 detail=' + detail[:80])
+"
+
+# T-S6-LG-002: Deploy succeeds after setting adversarial_eval_passed=true
+echo "--- T-S6-LG-002: Deploy succeeds after setting adversarial_eval_passed=true ---"
+run_test "T-S6-LG-002: PATCH adversarial_eval_passed=true then deploy → 201/202" "
+import urllib.request, json
+base = 'http://localhost:8000'
+ts = '${TS6LG}'
+agent_name = 'high-risk-gate-' + ts
+
+# Get latest version id
+r = urllib.request.urlopen(
+    base + '/api/v1/agents/' + agent_name + '/versions', timeout=5)
+versions = json.loads(r.read())
+# versions may be a list or paginated — handle both
+items = versions if isinstance(versions, list) else versions.get('items', versions.get('data', []))
+assert items, f'no versions found: {versions}'
+version_id = str(items[-1].get('id'))
+
+# Patch adversarial_eval_passed=true
+patch = json.dumps({'adversarial_eval_passed': True}).encode()
+req = urllib.request.Request(
+    base + '/api/v1/agents/' + agent_name + '/versions/' + version_id,
+    data=patch, headers={'Content-Type': 'application/json'}, method='PATCH')
+r = urllib.request.urlopen(req, timeout=5)
+assert r.getcode() in (200, 204), f'patch failed: {r.getcode()}'
+
+# Deploy should now succeed (or return 202 accepted)
+d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
+                 'deployer_team': 'platform'}).encode()
+try:
+    r2 = urllib.request.urlopen(urllib.request.Request(
+        base + '/api/v1/agents/' + agent_name + '/deployments',
+        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    print('DEPLOY_OK status=' + str(r2.getcode()))
+except urllib.error.HTTPError as e:
+    body = json.loads(e.read())
+    detail = str(body.get('detail', ''))
+    # 409 = already deployed is acceptable
+    if e.code == 409:
+        print('ALREADY_DEPLOYED (acceptable) detail=' + detail[:60])
+    else:
+        raise AssertionError(f'Expected 201/202/409 got {e.code}: {detail}')
+"
+
+# T-S6-LG-003: Deploy blocked when version has critical-risk tool (risk field)
+echo "--- T-S6-LG-003: Deploy blocked when tool risk='critical' ---"
+run_test "T-S6-LG-003: Deploy with critical tool → 422 with tool name in detail" "
+import urllib.request, json
+base = 'http://localhost:8000'
+ts = '${TS6LG}'
+agent_name = 'crit-tool-gate-' + ts
+
+ag = json.dumps({'name': agent_name, 'team': 'platform', 'description': 'gate test'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
+        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+except urllib.error.HTTPError as e:
+    if e.code != 409: raise
+
+v = json.dumps({'agent_name': agent_name, 'description': 'v1',
+                 'tools': [{'name': 'nuke_everything', 'risk': 'critical'}],
+                 'adversarial_eval_passed': True}).encode()
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/agents/' + agent_name + '/versions',
+    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+version_id = str(json.loads(r.read()).get('id'))
+
+d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
+                 'deployer_team': 'platform'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(
+        base + '/api/v1/agents/' + agent_name + '/deployments',
+        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    raise AssertionError('Expected 422 but deploy succeeded')
+except urllib.error.HTTPError as e:
+    body = json.loads(e.read())
+    detail = str(body.get('detail', ''))
+    assert e.code == 422, f'expected 422 got {e.code}: {detail}'
+    assert 'critical' in detail.lower(), f'expected \"critical\" in detail: {detail}'
+    print('BLOCKED 422 detail=' + detail[:80])
+"
+
+# T-S6-LG-004: Gate violations return structured 422 (not 500)
+echo "--- T-S6-LG-004: Deploy gate violations return 422 not 500 ---"
+run_test "T-S6-LG-004: Gate violation response is structured {detail: ...} JSON at 422" "
+import urllib.request, json
+base = 'http://localhost:8000'
+ts = '${TS6LG}'
+
+# Try to deploy a non-existent agent — should get a structured error
+d = json.dumps({'agent_name': 'nonexistent-agent-' + ts, 'version_id': '00000000-0000-0000-0000-000000000000',
+                 'deployer_team': 'platform'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(
+        base + '/api/v1/agents/nonexistent-agent-' + ts + '/deployments',
+        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    raise AssertionError('Expected 4xx but got 200')
+except urllib.error.HTTPError as e:
+    assert e.code in (404, 422), f'expected 404 or 422 got {e.code}'
+    body = json.loads(e.read())
+    assert 'detail' in body, f'response missing detail key: {body}'
+    assert e.code != 500, '500 Internal Server Error — gate must return structured error'
+    print('STRUCTURED_ERROR code=' + str(e.code) + ' detail=' + str(body.get('detail',''))[:60])
+"
+
+echo ""
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
