@@ -583,21 +583,22 @@ function GrantsTab() {
     queryFn: () => listGrants({ limit: 200 }),
   });
 
-  const { data: agents = [] } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
-  const { data: toolsData } = useQuery({ queryKey: ["tools"], queryFn: listTools });
-  const { data: skillsData } = useQuery({ queryKey: ["skills"], queryFn: listSkills });
+  const { data: agentsPage } = useQuery({ queryKey: ["agents"], queryFn: () => listAgents() });
+  const { data: toolsPage } = useQuery({ queryKey: ["tools"], queryFn: () => listTools() });
+  const { data: skillsPage } = useQuery({ queryKey: ["skills"], queryFn: () => listSkills() });
   const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
 
-  const tools = (toolsData as { items?: unknown[] } | undefined)?.items ?? (Array.isArray(toolsData) ? toolsData : []) as { id: string; name: string }[];
-  const skills = (skillsData as { items?: unknown[] } | undefined)?.items ?? (Array.isArray(skillsData) ? skillsData : []) as { id: string; name: string }[];
+  const agents = agentsPage?.items ?? [];
+  const tools = toolsPage?.items ?? [];
+  const skills = skillsPage?.items ?? [];
 
   const assetOptions: { id: string; name: string }[] =
     form.asset_type === "agent"
-      ? (agents as { id: string; name: string }[]).map((a) => ({ id: a.id, name: a.name }))
+      ? agents.map((a) => ({ id: a.id, name: a.name }))
       : form.asset_type === "tool"
-      ? (tools as { id: string; name: string }[]).map((t) => ({ id: t.id, name: t.name }))
+      ? tools.map((t) => ({ id: t.id, name: t.name }))
       : form.asset_type === "skill"
-      ? (skills as { id: string; name: string }[]).map((s) => ({ id: s.id, name: s.name }))
+      ? skills.map((s) => ({ id: s.id, name: s.name }))
       : [];
 
   const revokeMutation = useMutation({
