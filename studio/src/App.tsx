@@ -3,6 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 import Sidebar from "./components/Sidebar";
 import AgentDetailPage from "./pages/AgentDetailPage";
+import CatalogPage from "./pages/CatalogPage";
 import AgentListPage from "./pages/AgentListPage";
 import AdminAccessPage from "./pages/AdminAccessPage";
 import AdminApprovalAuthorityPage from "./pages/AdminApprovalAuthorityPage";
@@ -44,6 +45,7 @@ export default function App() {
               <Route path="/workflows/:id" element={<CanvasPage />} />
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/catalog" element={<CatalogPage />} />
               <Route path="/admin/publish-requests" element={<AdminPublishRequestsPage />} />
               <Route path="/admin/access" element={<AdminAccessPage />} />
               <Route path="/admin/grants" element={<AdminGrantsPage />} />

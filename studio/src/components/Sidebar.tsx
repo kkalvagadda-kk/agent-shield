@@ -32,8 +32,7 @@ function isPlaygroundRoute(pathname: string) {
     pathname.startsWith("/skills") ||
     pathname.startsWith("/tools") ||
     pathname.startsWith("/workflows") ||
-    pathname.startsWith("/playground") ||
-    pathname.startsWith("/providers")
+    pathname.startsWith("/playground")
   );
 }
 
@@ -138,6 +137,14 @@ export default function Sidebar() {
             <SideLink key={item.to} to={item.to} label={item.label} end={item.end} />
           ))}
         </Section>
+
+        {/* Catalog — shared artifacts */}
+        <div>
+          <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Org
+          </p>
+          <SideLink to="/catalog" label="Catalog" />
+        </div>
 
         {/* Providers — standalone */}
         <div>
