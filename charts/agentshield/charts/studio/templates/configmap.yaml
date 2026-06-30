@@ -23,8 +23,17 @@ data:
         proxy_redirect http://{{ .Release.Name }}-registry-api:8000/ /;
       }
 
-      # SPA fallback — all other routes serve index.html
+      # Hashed assets — cache forever (filenames change on rebuild)
+      location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+      }
+
+      # SPA fallback — serve index.html but never cache it so deploys
+      # are reflected immediately without users clearing browser cache
       location / {
         try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
       }
     }

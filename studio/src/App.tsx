@@ -3,6 +3,7 @@ import { BrowserRouter, NavLink, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 import AgentDetailPage from "./pages/AgentDetailPage";
 import AgentListPage from "./pages/AgentListPage";
+import AdminAccessPage from "./pages/AdminAccessPage";
 import AdminApprovalAuthorityPage from "./pages/AdminApprovalAuthorityPage";
 import AdminGrantsPage from "./pages/AdminGrantsPage";
 import AdminPublishRequestsPage from "./pages/AdminPublishRequestsPage";
@@ -114,12 +115,12 @@ export default function App() {
                 Publish Queue
               </NavLink>
               <NavLink
-                to="/admin/grants"
+                to="/admin/access"
                 className={({ isActive }) =>
                   `text-sm font-medium transition-colors ${isActive ? "text-white" : "text-slate-400 hover:text-slate-200"}`
                 }
               >
-                Grants
+                Access
               </NavLink>
               <NavLink
                 to="/admin/approval-authority"
@@ -144,6 +145,7 @@ export default function App() {
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/admin/publish-requests" element={<AdminPublishRequestsPage />} />
+              <Route path="/admin/access" element={<AdminAccessPage />} />
               <Route path="/admin/grants" element={<AdminGrantsPage />} />
               <Route path="/admin/approval-authority" element={<AdminApprovalAuthorityPage />} />
               {/* Phase 9.3 — HITL dashboard */}

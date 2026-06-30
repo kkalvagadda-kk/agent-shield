@@ -78,6 +78,11 @@ spec:
                 secretKeyRef:
                   name: slack-credentials
                   key: webhook-url
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin-password
+                  key: admin-password
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
             - name: AGENTSHIELD_ENCRYPTION_KEY
@@ -123,6 +128,11 @@ spec:
                 secretKeyRef:
                   name: slack-credentials
                   key: webhook-url
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin-password
+                  key: admin-password
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
             - name: AGENTSHIELD_ENCRYPTION_KEY

@@ -77,6 +77,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from routers.agent_tools import router as agent_tools_router
+from routers.admin_users import router as admin_users_router, teams_router as admin_teams_router
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +173,10 @@ def create_app() -> FastAPI:
     app.include_router(agent_tools_router)
     app.include_router(llm_providers_router)
     app.include_router(admin_router)
+
+    # --- Admin user management (Keycloak-backed) ---
+    app.include_router(admin_users_router)
+    app.include_router(admin_teams_router)
 
     # --- Agent Runs router (observability primitive) ---
     app.include_router(agent_runs_router)
