@@ -179,6 +179,32 @@ spec:
                 echo "    Client 'envoy-gateway' already exists — skipping."
               fi
 
+              # ── Client: agentshield-studio ────────────────────────────────
+              # Public SPA client. Uses PKCE (S256) — no client secret.
+              # Browser redirect flow; all origins/URIs allowed for dev.
+              echo "==> Creating client 'agentshield-studio' ..."
+              CLIENT_EXISTS=$(/opt/keycloak/bin/kcadm.sh get clients \
+                -r "${REALM}" --fields clientId --format csv 2>/dev/null \
+                | grep -c "^\"agentshield-studio\"" || true)
+
+              if [ "${CLIENT_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create clients \
+                  -r "${REALM}" \
+                  -s clientId=agentshield-studio \
+                  -s enabled=true \
+                  -s protocol=openid-connect \
+                  -s publicClient=true \
+                  -s standardFlowEnabled=true \
+                  -s implicitFlowEnabled=false \
+                  -s serviceAccountsEnabled=false \
+                  -s 'redirectUris=["*"]' \
+                  -s 'webOrigins=["*"]' \
+                  -s attributes='{"pkce.code.challenge.method":"S256"}'
+                echo "    Client 'agentshield-studio' created."
+              else
+                echo "    Client 'agentshield-studio' already exists — skipping."
+              fi
+
               # ── User: platform-admin ───────────────────────────────────────
               # Full-access administrative user for the AgentShield Studio and
               # Registry API. Password from the keycloak-user-passwords secret.

@@ -12,6 +12,28 @@ data:
       root /usr/share/nginx/html;
       index index.html;
 
+      # Keycloak config for the SPA — fetched at runtime so the image is
+      # environment-agnostic. Empty keycloakUrl means "same origin" (the
+      # browser uses window.location.origin, which nginx proxies to KC).
+      location = /config.json {
+        add_header Content-Type "application/json";
+        add_header Cache-Control "no-store";
+        return 200 '{"keycloakUrl":"","keycloakRealm":"agentshield","keycloakClientId":"agentshield-studio"}';
+      }
+
+      # Proxy Keycloak OIDC endpoints through Studio so the browser only
+      # needs one port (no separate KC port-forward required).
+      location ~ ^/(realms|resources|js)(/.*)?$ {
+        proxy_pass http://{{ .Release.Name }}-keycloak;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+      }
+
       # Proxy API calls to the Registry API
       location /api/ {
         proxy_pass http://{{ .Release.Name }}-registry-api:8000/api/;

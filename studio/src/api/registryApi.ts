@@ -1,6 +1,22 @@
 import axios from "axios";
+import { getKeycloak } from "../lib/keycloak";
 
 const http = axios.create({ baseURL: "/api/v1" });
+
+// Attach Bearer token on every request; refresh if stale first
+http.interceptors.request.use(async (config) => {
+  const kc = getKeycloak();
+  if (kc?.authenticated) {
+    try {
+      await kc.updateToken(10);
+    } catch {
+      kc.logout();
+      return Promise.reject(new Error("Session expired"));
+    }
+    config.headers.Authorization = `Bearer ${kc.token}`;
+  }
+  return config;
+});
 
 // ---------------------------------------------------------------------------
 // Types

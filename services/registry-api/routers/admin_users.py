@@ -20,7 +20,8 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from auth_middleware import get_optional_user
+from db import get_db
 from keycloak_client import (
     create_user as kc_create,
     delete_user as kc_delete,
@@ -147,7 +148,11 @@ async def list_users(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)):
+async def create_user(
+    body: UserCreate,
+    db: AsyncSession = Depends(get_db),
+    caller: dict | None = Depends(get_optional_user),
+):
     try:
         kc_id = await kc_create(
             username=body.username,
@@ -159,7 +164,8 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db)):
     except httpx.HTTPStatusError as e:
         raise _kc_error(e)
 
-    await _upsert_team(db, kc_id, body.team, body.role, assigned_by="admin")
+    assigned_by = caller.get("preferred_username", "admin") if caller else "admin"
+    await _upsert_team(db, kc_id, body.team, body.role, assigned_by=assigned_by)
 
     try:
         await set_user_realm_role(kc_id, body.role)

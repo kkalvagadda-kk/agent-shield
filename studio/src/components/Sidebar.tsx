@@ -1,6 +1,7 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, LogOut } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { useAuth } from "../contexts/AuthContext";
 
 // ── Nav item groups ──────────────────────────────────────────────────────────
 
@@ -91,6 +92,7 @@ function Section({
 
 export default function Sidebar() {
   const { pathname } = useLocation();
+  const { user, logout } = useAuth();
 
   const [open, setOpen] = useState({
     playground: isPlaygroundRoute(pathname),
@@ -165,6 +167,30 @@ export default function Sidebar() {
           ))}
         </Section>
       </nav>
+
+      {/* User footer */}
+      {user && (
+        <div className="border-t border-slate-800 px-3 py-3 flex items-center gap-2">
+          <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-semibold shrink-0">
+            {(user.given_name?.[0] ?? user.preferred_username?.[0] ?? "?").toUpperCase()}
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-medium text-slate-200 truncate">
+              {user.given_name
+                ? `${user.given_name} ${user.family_name ?? ""}`.trim()
+                : user.preferred_username}
+            </p>
+            <p className="text-xs text-slate-500 truncate">{user.email ?? user.preferred_username}</p>
+          </div>
+          <button
+            onClick={logout}
+            title="Sign out"
+            className="text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+          >
+            <LogOut size={14} />
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
