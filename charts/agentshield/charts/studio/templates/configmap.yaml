@@ -23,12 +23,27 @@ data:
 
       # Proxy Keycloak OIDC endpoints through Studio so the browser only
       # needs one port (no separate KC port-forward required).
+      #
+      # Two rewrites are required to keep the browser on localhost:5173:
+      #
+      # 1. proxy_redirect — rewrites Location headers in 3xx responses so
+      #    Keycloak's internal hostname never reaches the browser.
+      #
+      # 2. sub_filter — rewrites the internal hostname embedded in KC's
+      #    login page HTML (form action="http://agentshield-keycloak/...")
+      #    to a root-relative path the browser resolves against localhost.
+      #    Accept-Encoding is cleared so KC sends uncompressed HTML.
       location ~ ^/(realms|resources|js)(/.*)?$ {
         proxy_pass http://{{ .Release.Name }}-keycloak;
-        proxy_set_header Host $host;
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_redirect http://{{ .Release.Name }}-keycloak/ /;
+        proxy_set_header Accept-Encoding "";
+        sub_filter 'http://{{ .Release.Name }}-keycloak' '';
+        sub_filter_once off;
         proxy_buffer_size 128k;
         proxy_buffers 4 256k;
         proxy_busy_buffers_size 256k;
