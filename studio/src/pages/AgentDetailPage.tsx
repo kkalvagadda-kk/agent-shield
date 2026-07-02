@@ -163,7 +163,7 @@ export default function AgentDetailPage() {
             value={new Date(agent.updated_at).toLocaleString()}
           />
         </div>
-        {agent.created_by && (
+        {agent.created_by !== "system" && (
           <DetailRow label="Created By" value={agent.created_by} mono />
         )}
       </div>

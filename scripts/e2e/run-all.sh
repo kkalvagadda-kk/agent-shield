@@ -60,6 +60,7 @@ run_suite "Suite 10: Multi-Agent Handoff"       "suite-10-multi-agent.sh"
 run_suite "Suite 11: Resilience"                "suite-11-resilience.sh"
 run_suite "Suite 12: Quarantine"                "suite-12-quarantine.sh"
 run_suite "Suite 13: Observability (CRITICAL)"  "suite-13-observability.sh"
+run_suite "Suite 14: Consumer Chat"             "suite-14-consumer-chat.sh"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

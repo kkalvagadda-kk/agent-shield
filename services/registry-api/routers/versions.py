@@ -87,6 +87,7 @@ async def create_version(
         workflow_id=body.workflow_id,
         tools=[t.model_dump() for t in body.tools],
         eval_passed=body.eval_passed,
+        adversarial_eval_passed=body.adversarial_eval_passed,
         git_sha=body.git_sha,
         git_branch=body.git_branch,
         notes=body.notes,
@@ -169,6 +170,9 @@ async def patch_version(
     changed = False
     if body.eval_passed is not None:
         version.eval_passed = body.eval_passed
+        changed = True
+    if body.adversarial_eval_passed is not None:
+        version.adversarial_eval_passed = body.adversarial_eval_passed
         changed = True
     if body.status is not None:
         version.status = body.status

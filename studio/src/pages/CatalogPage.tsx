@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { BookOpen, Loader2, RefreshCw, ShieldOff } from "lucide-react";
+import { BookOpen, Loader2, MessageSquare, RefreshCw, Rocket, ShieldOff } from "lucide-react";
+import { Link } from "react-router-dom";
 import { listAgents, listTools, listSkills, listWorkflows } from "../api/registryApi";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -24,6 +25,7 @@ interface CatalogEntry {
   description?: string | null;
   team?: string;
   grantedTo: string[];
+  publish_status?: string;
 }
 
 // ── API ──────────────────────────────────────────────────────────────────────
@@ -59,7 +61,7 @@ export default function CatalogPage() {
 
   const { data: agentsPage, isLoading: loadingAgents } = useQuery({
     queryKey: ["catalog-agents"],
-    queryFn: () => listAgents(),
+    queryFn: () => listAgents(100, 0, "active"),
   });
   const { data: toolsPage, isLoading: loadingTools } = useQuery({
     queryKey: ["catalog-tools"],
@@ -100,6 +102,7 @@ export default function CatalogPage() {
       description: a.description,
       team: a.team,
       grantedTo: grantMap[a.name] ?? [],
+      publish_status: a.publish_status,
     })),
     ...(toolsPage?.items ?? []).map((t) => ({
       id: t.id,
@@ -128,7 +131,11 @@ export default function CatalogPage() {
   ];
 
   // Only show entries that have at least one active grant (shared with a team)
-  const shared = entries.filter((e) => e.grantedTo.length > 0);
+  // For agents, also require publish_status === "published"
+  const shared = entries.filter(
+    (e) => e.grantedTo.length > 0 &&
+           (e.type !== "agent" || e.publish_status === "published")
+  );
   const unshared = entries.filter((e) => e.grantedTo.length === 0);
 
   return (
@@ -254,6 +261,23 @@ function CatalogCard({ entry, dimmed }: { entry: CatalogEntry; dimmed?: boolean 
           <p className="text-xs text-slate-400 italic">Not granted to any team</p>
         )}
       </div>
+
+      {entry.type === "agent" && entry.grantedTo.length > 0 && (
+        <div className="flex gap-2 mt-2 pt-2 border-t border-slate-100">
+          <Link
+            to={`/agents/${entry.name}/chat`}
+            className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded transition-colors"
+          >
+            <MessageSquare size={11} /> Chat
+          </Link>
+          <Link
+            to={`/agents/${entry.name}/deploy`}
+            className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded transition-colors"
+          >
+            <Rocket size={11} /> Deploy
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

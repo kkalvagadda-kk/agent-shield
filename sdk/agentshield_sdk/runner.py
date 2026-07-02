@@ -21,6 +21,7 @@ from .checkpointer import get_checkpointer
 from .graph_builder import build_graph, _current_thread_id
 from .safety_client import scan_input, scan_output, SafetyBlockedError
 from .streaming import stream_events
+from .tracing import tracer
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +62,22 @@ class Runner:
         message: str,
         thread_id: str | None = None,
         metadata: dict | None = None,
+        trace_id: str | None = None,
     ) -> dict:
         """Run the agent synchronously (one shot, waits for completion).
 
         Steps:
-        1. Safety scan of input.
-        2. Graph ainvoke.
-        3. Safety scan of output.
-        4. Return response dict.
+        1. Start/attach Langfuse trace.
+        2. Safety scan of input.
+        3. Graph ainvoke.
+        4. Safety scan of output.
+        5. End trace and return response dict.
 
         Args:
             message:   The user's message.
             thread_id: Existing thread ID for conversation continuity.
             metadata:  Optional metadata attached to the run (unused in v1).
+            trace_id:  Optional trace ID from X-AgentShield-Trace-ID header.
 
         Returns:
             dict with ``response`` (str) and ``thread_id`` (str).
@@ -84,24 +88,33 @@ class Runner:
         self._assert_ready()
         thread_id = thread_id or str(uuid4())
 
-        # 1. Safety scan input.
+        # 1. Start/attach trace
+        trace_ctx = tracer.start_trace(
+            name=f"agent.{self.agent.name}",
+            session_id=thread_id,
+            agent_name=self.agent.name,
+            trace_id=trace_id,
+        )
+
+        # 2. Safety scan input.
         scan_result = await scan_input(
             message, agent_name=self.agent.name, session_id=thread_id
         )
         safe_message = scan_result.sanitized_text
+        tracer.span(trace_ctx, "safety_scan_input", input={"message_len": len(message)},
+                    output={"sanitized": scan_result.sanitized_text != message})
 
-        # 2. Invoke graph.
+        # 3. Invoke graph.
         graph_config = {"configurable": {"thread_id": thread_id}}
         state = {"messages": [HumanMessage(content=safe_message)]}
 
-        # Make thread_id available to governed_tool via ContextVar.
         token = _current_thread_id.set(thread_id)
         try:
             result = await self._graph.ainvoke(state, graph_config)
         finally:
             _current_thread_id.reset(token)
 
-        # 3. Extract last AI message.
+        # 4. Extract last AI message.
         messages = result.get("messages", [])
         last_message = messages[-1] if messages else None
         response_text: str = (
@@ -110,10 +123,15 @@ class Runner:
             else ""
         )
 
-        # 4. Safety scan output.
+        # 5. Safety scan output.
         out_scan = await scan_output(
             response_text, agent_name=self.agent.name, session_id=thread_id
         )
+        tracer.span(trace_ctx, "safety_scan_output",
+                    output={"clean": out_scan.clean_text == response_text})
+
+        # 6. End trace
+        tracer.end_trace(trace_ctx, output={"response_len": len(out_scan.clean_text)})
 
         return {
             "response": out_scan.clean_text,
@@ -124,13 +142,15 @@ class Runner:
         self,
         message: str,
         thread_id: str | None = None,
+        trace_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream agent output as SSE events.
 
         Steps:
-        1. Safety scan of input (before streaming begins).
-        2. Yield SSE events from graph.astream_events().
-        3. Safety scan done event is implicit (scanner runs inside runner.run()).
+        1. Start/attach Langfuse trace.
+        2. Safety scan of input (before streaming begins).
+        3. Yield SSE events from graph.astream_events().
+        4. End trace after stream completes.
 
         Yields:
             SSE-formatted strings (event + data lines).
@@ -141,13 +161,23 @@ class Runner:
         self._assert_ready()
         thread_id = thread_id or str(uuid4())
 
-        # 1. Safety scan input — fail fast before starting the stream.
+        # 1. Start/attach trace
+        trace_ctx = tracer.start_trace(
+            name=f"agent.{self.agent.name}.stream",
+            session_id=thread_id,
+            agent_name=self.agent.name,
+            trace_id=trace_id,
+        )
+
+        # 2. Safety scan input — fail fast before starting the stream.
         scan_result = await scan_input(
             message, agent_name=self.agent.name, session_id=thread_id
         )
         safe_message = scan_result.sanitized_text
+        tracer.span(trace_ctx, "safety_scan_input", input={"message_len": len(message)},
+                    output={"sanitized": scan_result.sanitized_text != message})
 
-        # 2. Stream graph events.
+        # 3. Stream graph events.
         graph_config = {"configurable": {"thread_id": thread_id}}
         state = {"messages": [HumanMessage(content=safe_message)]}
 
@@ -157,6 +187,7 @@ class Runner:
                 yield sse_chunk
         finally:
             _current_thread_id.reset(token)
+            tracer.end_trace(trace_ctx, output={"streamed": True})
 
     async def resume(self, thread_id: str, decision: dict) -> dict:
         """Resume a paused graph after a HITL decision.

@@ -1,10 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, Loader2, RefreshCw, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   approvePublishRequest,
+  listAgents,
   listPublishRequests,
+  listSkills,
+  listTools,
+  listWorkflows,
   rejectPublishRequest,
   type PublishRequest,
 } from "../api/registryApi";
@@ -26,7 +30,6 @@ export default function AdminPublishRequestsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("pending_review");
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
-  const [teamsInput, setTeamsInput] = useState("");
   const [rejectNotes, setRejectNotes] = useState("");
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
@@ -34,13 +37,26 @@ export default function AdminPublishRequestsPage() {
     queryFn: () => listPublishRequests({ status: statusFilter || undefined, limit: 100 }),
   });
 
+  const { data: agentsPage }    = useQuery({ queryKey: ["pq-agents"],    queryFn: () => listAgents(200, 0, "active") });
+  const { data: toolsPage }     = useQuery({ queryKey: ["pq-tools"],     queryFn: () => listTools(200, 0) });
+  const { data: skillsPage }    = useQuery({ queryKey: ["pq-skills"],    queryFn: () => listSkills(200, 0) });
+  const { data: workflowsList } = useQuery({ queryKey: ["pq-workflows"], queryFn: () => listWorkflows() });
+
+  const assetNameMap = useMemo(() => {
+    const m: Record<string, { name: string; description?: string | null; team?: string | null }> = {};
+    for (const a of agentsPage?.items ?? [])  m[String(a.id ?? a.name)] = { name: a.name, description: a.description, team: a.team };
+    for (const t of toolsPage?.items ?? [])   m[String(t.id)]           = { name: t.name, description: t.description, team: t.owner_team };
+    for (const s of skillsPage?.items ?? [])  m[String(s.id)]           = { name: s.name, description: s.description, team: s.team };
+    for (const w of workflowsList ?? [])      m[String(w.id)]           = { name: w.name, description: w.description, team: w.team };
+    return m;
+  }, [agentsPage, toolsPage, skillsPage, workflowsList]);
+
   const approveMutation = useMutation({
-    mutationFn: ({ id, teams }: { id: string; teams: string[] }) =>
-      approvePublishRequest(id, { grantee_teams: teams }),
-    onSuccess: (result) => {
-      toast.success(`Approved — ${result.grants_created} grant(s) created.`);
+    mutationFn: ({ id }: { id: string }) =>
+      approvePublishRequest(id),
+    onSuccess: () => {
+      toast.success("Promoted to catalog. Go to Access Control to grant team access.");
       setApprovingId(null);
-      setTeamsInput("");
       qc.invalidateQueries({ queryKey: ["publish-requests"] });
     },
     onError: (err: unknown) => {
@@ -67,12 +83,7 @@ export default function AdminPublishRequestsPage() {
   });
 
   const handleApprove = (pr: PublishRequest) => {
-    const teams = teamsInput.split(",").map((t) => t.trim()).filter(Boolean);
-    if (teams.length === 0) {
-      toast.error("Enter at least one grantee team.");
-      return;
-    }
-    approveMutation.mutate({ id: pr.id, teams });
+    approveMutation.mutate({ id: pr.id });
   };
 
   const handleReject = (pr: PublishRequest) => {
@@ -130,7 +141,7 @@ export default function AdminPublishRequestsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Asset Type", "Asset ID", "Submitted By", "Submitted At", "Status", "Risk", "Actions"].map(
+                  {["Asset Type", "Asset", "Submitted By", "Submitted At", "Status", "Risk", "Actions"].map(
                     (h) => (
                       <th
                         key={h}
@@ -149,8 +160,20 @@ export default function AdminPublishRequestsPage() {
                       <td className="px-4 py-3">
                         <span className="badge bg-slate-100 text-slate-600">{pr.asset_type}</span>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                        {pr.asset_id.slice(0, 8)}…
+                      <td className="px-4 py-3">
+                        <p className="text-sm font-medium text-slate-800">
+                          {assetNameMap[pr.asset_id]?.name ?? `${pr.asset_id.slice(0, 8)}…`}
+                        </p>
+                        {assetNameMap[pr.asset_id]?.description && (
+                          <p className="text-xs text-slate-400 line-clamp-1 mt-0.5">
+                            {assetNameMap[pr.asset_id]!.description}
+                          </p>
+                        )}
+                        {assetNameMap[pr.asset_id]?.team && (
+                          <p className="text-xs text-slate-400">
+                            Team: <span className="font-medium">{assetNameMap[pr.asset_id]!.team}</span>
+                          </p>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-slate-700">{pr.submitted_by}</td>
                       <td className="px-4 py-3 text-slate-400 text-xs">
@@ -177,7 +200,7 @@ export default function AdminPublishRequestsPage() {
                               className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800 font-medium"
                             >
                               <CheckCircle size={12} />
-                              Approve
+                              Promote
                             </button>
                             <button
                               onClick={() => {
@@ -197,22 +220,14 @@ export default function AdminPublishRequestsPage() {
                       </td>
                     </tr>
 
-                    {/* Inline Approve form */}
+                    {/* Inline Promote form */}
                     {approvingId === pr.id && (
                       <tr key={`approve-${pr.id}`} className="bg-green-50 border-b border-green-100">
                         <td colSpan={7} className="px-4 py-3">
-                          <div className="flex items-end gap-3">
-                            <div className="flex-1">
-                              <label className="label text-xs mb-1">
-                                Grantee teams (comma-separated)
-                              </label>
-                              <input
-                                className="input text-sm"
-                                placeholder="platform, operations"
-                                value={teamsInput}
-                                onChange={(e) => setTeamsInput(e.target.value)}
-                              />
-                            </div>
+                          <div className="flex items-center gap-3">
+                            <p className="text-xs text-slate-600 flex-1">
+                              This will promote the asset to the catalog. Use Access Control to grant team access afterwards.
+                            </p>
                             <button
                               onClick={() => handleApprove(pr)}
                               disabled={approveMutation.isPending}
@@ -221,7 +236,7 @@ export default function AdminPublishRequestsPage() {
                               {approveMutation.isPending ? (
                                 <Loader2 size={12} className="animate-spin" />
                               ) : (
-                                "Confirm Approve"
+                                "Promote to Catalog"
                               )}
                             </button>
                             <button

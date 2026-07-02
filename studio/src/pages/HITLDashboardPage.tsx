@@ -28,7 +28,6 @@ const RISK_CHIP: Record<string, string> = {
 
 const CONTEXT_CHIP: Record<string, string> = {
   production: "bg-blue-100 text-blue-700",
-  playground: "bg-purple-100 text-purple-700",
 };
 
 async function fetchApprovals(statusFilter?: string): Promise<{ items: Approval[]; total: number }> {
@@ -108,9 +107,9 @@ export default function HITLDashboardPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">HITL Approval Queue</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Production HITL Queue</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Human-in-the-loop approval requests for high-risk tool calls
+            Human-in-the-loop approval requests from deployed agents. Playground approvals are handled inline in the Evaluate tab.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -134,6 +133,10 @@ export default function HITLDashboardPage() {
             Refresh
           </button>
         </div>
+      </div>
+
+      <div className="rounded-md bg-blue-50 border border-blue-200 px-4 py-2 text-xs text-blue-700 mb-4">
+        Showing production approvals only. Sandbox approvals appear in the Evaluate tab during testing.
       </div>
 
       {isLoading && (

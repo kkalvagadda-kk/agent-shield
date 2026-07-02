@@ -3,10 +3,10 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.18  (+ grant audit endpoint, AdminApprovalAuthorityPage, FK 500→409)
+#   - registry-api:0.2.30  (artifact isolation: created_by NOT NULL, visibility filter on list)
 #   - safety-orchestrator:0.1.3 (per-scanner Langfuse spans + trace_id propagation)
 #   - deploy-controller:0.1.7 (Phase 9.1 ensure_service_account wired in)
-#   - studio:0.1.18        (+ AdminApprovalAuthorityPage, Approvers nav link)
+#   - studio:0.1.28        (Agent.created_by type fix, suppress system in detail view)
 #   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
 #   - declarative-runner:0.1.1 (PythonToolNodeExecutor)
 #   - python-executor:0.1.0 (sandboxed Python code runner)
@@ -35,10 +35,10 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.25"
+REGISTRY_API_TAG="0.2.30"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.7"
-STUDIO_TAG="0.1.23"
+STUDIO_TAG="0.1.28"
 EVAL_RUNNER_TAG="0.1.0"
 DECLARATIVE_RUNNER_TAG="0.1.1"
 PYTHON_EXECUTOR_TAG="0.1.0"
@@ -51,7 +51,7 @@ echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (agent_runs, trace middleware, bundle endpoint, playground trace/feedback)"
+echo "  → registry-api:${REGISTRY_API_TAG} (artifact isolation: created_by NOT NULL, list visibility filter)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
@@ -63,7 +63,7 @@ docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTRO
 echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (PythonToolNodeExecutor support)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" services/declarative-runner/
 
-echo "  → studio:${STUDIO_TAG} (AdminApprovalAuthorityPage, Approvers nav link)"
+echo "  → studio:${STUDIO_TAG} (Agent.created_by non-nullable type, suppress system sentinel in detail)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
 echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"

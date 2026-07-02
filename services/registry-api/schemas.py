@@ -59,7 +59,7 @@ class ToolDefinition(BaseModel):
     """Lightweight tool reference stored in agent_versions.tools JSONB."""
 
     name: str
-    risk: str = Field(..., pattern="^(low|high)$")
+    risk: str = Field(..., pattern="^(low|medium|high|critical)$")
     description: str | None = None
 
 
@@ -96,7 +96,7 @@ class AgentResponse(BaseModel):
     publish_status: str
     created_at: datetime
     updated_at: datetime
-    created_by: str | None
+    created_by: str
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(from_attributes=True)
@@ -661,7 +661,7 @@ class PublishRequestResponse(BaseModel):
 
 
 class PublishRequestApprove(BaseModel):
-    grantee_teams: list[str]
+    grantee_teams: list[str] = Field(default_factory=list)
     expires_at: Optional[datetime] = None
 
 

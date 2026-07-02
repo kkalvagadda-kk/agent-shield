@@ -15,7 +15,7 @@ const CLASS_CHIP: Record<string, string> = {
 export default function VersionSelector({ selectedAgent, onSelect }: Props) {
   const { data, isLoading } = useQuery({
     queryKey: ["agents-for-playground"],
-    queryFn: () => listAgents(100, 0),
+    queryFn: () => listAgents(100, 0, "active"),
   });
 
   const agents: Agent[] = data?.items ?? [];

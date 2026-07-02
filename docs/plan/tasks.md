@@ -1,535 +1,755 @@
-# AgentShield — Task List (Reordered for E2E-First Delivery)
+# AgentShield UX Phases A-B-C — Tasks
 
-**Total tasks:** 193 (178 implementation + 15 checkpoint)
-**Phases:** 19 (13 implementation + 6 checkpoint gates)
-**Parallel opportunities:** noted inline with [P]
-**Checkpoint gates:** CP1 (after Phase 2), CP2 (after Phase 3), Checkpoint E2E (after Phase 8), CP3 (after Phase 9), CP4 (after Phase 11)
-**Gap register:** see `docs/plan/gaps.md` for full gap tracking
+**Spec:** `docs/plan/plan-phases-abc.md` (authoritative — takes precedence over all other docs)
+**Images:** registry-api:0.2.26 (A4 backend), studio:0.1.25 (Phase A), registry-api:0.2.27 (B1), studio:0.1.26 (Phase B)
 
 ---
 
-## Reordering Rationale
+## Phase A: Studio UX Gaps
+> Frontend-only except A4 (one `schemas.py` field change). No new DB tables.
 
-**What changed and why:**
+### A1 — Rename "Test" → "Evaluate"
 
-The original plan ordered phases by architectural layer — infra → registry → safety → OPA → HITL → SDK → Studio. Sound build-up order, but it means you cannot see an agent actually running until Phase 8 (SDK) and cannot interact with it via a browser until Phase 9 (Studio). Security scanners and deep observability block the functional path.
+- [X] `studio/src/components/Sidebar.tsx`: in `PLAYGROUND_TEST` array, change `label: "Test"` → `label: "Evaluate"`
+- [X] `studio/src/pages/PlaygroundPage.tsx`: change `<h2>` heading `"Playground"` → `"Evaluate"` (line ~51)
 
-The reordering prioritises *create → deploy → invoke* first. A working end-to-end experience is visible after Phase 7/8. Safety scanners (LLM Guard, Presidio, NeMo), Portkey, Redis pub/sub, Slack, and dashboard integrations move to the end — they layer onto an already-functional system rather than blocking it.
-
-**Concrete changes:**
-
-| What moved | Original phase | New phase | Why |
-|---|---|---|---|
-| Studio UI MVP (new simplified 3-screen app) | Phase 9 (Studio v0) | **New Phase 5** | Register and deploy agents from a browser early |
-| LLM Provider Config (new) | — | **New Phase 5b** | Agents can't call LLMs without credentials injected at deploy time; must precede SDK |
-| SDK v1 | Phase 8 | **New Phase 6** | Developers need this to write agent code before safety is wired |
-| Basic HITL (no Redis, no Slack) | Phase 7 | **New Phase 7** | Minimal approval flow + Envoy routing needed for E2E demo |
-| Declarative Runner + Studio Canvas | Phase 9 | **New Phase 8** | Canvas extends MVP; runner enables workflow deploy |
-| Safety Orchestrator + Scanners | Phase 5 | **New Phase 9** | Not needed to prove core functionality; added after E2E works |
-| OPA policy generation + Langfuse | Phase 6 | **New Phase 10** | Observability added after functionality is confirmed |
-| Redis pub/sub, Slack, Portkey | Phase 7 | **New Phase 11** | Notification and LLM proxy integrations are enhancements |
-| Dashboards (Langfuse, Appsmith) | Phase 9b | **New Phase 12** | Depends on observability stack |
-
-**Tasks deferred within phases (not removed — just done later):**
-- T049 (OPA policy generator): Phase 4 → Phase 9
-- T078 (Redis pub/sub), T079 (Slack notifier), T083–T084 (Portkey), T148–T150: Phase 7 → Phase 11
-- T152 (cross-agent trace stitching), T154 (approval_timeout SSE): Phase 6 → Phase 10
-
-**New tasks added:**
-- T162: Agent List page (Studio MVP)
-- T163: Create Agent form page (Studio MVP)
-- T164: Deploy Agent page (Studio MVP)
-- CPE-a, CPE-b, CPE-c: E2E Demo checkpoint scripts
-- T165–T178: Phase 5b — LLM Provider Configuration (model, crypto layer, migration, router, K8s RBAC, deploy controller injection, Studio Providers page + nav)
+**Verify:** `cd studio && npm run typecheck`. Sidebar shows "Evaluate".
 
 ---
 
-## Phase 1 — Infra Setup ✅
-_Depends on: Nothing — this is the foundation_
+### A2 — HITL Dashboard: production context only
 
-- [X] [T001] Umbrella chart metadata and sub-chart dependency list — `charts/agentshield/Chart.yaml`
-- [X] [T002] Top-level Helm values with sub-chart enable flags and global overrides — `charts/agentshield/values.yaml`
-- [X] [T003] Platform namespace manifest with labels for network policy selection — `infra/namespaces/agentshield-platform.yaml`
-- [X] [T004] First team namespace manifest (agents-platform template) — `infra/namespaces/agents-platform.yaml`
-- [X] [T005] Kustomization file wiring both namespace manifests — `infra/namespaces/kustomization.yaml`
-- [X] [T006] [P] Default-deny NetworkPolicy for agentshield-platform namespace — `infra/network-policies/platform-default-deny.yaml`
-- [X] [T007] [P] Allow-ingress NetworkPolicy: Envoy→Safety, Safety→Scanners, Registry→Postgres — `infra/network-policies/platform-allow-ingress.yaml`
-- [X] [T008] [P] Default-deny NetworkPolicy template for agents-{team} namespaces — `infra/network-policies/agents-default-deny.yaml`
-- [X] [T009] [P] Allow-egress NetworkPolicy for agent pods: safety, postgres, langfuse, dns, internal APIs — `infra/network-policies/agents-allow-egress.yaml`
-- [X] [T010] [P] CloudNativePG Postgres HA sub-chart values: sync replication, 5-database init SQL ConfigMap, DB users — `charts/agentshield/charts/postgresql/values.yaml`
-- [X] [T011] [P] PgBouncer sub-chart values: transaction pool mode, max_client_conn=200, pool_size=25 — `charts/agentshield/charts/pgbouncer/values.yaml`
-- [X] [T012] [P] Redis 7 sub-chart values: AOF persistence enabled, password Secret reference — `charts/agentshield/charts/redis/values.yaml`
-- [X] [T013] [P] MinIO sub-chart values: 4 buckets, access/secret key Secret reference — `charts/agentshield/charts/minio/values.yaml`
-- [X] [T014] [P] Keycloak 24 sub-chart values: postgres backend URL, admin credentials, realm init job config — `charts/agentshield/charts/keycloak/values.yaml`
-- [X] [T015] [P] Keycloak realm init Job manifest: creates agentshield realm, registry-api and envoy-gateway clients, initial users — `charts/agentshield/charts/keycloak/templates/realm-init-job.yaml`
-- [X] [T016] [P] ArgoCD Application resource pointing to charts/agentshield with automated sync and self-heal — `infra/argocd/agentshield-app.yaml`
+- [X] `studio/src/pages/HITLDashboardPage.tsx`: change page `<h1>` to `"Production HITL Queue"`
+- [X] Change subtitle to `"Human-in-the-loop approval requests from deployed agents. Playground approvals are handled inline in the Evaluate tab."`
+- [X] Remove `playground: "bg-purple-100 text-purple-700"` from `CONTEXT_CHIP` — it will never appear
+- [X] Add info callout below header (before filter controls):
+  ```tsx
+  <div className="rounded-md bg-blue-50 border border-blue-200 px-4 py-2 text-xs text-blue-700 mb-4">
+    Showing production approvals only. Sandbox approvals appear in the Evaluate tab during testing.
+  </div>
+  ```
 
-- [ ] [T130] [P] Update top-level Helm values with `imagePullSecrets` configuration block for private registry (Harbor or ECR); add `.Values.global.imagePullSecrets` that propagates to all sub-chart Deployment templates via `helm.sh/chart` convention (Gap M-25) — `charts/agentshield/values.yaml`
-- [ ] [T131] [P] Add `imagePullSecrets` Secret template: creates a Kubernetes Secret with registry credentials from Helm values, referenced by all Deployments (Gap M-25) — `charts/agentshield/templates/registry-secret.yaml`
-
-**Verification:** `kubectl get pods -n agentshield-platform` — all pods Running; `psql -c "\l"` shows 5 databases; Keycloak realm accessible at `/realms/agentshield`
+**Verify:** `npm run typecheck`. Page title updated, no TS errors from removed CONTEXT_CHIP key.
 
 ---
 
-## Phase 2 — Registry API ✅ (core complete; T132–T136 pending)
-_Depends on: Phase 1 complete (Postgres running, Keycloak realm configured)_
-_Note: T132–T136 must be completed before starting Phase 5 (teams endpoint) and Phase 7 (approvals router)_
+### A3 — Publish Queue: show asset name + description instead of raw UUID
 
-- [X] [T017] Settings class reading DATABASE_URL, KEYCLOAK_URL, PORT via pydantic-settings — `services/registry-api/config.py`
-- [X] [T018] SQLAlchemy async engine and session factory (async_sessionmaker) — `services/registry-api/db.py`
-- [X] [T019] SQLAlchemy ORM models: Agent, AgentVersion, Deployment, Approval, AgentPolicy, Workflow, WorkflowVersion, PiiMapping — `services/registry-api/models.py`
-- [X] [T020] Pydantic request/response schemas matching the registry-api.yaml OpenAPI contract — `services/registry-api/schemas.py`
-- [X] [T021] Agents router: POST/GET /agents, GET/PUT/DELETE /agents/{name} — `services/registry-api/routers/agents.py`
-- [X] [T022] [P] Versions router: POST/GET /agents/{name}/versions, PATCH /agents/{name}/versions/{id} — `services/registry-api/routers/versions.py`
-- [X] [T023] [P] Deployments router: POST /agents/{name}/deploy, POST /agents/{name}/rollback, GET /agents/{name}/deployments — `services/registry-api/routers/deployments.py`
-- [X] [T024] [P] Workflows router: POST/GET /workflows, GET/PUT /workflows/{id}, POST /workflows/{id}/deploy, GET /workflows/{id}/versions — `services/registry-api/routers/workflows.py`
-- [X] [T025] FastAPI app factory: mounts all routers, lifespan startup (DB pool), /health endpoint — `services/registry-api/main.py`
-- [X] [T026] alembic.ini config pointing to DATABASE_URL env var — `services/registry-api/alembic.ini`
-- [X] [T027] Alembic env.py wiring async engine to Base.metadata for autogenerate — `services/registry-api/alembic/env.py`
-- [X] [T028] Initial migration: creates all Phase 1 tables with indexes, constraints, and pgcrypto extension — `services/registry-api/alembic/versions/0001_initial_schema.py`
-- [X] [T029] requirements.txt pinning fastapi, uvicorn, sqlalchemy[asyncio], asyncpg, alembic, pydantic-settings — `services/registry-api/requirements.txt`
-- [X] [T030] Dockerfile: python:3.12-slim base, install requirements, uvicorn CMD — `services/registry-api/Dockerfile`
-- [X] [T031] Registry API Helm Chart.yaml — `charts/agentshield/charts/registry-api/Chart.yaml`
-- [X] [T032] Registry API Deployment template: 2 replicas, env vars from Secrets, alembic init container — `charts/agentshield/charts/registry-api/templates/deployment.yaml`
-- [X] [T033] Registry API Service template: ClusterIP on port 8000 — `charts/agentshield/charts/registry-api/templates/service.yaml`
+- [X] `studio/src/api/registryApi.ts`: update `listAgents` to pass `?status=` only when defined (not always):
+  ```typescript
+  params: { limit, offset, ...(status !== undefined ? { status } : {}) }
+  ```
+  Change the third param from `status = "active"` to `status?: string` (no default).
+- [X] `studio/src/api/registryApi.ts`: update `listTools` signature to accept `(limit, offset, params?)`:
+  ```typescript
+  export const listTools = async (
+    limit = 100, offset = 0, params?: { team?: string }
+  ): Promise<Paginated<RegistryTool>> => {
+    const { data } = await http.get<Paginated<RegistryTool>>('/tools/', {
+      params: { limit, offset, ...params },
+    });
+    return data;
+  };
+  ```
+  Update any existing callers that passed `{ team: "..." }` to use `listTools(100, 0, { team: "..." })`.
+- [X] `studio/src/api/registryApi.ts`: update `listSkills` signature to accept `(limit, offset, params?)`:
+  ```typescript
+  export const listSkills = async (
+    limit = 100, offset = 0, params?: { team?: string }
+  ): Promise<Paginated<Skill>> => {
+    const { data } = await http.get<Paginated<Skill>>('/skills/', {
+      params: { limit, offset, ...params },
+    });
+    return data;
+  };
+  ```
+- [X] `studio/src/pages/AdminPublishRequestsPage.tsx`: add four parallel asset queries (after existing `useQuery` for publish-requests):
+  ```typescript
+  const { data: agentsPage }    = useQuery({ queryKey: ["pq-agents"],    queryFn: () => listAgents(200, 0, "active") });
+  const { data: toolsPage }     = useQuery({ queryKey: ["pq-tools"],     queryFn: () => listTools(200, 0) });
+  const { data: skillsPage }    = useQuery({ queryKey: ["pq-skills"],    queryFn: () => listSkills(200, 0) });
+  const { data: workflowsList } = useQuery({ queryKey: ["pq-workflows"], queryFn: () => listWorkflows() });
+  ```
+- [X] Build name map with `useMemo`:
+  ```typescript
+  const assetNameMap = useMemo(() => {
+    const m: Record<string, { name: string; description?: string | null; team?: string | null }> = {};
+    for (const a of agentsPage?.items ?? [])  m[String(a.id ?? a.name)] = { name: a.name, description: a.description, team: a.team };
+    for (const t of toolsPage?.items ?? [])   m[String(t.id)]           = { name: t.name, description: t.description, team: t.owner_team };
+    for (const s of skillsPage?.items ?? [])  m[String(s.id)]           = { name: s.name, description: s.description, team: s.team };
+    for (const w of workflowsList ?? [])      m[String(w.id)]           = { name: w.name, description: w.description, team: w.team };
+    return m;
+  }, [agentsPage, toolsPage, skillsPage, workflowsList]);
+  ```
+- [X] Change table column header `"Asset ID"` → `"Asset"`
+- [X] Replace UUID cell with enriched cell:
+  ```tsx
+  <td className="px-4 py-3">
+    <p className="text-sm font-medium text-slate-800">
+      {assetNameMap[pr.asset_id]?.name ?? `${pr.asset_id.slice(0, 8)}…`}
+    </p>
+    {assetNameMap[pr.asset_id]?.description && (
+      <p className="text-xs text-slate-400 line-clamp-1 mt-0.5">
+        {assetNameMap[pr.asset_id]!.description}
+      </p>
+    )}
+    {assetNameMap[pr.asset_id]?.team && (
+      <p className="text-xs text-slate-400">
+        Team: <span className="font-medium">{assetNameMap[pr.asset_id]!.team}</span>
+      </p>
+    )}
+  </td>
+  ```
+- [X] Add `useMemo` to React import if not present
 
-- [X] [T132] Full approvals router with `session_id` and `opa_decision_id` fields: POST /approvals, GET /approvals, PATCH /approvals/{id} (approve/reject with optimistic lock), GET /approvals/{id} (Gaps C-01, C-17, C-18) — `services/registry-api/routers/approvals.py`
-- [X] [T133] [P] OPA decisions router: POST /opa-decisions (create audit log entry), GET /opa-decisions?agent=&decision= (query audit log) (Gap C-17) — `services/registry-api/routers/opa_decisions.py`
-- [X] [T134] [P] Agent quarantine endpoints: POST /agents/{name}/quarantine (sets agent status=quarantined, scales pod to 0), DELETE /agents/{name}/quarantine (restores); mount in agents router (Gap C-19) — `services/registry-api/routers/agents.py`
-- [X] [T135] [P] Teams router: POST /teams, GET /teams, GET /teams/{id}, PUT /teams/{id}, GET /teams/{id}/agents — team is a first-class entity with name, namespace, keycloak_role_id fields (Gap M-11) — `services/registry-api/routers/teams.py`
-- [X] [T136] Alembic migration for `teams` table with indexes on name and keycloak_role_id; add `team_id` FK to `agents` table (Gap M-11) — `services/registry-api/alembic/versions/0002_add_teams.py`
-
-**Verification:** `curl -X POST http://registry-api:8000/api/v1/agents -d '{"name":"echo-agent","team":"platform"}'` returns 201; `/health` returns `{"status":"ok"}`; GET /teams returns empty list
-
----
-
-## Checkpoint 1 — Deploy Data Layer + Registry API
-_Gate: Phases 1-2 must be complete. Run before starting Phase 3._
-_What you prove: Postgres, Redis, MinIO, Keycloak all healthy; Registry API accepting registrations; schema migrations applied._
-
-- [ ] [CP1a] Helm deploy script: `helm dependency update` + `helm install agentshield` with custom services disabled (registry-api enabled, all others disabled) — `scripts/deploy-cp1.sh`
-- [ ] [CP1b] Data layer smoke test: kubectl checks all platform pods Running, psql verifies 5 databases, Keycloak realm endpoint responds, Redis ping, MinIO bucket list — `scripts/smoke-test-cp1-infra.sh`
-- [ ] [CP1c] Registry API smoke test: POST /agents creates echo-agent (expect 201), GET /agents lists it, GET /health returns ok, GET /api/v1/tools returns empty list — `scripts/smoke-test-cp1-registry.sh`
-
-> **To run:** `bash scripts/deploy-cp1.sh` → wait for pods → `bash scripts/smoke-test-cp1-infra.sh && bash scripts/smoke-test-cp1-registry.sh`
-> **Pass criteria:** All assertions exit 0, no pod in CrashLoopBackOff
-
----
-
-## Phase 3 — Deploy Controller ✅
-_Depends on: Phase 2 complete (Registry API running and accepting agent registrations)_
-
-- [X] [T034] Settings class reading REGISTRY_API_URL, KUBECONFIG, POLL_INTERVAL_SECONDS — `services/deploy-controller/config.py`
-- [X] [T035] Kubernetes Python client wrapper: create/update/delete Deployments and Services in agents-* namespaces — `services/deploy-controller/k8s_client.py`
-- [X] [T036] Manifest builder: generates K8s Deployment YAML from AgentVersion data with OPA sidecar container, resource limits, liveness/readiness probes — `services/deploy-controller/manifest_builder.py`
-- [X] [T037] Reconciler: compares desired state from Registry to actual K8s Deployments; creates/updates/deletes as needed — `services/deploy-controller/reconciler.py`
-- [X] [T038] Main polling loop: polls Registry API every 5s for pending deployments, calls reconciler — `services/deploy-controller/main.py`
-- [X] [T039] requirements.txt pinning kubernetes, httpx, pydantic-settings — `services/deploy-controller/requirements.txt`
-- [X] [T040] Dockerfile: python:3.12-slim base, install requirements — `services/deploy-controller/Dockerfile`
-- [X] [T041] Deploy Controller Chart.yaml — `charts/agentshield/charts/deploy-controller/Chart.yaml`
-- [X] [T042] Deploy Controller Deployment template: 1 replica, ServiceAccount with agents-* RBAC — `charts/agentshield/charts/deploy-controller/templates/deployment.yaml`
-- [X] [T043] ClusterRole and ClusterRoleBinding: create/update/delete Deployments, Services, ConfigMaps in agents-* namespaces — `charts/agentshield/charts/deploy-controller/templates/clusterrole.yaml`
-
-- [X] [T137] `services/deploy-controller/timeout_worker.py` — background worker that queries `approvals WHERE status='pending' AND expires_at < now()`, updates `status='timeout'`, issues Postgres NOTIFY on `approvals` channel to wake the waiting agent thread (Gaps C-12, C-13) — `services/deploy-controller/timeout_worker.py`
-- [X] [T138] Update `services/deploy-controller/main.py` to start timeout_worker as asyncio background task on startup; add graceful shutdown on SIGTERM (Gap C-12) — `services/deploy-controller/main.py`
-- [X] [T139] `POST /approvals/{id}/reopen` endpoint — re-triggers a timed-out or rejected approval: resets status to pending, updates expires_at, re-issues Redis pub/sub notification (Gap M-29) — `services/registry-api/routers/approvals.py`
-
-**Verification:** Register echo-agent, POST deploy → within 60s `kubectl get pods -n agents-platform -l agent=echo-agent` shows Running pod with 2 containers (echo-agent + opa)
-
----
-
-## Checkpoint 2 — First Agent Deployed End-to-End ✅
-_Gate: Phases 1-3 must be complete. Run before starting Phase 4._
-_What you prove: Deploy Controller reconciles K8s state; echo-agent pod appears with OPA sidecar; agent /health endpoint responds._
-
-- [X] [CP2a] Helm upgrade script: enable deploy-controller in umbrella chart — `scripts/deploy-cp2.sh`
-- [X] [CP2b] Agent deploy smoke test: register echo-agent version, POST /deploy, poll until pod Running (timeout 90s), verify 2 containers (echo-agent + opa), curl agent /health — `scripts/smoke-test-cp2-deploy.sh`
-- [X] [CP2c] OPA sidecar smoke test: port-forward OPA sidecar (localhost:8181), POST to /v1/data with a known tool name, assert allow decision returned — `scripts/smoke-test-cp2-opa.sh`
-
-> **To run:** `bash scripts/deploy-cp2.sh` → `bash scripts/smoke-test-cp2-deploy.sh && bash scripts/smoke-test-cp2-opa.sh`
-> **Pass criteria:** echo-agent pod Running with 2 containers, OPA returns `{"result":{"allow":true}}`
+**Verify:** `npm run typecheck`. Publish Queue shows `"customer-intelligence-agent"` not `"14991bdf…"`.
 
 ---
 
-## Phase 3b — Operations & Runbooks ✅
-_Depends on: Phase 1 complete (Helm infra deployed); can run in parallel with Phase 4_
-_Gaps addressed: C-15, M-10, M-15, M-17, M-18, M-19_
+### A4 — Separate Promote from Grant
 
-- [X] [T140] `scripts/post-install.sh` — detailed post-install checklist: verify Keycloak realm and clients, create first platform-admin user, confirm all agentshield-platform pods Running, print service URLs and connection strings (Gap C-15) — `scripts/post-install.sh`
-- [X] [T141] [P] `scripts/onboard-team.sh` — new team onboarding automation: creates agents-{team} namespace, applies default-deny and allow-egress NetworkPolicies from templates, creates Keycloak role for the team, registers team via POST /api/v1/teams (Gap M-10) — `scripts/onboard-team.sh`
-- [X] [T142] [P] `docs/runbooks/incident-response.md` — emergency response runbook: quarantine steps (use POST /agents/{name}/quarantine), forensic evidence collection (Langfuse trace export, OPA decision log query), incident timeline template, escalation contacts (Gap M-19) — `docs/runbooks/incident-response.md`
-- [X] [T143] [P] `scripts/run-garak.sh` — ad-hoc Garak scan script: accepts --agent, --probes (comma-separated probe list), --output (report path); runs garak CLI against the agent's /chat endpoint; exits non-zero on critical findings (Gap M-17) — `scripts/run-garak.sh`
-- [X] [T144] [P] `policies/nemo/rules/default.yar` — default YARA rules covering: SQL injection patterns, XSS payloads, Jinja/template injection, Python code injection, system prompt extraction attempts (Gap M-18) — `policies/nemo/rules/default.yar`
-- [X] [T145] [P] `policies/nemo/rules/Makefile` — validate YARA rule syntax (`yara --syntax-only`), package rules into ConfigMap YAML, apply ConfigMap update to cluster, send SIGHUP to NeMo pod for hot-reload; usable in CI (Gap M-15) — `policies/nemo/rules/Makefile`
+**Backend (`registry-api`):**
+- [X] `services/registry-api/schemas.py` line ~664: make `grantee_teams` optional:
+  ```python
+  # Before
+  class PublishRequestApprove(BaseModel):
+      grantee_teams: list[str]
+      expires_at: Optional[datetime] = None
+  # After
+  class PublishRequestApprove(BaseModel):
+      grantee_teams: list[str] = Field(default_factory=list)
+      expires_at: Optional[datetime] = None
+  ```
+  No router change needed — `for team in body.grantee_teams:` already handles empty list.
 
-**Verification:** `bash scripts/post-install.sh` exits 0 with all checks green; `bash scripts/onboard-team.sh fraud-team` creates namespace `agents-fraud-team` and Keycloak role; `make -C policies/nemo/rules validate` exits 0
+**Frontend (`studio`):**
+- [X] `studio/src/api/registryApi.ts`: update `approvePublishRequest` body type — `grantee_teams` optional:
+  ```typescript
+  export const approvePublishRequest = async (
+    id: string,
+    body: { grantee_teams?: string[]; expires_at?: string } = {}
+  ): Promise<{ approved: boolean; grants_created: number }> => { ... }
+  ```
+- [X] `studio/src/pages/AdminPublishRequestsPage.tsx`:
+  - Remove `teamsInput` state and its `<input>` field from the inline approve form
+  - Remove `teamsInput.split(...)` logic from `handleApprove`
+  - Change `handleApprove` call to: `approveMutation.mutate({ id: pr.id, teams: [] })`
+  - Rename expand button in Actions column: `"Approve"` → `"Promote"`
+  - Rename `"Confirm Approve"` submit button → `"Promote to Catalog"`
+  - Update `onSuccess` toast: `toast.success("Promoted to catalog. Go to Access Control to grant team access.")`
 
----
-
-## Phase 4 — Tool Registry
-_Depends on: Phase 2 complete (Registry API running with DB models); T132–T136 also complete (teams FK needed)_
-
-- [X] [T044] SQLAlchemy models for Tool, AuthConfig, MCPServer, AgentToolBinding — append to `services/registry-api/models.py`
-- [X] [T045] Pydantic schemas for Tool, AuthConfig, MCPServer CRUD matching tool-registry API contract — append to `services/registry-api/schemas.py`
-- [X] [T046] Tools router: POST/GET /tools, GET/PUT/DELETE /tools/{id}, GET /tools/{id}/agents, POST /tools/{id}/test — `services/registry-api/routers/tools.py`
-- [X] [T047] [P] Auth configs router: POST/GET /auth-configs, PUT/DELETE /auth-configs/{id} — `services/registry-api/routers/auth_configs.py`
-- [X] [T048] [P] Agent-tool bindings router: POST/DELETE/GET /agents/{name}/tools — `services/registry-api/routers/agent_tools.py`
-- [X] [T049] ⚠️ **Completed in Phase 9** — OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py`
-- [X] [T050] Alembic migration for Tool, AuthConfig, MCPServer, AgentToolBinding tables — already created in `0001_initial_schema.py`
-- [X] [T051] Mount new routers in main.py and wire policy_generator call on deploy/version create (policy_generator wiring skipped until T049 completes in Phase 9) — `services/registry-api/main.py`
-
-**Verification:** `POST /api/v1/tools` creates tool; `POST /api/v1/agents/echo-agent/tools` attaches it; GET /tools returns list
-
----
-
-## Phase 5 — Studio UI MVP
-_Depends on: Phase 2 + T132–T136 complete (Registry API with agents + teams endpoints)_
-_Scope: Simplified 3-screen app — Agent List, Create Agent, Deploy Agent. No visual canvas (that comes in Phase 8). Calls Registry API directly._
-
-- [X] [T115] package.json — MVP deps: react@18, typescript@5, vite@5, @tanstack/react-query@5, axios, react-router-dom@6; note @xyflow/react@12 and zustand@5 added in Phase 8 when canvas is built — `studio/package.json`
-- [X] [T116] Vite config: TypeScript React plugin, dev server proxy `/api` → Registry API at `http://registry-api:8000` — `studio/vite.config.ts`
-- [X] [T118] Registry API axios client — MVP scope: `listAgents()`, `createAgent()`, `getAgent()`, `createVersion()`, `deployAgent()`, `getDeployments()`, `listTeams()` — `studio/src/api/registryApi.ts`
-- [X] [T162] Agent List page — `studio/src/pages/AgentListPage.tsx`
-- [X] [T163] [P] Create Agent form — `studio/src/pages/CreateAgentPage.tsx`
-- [X] [T164] [P] Deploy Agent page — `studio/src/pages/DeployAgentPage.tsx`
-- [X] [T126] [P] App.tsx — MVP routing wired — `studio/src/App.tsx`
-- [X] [T127] [P] Studio Helm Chart.yaml updated — `charts/agentshield/charts/studio/Chart.yaml`
-- [X] [T128] [P] Studio Deployment + ConfigMap (nginx.conf proxying /api/* to registry-api) — `charts/agentshield/charts/studio/templates/`
-- [X] [T129] [P] Studio Service template: ClusterIP port 80 — `charts/agentshield/charts/studio/templates/service.yaml`
-
-**Verification:** `kubectl port-forward svc/studio 5173:80`; navigate to http://localhost:5173; click "Register New Agent" → fill form → submit → agent appears in list; click Deploy → enter image tag → click Deploy button → status badge transitions to Running within 90s
+**Verify:** Build and deploy registry-api:0.2.26. `curl -X POST .../approve -d '{}'` returns `{ approved: true, grants_created: 0 }`. Agent `publish_status` = `published`.
 
 ---
 
-## Phase 5b — LLM Provider Configuration
-_Depends on: Phase 5 complete (Studio UI MVP); Phase 3 complete (Deploy Controller)_
-_Why before Phase 6: The SDK reads LLM credentials from env vars injected into the pod. Without the deploy controller injecting them, agents deployed through the platform cannot make LLM calls even after the SDK is built._
+### A5 — Admin: All Artifacts view (read-only) [P]
 
-**Design decisions:**
-- Providers: `anthropic` and `bedrock` only (no OpenAI/Azure/Custom in this phase)
-- Credentials stored AES-256 (Fernet) encrypted in Postgres as a JSON blob — Postgres is the source of truth, not K8s etcd; cluster can be wiped and recovered by redeploying against the same DB
-- K8s Secret is a derived artifact: Registry API decrypts and writes it at deploy trigger time; deploy controller never sees plaintext credentials
-- Provider is team-scoped: agents can only use providers belonging to the same team
-- `credentials_encrypted` is write-only — never returned in any API response
-- Anthropic credentials shape: `{"ANTHROPIC_API_KEY": "sk-ant-..."}` — one field
-- Bedrock credentials shape: `{"AWS_ACCESS_KEY_ID": "AKIA...", "AWS_SECRET_ACCESS_KEY": "...", "AWS_DEFAULT_REGION": "us-east-1"}` — IAM user, no role assumption
-- Registry API gets K8s RBAC: create/update/delete Secrets in `agentshield-platform` namespace only
+- [X] Create `studio/src/pages/AdminArtifactsPage.tsx`
+- [X] Define type:
+  ```typescript
+  interface ArtifactRow {
+    id: string; name: string;
+    type: "agent" | "tool" | "skill" | "workflow";
+    team: string; status: string;
+    publish_status?: string; risk_level?: string;
+    created_at: string; description?: string | null;
+  }
+  ```
+- [X] Four `useQuery` calls: agents (no status filter — pass `undefined`), tools, skills, workflows
+- [X] Build `rows: ArtifactRow[]` with `useMemo` from all four lists
+- [X] `typeFilter` state: `"" | "agent" | "tool" | "skill" | "workflow"`, default `""`
+- [X] Filter chips row: All | Agents | Tools | Skills | Workflows (with counts)
+- [X] Table: Name | Type badge | Team | Status badge | Publish Status badge | Created At
+- [X] Status badge colors: `active`→green, `deprecated`→amber, `quarantined`→red, `archived`/`inactive`→slate
+- [X] Publish status badge: `published`→green, `pending_review`→amber, `private`→slate, `undefined`→omit
+- [X] No action buttons anywhere — read-only
+- [X] Agent row click: `navigate(`/agents/${row.name}`)`. Others: no navigation.
+- [X] `App.tsx`: add `import AdminArtifactsPage` + `<Route path="/admin/artifacts" element={<AdminArtifactsPage />} />`
 
-**Anthropic models:** `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`
-**Bedrock models:** `anthropic.claude-3-5-sonnet-20241022-v2:0`, `anthropic.claude-3-haiku-20240307-v1:0`, `amazon.titan-text-lite-v1`
-
-- [X] [T165] Add `LLMProvider` SQLAlchemy model: `id` (uuid pk), `name` (varchar 128), `provider` (varchar 32 — `anthropic|bedrock`), `default_model` (varchar 256), `credentials_encrypted` (Text — Fernet-encrypted JSON blob, never returned in responses), `team` (varchar 128, indexed), `created_at`, `updated_at`; UniqueConstraint on (name, team) — append to `services/registry-api/models.py`
-- [X] [T166] Add nullable `llm_provider_id` UUID FK on `Agent` model (ON DELETE SET NULL); add `llm_provider` relationship — `services/registry-api/models.py`. Add `llm_secret_name` (varchar 256, nullable) and `llm_env_keys` (JSONB, nullable — e.g. `["ANTHROPIC_API_KEY"]`) to `Deployment` model so manifest builder can wire secretKeyRef without knowing provider type — `services/registry-api/models.py`
-- [X] [T167] `services/registry-api/crypto.py` (NEW): Fernet helpers `encrypt_json(dict) -> str` and `decrypt_json(str) -> dict`; reads `AGENTSHIELD_ENCRYPTION_KEY` env var; raises clear error if key is missing — `services/registry-api/crypto.py`
-- [X] [T168] Pydantic schemas — `services/registry-api/schemas.py`: `LLMProviderCreate` (name, provider, default_model, team, credentials as `AnthropicCredentials | BedrockCredentials` discriminated union); `LLMProviderUpdate` (all optional except credentials); `LLMProviderResponse` (id, name, provider, default_model, team, created_at, updated_at — credentials NEVER included); `AnthropicCredentials` (ANTHROPIC_API_KEY); `BedrockCredentials` (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION); update `AgentCreate` to accept optional `llm_provider_id` UUID; update `AgentResponse` to include nested `llm_provider: LLMProviderResponse | None`
-- [X] [T169] LLM Providers router — `services/registry-api/routers/llm_providers.py`: `POST /api/v1/llm-providers/` (encrypts credentials, validates provider+model combo, validates team match); `GET /api/v1/llm-providers/` (supports `?team=` filter); `GET /api/v1/llm-providers/{id}`; `PUT /api/v1/llm-providers/{id}` (re-encrypts if credentials provided); `DELETE /api/v1/llm-providers/{id}` (hard delete — returns 409 if any active agent references it)
-- [X] [T170] Mount `llm_providers_router` in `main.py`; add `AGENTSHIELD_ENCRYPTION_KEY` to `config.py` Settings — `services/registry-api/main.py`, `services/registry-api/config.py`
-- [X] [T171] Alembic migration `0003_add_llm_providers.py`: CREATE TABLE llm_providers; ALTER TABLE agents ADD COLUMN llm_provider_id UUID REFERENCES llm_providers(id) ON DELETE SET NULL; ALTER TABLE deployments ADD COLUMN llm_secret_name VARCHAR(256), ADD COLUMN llm_env_keys JSONB — `services/registry-api/alembic/versions/0003_add_llm_providers.py`
-- [X] [T172] Update deployments router `POST /agents/{name}/deploy` — `services/registry-api/routers/deployments.py`: if agent has `llm_provider`, decrypt credentials, create/upsert K8s Secret `agentshield-llm-{provider_id}` in `agentshield-platform` namespace using in-cluster kubernetes client; store `secret_name` and `list(credentials.keys())` as `llm_secret_name` and `llm_env_keys` on the Deployment record; add `kubernetes` and `cryptography` to `requirements.txt`
-- [X] [T173] Add ServiceAccount + RBAC to registry-api Helm chart — `charts/agentshield/charts/registry-api/templates/serviceaccount.yaml`, `rbac.yaml`: ClusterRole allowing create/update/delete of Secrets resource only in `agentshield-platform` namespace; add `AGENTSHIELD_ENCRYPTION_KEY` secretKeyRef to Deployment template env vars — `charts/agentshield/charts/registry-api/templates/deployment.yaml`
-- [X] [T174] Update `manifest_builder.py` — `services/deploy-controller/manifest_builder.py`: read `deployment.llm_secret_name` and `deployment.llm_env_keys` from the deployment record; if both are set, append to agent container env: for each key in `llm_env_keys` add a `secretKeyRef` entry pointing to `llm_secret_name`; also inject `LLM_PROVIDER` and `LLM_MODEL` as plain env vars from provider metadata included in the deployment payload
-- [X] [T175] [P] `registryApi.ts` additions — `studio/src/api/registryApi.ts`: `LLMProvider` type (no credentials fields); `listProviders(team?)`, `createProvider()`, `updateProvider()`, `deleteProvider()` functions
-- [X] [T176] [P] Studio Providers page — `studio/src/pages/ProvidersPage.tsx`: table (name, provider badge, default model, team, actions); "Add Provider" side-panel form with dynamic fields — Anthropic shows one masked API key field, Bedrock shows Access Key ID + masked Secret Key + Region dropdown; model dropdown filtered by provider type; edit re-shows form with masked placeholders for credentials (blank = keep existing); delete shows 409 error if agents reference the provider
-- [X] [T177] [P] Update `CreateAgentPage.tsx` — `studio/src/pages/CreateAgentPage.tsx`: add LLM Provider dropdown filtered to the selected team's providers (`listProviders(team)`); re-fetches when team changes; shows "No providers for this team — add one in Providers →" when empty; sends `llm_provider_id` in createAgent payload
-- [X] [T178] [P] Update `App.tsx` — `studio/src/App.tsx`: add `/providers` route → `ProvidersPage`; add "Providers" nav link in top bar
-
-**Verification:** `POST /api/v1/llm-providers/` with Anthropic credentials creates provider; `GET` response omits credentials; create agent with `llm_provider_id`; `POST /agents/{name}/deploy` → `kubectl get secret agentshield-llm-{id} -n agentshield-platform` exists; `kubectl describe pod -n agents-platform <pod>` shows `ANTHROPIC_API_KEY` mounted via secretKeyRef; Studio /providers page shows dynamic form (Anthropic vs Bedrock); Create Agent form filters providers by team
+**Verify:** `npm run typecheck`. `/admin/artifacts` shows all 3 agents + 9 tools + 3 skills with type/status badges.
 
 ---
 
-## Phase 6 — SDK v1
-_Depends on: Phase 3 (Deploy Controller for agent pods), Phase 4 (Tool Registry models for tool metadata), Phase 5b (LLM Provider config — so deployed agents receive credentials)_
-_Note: T152 (cross-agent trace stitching) and T154 (approval_timeout SSE) deferred to Phase 10 — Langfuse not yet deployed_
+### A6 — Catalog: Chat + Deploy buttons on granted agent cards [P]
 
-- [X] [T089] SDK config: reads AGENTSHIELD_SAFETY_URL, AGENTSHIELD_LANGFUSE_KEY, AGENTSHIELD_OPA_URL, OPENAI_BASE_URL, AGENT_NAME from env — `sdk/agentshield_sdk/config.py`
-- [X] [T090] Agent dataclass: name, instructions, tools, model, handoffs fields; validates tool list on construction — `sdk/agentshield_sdk/agent.py`
-- [X] [T091] Tool decorator: @tool(risk="low|high") wraps callable, attaches .risk and .name attributes, registers metadata for OPA — `sdk/agentshield_sdk/tool_decorator.py`
-- [X] [T092] Safety client: async call to Safety Orchestrator POST /scan/input and POST /scan/output; raises SafetyBlockedError on blocked=True; in Phase 6 connects to mock safety if AGENTSHIELD_SAFETY_URL not set — `sdk/agentshield_sdk/safety_client.py`
-- [X] [T093] OPA client: calls OPA sidecar at http://localhost:8181/v1/data/agentshield/agent/{agent_name}; returns OPADecision(allow, require_approval, reason) — `sdk/agentshield_sdk/opa_client.py`
-- [X] [T094] Tracing module: Langfuse client wrapper; emits trace spans for each run, tool call, safety scan, and approval event; no-ops gracefully when AGENTSHIELD_LANGFUSE_KEY is not set — `sdk/agentshield_sdk/tracing.py`
-- [X] [T095] HITL module: require_approval() calls Registry API POST /approvals then calls LangGraph interrupt() to pause; handles resume — `sdk/agentshield_sdk/hitl.py`
-- [X] [T096] Graph builder: constructs LangGraph StateGraph from Agent; injects OPA check before each tool node; wires HITL pause for high-risk tools — `sdk/agentshield_sdk/graph_builder.py`
-- [X] [T097] Streaming module: converts LangGraph astream_events() to SSE events per sse-protocol.md (text_delta, tool_call_start/end, approval_requested/decided, done, error) — `sdk/agentshield_sdk/streaming.py`
-- [X] [T098] Runner class: run() calls graph invoke with safety pre/post scan; run_streamed() calls graph astream_events() and yields SSE events — `sdk/agentshield_sdk/runner.py`
-- [X] [T099] Mock safety layer: always returns {"blocked": false, "sanitized_text": input} — for local dev with agentshield dev — `sdk/agentshield_sdk/mock_safety.py`
-- [X] [T100] Mock OPA client: always returns {"allow": true, "require_approval": false} — for local dev — `sdk/agentshield_sdk/mock_opa.py`
-- [X] [T101] FastAPI server: POST /chat (sync), POST /chat/stream (SSE), POST /resume/{thread_id}, GET /health, GET /ready (checks all deps), GET /metrics (Prometheus) — `sdk/agentshield_sdk/server.py`
-- [X] [T102] CLI: agentshield dev (starts server with mock backends), agentshield dev --safety (real safety), agentshield register, agentshield deploy — `sdk/agentshield_sdk/cli.py`
-- [X] [T103] SDK __init__.py exporting Agent, Runner, tool, AgentGraph — `sdk/agentshield_sdk/__init__.py`
-- [X] [T104] SDK setup.py or pyproject.toml: package name agentshield-sdk, dependencies (fastapi, langgraph>=0.3, langfuse, httpx, click) — `sdk/pyproject.toml`
-- [X] [T105] LangGraph checkpointer setup for SDK: AsyncPostgresSaver using DIRECT_DATABASE_URL — `sdk/agentshield_sdk/checkpointer.py`
-- [X] [T106] Example order-agent agent.py: lookup_order (@tool risk=low) and issue_refund (@tool risk=high), Agent constructor — `examples/order-agent/agent.py`
-- [X] [T107] [P] Example order-agent agent.yaml: name, team, description, tools with risk levels — `examples/order-agent/agent.yaml`
-- [X] [T108] [P] Example order-agent Dockerfile: python:3.12-slim, pip install agentshield-sdk, COPY agent.py, CMD agentshield dev — `examples/order-agent/Dockerfile`
-- [X] [T151] `agentshield_sdk/handoff.py` — multi-agent handoff via Envoy ingress URL (not K8s DNS): `handoff(target_agent, message, session_id)` sends POST to `http://envoy/agents/{name}/chat` with `X-AgentShield-Session-Id` header propagated; receiving agent's input is scanned by Safety Orchestrator via Envoy ingress path (Gaps C-03, C-04) — `sdk/agentshield_sdk/handoff.py`
-- [ ] [T152] ⚠️ **Deferred to Phase 10** — Update `agentshield_sdk/tracing.py`: add `parent_trace_id` and `source_agent` metadata to all Langfuse spans; cross-agent trace stitching via shared `trace_id = session_id`; add `team` and `agent_name` as top-level trace metadata tags (Gaps M-08, M-31) — `sdk/agentshield_sdk/tracing.py`
-- [X] [T153] [P] Update `agentshield_sdk/runner.py` — populate `approvals.context` dict before calling require_approval(): include conversation history (last 10 turns), tool name and parameters, LLM reasoning step if available, agent state snapshot (current node, pending tool calls) (Gap M-26) — `sdk/agentshield_sdk/runner.py`
-- [ ] [T154] ⚠️ **Deferred to Phase 10** — Update `agentshield_sdk/streaming.py`: add `approval_timeout` SSE event type with payload schema `{event: "approval_timeout", data: {approval_id, thread_id, reason: "timeout", reopen_url}}`; consumed by client UX to show timeout state (Gap M-28) — `sdk/agentshield_sdk/streaming.py`
+- [X] `studio/src/pages/CatalogPage.tsx`: add `publish_status?: string` to `CatalogEntry` interface
+- [X] In agents mapping: add `publish_status: a.publish_status`
+- [X] Update `shared` filter: exclude unpublished agents:
+  ```typescript
+  const shared = entries.filter(
+    (e) => e.grantedTo.length > 0 &&
+           (e.type !== "agent" || e.publish_status === "published")
+  );
+  ```
+- [X] Import `Link` from `react-router-dom` and `MessageSquare`, `Rocket` from `lucide-react`
+- [X] In `CatalogCard`, add action row for granted agents:
+  ```tsx
+  {entry.type === "agent" && entry.grantedTo.length > 0 && (
+    <div className="flex gap-2 mt-2 pt-2 border-t border-slate-100">
+      <Link to={`/agents/${entry.name}/chat`}
+        className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded transition-colors">
+        <MessageSquare size={11} /> Chat
+      </Link>
+      <Link to={`/agents/${entry.name}/deploy`}
+        className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded transition-colors">
+        <Rocket size={11} /> Deploy
+      </Link>
+    </div>
+  )}
+  ```
 
-**Verification:** `cd examples/order-agent && agentshield dev` starts; `curl -X POST localhost:8080/chat -d '{"message":"status of order 123"}'` returns response; `curl -N -X POST localhost:8080/chat/stream -d '{"message":"issue refund for 123"}'` yields approval_requested SSE event (using mock OPA + mock approval flow)
-
----
-
-## Phase 7 — Basic HITL (Envoy Gateway + Core Approval Flow)
-_Depends on: Phase 5 (Studio MVP for approval UI), Phase 6 (SDK HITL module); T132 from Phase 2 must be complete (approvals router)_
-_Scope: Minimal approval flow using direct DB — no Redis pub/sub, no Slack, no Portkey. Those come in Phase 11._
-
-- [X] [T077] Approvals router: POST /api/v1/approvals, GET /api/v1/approvals, GET/PATCH /api/v1/approvals/{id} with optimistic lock (version field) — `services/registry-api/routers/approvals.py` _(builds on T132; T077 adds the version-field optimistic lock and ensures router is finalized)_
-- [X] [T080] Mount approvals router in main.py — `services/registry-api/main.py` _(Note: do NOT wire approval_notifier in this phase — T078 Redis pub/sub comes in Phase 11; mount router only)_
-- [X] [T081] HITL module: require_approval() using LangGraph interrupt(); creates approval record via Registry API, calls interrupt() to checkpoint and pause — `sdk/agentshield_sdk/hitl.py`
-- [X] [T082] LangGraph PostgresSaver setup: AsyncPostgresSaver using DIRECT_DATABASE_URL (bypasses PgBouncer) for LISTEN/NOTIFY — `sdk/agentshield_sdk/checkpointer.py`
-- [X] [T085] [P] Envoy Gateway GatewayClass and Gateway resource definitions — `infra/envoy/gateway.yaml`. Gateway routes `/agents/{name}/chat` and `/agents/{name}/chat/stream` to `safety-orchestrator.agentshield-platform:8080` (Safety acts as the ingress proxy); routes `/api/v1/*` to `registry-api`. In Phase 7, safety-orchestrator is not yet deployed — route `/agents/{name}/chat` directly to agent pod until Phase 9.
-- [X] [T086] [P] Envoy SecurityPolicy for JWT validation: Keycloak issuer URL, remote JWKS URI — `infra/envoy/jwt-auth-policy.yaml`
-- [X] [T087] [P] Envoy HTTPRoute — `infra/envoy/httproutes.yaml`: `/api/v1/*` → `registry-api`; `/agents/{name}/chat` and `/agents/{name}/chat/stream` → agent pod (direct in Phase 7; updated to safety-orchestrator in Phase 9)
-- [X] [T088] Approval timeout background task: scans approvals WHERE expires_at < now() AND status = 'pending'; updates to timed_out; notifies agent via POST /resume/{thread_id} — `services/registry-api/approval_timeout_worker.py`
-
-_Deferred to Phase 11 — complete after Redis and Slack are available:_
-- [ ] [T078] ⚠️ **Deferred to Phase 11** — Approval notifier: on INSERT with status=pending, publish to Redis pub/sub channel approvals:pending — `services/registry-api/approval_notifier.py`
-- [ ] [T079] ⚠️ **Deferred to Phase 11** — Slack notifier: reads SLACK_WEBHOOK_URL; sends formatted message with approval context, tool args, and Studio deep link — `services/registry-api/slack_notifier.py`
-- [ ] [T083] ⚠️ **Deferred to Phase 11** — Portkey sub-chart values: OpenAI and Anthropic provider configs, Redis cache URL — `charts/agentshield/charts/portkey/values.yaml`
-- [ ] [T084] ⚠️ **Deferred to Phase 11** — Portkey Chart.yaml — `charts/agentshield/charts/portkey/Chart.yaml`
-- [ ] [T148] ⚠️ **Deferred to Phase 11** — Slack notification on approval timeout (Gap M-30) — `services/registry-api/slack_notifier.py`
-- [ ] [T149] ⚠️ **Deferred to Phase 11** — Appsmith approval card conflict resolution UX (Gap M-27) — `appsmith/apps/approval-queue-conflict.js`
-- [ ] [T150] ⚠️ **Deferred to Phase 11** — SSE protocol update: approval_timeout event type (Gap M-28) — `sdk/agentshield_sdk/streaming.py`
-
-**Verification:** Send request with invalid JWT to Envoy → assert 401; send valid JWT → forwarded; trigger issue_refund tool via `/chat/stream` → SSE emits `approval_requested`; PATCH approval to approved → stream resumes with `approval_decided` and `done`
+**Verify:** `npm run typecheck`. Grant `customer-intelligence-agent` to a team — Chat + Deploy buttons appear on its catalog card.
 
 ---
 
-## Phase 8 — Declarative Runner + Studio Canvas
-_Depends on: Phase 6 (SDK for declarative runner backend), Phase 5 (Studio MVP app shell for canvas extension)_
-_Parallel streams: Declarative runner backend (T109–T114) vs Studio canvas frontend (T117, T119–T125, T155–T156)_
+### A7 — Deployments page [P]
 
-**Declarative Runner (backend)**
+- [X] `studio/src/api/registryApi.ts`: add function:
+  ```typescript
+  export const listAllDeployments = async (
+    status?: string, limit = 100
+  ): Promise<Paginated<Deployment>> => {
+    const { data } = await http.get<Paginated<Deployment>>("/deployments/", {
+      params: { limit, ...(status ? { status } : {}) },
+    });
+    return data;
+  };
+  ```
+  Confirm `Deployment` interface is exported (it's used in `DeployAgentPage` — if defined inline there, extract to a named export in `registryApi.ts`).
+- [X] Create `studio/src/pages/DeploymentsPage.tsx`
+- [X] Status label map (same as `DeployAgentPage.tsx`):
+  ```typescript
+  const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
+    pending:     { label: "Pending",     cls: "bg-amber-100 text-amber-700" },
+    deploying:   { label: "Deploying",   cls: "bg-blue-100 text-blue-700"  },
+    running:     { label: "Running",     cls: "bg-green-100 text-green-700" },
+    failed:      { label: "Failed",      cls: "bg-red-100 text-red-700"    },
+    rolled_back: { label: "Rolled back", cls: "bg-slate-100 text-slate-600" },
+    terminated:  { label: "Terminated",  cls: "bg-slate-100 text-slate-600" },
+  };
+  ```
+- [X] `statusFilter` state, default `""`
+- [X] `useQuery` with `refetchInterval: 30_000`
+- [X] Filter tabs: All | Running | Deploying | Failed | Terminated
+- [X] Table columns: Agent Name (link to `/agents/:agent_name`) | Status badge | Deployed At | Error | Actions
+- [X] Actions: if `d.status === "running"` → `<Link to={/agents/${d.agent_name}/chat}>Chat →</Link>`
+- [X] Running rows: `className` includes `"border-l-2 border-l-green-400"`
+- [X] `App.tsx`: add `import DeploymentsPage` + `<Route path="/deployments" element={<DeploymentsPage />} />`
 
-- [X] [T109] Declarative runner config: reads WORKFLOW_JSON (base64 env var), AGENTSHIELD_SAFETY_URL, DATABASE_URL — `services/declarative-runner/config.py`
-- [X] [T110] Node executors: AgentNodeExecutor (creates Agent() from config, calls Runner), HttpToolNodeExecutor (httpx call with {{variable}} substitution), EndNodeExecutor (output mapping) — `services/declarative-runner/node_executors.py`
-- [X] [T111] Workflow executor: parses WORKFLOW_JSON at module startup; builds LangGraph StateGraph from node/edge definitions; caches graph object — `services/declarative-runner/workflow_executor.py`
-- [X] [T112] Declarative runner FastAPI app: POST /chat, POST /chat/stream, POST /resume/{thread_id}, GET /health, GET /ready — `services/declarative-runner/main.py`
-- [X] [T113] Declarative runner Dockerfile: python:3.12-slim, pip install agentshield-sdk httpx, COPY . — `services/declarative-runner/Dockerfile`
-- [X] [T114] Deploy Controller reconciler update: handles agent_type=declarative; fetches workflow JSON from Registry API; injects WORKFLOW_JSON as base64 env var; uses declarative-runner image — `services/deploy-controller/reconciler.py`
-
-**Studio Canvas Frontend (can run in parallel with T109–T114)**
-
-- [X] [T117] [P] Zustand workflow store: nodes, edges, selectedNodeId, isDirty, setNodes, setEdges, selectNode, markSaved — `studio/src/stores/workflowStore.ts`
-- [X] [T119] [P] Workflow serializer: converts React Flow nodes+edges to workflow JSON schema; deserializer for loading saved workflows — `studio/src/utils/workflowSerializer.ts`
-- [X] [T120] [P] AgentNode component: icon, name label, source/target handles, click to select — `studio/src/nodes/AgentNode.tsx`
-- [X] [T121] [P] HttpToolNode component: method badge, URL label, source/target handles — `studio/src/nodes/HttpToolNode.tsx`
-- [X] [T122] [P] EndNode component: terminal indicator, target handle only (no out handle) — `studio/src/nodes/EndNode.tsx`
-- [X] [T123] [P] PropertiesPanel component: renders config fields for selected node (Agent: name/instructions/model/risk; HttpTool: name/endpoint/method/headers/body; End: output_mapping) — `studio/src/components/PropertiesPanel.tsx`
-- [X] [T124] [P] Toolbar component: Save button (calls saveWorkflow(), shows toast), Deploy button (calls deployWorkflow(), polls deployment status) — `studio/src/components/Toolbar.tsx`
-- [X] [T125] [P] Canvas component: React Flow canvas with node types registered, Toolbar rendered above, PropertiesPanel on right; add @xyflow/react and zustand to package.json — `studio/src/components/Canvas.tsx`
-- [X] [T155] [P] Studio first-save modal — React dialog shown before first `saveWorkflow()` call: workflow name input (required, validated against existing names), team selector dropdown (GET /teams), submit triggers save with name+team in payload (Gap M-22) — `studio/src/components/FirstSaveModal.tsx`
-- [X] [T156] [P] Studio HTTP Tool node auth config selector — add `authConfigId` field to HttpToolNode properties panel: dropdown from GET /auth-configs; selected ID included in workflow JSON (Gap M-23) — `studio/src/components/PropertiesPanel.tsx`
-
-**Verification:** `kubectl port-forward svc/studio 5173:80`; drag Agent+HttpTool+End nodes; fill properties; click Save → first-save modal → enter name and team → workflow_id returned; click Deploy → pod appears with `kubectl get pods -n agents-platform -l workflow={id}`; `curl -X POST localhost:8080/chat -d '{"message":"test"}'` returns response from declarative runner
-
----
-
-## Phase 8b — Python Tool Executor
-_Depends on: Phase 8 complete (declarative runner exists and resolves tools from Registry API)_
-_Parallel streams: microservice + migration + runner changes can overlap; Helm chart after microservice_
-
-- [X] [T179] `services/python-executor/main.py` — FastAPI microservice: `POST /execute` accepts `{code: str, args: dict, timeout_ms: int = 10000}`; forks a subprocess that defines + calls `run_tool(args)` from user-supplied code; hard-kills subprocess on timeout; returns `{result: str, error: str | null}`; `GET /health` returns 200 — `services/python-executor/main.py`
-- [X] [T180] [P] `services/python-executor/requirements.txt` (`fastapi>=0.115`, `uvicorn[standard]>=0.30`) + `Dockerfile` (`FROM python:3.12-slim`) — `services/python-executor/`
-- [X] [T181] [P] Alembic migration `0005_add_python_tool.py`: `ALTER TABLE tools ADD COLUMN python_code TEXT`; update `type` CHECK constraint to include `'python'` — `services/registry-api/alembic/versions/0005_add_python_tool.py`
-- [X] [T182] [P] Update `services/registry-api/models.py`: add `python_code = Column(Text, nullable=True)` to Tool; update type CHECK constraint string. Update `services/registry-api/schemas.py`: add `python_code: str | None = None` to `ToolCreate`, `ToolUpdate`, `ToolResponse` — `services/registry-api/models.py`, `schemas.py`
-- [X] [T183] Add `PythonToolNodeExecutor` class to `services/declarative-runner/node_executors.py`: constructor takes `tool_name`, `description`, `python_code`, `executor_url`, `risk`, `timeout_ms`; `as_tool_callable()` returns async function that POSTs `{code, args, timeout_ms}` to `executor_url/execute` and returns the `result` string — `services/declarative-runner/node_executors.py`
-- [X] [T184] [P] Update `services/declarative-runner/workflow_executor.py` `_tool_dict_to_executor()`: branch on `t["type"] == "python"` → instantiate `PythonToolNodeExecutor`; existing `http` path unchanged. Update `services/declarative-runner/config.py`: add `python_executor_url: str = "http://python-executor:8080"` — `services/declarative-runner/workflow_executor.py`, `config.py`
-- [X] [T185] [P] Helm: add python-executor `Deployment` (1 replica, port 8080, image from `global.registry`/python-executor:`pythonExecutorTag`) and `Service` (ClusterIP port 8080) to `charts/agentshield/` — either new subchart or templates directly in umbrella chart — `charts/agentshield/`
-- [X] [T186] [P] Update `services/deploy-controller/manifest_builder.py`: inject `PYTHON_EXECUTOR_URL=http://python-executor.agentshield-platform:8080` env var into declarative-runner pods (same pattern as `REGISTRY_API_URL`). Add `PYTHON_EXECUTOR_IMAGE` to `charts/agentshield/charts/deploy-controller/templates/deployment.yaml` — `services/deploy-controller/manifest_builder.py`, `charts/agentshield/charts/deploy-controller/templates/deployment.yaml`
-
-**Image bumps for this phase:**
-- `python-executor`: new at **0.1.0**
-- `registry-api`: 0.2.10 → **0.2.11** (migration 0005 + python_code field)
-- `declarative-runner`: 0.1.0 → **0.1.1** (PythonToolNodeExecutor)
-- `deploy-controller`: 0.1.3 → **0.1.4** (PYTHON_EXECUTOR_URL injection)
-
-**Verification:** `kubectl port-forward svc/python-executor -n agentshield-platform 8081:8080`; `curl -X POST http://localhost:8081/execute -H "Content-Type: application/json" -d '{"code":"def run_tool(args):\n return str(int(args[\"a\"]) + int(args[\"b\"]))", "args":{"a":5,"b":3}}'` → `{"result":"8","error":null}`; `POST /api/v1/tools` with `type=python` and `python_code` → 201; declarative runner resolves python tool and calls executor on agent invocation
+**Verify:** `npm run typecheck`. `/deployments` auto-refreshes. Running agents show Chat link.
 
 ---
 
-## Phase 8c — Default Resources + Studio Python Tool UI
-_Depends on: Phase 8b complete (python tool type exists in Registry API and declarative runner); Phase 8 complete (Studio canvas with ToolsPage)_
+### A8 — Sidebar restructure
 
-- [X] [T187] `scripts/seed-defaults.sh` — idempotent seed script: port-forwards registry-api on 8001; POSTs 6 tools (web-search, weather-lookup, ip-geolocation, slack-notify, http-echo as `type=http`; calculator as `type=python`); captures UUIDs from responses; POSTs 2 skills (`web-research-skill` → [web-search, weather-lookup, ip-geolocation], `notification-skill` → [slack-notify]); POSTs 3 starter workflows (research-workflow, calculator-workflow, notification-workflow — each is 1 agent node + end node with appropriate tool_ids/skill_ids); POSTs 5 agent Registry entries (research-assistant, calculator-bot, slack-notifier as `declarative`; echo-agent, order-agent as `sdk`); all operations 409-safe; kills port-forward on exit — `scripts/seed-defaults.sh`
-- [X] [T188] [P] Update `studio/src/pages/ToolsPage.tsx`: when tool type selector is set to `python`, replace the HTTP-specific fields (URL, method, headers, body template) with a `<textarea>` for `python_code`; label reads "Python Code — define `run_tool(args: dict) -> str`"; pre-populated with a starter template; included in the createTool API payload — `studio/src/pages/ToolsPage.tsx`
-- [X] [T189] Update `scripts/deploy-cpe2e.sh`: add python-executor build step (`docker build -t registry.internal/agentshield/python-executor:0.1.0`); add step `[8/8] Seeding default resources…` calling `bash scripts/seed-defaults.sh`; fix step-count labels (`[7/7]` → `[7/8]`); bump image tags: registry-api=0.2.11, declarative-runner=0.1.1, deploy-controller=0.1.4, studio=0.1.12 — `scripts/deploy-cpe2e.sh`
+- [X] `studio/src/components/Sidebar.tsx`: replace all nav constant arrays:
+  ```typescript
+  const PLAYGROUND_BUILD = [
+    { label: "Agents",    to: "/",          end: true  },
+    { label: "Skills",    to: "/skills",    end: false },
+    { label: "Tools",     to: "/tools",     end: false },
+    { label: "Workflows", to: "/workflows", end: false },
+  ];
+  const PLAYGROUND_EVAL = [
+    { label: "Evaluate", to: "/playground",         end: true  },
+    { label: "Datasets", to: "/playground/datasets", end: false },
+  ];
+  const ORG_ITEMS = [
+    { label: "Catalog",     to: "/catalog"     },
+    { label: "Deployments", to: "/deployments" },
+  ];
+  const ADMIN_ITEMS = [
+    { label: "All Artifacts",  to: "/admin/artifacts"          },
+    { label: "Publish Queue",  to: "/admin/publish-requests"   },
+    { label: "Access Control", to: "/admin/access"             },
+    { label: "HITL Queue",     to: "/hitl"                     },
+    { label: "Approvers",      to: "/admin/approval-authority" },
+  ];
+  ```
+- [X] Update `open` state to add `org` key:
+  ```typescript
+  const [open, setOpen] = useState({ playground: isPlaygroundRoute(pathname), org: isOrgRoute(pathname), admin: isAdminRoute(pathname) });
+  ```
+- [X] Add `isOrgRoute` helper:
+  ```typescript
+  function isOrgRoute(p: string) { return p.startsWith("/catalog") || p.startsWith("/deployments"); }
+  ```
+- [X] Update `isPlaygroundRoute` to include `/my-agents`
+- [X] Add `useEffect` line: `if (isOrgRoute(pathname)) setOpen((o) => ({ ...o, org: true }));`
+- [X] Update `toggle` type: `"playground" | "org" | "admin"`
+- [X] Update JSX nav section — full new structure:
+  ```tsx
+  {/* Playground */}
+  <Section label="Playground" open={open.playground} onToggle={() => toggle("playground")}>
+    {PLAYGROUND_BUILD.map(i => <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />)}
+    <div className="my-2 border-t border-slate-800" />
+    {PLAYGROUND_EVAL.map(i => <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />)}
+  </Section>
 
-### Phase 8d — Studio Edit/Detail UX
+  {/* My Agents — placeholder; fully wired in Phase B */}
+  <div>
+    <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">My Agents</p>
+    <NavLink to="/my-agents" className={({isActive}) => `block px-3 py-1.5 rounded text-sm transition-colors ${isActive ? "bg-slate-700 text-white font-medium" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"}`}>
+      View my agents →
+    </NavLink>
+  </div>
 
-_Identified as product plan gap: backend supports PUT for both Tools and Agents, but Studio UI had no edit or view-detail flow. Skills and Providers already had this pattern; Tools and Agents were missed._
+  {/* Org */}
+  <Section label="Org" open={open.org} onToggle={() => toggle("org")}>
+    {ORG_ITEMS.map(i => <SideLink key={i.to} to={i.to} label={i.label} />)}
+  </Section>
 
-- [X] [T190] `studio/src/pages/ToolsPage.tsx` — add edit support: (1) extend `RegistryTool` interface in `registryApi.ts` with `http_method`, `http_url`, `python_code` top-level fields; add `updateTool(id, payload)` calling `PUT /api/v1/tools/{id}`; (2) add `editingTool: RegistryTool | null` state to `ToolsPage`; (3) rename `CreateToolForm` → `ToolForm({ tool, onClose, onSaved })` — when `tool` is provided (edit mode): `name` and `tool_type` are read-only, all other fields pre-populated; submit calls `updateTool`; (4) add `Pencil` Edit button per row next to Delete — clicking sets `editingTool` — `studio/src/pages/ToolsPage.tsx`, `studio/src/api/registryApi.ts`
-- [X] [T191] `studio/src/pages/AgentListPage.tsx` — add edit + delete support: (1) add `updateAgent(name, body)` calling `PUT /api/v1/agents/{name}` and `deleteAgent(name)` calling `DELETE /api/v1/agents/{name}` to `registryApi.ts`; (2) add `editingAgent: Agent | null` state; (3) add inline `AgentEditForm` card (same pattern as SkillsPage) showing editable `description` textarea and `status` dropdown (active/archived/deprecated), with save/cancel; (4) add `Pencil` Edit and `Trash2` Delete buttons per row in the actions column — `studio/src/pages/AgentListPage.tsx`, `studio/src/api/registryApi.ts`
+  {/* Config */}
+  <div>
+    <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">Config</p>
+    <SideLink to="/providers" label="Providers" />
+  </div>
 
-**Image bumps for this phase:**
-- `studio`: 0.1.11 → **0.1.12** (python_code textarea in ToolsPage)
+  {/* Administration */}
+  <Section label="Administration" open={open.admin} onToggle={() => toggle("admin")}>
+    {ADMIN_ITEMS.map(i => <SideLink key={i.to} to={i.to} label={i.label} />)}
+  </Section>
+  ```
 
-**Verification:**
-```bash
-# All 6 tools present (5 http + 1 python)
-curl -s http://localhost:8000/api/v1/tools/ | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); [print(t['name'], t['type']) for t in d['items']]"
-# 2 skills, 3 workflows, 5 agents
-curl -s "http://localhost:8000/api/v1/skills/?team=platform" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'], 'skills')"
-curl -s http://localhost:8000/api/v1/workflows/ | python3 -c "import sys,json; print(len(json.load(sys.stdin)), 'workflows')"
-# Studio: Tools page shows python_code textarea when type=python is selected
-# Calculator workflow in Studio canvas has agent with calculator tool_id wired
-```
-
----
-
-## Checkpoint E2E — Create → Deploy → Invoke
-_Gate: Phases 4–8 must be complete. Run before starting Phase 9._
-_What you prove: Create agent via Studio UI → register order-agent with SDK → deploy → invoke via Envoy with JWT → see response → trigger high-risk tool → approve via Studio → stream resumes._
-
-- [X] [CPE-a] E2E demo deploy script: enable studio, deploy-controller, envoy-gateway in umbrella chart; run helm upgrade; wait for studio pod Ready; register and push order-agent example image — `scripts/deploy-cpe2e.sh`
-- [X] [CPE-b] Studio UI smoke test: kubectl port-forward studio; navigate to Create Agent form, fill name=smoke-agent team=platform, submit; verify GET /api/v1/agents returns smoke-agent; navigate to Deploy page, enter echo image tag, deploy; poll until status=Running — `scripts/smoke-test-cpe2e-studio.sh`
-- [X] [CPE-c] Full E2E invoke smoke test: deploy order-agent SDK example; POST /agents/order-agent/chat via Envoy with valid Keycloak JWT; assert 200 response with order status; send chat triggering issue_refund; assert SSE stream emits approval_requested event; PATCH /approvals/{id} to approved; assert SSE stream resumes with approval_decided then done — `scripts/smoke-test-cpe2e-invoke.sh`
-
-> **To run:** `bash scripts/deploy-cpe2e.sh` → `bash scripts/smoke-test-cpe2e-studio.sh && bash scripts/smoke-test-cpe2e-invoke.sh`
-> **Pass criteria:** Agent visible in Studio, deployed pod Running, full chat invoke succeeds, HITL pause/resume works end-to-end
-
----
-
-## Phase 9 — Safety Orchestrator + Scanners
-_Depends on: Phase 1 (Postgres for PII mappings), Phase 3 (Deploy Controller for routing); can start in parallel with Phase 10 after CPE gate passes_
-_Also complete T049 (deferred from Phase 4) in this phase — OPA policy generator needs safety context to be useful_
-
-- [X] [T052] Settings class reading LLMGUARD_URL, PRESIDIO_ANALYZER_URL, PRESIDIO_ANONYMIZER_URL, NEMO_URL, DATABASE_URL — `services/safety-orchestrator/config.py`
-- [X] [T053] Pydantic schemas: ScanInputRequest, ScanInputResponse, ScanOutputRequest, ScanOutputResponse, ReadinessResponse — `services/safety-orchestrator/schemas.py`
-- [X] [T054] Async HTTP clients for LLM Guard, Presidio Analyzer, Presidio Anonymizer, and NeMo using httpx.AsyncClient — `services/safety-orchestrator/scanner_clients.py`
-- [X] [T055] PII store: writes Presidio anonymization mappings to pii_mappings table; lookup for de-anonymization — `services/safety-orchestrator/pii_store.py`
-- [X] [T056] Orchestrator: asyncio.gather fan-out to all scanners with 5s timeout; fail-closed on any error or timeout; merges scores — `services/safety-orchestrator/orchestrator.py`
-- [X] [T057] FastAPI app: POST /api/v1/scan/input, POST /api/v1/scan/output, GET /health, GET /ready (scanner ping checks) — `services/safety-orchestrator/main.py`
-- [X] [T058] requirements.txt pinning fastapi, uvicorn, httpx, sqlalchemy[asyncio], asyncpg, pydantic-settings — `services/safety-orchestrator/requirements.txt`
-- [X] [T059] Dockerfile: python:3.12-slim, install requirements — `services/safety-orchestrator/Dockerfile`
-- [X] [T060] [P] LLM Guard Helm chart: Deployment (2 replicas, 4Gi memory), ClusterIP Service on port 8000, env vars for scanner config — `charts/agentshield/charts/llm-guard/templates/deployment.yaml`
-- [X] [T061] [P] LLM Guard Chart.yaml — `charts/agentshield/charts/llm-guard/Chart.yaml`
-- [X] [T062] [P] Presidio Deployment: presidio-analyzer (port 3000) and presidio-anonymizer (port 3001) containers — `charts/agentshield/charts/presidio/templates/deployment.yaml`
-- [X] [T063] [P] Presidio Chart.yaml and Service templates for analyzer and anonymizer — `charts/agentshield/charts/presidio/Chart.yaml`
-- [X] [T064] [P] NeMo Guardrails Deployment (1 replica, 2Gi memory) with YARA rules ConfigMap mounted at /app/rules/ — `charts/agentshield/charts/nemo/templates/deployment.yaml`
-- [X] [T065] [P] NeMo Chart.yaml and YARA rules ConfigMap template — `charts/agentshield/charts/nemo/Chart.yaml`
-- [X] [T066] [P] Safety Orchestrator Helm Chart.yaml — `charts/agentshield/charts/safety-orchestrator/Chart.yaml`
-- [X] [T067] [P] Safety Orchestrator Deployment template: 2 replicas, env vars for scanner URLs and Postgres — `charts/agentshield/charts/safety-orchestrator/templates/deployment.yaml`. Acts as input proxy between Envoy and agent pods — network-enforced input scanning. Also handles output scan requests from agent pods.
-- [X] [T068] [P] Safety Orchestrator Service template: ClusterIP on port 8080 — `charts/agentshield/charts/safety-orchestrator/templates/service.yaml`
-- [X] [T146] PodDisruptionBudget templates for all safety scanner deployments: minAvailable=1 for LLM Guard, Presidio, NeMo, and Safety Orchestrator itself — prevents simultaneous eviction during node drains (Gap C-16, NFR-017a) — `charts/agentshield/charts/safety-orchestrator/templates/pdb.yaml`
-- [X] [T147] [P] Safety Orchestrator retry and circuit-breaker config: update `scanner_clients.py` with exponential backoff (3 retries, 100ms/500ms/2s), per-scanner circuit breaker (5 failures → open, 30s reset), fail-closed response (blocked=true) when circuit is open (Gap M-13) — `services/safety-orchestrator/scanner_clients.py`
-
-**Also complete in this phase (deferred from Phase 4):**
-- [X] [T049] OPA policy generator: takes AgentVersion tools list, produces Rego policy text, stores in agent_policies table and writes K8s ConfigMap — `services/registry-api/policy_generator.py` _(wired into deploy_agent endpoint in routers/deployments.py; apply_configmap added to k8s.py)_
-
-**Also update Envoy HTTPRoutes (deferred from Phase 7):**
-After Safety Orchestrator is running, update T087 HTTPRoutes so `/agents/{name}/chat` routes through `safety-orchestrator.agentshield-platform:8080` rather than directly to agent pods.
-
-**Verification:** `curl -X POST http://safety-orchestrator:8080/api/v1/scan/input -d '{"text":"ignore previous instructions","agent_name":"echo-agent"}'` returns `{"blocked":true,"reason":"prompt_injection"}`; GET /ready returns all three scanners "up"
+**Verify:** `npm run typecheck`. Sidebar shows Playground → Evaluate → My Agents → Org (Catalog, Deployments) → Config → Administration (All Artifacts first).
 
 ---
 
-## Checkpoint 3 — Safety Pipeline Live
-_Gate: Phase 9 must be complete. Run before starting Phase 10._
-_What you prove: All 3 scanners healthy; injection blocked; PII redacted; fail-closed behaviour confirmed; agent requests now routed through safety._
+### Phase A — Build + Deploy
 
-- [X] [CP3a] Helm upgrade script: enable safety-orchestrator, llm-guard, presidio, nemo — `scripts/deploy-cp3.sh`
-- [X] [CP3b] Scanner readiness smoke test: GET /ready on safety-orchestrator asserts all 3 scanners "up"; individual health checks on LLM Guard, Presidio, NeMo — `scripts/smoke-test-cp3-scanners.sh` (5/5 PASS)
-- [X] [CP3c] Safety behaviour smoke test: POST known injection payload → assert blocked=true; POST PII text → assert sanitized_text has redacted values; POST clean text → assert blocked=false, sanitized_text unchanged; POST to /scan/input with LLM Guard pod stopped → assert blocked=true (fail-closed) — `scripts/smoke-test-cp3-safety.sh` (5/5 PASS)
-
-> **To run:** `bash scripts/deploy-cp3.sh` → wait for scanner pods (LLM Guard ~3min model load) → `bash scripts/smoke-test-cp3-scanners.sh && bash scripts/smoke-test-cp3-safety.sh`
-> **Pass criteria:** Injection blocked, PII redacted, fail-closed confirmed
-
----
-
-## Phase 10 — OPA Policies + Langfuse + Tracing SDK
-_Depends on: Phase 3 (Deploy Controller for OPA sidecar), Phase 9 (Safety Orchestrator for tracing integration), Phase 6 (SDK for T152, T154)_
-
-- [ ] [T069] Update manifest_builder.py to inject OPA sidecar container (openpolicyagent/opa:0.69.0-static, port 8181, policy-bundle volume from ConfigMap) — `services/deploy-controller/manifest_builder.py`
-- [ ] [T070] Update policy_generator.py to write Rego policy to K8s ConfigMap in agents-{team} namespace after generating it — `services/registry-api/policy_generator.py`
-- [ ] [T071] Langfuse sub-chart values: Postgres URL, ClickHouse sub-chart config, MinIO bucket, initial API key Secret reference — `charts/agentshield/charts/langfuse/values.yaml`
-- [ ] [T072] [P] ClickHouse sub-chart values: single-node, PVC 10Gi, MinIO backup config — `charts/agentshield/charts/clickhouse/values.yaml`
-- [ ] [T073] [P] Langfuse Chart.yaml listing clickhouse as dependency — `charts/agentshield/charts/langfuse/Chart.yaml`
-- [ ] [T074] Langfuse tracing client wrapper: emits traces to Langfuse for safety scans and agent runs — `services/safety-orchestrator/tracing.py`
-- [ ] [T075] [P] Langfuse tracing client for Registry API: emits deploy and approval events — `services/registry-api/tracing.py`
-- [ ] [T076] Skeleton OPA client for SDK (calls localhost:8181, returns allow/require_approval/reason) — `sdk/agentshield_sdk/opa_client.py`
-- [ ] [T152] Update `agentshield_sdk/tracing.py` — add `parent_trace_id` and `source_agent` metadata to all Langfuse spans; cross-agent trace stitching via shared `trace_id = session_id`; add `team` and `agent_name` as top-level trace metadata tags for team-level cost grouping (Gaps M-08, M-31) — `sdk/agentshield_sdk/tracing.py`
-- [ ] [T154] Update `agentshield_sdk/streaming.py` — add `approval_timeout` SSE event type with payload schema `{event: "approval_timeout", data: {approval_id, thread_id, reason: "timeout", reopen_url}}`; consumed by client UX to show timeout state (Gap M-28) — `sdk/agentshield_sdk/streaming.py`
-
-**Verification:** `kubectl get pods -n agents-platform -l agent=echo-agent -o jsonpath='{.items[0].spec.containers[*].name}'` returns `echo-agent opa`; `curl localhost:8181/v1/data/agentshield/agent/echo_agent` returns allow decision; Langfuse UI shows traces with safety + agent spans
+- [X] `cd studio && npm run build` — zero TypeScript errors
+- [ ] `docker build -t registry.internal/agentshield/registry-api:0.2.26 services/registry-api/`
+- [ ] `docker build -t registry.internal/agentshield/studio:0.1.25 studio/`
+- [X] Update `scripts/deploy-cpe2e.sh`: `REGISTRY_API_TAG="0.2.26"` + `STUDIO_TAG="0.1.25"`
+- [ ] `kubectl set image deployment/agentshield-registry-api registry-api=registry.internal/agentshield/registry-api:0.2.26 -n agentshield-platform`
+- [ ] `kubectl set image deployment/agentshield-studio studio=registry.internal/agentshield/studio:0.1.25 -n agentshield-platform`
+- [ ] `kubectl rollout status deployment/agentshield-registry-api -n agentshield-platform --timeout=60s`
+- [ ] `kubectl rollout status deployment/agentshield-studio -n agentshield-platform --timeout=60s`
 
 ---
 
-## Phase 11 — Complete HITL + Portkey
-_Depends on: Phase 7 (Basic HITL baseline in place), Phase 10 (Redis available for pub/sub)_
+## Phase B: Consumer Chat
+> Requires Phase A deployed. New backend router + 3 new Studio pages.
 
-- [ ] [T078] Approval notifier: on INSERT with status=pending, publish to Redis pub/sub channel approvals:pending; includes agent name, tool, Studio queue link — `services/registry-api/approval_notifier.py`
-- [ ] [T079] Slack notifier: reads SLACK_WEBHOOK_URL; sends formatted message with approval context, tool args, and Studio deep link — `services/registry-api/slack_notifier.py`
-- [ ] [T083] Portkey sub-chart values: OpenAI and Anthropic provider configs (API keys from Secrets), Redis cache URL — `charts/agentshield/charts/portkey/values.yaml`. Agents set OPENAI_BASE_URL=http://portkey:8787 so LLM calls route through Portkey transparently — not in the Envoy routing path.
-- [ ] [T084] [P] Portkey Chart.yaml — `charts/agentshield/charts/portkey/Chart.yaml`
-- [ ] [T148] Slack notification on approval timeout — extend `services/registry-api/slack_notifier.py` with `notify_timeout()`: sends message including thread_id, agent name, tool name, timed-out timestamp, and link to reopen via `/approvals/{id}/reopen`; called by timeout_worker.py when status transitions to timeout (Gap M-30) — `services/registry-api/slack_notifier.py`
-- [ ] [T149] [P] Appsmith approval card conflict resolution UX — update Appsmith approval queue app to handle 409 Conflict on PATCH: display "Already decided by [reviewer_name] at [timestamp]" message and refresh the card to show final decision; prevent double-submit (Gap M-27) — `appsmith/apps/approval-queue-conflict.js`
-- [ ] [T150] [P] SSE protocol update — add `approval_timeout` event type to `sdk/agentshield_sdk/streaming.py`: emitted when agent detects approval status = timeout via LISTEN/NOTIFY; payload includes `approval_id`, `thread_id`, `reason: "timeout"` (Gap M-28) — `sdk/agentshield_sdk/streaming.py`
+### B1 — Chat proxy router (backend)
 
-**Verification:** Trigger high-risk tool → Slack message received with approval link; approve via Studio → agent resumes within 5s; verify Portkey in agent pod env: `OPENAI_BASE_URL=http://portkey.agentshield-platform:8787/v1`; timeout scenario: let approval expire → Slack timeout notification received
+- [X] Create `services/registry-api/routers/chat.py` with:
+
+  ```python
+  from __future__ import annotations
+  import uuid, logging, json, asyncio
+  from datetime import datetime, timezone
+  from typing import Optional, Any, AsyncGenerator
+  from fastapi import APIRouter, Depends, HTTPException, status
+  from fastapi.responses import StreamingResponse
+  from pydantic import BaseModel
+  from sqlalchemy import text, select
+  from sqlalchemy.ext.asyncio import AsyncSession
+  from auth_middleware import require_user
+  from db import get_db
+  from models import Agent, AssetGrant, Deployment, PlaygroundRun
+
+  router = APIRouter(prefix="/api/v1/agents", tags=["consumer-chat"])
+  logger = logging.getLogger(__name__)
+
+  class AgentChatRequest(BaseModel):
+      message: str
+      session_id: Optional[str] = None
+
+  async def _caller_team(db: AsyncSession, user_sub: str) -> Optional[str]:
+      row = await db.execute(
+          text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub"),
+          {"sub": user_sub})
+      r = row.first()
+      return r.team_name if r else None
+
+  async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
+      now = datetime.now(tz=timezone.utc)
+      row = await db.execute(
+          select(AssetGrant).where(
+              AssetGrant.asset_id == agent_id,
+              AssetGrant.asset_type == "agent",
+              AssetGrant.grantee_team == team,
+              AssetGrant.revoked_at.is_(None),
+          ).limit(1))
+      grant = row.scalar_one_or_none()
+      if grant is None:
+          return False
+      if grant.expires_at and grant.expires_at.replace(tzinfo=timezone.utc) < now:
+          return False
+      return True
+
+  async def _running_deployment(db: AsyncSession, agent_id: uuid.UUID) -> Optional[Deployment]:
+      row = await db.execute(
+          select(Deployment)
+          .where(Deployment.agent_id == agent_id, Deployment.status == "running")
+          .order_by(Deployment.deployed_at.desc()).limit(1))
+      return row.scalar_one_or_none()
+
+  async def _sse_stream(message: str, run_id: str) -> AsyncGenerator[str, None]:
+      words = message.split()
+      for i, word in enumerate(words):
+          content = word + (" " if i < len(words) - 1 else "")
+          yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+          await asyncio.sleep(0.05)
+      yield f"data: {json.dumps({'type': 'done', 'run_id': run_id})}\n\n"
+
+  @router.post("/{name}/chat", status_code=status.HTTP_200_OK)
+  async def start_chat(
+      name: str,
+      body: AgentChatRequest,
+      caller: dict = Depends(require_user),
+      db: AsyncSession = Depends(get_db),
+  ) -> dict[str, Any]:
+      result = await db.execute(select(Agent).where(Agent.name == name, Agent.status == "active"))
+      agent = result.scalar_one_or_none()
+      if not agent:
+          raise HTTPException(status_code=404, detail=f"Agent '{name}' not found.")
+      user_sub = caller.get("sub", "")
+      caller_team = await _caller_team(db, user_sub)
+      if caller_team != agent.team:
+          if not caller_team:
+              raise HTTPException(status_code=403, detail="User has no team assignment.")
+          if not await _has_grant(db, agent.id, caller_team):
+              raise HTTPException(status_code=403,
+                  detail=f"Team '{caller_team}' does not have access to agent '{name}'.")
+      deployment = await _running_deployment(db, agent.id)
+      if not deployment:
+          raise HTTPException(status_code=503,
+              detail=f"Agent '{name}' has no running deployment. Deploy it first.")
+      session_id = body.session_id or str(uuid.uuid4())
+      run = PlaygroundRun(user_id=user_sub, agent_name=name, context="production",
+          sandbox=False, input_message=body.message, status="running",
+          started_at=datetime.now(tz=timezone.utc))
+      db.add(run)
+      await db.flush()
+      run_id = str(run.id)
+      await db.commit()
+      logger.info("chat: run_id=%s agent=%s user=%s team=%s", run_id, name, user_sub, caller_team)
+      return {"run_id": run_id, "session_id": session_id,
+              "stream_url": f"/api/v1/agents/{name}/chat/{run_id}/stream",
+              "agent_name": name, "deployment_id": str(deployment.id)}
+
+  @router.get("/{name}/chat/{run_id}/stream")
+  async def stream_chat(
+      name: str, run_id: str,
+      caller: dict = Depends(require_user),
+      db: AsyncSession = Depends(get_db),
+  ) -> StreamingResponse:
+      parsed_id = uuid.UUID(run_id)
+      result = await db.execute(select(PlaygroundRun).where(PlaygroundRun.id == parsed_id))
+      run = result.scalar_one_or_none()
+      if not run or run.agent_name != name:
+          raise HTTPException(status_code=404, detail="Chat run not found.")
+      if run.user_id != caller.get("sub", ""):
+          raise HTTPException(status_code=403, detail="Not your chat run.")
+      return StreamingResponse(_sse_stream(run.input_message, run_id),
+          media_type="text/event-stream",
+          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+  ```
+
+- [X] `services/registry-api/main.py`: add after last router import:
+  ```python
+  from routers.chat import router as chat_router
+  ```
+  Add in `create_app()` after playground routers:
+  ```python
+  # --- Consumer chat router (Phase B) ---
+  app.include_router(chat_router)
+  ```
+- [X] Add to `main.py` module docstring:
+  ```
+  /api/v1/agents/{name}/chat  — consumer chat proxy (grant-checked, SSE)
+  ```
+
+**Verify:** `curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8001/api/v1/agents/customer-intelligence-agent/chat -H "Content-Type: application/json" -d '{"message":"hello"}'` → `401`
 
 ---
 
-## Phase 12 — Observability Dashboards
-_Depends on: Phase 10 complete (Langfuse running with ClickHouse), Phase 7 complete (approval queue baseline)_
-_Gaps addressed: M-16, M-24, M-31_
+### B2 — My Agents page [P]
 
-- [ ] [T157] `langfuse/dashboards/safety-dashboard.json` — Langfuse dashboard import file: per-agent injection block rate chart, false positive tracking (blocked=true AND no human override), PII redaction count per team, scanner latency P50/P99 (Gap M-16) — `langfuse/dashboards/safety-dashboard.json`
-- [ ] [T158] [P] `langfuse/dashboards/rejection-rate.json` — per-agent rejection rate dashboard: OPA deny rate, Safety block rate, HITL approval rate, combined pass rate funnel chart; filterable by team and time range (Gap M-16) — `langfuse/dashboards/rejection-rate.json`
-- [ ] [T159] [P] Langfuse SDK instrumentation audit — update `agentshield_sdk/tracing.py` to ensure ALL traces include `team`, `agent_name`, `session_id` as Langfuse metadata tags; add `model`, `token_count` for cost grouping; write test asserting span metadata completeness (Gap M-31) — `sdk/agentshield_sdk/tracing.py`
-- [ ] [T160] [P] `appsmith/apps/approval-queue.json` — Appsmith export/import file for the Approval Queue app: approval list view with status filter, approve/reject buttons with optimistic lock handling, session_id and OPA decision cross-reference panel (Gap M-24) — `appsmith/apps/approval-queue.json`
-- [ ] [T161] [P] `appsmith/apps/agent-registry.json` — Appsmith export/import file for the Agent Registry app: agent list with deployment status, version history table, quarantine toggle button, team filter (Gap M-24) — `appsmith/apps/agent-registry.json`
+- [X] Create `studio/src/pages/MyAgentsPage.tsx`
+- [ ] Imports: `useQuery` from react-query; `listAgents`, `listAllDeployments` from registryApi; `useAuth` from contexts/AuthContext; `Link` from react-router-dom; `Bot`, `Loader2`, `MessageSquare`, `Rocket`, `RefreshCw` from lucide-react
+- [ ] Local `fetchTeamsSummary` helper (same as in CatalogPage: `fetch("/api/v1/admin/teams-summary")`)
+- [ ] Three parallel queries: teams-summary, `listAgents(200, 0, "active")`, `listAllDeployments("running", 100)`
+- [ ] Derive `myAgents`:
+  ```typescript
+  const { user } = useAuth();
+  const myTeam = teams?.find(t => t.members.some(m => m.user_sub === user?.sub));
+  const grantedNames = new Set(
+    (myTeam?.grants ?? []).filter(g => g.asset_type === "agent").map(g => g.asset_name)
+  );
+  const runningNames = new Set((deploymentsPage?.items ?? []).map(d => d.agent_name));
+  const myAgents = (agentsPage?.items ?? [])
+    .filter(a => grantedNames.has(a.name))
+    .map(a => ({ ...a, isRunning: runningNames.has(a.name) }));
+  ```
+- [ ] Page header: `"My Agents"` + subtitle `"Agents your team (${myTeam?.name ?? "—"}) has been granted access to"`
+- [ ] Card grid (`grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4`) — one `MyAgentCard` per agent:
+  - Name + description (2-line clamp)
+  - Status badge: `isRunning` → `bg-green-100 text-green-700 "● Running"` ; else `bg-slate-100 text-slate-500 "Not deployed"`
+  - Owner team label
+  - Actions: if `isRunning` → Chat button (`Link to /agents/:name/chat`, primary blue) + View button; else → Deploy button + View button
+- [ ] Empty state: `"No agents have been granted to your team yet. Ask an admin to grant access via Administration → Access Control."`
+- [ ] `App.tsx`: add import + `<Route path="/my-agents" element={<MyAgentsPage />} />`
 
-**Verification:** Import `langfuse/dashboards/safety-dashboard.json` via Langfuse UI → dashboard renders with data; import both Appsmith app JSON files → approval queue shows pending approvals; agent registry shows registered agents with deployment status
+**Verify:** `npm run typecheck`. `/my-agents` shows cards for granted agents with correct Running/Not-deployed states.
 
 ---
 
-## Checkpoint 4 — Full Governed Request
-_Gate: Phases 9–12 must be complete. Run after all safety and observability is wired._
-_What you prove: Complete request lifecycle — JWT auth via Envoy, safety scan, OPA policy, HITL approval pause/resume, SSE streaming, trace in Langfuse._
+### B3 — Agent Chat page [P]
 
-- [ ] [CP4a] Helm upgrade script: enable portkey, langfuse — `scripts/deploy-cp4.sh`
-- [ ] [CP4b] Auth smoke test: send request with invalid JWT to Envoy → assert 401; send with valid JWT → assert forwarded to safety-orchestrator → agent — `scripts/smoke-test-cp4-auth.sh`
-- [ ] [CP4c] Full E2E HITL smoke test: POST /chat/stream to echo-agent with high-risk tool trigger; assert SSE stream emits approval_requested event; PATCH approval to approved; assert stream resumes with approval_decided then done; check Langfuse trace created with all spans present (safety + OPA + approval) — `scripts/smoke-test-cp4-e2e.sh`
+- [ ] `studio/src/api/registryApi.ts`: add `startAgentChat`:
+  ```typescript
+  export const startAgentChat = async (
+    name: string,
+    body: { message: string; session_id?: string }
+  ): Promise<{ run_id: string; session_id: string; stream_url: string; agent_name: string }> => {
+    const { data } = await http.post(`/agents/${name}/chat`, body);
+    return data;
+  };
+  ```
+- [X] Create `studio/src/pages/AgentChatPage.tsx`
+- [ ] Imports: `useParams`, `Link` from react-router-dom; `useQuery` from react-query; `getAgent`, `startAgentChat` from registryApi; `useState`, `useRef`, `useEffect` from react; `ArrowLeft`, `Bot`, `Loader2`, `Send` from lucide-react
+- [ ] Types: `interface Message { role: "user" | "assistant"; content: string; }`
+- [ ] State: `messages`, `input`, `isStreaming`, `sessionId` (init `crypto.randomUUID()`)
+- [ ] `useRef` on message container for auto-scroll; `useEffect` scrolls to bottom on `messages` change
+- [ ] `sendMessage` function:
+  1. Guard: `!input.trim() || isStreaming` → return
+  2. Append user message, clear input, set `isStreaming=true`
+  3. `await startAgentChat(name!, { message: userMsg, session_id: sessionId })`
+  4. Open `new EventSource(stream_url)` — note: `stream_url` from response is already a full path like `/api/v1/agents/{name}/chat/{run_id}/stream`; use it directly as the EventSource URL
+  5. Append empty assistant message; on `message` event: parse JSON, if `type==="token"` update last message content; if `type==="done"` close + `setIsStreaming(false)`
+  6. On `onerror`: close + `setIsStreaming(false)`
+- [ ] Layout (full-height flex column — no inner scroll except message area):
+  ```tsx
+  <div className="flex flex-col h-screen bg-white">
+    {/* Header — minimal */}
+    <div className="border-b border-slate-200 px-6 py-3 flex items-center gap-3 shrink-0">
+      <Link to="/my-agents" className="text-slate-400 hover:text-slate-600"><ArrowLeft size={16} /></Link>
+      <div className="flex-1 min-w-0">
+        <h1 className="text-sm font-semibold text-slate-900 truncate">{agent?.name ?? name}</h1>
+        <p className="text-xs text-slate-400 truncate">{agent?.description}</p>
+      </div>
+      <span className="badge bg-green-100 text-green-700 text-xs">Live</span>
+    </div>
+    {/* Messages */}
+    <div ref={messagesEndRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+      {messages.length === 0 && <EmptyState description={agent?.description} />}
+      {messages.map((m, i) => <MessageBubble key={i} role={m.role} content={m.content} />)}
+    </div>
+    {/* Input */}
+    <div className="border-t border-slate-200 px-6 py-4 shrink-0">
+      <form onSubmit={e=>{e.preventDefault(); sendMessage();}} className="flex gap-2">
+        <input className="input flex-1" value={input} onChange={e=>setInput(e.target.value)}
+          disabled={isStreaming} placeholder="Message…" />
+        <button type="submit" disabled={isStreaming || !input.trim()} className="btn-primary">
+          {isStreaming ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>}
+        </button>
+      </form>
+    </div>
+  </div>
+  ```
+- [ ] `MessageBubble`: user → right-aligned, `bg-blue-600 text-white rounded-2xl rounded-br-sm`; assistant → left-aligned, `bg-slate-100 text-slate-800 rounded-2xl rounded-bl-sm`
+- [ ] `App.tsx`: add import + `<Route path="/agents/:name/chat" element={<AgentChatPage />} />`
 
-> **To run:** `bash scripts/deploy-cp4.sh` → `bash scripts/smoke-test-cp4-auth.sh && bash scripts/smoke-test-cp4-e2e.sh`
-> **Pass criteria:** 401 on bad JWT, safety scan blocks injection, HITL pause/resume works, Langfuse trace visible with safety + approval spans
+**Verify:** `npm run typecheck`. `/agents/customer-intelligence-agent/chat` shows clean chat UI. No trace panel, no version selector, no sandbox badge. Message streams tokens on send.
 
 ---
 
-## Summary
+### B4 — Wire My Agents sidebar (dynamic mini-list)
 
-**Total tasks:** 192 (177 implementation T001–T191 + 15 checkpoint CP1a–CP4c + CPE-a–CPE-c)
+- [ ] `studio/src/components/Sidebar.tsx`:
+  - Add `useQuery` import and local `fetchTeamsSummary` + `listAgents` import
+  - Add `useAuth` import
+  - Add query:
+    ```typescript
+    const { user } = useAuth();
+    const { data: sidebarTeams } = useQuery({
+      queryKey: ["sidebar-teams"],
+      queryFn: () => fetch("/api/v1/admin/teams-summary").then(r => r.json()),
+      staleTime: 60_000,
+    });
+    const { data: sidebarAgents } = useQuery({
+      queryKey: ["sidebar-agents"],
+      queryFn: () => listAgents(200, 0, "active"),
+      staleTime: 60_000,
+    });
+    const myTeamGrants = useMemo(() => {
+      const myTeam = (sidebarTeams ?? []).find((t: any) =>
+        t.members?.some((m: any) => m.user_sub === user?.sub)
+      );
+      const grantedNames = new Set(
+        (myTeam?.grants ?? []).filter((g: any) => g.asset_type === "agent").map((g: any) => g.asset_name)
+      );
+      return (sidebarAgents?.items ?? []).filter(a => grantedNames.has(a.name)).slice(0, 5);
+    }, [sidebarTeams, sidebarAgents, user?.sub]);
+    ```
+  - Replace the "My Agents" placeholder `<NavLink>` block with:
+    ```tsx
+    <div>
+      <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">My Agents</p>
+      {myTeamGrants.length === 0 ? (
+        <p className="px-3 py-1 text-xs text-slate-500 italic">No agents granted yet</p>
+      ) : (
+        <>
+          {myTeamGrants.map(a => <SideLink key={a.name} to={`/agents/${a.name}/chat`} label={a.name} />)}
+          <NavLink to="/my-agents" className="block px-3 py-1 text-xs text-slate-500 hover:text-slate-300">
+            See all →
+          </NavLink>
+        </>
+      )}
+    </div>
+    ```
+  - Add `useMemo` to React import if not already present
 
-| Phase | Tasks | Parallel | Status | Notes |
-|-------|-------|---------|--------|-------|
-| Phase 1 — Infra Setup | T001–T016, T130–T131 (18) | T006–T016, T131 (12) | ✅ Core done; T130–T131 pending | Sub-chart values all parallel |
-| Phase 2 — Registry API | T017–T033, T132–T136 (22) | T022–T024, T133–T135 (6) | ✅ Done | All routers implemented and mounted |
-| **Checkpoint 1** | CP1a–CP1c (3) | — | Pending | Deploy data layer + Registry API |
-| Phase 3 — Deploy Controller | T034–T043, T137–T139 (13) | None | ✅ Done | Timeout worker + reopen endpoint done |
-| **Checkpoint 2** | CP2a–CP2c (3) | — | ✅ Done | First agent deployed; OPA sidecar verified |
-| Phase 3b — Ops & Runbooks | T140–T145 (6) | T141–T145 (5) | ✅ Done | Scripts + runbooks |
-| Phase 4 — Tool Registry | T044–T051 (8) | T047–T048 (2) | ✅ Done | T049 deferred to Phase 9 |
-| Phase 5 — Studio UI MVP | T115–T116, T118, T126–T129, T162–T164 (10) | T163–T164, T127–T129 (5) | ✅ Done | 3-screen app + canvas |
-| Phase 5b — LLM Provider Config | T165–T178 (14) | T175–T177 (3) | ✅ Done | Fernet encryption + K8s RBAC + Studio Providers page |
-| Phase 6 — SDK v1 | T089–T108, T151–T154 (24) | T107–T108, T152–T154 (5) | ✅ Done | T152+T154 deferred to Phase 10 |
-| Phase 7 — Basic HITL | T077–T088, T148–T150 (15) | T085–T087 (3) | ✅ Done | T078–T079, T083–T084, T148–T150 deferred to Phase 11 |
-| Phase 8 — Declarative Runner + Canvas | T109–T114, T117, T119–T125, T155–T156 (16) | T117, T119–T125, T155–T156 (9) | ✅ Done | Backend + canvas frontend; skills CRUD; conditional routing |
-| **Phase 8b — Python Tool Executor** | T179–T186 (8) | T180–T182, T184–T186 (6) | ✅ Done | New tool type; python-executor microservice; PythonToolNodeExecutor |
-| **Phase 8c — Default Resources** | T187–T189 (3) | T188 (1) | ✅ Done | 6 tools, 2 skills, 3 workflows, 5 agents seeded; Studio python_code UI |
-| **Phase 8d — Studio Edit/Detail UX** | T190–T191 (2) | — | ✅ Done | ToolsPage + AgentListPage edit/delete — product plan gap fill |
-| **Checkpoint E2E** | CPE-a–CPE-c (3) | — | Pending | Create → deploy → invoke E2E demo; runs after defaults seeded |
-| Phase 9 — Safety Orchestrator | T052–T068, T146–T147 (19) + T049 | T060–T068, T147 (10) | ✅ Done | T049 also completed; scanner charts linted; OPA generator wired to deploy |
-| **Checkpoint 3** | CP3a–CP3c (3) | — | ✅ Done | Safety pipeline live; fail-closed confirmed (5/5 each) |
-| Phase 10 — OPA + Langfuse + Tracing | T069–T076, T152, T154 (10) | T072–T073, T075–T076 (4) | Pending | OPA policy ConfigMaps + Langfuse charts + SDK tracing |
-| Phase 11 — Complete HITL + Portkey | T078–T079, T083–T084, T148–T150 (7) | T084, T149–T150 (3) | Pending | Redis pub/sub + Slack + Portkey |
-| Phase 12 — Dashboards | T157–T161 (5) | T158–T161 (4) | Pending | Langfuse dashboards + Appsmith import files |
-| **Checkpoint 4** | CP4a–CP4c (3) | — | Pending | Full governed: JWT + safety + HITL + Langfuse trace |
+**Verify:** `npm run typecheck`. Sidebar My Agents section shows agent names for granted agents, "No agents granted yet" when empty.
 
-**Parallelism highlights:** Phase 8b (6 of 8 parallel), Phase 8 canvas frontend (9 parallel tasks), Phase 1 sub-chart values (12 parallel tasks), Phase 9 scanner Helm charts (10 parallel tasks)
-**Gap coverage:** 32 gap-tagged tasks cover 14 critical gaps and 17 major gaps; see `docs/plan/gaps.md` for full register
-**E2E milestone:** Functional end-to-end (create → deploy → invoke → approve) visible after Phase 8b/8c + Checkpoint E2E — before any scanner integration
-**Python tool execution:** Phase 8b adds `type=python` tools running sandboxed code via `python-executor` microservice; same governance pipeline as HTTP tools
+---
+
+### Phase B — Build + Deploy
+
+- [ ] `cd studio && npm run build` — zero errors
+- [ ] `docker build -t registry.internal/agentshield/registry-api:0.2.27 services/registry-api/`
+- [ ] `docker build -t registry.internal/agentshield/studio:0.1.26 studio/`
+- [ ] Update `scripts/deploy-cpe2e.sh`: `REGISTRY_API_TAG="0.2.27"` + `STUDIO_TAG="0.1.26"`
+- [ ] `kubectl set image deployment/agentshield-registry-api registry-api=registry.internal/agentshield/registry-api:0.2.27 -n agentshield-platform`
+- [ ] `kubectl set image deployment/agentshield-studio studio=registry.internal/agentshield/studio:0.1.26 -n agentshield-platform`
+- [ ] `kubectl rollout status deployment/agentshield-registry-api -n agentshield-platform --timeout=60s`
+- [ ] `kubectl rollout status deployment/agentshield-studio -n agentshield-platform --timeout=60s`
+
+---
+
+## Phase C: E2E Tests
+> Write after Phase B is deployed. All tests run via `kubectl exec` into the registry-api pod.
+
+### C1 — Create suite-14-consumer-chat.sh
+
+- [ ] Create `scripts/e2e/suite-14-consumer-chat.sh` — copy boilerplate from `suite-8-playground.sh`:
+  - Header comment block listing all test IDs
+  - `NAMESPACE` var, `API_POD` lookup via `kubectl get pods -l app.kubernetes.io/name=registry-api`
+  - `PASS=0 FAIL=0 MANUAL=0`
+  - `pass()`, `fail()`, `check_manual()` functions
+
+- [ ] **T-S14-001** — Chat returns 401 without auth token:
+  ```bash
+  STATUS=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+  import httpx
+  r = httpx.post('http://localhost:8000/api/v1/agents/customer-intelligence-agent/chat',
+                 json={'message':'hello'}, timeout=5)
+  print(r.status_code)" 2>/dev/null)
+  [ "$STATUS" = "401" ] && pass "T-S14-001: chat returns 401 without token" || fail "T-S14-001: expected 401 got $STATUS"
+  ```
+
+- [ ] **T-S14-002** — `/deployments/?status=running` only returns running deployments:
+  ```bash
+  RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+  import httpx, sys
+  r = httpx.get('http://localhost:8000/api/v1/deployments/?status=running', timeout=5)
+  items = r.json().get('items', [])
+  bad = [d.get('status') for d in items if d.get('status') != 'running']
+  print('FAIL: ' + str(bad) if bad else 'ok')" 2>/dev/null)
+  [ "$RESULT" = "ok" ] && pass "T-S14-002: /deployments/?status=running returns only running" || fail "T-S14-002: $RESULT"
+  ```
+
+- [ ] **T-S14-003** — Approve with empty body creates 0 grants and sets publish_status=published:
+  ```bash
+  RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+  import httpx, sys
+  # Create test agent
+  r = httpx.post('http://localhost:8000/api/v1/agents/',
+      json={'name':'s14-promote-test','team':'platform','agent_type':'declarative'}, timeout=5)
+  if r.status_code not in (200,201,409): print(f'agent: {r.status_code}'); sys.exit(1)
+  # Submit for publish
+  pub = httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/publish', timeout=5)
+  if pub.status_code not in (200,201): print(f'publish: {pub.status_code} {pub.text[:100]}'); sys.exit(1)
+  pr_id = pub.json().get('publish_request_id','')
+  # Approve with no grantee_teams
+  apr = httpx.post(f'http://localhost:8000/api/v1/admin/publish-requests/{pr_id}/approve',
+      json={}, timeout=5)
+  d = apr.json()
+  if apr.status_code != 200: print(f'approve: {apr.status_code} {d}'); sys.exit(1)
+  if d.get('grants_created',99) != 0: print(f'expected 0 grants got {d}'); sys.exit(1)
+  # Check publish_status
+  ag = httpx.get('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5).json()
+  if ag.get('publish_status') != 'published': print(f'publish_status={ag.get(\"publish_status\")}'); sys.exit(1)
+  print('ok')" 2>/dev/null)
+  [ "$RESULT" = "ok" ] && pass "T-S14-003: approve with no grantee_teams → 0 grants + published status" || fail "T-S14-003: $RESULT"
+  ```
+
+- [ ] **T-S14-004** — HITL production queue excludes playground approvals (regression guard):
+  ```bash
+  RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+  import httpx, sys
+  r = httpx.get('http://localhost:8000/api/v1/approvals/?status=pending', timeout=5)
+  items = r.json().get('items', [])
+  pg = [i for i in items if i.get('context') == 'playground']
+  print('FAIL: playground items in prod queue: ' + str(pg) if pg else 'ok')" 2>/dev/null)
+  [ "$RESULT" = "ok" ] && pass "T-S14-004: production HITL queue excludes playground approvals" || fail "T-S14-004: $RESULT"
+  ```
+
+- [ ] **T-S14-005** — Chat returns 503 when agent has no running deployment (MANUAL):
+  ```bash
+  check_manual "T-S14-005" "Chat returns 503 when agent has no running deployment" \
+    "With valid Bearer token: POST /api/v1/agents/s14-promote-test/chat → 503 (no deployment)"
+  ```
+
+- [ ] **T-S14-006** — Chat endpoint SSE stream returns text/event-stream (MANUAL):
+  ```bash
+  check_manual "T-S14-006" "Chat SSE stream returns Content-Type: text/event-stream" \
+    "POST /agents/{name}/chat → use run_id to GET stream_url → verify Content-Type header and 'data:' lines"
+  ```
+
+- [ ] **T-S14-007** — Cleanup test artifacts:
+  ```bash
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+  import httpx
+  httpx.delete('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5)
+  " 2>/dev/null || true
+  echo "  (Cleanup: s14-promote-test deleted)"
+  ```
+
+- [ ] Add summary block:
+  ```bash
+  echo ""
+  echo "  Suite 14 Results: PASS=${PASS}  FAIL=${FAIL}  MANUAL=${MANUAL}"
+  echo "  (MANUAL items require a valid Bearer token and running agent deployment)"
+  [ "$FAIL" -eq 0 ] && exit 0 || exit 1
+  ```
+
+---
+
+### C2 — Wire suite-14 into run-all.sh
+
+- [ ] `scripts/e2e/run-all.sh`: add after last `run_suite` call:
+  ```bash
+  run_suite "Suite 14: Consumer Chat (Phase B)" "suite-14-consumer-chat.sh"
+  ```
+
+**Verify:** `NAMESPACE=agentshield-platform bash scripts/e2e/suite-14-consumer-chat.sh`
+Expected: T-S14-001 through T-S14-004 PASS. T-S14-005, T-S14-006 MANUAL. T-S14-007 cleanup runs. Exit 0.
+
+---
+
+## Final Acceptance Checklist
+
+### Phase A
+- [ ] Sidebar: "Evaluate" not "Test"
+- [ ] HITL Queue: header = "Production HITL Queue" + info callout
+- [ ] Publish Queue: rows show agent name + description, column header = "Asset"
+- [ ] Promote button calls approve with `{}` body; no grantee_teams field
+- [ ] Toast after promote says "Promoted to catalog. Go to Access Control to grant team access."
+- [ ] `/admin/artifacts`: all 3 agents + 9 tools + 3 skills shown, filterable by type, read-only
+- [ ] Catalog: agent cards with grants show Chat + Deploy buttons (only when `publish_status=published`)
+- [ ] `/deployments`: auto-refreshes, running rows have green border + Chat button
+- [ ] Sidebar: Playground → My Agents → Org (Catalog, Deployments) → Config → Administration (All Artifacts first)
+
+### Phase B
+- [ ] `POST /api/v1/agents/{name}/chat` → 401 no token, 403 no grant, 503 no deployment, 200 all conditions met
+- [ ] `/my-agents`: cards for team-granted agents with Running/Not-deployed status
+- [ ] `/agents/:name/chat`: clean chat UI, tokens stream, no trace/version/eval controls
+- [ ] Sidebar My Agents section: shows granted agent names, "No agents granted yet" when empty
+
+### Phase C
+- [ ] `suite-14-consumer-chat.sh` exits 0 with T-S14-001 through T-S14-004 all PASS
+- [ ] `run-all.sh` includes Suite 14

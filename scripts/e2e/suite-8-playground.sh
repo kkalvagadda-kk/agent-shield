@@ -358,17 +358,20 @@ check_manual "T-S8-007" \
 # T-S8-008: GET /playground/runs/{id}/trace → returns trace_id field
 # ---------------------------------------------------------------------------
 echo "--- T-S8-008: GET /playground/runs/{run_id}/trace ---"
-run_test "T-S8-008: GET /playground/runs/{id}/trace returns trace_id" "
+run_test "T-S8-008: GET /playground/runs/{id}/trace returns expected fields" "
 import urllib.request, json
 r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/playground/runs/' + RUN_ID + '/trace',
+    'http://localhost:8000/api/v1/playground/runs/${RUN_ID}/trace',
     timeout=5
 )
 d = json.loads(r.read())
 assert 'trace_id' in d, f'trace_id missing from trace response: {d}'
 assert 'run_id' in d, f'run_id missing from trace response: {d}'
 assert 'trace_url' in d, f'trace_url missing from trace response: {d}'
-# trace_id may be None if no Langfuse trace was emitted (sandbox run)
+assert 'status' in d, f'status missing from trace response: {d}'
+# trace_id is non-null when trace_create_run() is active (requires image rebuild)
+if d.get('trace_id'):
+    assert d.get('trace_url') is not None, f'trace_url should be set when trace_id is present'
 print('trace_id=' + str(d.get('trace_id')) + ' status=' + str(d.get('status')))
 "
 
@@ -394,7 +397,7 @@ if [ -n "$DATASET_ID" ]; then
 import urllib.request, json
 body = json.dumps({'dataset_id': '${DATASET_ID}', 'label': 'e2e-s8-save-test'}).encode()
 req = urllib.request.Request(
-    'http://localhost:8000/api/v1/playground/runs/' + RUN_ID + '/save-to-dataset',
+    'http://localhost:8000/api/v1/playground/runs/${RUN_ID}/save-to-dataset',
     data=body, headers={'Content-Type': 'application/json'}, method='POST'
 )
 r = urllib.request.urlopen(req, timeout=5)
@@ -417,7 +420,7 @@ run_test "T-S8-010: Submit thumbs-up feedback returns score" "
 import urllib.request, json
 body = json.dumps({'score': 1, 'comment': 'good response'}).encode()
 req = urllib.request.Request(
-    'http://localhost:8000/api/v1/playground/runs/' + RUN_ID + '/feedback',
+    'http://localhost:8000/api/v1/playground/runs/${RUN_ID}/feedback',
     data=body, headers={'Content-Type': 'application/json'}, method='POST'
 )
 r = urllib.request.urlopen(req, timeout=5)
@@ -432,7 +435,7 @@ run_test "T-S8-010b: Submit invalid feedback score → 422" "
 import urllib.request, json
 body = json.dumps({'score': 0}).encode()
 req = urllib.request.Request(
-    'http://localhost:8000/api/v1/playground/runs/' + RUN_ID + '/feedback',
+    'http://localhost:8000/api/v1/playground/runs/${RUN_ID}/feedback',
     data=body, headers={'Content-Type': 'application/json'}, method='POST'
 )
 try:

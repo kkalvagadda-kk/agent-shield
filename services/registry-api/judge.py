@@ -54,6 +54,7 @@ async def score_run(
     input_text: str,
     output_text: str,
     team: str = "platform",
+    langfuse_trace_id: str | None = None,
 ) -> None:
     """Fire-and-forget judge scorer. Writes result to the playground run record."""
     try:
@@ -70,6 +71,11 @@ async def score_run(
 
     await _write_score(run_id, score=score, reason=reason, status="completed")
     logger.info("judge: run %s scored %.2f (%s)", run_id, score, reason[:60])
+
+    # Push score to Langfuse trace
+    if langfuse_trace_id:
+        from tracing import trace_judge_score
+        trace_judge_score(trace_id=langfuse_trace_id, score=score, reason=reason)
 
 
 async def _call_judge(

@@ -33,7 +33,7 @@ export default function DatasetsPage() {
 
   const { data: agentsData } = useQuery({
     queryKey: ["agents-for-eval"],
-    queryFn: () => listAgents(100, 0),
+    queryFn: () => listAgents(100, 0, "active"),
   });
 
   const createMutation = useMutation({

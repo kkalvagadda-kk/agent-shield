@@ -113,7 +113,9 @@ class Agent(Base):
     updated_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
-    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_by: Mapped[str] = mapped_column(
+        String(256), nullable=False, server_default=text("'system'")
+    )
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, server_default=text("'{}'")
     )

@@ -194,8 +194,14 @@ async def deploy_agent(
     )
     agent_tools = tools_result.scalars().all()
 
-    # Gate 4: block critical-risk tools
+    # Gate 4: block critical-risk tools (bound via AgentTool OR declared in version)
     critical_tools = [t.name for t in agent_tools if t.risk_level == "critical"]
+    version_tools = version.tools or []
+    critical_tools += [
+        t.get("name", "unknown")
+        for t in version_tools
+        if isinstance(t, dict) and t.get("risk", "").lower() == "critical"
+    ]
     if critical_tools:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -234,6 +240,25 @@ async def deploy_agent(
             detail=(
                 f"Version '{body.version_id}' has not passed evaluation "
                 "(eval_passed=False). Run evals before deploying."
+            ),
+        )
+
+    # ── Pre-flight gate 3b: adversarial eval gate ────────────────────────────
+    # Adversarial eval required when the version declares high/critical-risk tools
+    version_tools_list = version.tools or []
+    has_risky_tools = any(
+        isinstance(t, dict) and t.get("risk", "low") in ("high", "critical")
+        for t in version_tools_list
+    )
+    has_risky_bound_tools = any(
+        t.risk_level in ("high", "critical") for t in agent_tools
+    )
+    if (has_risky_tools or has_risky_bound_tools) and not version.adversarial_eval_passed:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Version '{body.version_id}' has not passed adversarial evaluation "
+                "(adversarial_eval_passed=False). Run adversarial evals before deploying."
             ),
         )
 
@@ -307,6 +332,20 @@ async def deploy_agent(
         await generate_and_store(db, agent.id, name, version, namespace=k8s_ns)
     except Exception as exc:
         logger.warning("Policy generation failed for agent '%s' (non-fatal): %s", name, exc)
+
+    # Emit Langfuse platform action trace
+    from tracing import trace_platform_action
+    trace_platform_action(
+        trace_id=str(deployment.id),
+        action="deploy",
+        user_id=x_user_team,
+        agent_name=name,
+        metadata={
+            "version_id": str(body.version_id),
+            "environment": body.environment,
+            "replicas": body.replicas,
+        },
+    )
 
     return DeploymentResponse.model_validate(deployment)
 

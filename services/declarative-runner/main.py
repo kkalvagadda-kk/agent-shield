@@ -203,12 +203,15 @@ async def metrics():
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     """Synchronous chat — invoke the workflow and return the complete response."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
+    trace_id = request.headers.get("x-agentshield-trace-id")
     try:
-        result = await workflow_executor.run(req.message, thread_id=req.thread_id)
+        result = await workflow_executor.run(
+            req.message, thread_id=req.thread_id, trace_id=trace_id
+        )
         return result
     except SafetyBlockedError as exc:
         SAFETY_BLOCKS.inc()
@@ -219,15 +222,16 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, request: Request):
     """Streaming chat — return workflow output as Server-Sent Events."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
+    trace_id = request.headers.get("x-agentshield-trace-id")
 
     async def sse_generator():
         try:
             async for chunk in workflow_executor.run_streamed(
-                req.message, thread_id=req.thread_id
+                req.message, thread_id=req.thread_id, trace_id=trace_id
             ):
                 yield chunk
         except SafetyBlockedError as exc:

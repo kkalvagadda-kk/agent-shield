@@ -84,6 +84,31 @@ export function streamPlaygroundRun(runId: string): EventSource {
 }
 
 // ---------------------------------------------------------------------------
+// Run Trace & Feedback
+// ---------------------------------------------------------------------------
+export async function getRunTrace(runId: string): Promise<{
+  run_id: string;
+  trace_id: string | null;
+  trace_url: string | null;
+  status: string;
+}> {
+  const { data } = await http.get(`/playground/runs/${runId}/trace`);
+  return data;
+}
+
+export async function submitRunFeedback(
+  runId: string,
+  score: 1 | -1,
+  comment?: string
+): Promise<{ langfuse_score_id: string | null }> {
+  const { data } = await http.post(`/playground/runs/${runId}/feedback`, {
+    score,
+    comment,
+  });
+  return data;
+}
+
+// ---------------------------------------------------------------------------
 // Playground Approvals
 // ---------------------------------------------------------------------------
 export async function listPlaygroundApprovals(statusFilter?: string): Promise<unknown[]> {

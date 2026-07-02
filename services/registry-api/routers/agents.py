@@ -53,9 +53,12 @@ router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 )
 async def create_agent(
     body: AgentCreate,
+    x_user_sub: Optional[str] = Header(default=None, alias="X-User-Sub"),
     db: AsyncSession = Depends(get_db),
 ) -> AgentResponse:
     """Create a new agent record.  Returns 409 if the name is already taken."""
+    caller = x_user_sub or "system"
+
     # Uniqueness check
     existing = await db.execute(select(Agent).where(Agent.name == body.name))
     if existing.scalar_one_or_none() is not None:
@@ -72,12 +75,16 @@ async def create_agent(
         agent_type=body.agent_type,
         agent_class=body.agent_class,
         metadata_=body.metadata,
+        created_by=caller,
     )
     db.add(agent)
     await db.flush()  # populate server-generated id / timestamps
     await db.refresh(agent)
 
-    logger.info("create_agent: registered agent '%s' (id=%s)", agent.name, agent.id)
+    logger.info(
+        "create_agent: registered agent '%s' (id=%s, created_by=%s)",
+        agent.name, agent.id, caller,
+    )
     return AgentResponse.model_validate(agent)
 
 
@@ -96,11 +103,27 @@ async def list_agents(
     ),
     limit: int = Query(50, ge=1, le=500, description="Maximum records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip"),
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[AgentResponse]:
-    """Return a paginated list of agents, optionally filtered by team and/or status."""
+    """Return a paginated list of agents, optionally filtered by team and/or status.
+
+    Visibility rule (when X-User-Sub is present): published agents are visible
+    to everyone; private/pending_review agents are visible only to their creator.
+    System calls without X-User-Sub see all agents.
+    """
+    from sqlalchemy import or_
+
     base_query = select(Agent)
     count_query = select(func.count()).select_from(Agent)
+
+    if x_user_sub:
+        vis_filter = or_(
+            Agent.publish_status == "published",
+            Agent.created_by == x_user_sub,
+        )
+        base_query = base_query.where(vis_filter)
+        count_query = count_query.where(vis_filter)
 
     if team is not None:
         base_query = base_query.where(Agent.team == team)

@@ -568,33 +568,49 @@ class WorkflowExecutor:
     # Public invocation methods
     # ------------------------------------------------------------------
 
-    async def run(self, message: str, thread_id: str | None = None) -> dict:
+    async def run(
+        self, message: str, thread_id: str | None = None, trace_id: str | None = None
+    ) -> dict:
         """Invoke the workflow synchronously and return a response dict.
 
         Steps:
-          1. Safety scan of input.
-          2. Graph ainvoke with the sanitised message.
-          3. Safety scan of output.
-          4. Return {"response": ..., "thread_id": ...}.
+          1. Start/attach Langfuse trace.
+          2. Safety scan of input.
+          3. Graph ainvoke with the sanitised message.
+          4. Safety scan of output.
+          5. End trace and return response.
 
         Raises:
             SafetyBlockedError: if input or output is blocked.
         """
+        from agentshield_sdk.tracing import tracer  # type: ignore[import]
+
         thread_id = thread_id or str(uuid4())
         agent_name = os.getenv("AGENT_NAME", "declarative-agent")
 
-        # 1. Input safety scan.
+        # 1. Start/attach trace
+        trace_ctx = tracer.start_trace(
+            name=f"workflow.{agent_name}",
+            session_id=thread_id,
+            agent_name=agent_name,
+            trace_id=trace_id,
+        )
+
+        # 2. Input safety scan.
         scan_result = await scan_input(
             message, agent_name=agent_name, session_id=thread_id
         )
         safe_message = scan_result.sanitized_text
+        tracer.span(trace_ctx, "safety_scan_input",
+                    input={"message_len": len(message)},
+                    output={"sanitized": scan_result.sanitized_text != message})
 
-        # 2. Invoke the graph.
+        # 3. Invoke the graph.
         config = {"configurable": {"thread_id": thread_id}}
         state = {"messages": [HumanMessage(content=safe_message)]}
         result = await self.graph.ainvoke(state, config)
 
-        # 3. Extract last AI message.
+        # 4. Extract last AI message.
         messages = result.get("messages", [])
         last_msg = messages[-1] if messages else None
         response_text: str = (
@@ -603,15 +619,16 @@ class WorkflowExecutor:
             else ""
         )
 
-        # 4. Output safety scan.
+        # 5. Output safety scan.
         out_scan = await scan_output(
             response_text, agent_name=agent_name, session_id=thread_id
         )
 
+        tracer.end_trace(trace_ctx, output={"response_len": len(out_scan.clean_text)})
         return {"response": out_scan.clean_text, "thread_id": thread_id}
 
     async def run_streamed(
-        self, message: str, thread_id: str | None = None
+        self, message: str, thread_id: str | None = None, trace_id: str | None = None
     ) -> AsyncIterator[str]:
         """Stream workflow output as SSE-formatted strings.
 
@@ -621,20 +638,34 @@ class WorkflowExecutor:
         Raises:
             SafetyBlockedError: if input scan blocks the message.
         """
+        from agentshield_sdk.tracing import tracer  # type: ignore[import]
+
         thread_id = thread_id or str(uuid4())
         agent_name = os.getenv("AGENT_NAME", "declarative-agent")
+
+        trace_ctx = tracer.start_trace(
+            name=f"workflow.{agent_name}.stream",
+            session_id=thread_id,
+            agent_name=agent_name,
+            trace_id=trace_id,
+        )
 
         # Safety scan before starting the stream — fail fast.
         scan_result = await scan_input(
             message, agent_name=agent_name, session_id=thread_id
         )
         safe_message = scan_result.sanitized_text
+        tracer.span(trace_ctx, "safety_scan_input",
+                    input={"message_len": len(message)},
+                    output={"sanitized": scan_result.sanitized_text != message})
 
         config = {"configurable": {"thread_id": thread_id}}
         state = {"messages": [HumanMessage(content=safe_message)]}
 
         async for sse_chunk in stream_events(self.graph, state, config):
             yield sse_chunk
+
+        tracer.end_trace(trace_ctx, output={"streamed": True})
 
     async def resume(self, thread_id: str, decision: dict) -> dict:
         """Resume a paused graph thread after a HITL decision.

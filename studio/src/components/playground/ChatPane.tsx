@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2, Send } from "lucide-react";
-import { startPlaygroundRun } from "../../api/playgroundApi";
+import { ExternalLink, Loader2, Send, ThumbsDown, ThumbsUp } from "lucide-react";
+import { getRunTrace, startPlaygroundRun, submitRunFeedback } from "../../api/playgroundApi";
 import { toast } from "sonner";
 
 interface Message {
@@ -24,6 +24,9 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [traceUrl, setTraceUrl] = useState<string | null>(null);
+  const [feedbackGiven, setFeedbackGiven] = useState<1 | -1 | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -46,6 +49,9 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
     setRunning(true);
+    setCurrentRunId(null);
+    setTraceUrl(null);
+    setFeedbackGiven(null);
 
     // Add empty assistant message that will grow as SSE events arrive
     setMessages((prev) => [...prev, { role: "assistant", content: "", chips: [] }]);
@@ -119,6 +125,10 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
             es.close();
             esRef.current = null;
             setRunning(false);
+            // Fetch trace URL after completion
+            getRunTrace(run_id).then((t) => {
+              if (t.trace_url) setTraceUrl(t.trace_url);
+            }).catch(() => {});
           }
         } catch {
           // ignore parse errors in stream
@@ -132,7 +142,7 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
         toast.error("Stream connection lost.");
       };
 
-      void run_id; // suppress unused warning
+      setCurrentRunId(run_id);
     } catch (err) {
       setRunning(false);
       toast.error((err as Error)?.message ?? "Failed to start run.");
@@ -191,6 +201,49 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
           </div>
         ))}
       </div>
+
+      {/* Feedback + trace bar (shown after run completes) */}
+      {!running && currentRunId && (
+        <div className="border-t border-slate-100 px-4 py-2 flex items-center gap-3">
+          <div className="flex items-center gap-1">
+            <button
+              onClick={async () => {
+                await submitRunFeedback(currentRunId, 1);
+                setFeedbackGiven(1);
+                toast.success("Thanks for your feedback!");
+              }}
+              disabled={feedbackGiven !== null}
+              className={`p-1 rounded hover:bg-green-50 ${feedbackGiven === 1 ? "text-green-600" : "text-slate-400"}`}
+              title="Thumbs up"
+            >
+              <ThumbsUp size={14} />
+            </button>
+            <button
+              onClick={async () => {
+                await submitRunFeedback(currentRunId, -1);
+                setFeedbackGiven(-1);
+                toast.success("Thanks for your feedback!");
+              }}
+              disabled={feedbackGiven !== null}
+              className={`p-1 rounded hover:bg-red-50 ${feedbackGiven === -1 ? "text-red-600" : "text-slate-400"}`}
+              title="Thumbs down"
+            >
+              <ThumbsDown size={14} />
+            </button>
+          </div>
+          {traceUrl && (
+            <a
+              href={traceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800"
+            >
+              <ExternalLink size={12} />
+              View Trace
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Input bar */}
       <div className="border-t border-slate-200 p-3 flex gap-2">

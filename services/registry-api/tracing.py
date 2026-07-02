@@ -89,6 +89,84 @@ def trace_eval_run_completed(run_id: str, status: str, overall_score: float | No
         logger.debug("Langfuse trace_eval_run_completed error: %s", exc)
 
 
+def trace_create_run(
+    run_id: str,
+    agent_name: str,
+    user_id: str,
+    context: str = "playground",
+    input_message: str | None = None,
+) -> str | None:
+    """Create a root Langfuse trace when a playground or consumer chat run starts.
+
+    Returns the trace_id (same as run_id for simplicity) or None if tracing is disabled.
+    """
+    lf = get_langfuse()
+    if not lf:
+        return None
+    try:
+        lf.trace(
+            id=run_id,
+            name=f"agent-run.{context}",
+            user_id=user_id,
+            input={"message": input_message} if input_message else None,
+            metadata={"agent_name": agent_name, "context": context},
+            tags=[agent_name, context],
+        )
+        lf.flush()
+        return run_id
+    except Exception as exc:
+        logger.debug("Langfuse trace_create_run error: %s", exc)
+        return None
+
+
+def trace_complete_run(
+    run_id: str,
+    status: str = "completed",
+    output_text: str | None = None,
+    judge_score: float | None = None,
+) -> None:
+    """Update the root trace with completion data."""
+    lf = get_langfuse()
+    if not lf:
+        return
+    try:
+        output: dict = {"status": status}
+        if output_text:
+            output["response"] = output_text[:2000]
+        if judge_score is not None:
+            output["judge_score"] = judge_score
+        lf.trace(
+            id=run_id,
+            name="agent-run",
+            output=output,
+            tags=[f"status:{status}"],
+        )
+        lf.flush()
+    except Exception as exc:
+        logger.debug("Langfuse trace_complete_run error: %s", exc)
+
+
+def trace_judge_score(
+    trace_id: str,
+    score: float,
+    reason: str | None = None,
+) -> None:
+    """Push the LLM judge score to Langfuse as a score attached to the run trace."""
+    lf = get_langfuse()
+    if not lf:
+        return
+    try:
+        lf.score(
+            trace_id=trace_id,
+            name="llm-judge",
+            value=score,
+            comment=reason,
+        )
+        lf.flush()
+    except Exception as exc:
+        logger.debug("Langfuse trace_judge_score error: %s", exc)
+
+
 def trace_platform_action(
     trace_id: str,
     action: str,

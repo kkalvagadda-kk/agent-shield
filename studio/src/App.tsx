@@ -8,7 +8,11 @@ import AgentListPage from "./pages/AgentListPage";
 import AdminAccessPage from "./pages/AdminAccessPage";
 import AdminApprovalAuthorityPage from "./pages/AdminApprovalAuthorityPage";
 import AdminGrantsPage from "./pages/AdminGrantsPage";
+import AdminArtifactsPage from "./pages/AdminArtifactsPage";
 import AdminPublishRequestsPage from "./pages/AdminPublishRequestsPage";
+import AgentChatPage from "./pages/AgentChatPage";
+import MyAgentsPage from "./pages/MyAgentsPage";
+import DeploymentsPage from "./pages/DeploymentsPage";
 import CanvasPage from "./pages/CanvasPage";
 import CreateAgentPage from "./pages/CreateAgentPage";
 import DatasetsPage from "./pages/DatasetsPage";
@@ -37,19 +41,23 @@ export default function App() {
             <Routes>
               <Route path="/" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
-              <Route path="/agents/:name" element={<AgentDetailPage />} />
+              <Route path="/agents/:name/chat" element={<AgentChatPage />} />
               <Route path="/agents/:name/deploy" element={<DeployAgentPage />} />
+              <Route path="/agents/:name" element={<AgentDetailPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/workflows/new" element={<CanvasPage />} />
               <Route path="/workflows/:id" element={<CanvasPage />} />
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/my-agents" element={<MyAgentsPage />} />
               <Route path="/catalog" element={<CatalogPage />} />
+              <Route path="/admin/artifacts" element={<AdminArtifactsPage />} />
               <Route path="/admin/publish-requests" element={<AdminPublishRequestsPage />} />
               <Route path="/admin/access" element={<AdminAccessPage />} />
               <Route path="/admin/grants" element={<AdminGrantsPage />} />
               <Route path="/admin/approval-authority" element={<AdminApprovalAuthorityPage />} />
+              <Route path="/deployments" element={<DeploymentsPage />} />
               <Route path="/hitl" element={<HITLDashboardPage />} />
               <Route path="/playground" element={<PlaygroundPage />} />
               <Route path="/playground/datasets" element={<DatasetsPage />} />

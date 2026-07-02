@@ -87,11 +87,25 @@ async def create_playground_run(
     db.add(run)
     await db.flush()
     run_id = str(run.id)
+
+    # Create Langfuse root trace for this run
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=run_id,
+        agent_name=body.agent_name,
+        user_id=caller,
+        context="playground",
+        input_message=body.input_message,
+    )
+    if trace_id:
+        run.langfuse_trace_id = trace_id
+        await db.flush()
+
     await db.commit()
 
     logger.info(
-        "create_playground_run: run_id=%s agent=%s user=%s",
-        run_id, body.agent_name, caller,
+        "create_playground_run: run_id=%s agent=%s user=%s trace=%s",
+        run_id, body.agent_name, caller, trace_id,
     )
 
     return {
@@ -155,15 +169,15 @@ async def _simulate_agent_stream(
         await asyncio.sleep(0.05)
 
 
-async def _complete_run(run_id_str: str) -> None:
+async def _complete_run(run_id_str: str, output_text: str = "") -> None:
     """Background task: mark run as completed after stream ends, then fire judge."""
     import asyncio
     from db import AsyncSessionLocal
 
     agent_name = "unknown"
     input_message = ""
-    output_text = ""
     team = "platform"
+    langfuse_trace_id: str | None = None
 
     async with AsyncSessionLocal() as session:
         try:
@@ -175,13 +189,25 @@ async def _complete_run(run_id_str: str) -> None:
             if run:
                 run.status = "completed"
                 run.completed_at = datetime.now(tz=timezone.utc)
+                if output_text:
+                    run.output_text = output_text
                 agent_name = run.agent_name
                 input_message = run.input_message or ""
+                langfuse_trace_id = run.langfuse_trace_id
                 await session.commit()
                 logger.debug("Marked playground run %s as completed", run_id_str)
         except Exception as exc:
             logger.warning("_complete_run: could not update run %s: %s", run_id_str, exc)
             return
+
+    # Update Langfuse trace with completion
+    if langfuse_trace_id:
+        from tracing import trace_complete_run
+        trace_complete_run(
+            run_id=langfuse_trace_id,
+            status="completed",
+            output_text=output_text,
+        )
 
     # Fire-and-forget LLM-as-Judge scorer (non-blocking, 30s timeout in judge.py)
     if input_message:
@@ -194,6 +220,7 @@ async def _complete_run(run_id_str: str) -> None:
                     input_text=input_message,
                     output_text=output_text,
                     team=team,
+                    langfuse_trace_id=langfuse_trace_id,
                 )
             )
         except Exception as exc:
@@ -226,15 +253,31 @@ async def stream_playground_run(
             detail=f"Playground run '{run_id}' not found.",
         )
 
-    # Schedule completion update after stream
-    background_tasks.add_task(_complete_run, run_id)
+    # Collect output text from stream and schedule completion
+    agent_name = run.agent_name
+    input_message = run.input_message or ""
+
+    async def _stream_and_complete():
+        output_parts = []
+        async for chunk in _simulate_agent_stream(
+            run_id=run_id,
+            agent_name=agent_name,
+            input_message=input_message,
+        ):
+            # Extract text content from data events for output capture
+            if chunk.startswith("data: "):
+                try:
+                    ev = json.loads(chunk[6:].strip())
+                    if ev.get("event") == "text_delta":
+                        output_parts.append(ev.get("content", ""))
+                except Exception:
+                    pass
+            yield chunk
+        # After stream ends, schedule completion with captured output
+        background_tasks.add_task(_complete_run, run_id, "".join(output_parts))
 
     return StreamingResponse(
-        _simulate_agent_stream(
-            run_id=run_id,
-            agent_name=run.agent_name,
-            input_message=run.input_message or "",
-        ),
+        _stream_and_complete(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

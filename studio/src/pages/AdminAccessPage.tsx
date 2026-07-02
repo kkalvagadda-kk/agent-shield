@@ -583,7 +583,7 @@ function GrantsTab() {
     queryFn: () => listGrants({ limit: 200 }),
   });
 
-  const { data: agentsPage } = useQuery({ queryKey: ["agents"], queryFn: () => listAgents() });
+  const { data: agentsPage } = useQuery({ queryKey: ["agents"], queryFn: () => listAgents(100, 0, "active") });
   const { data: toolsPage } = useQuery({ queryKey: ["tools"], queryFn: () => listTools() });
   const { data: skillsPage } = useQuery({ queryKey: ["skills"], queryFn: () => listSkills() });
   const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });

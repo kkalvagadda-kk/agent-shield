@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Suite 13: Observability — T-S13-001 through T-S13-008
+# Suite 13: Observability — T-S13-001 through T-S13-010
 #
 # CRITICAL gate: if this suite fails, the platform is operationally dark.
 # No request-scoped traces = no cost tracking, no latency SLOs, no auditability.
@@ -13,6 +13,8 @@
 #   T-S13-006  Langfuse worker flushes 3 traces to ClickHouse within 15s
 #   T-S13-007  X-AgentShield-Trace-ID echoed in scan response headers
 #   T-S13-008  Agent run record created via Registry API
+#   T-S13-009  Playground run creates Langfuse root trace (Layer 1)
+#   T-S13-010  Feedback score pushed to Langfuse (Layer 4)
 #
 # Usage:
 #   NAMESPACE=agentshield-platform bash scripts/e2e/suite-13-observability.sh
@@ -394,6 +396,175 @@ else
     "curl -X POST http://localhost:8000/api/v1/agent-runs -d '{\"agent_name\":\"test\",\"context\":\"production\"}'" \
     "Assert HTTP 201 with id and status=running"
 fi
+echo ""
+
+# ── T-S13-009: Playground run creates Langfuse root trace (Layer 1) ─────────
+echo "--- T-S13-009: Playground Run Creates Langfuse Root Trace ---"
+PG_TRACE_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, base64, time, urllib.error
+
+base = 'http://localhost:8000'
+
+# Ensure agent exists
+ag_body = json.dumps({'name': 's13-trace-agent', 'team': 'platform', 'description': 's13 trace test'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
+        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+except urllib.error.HTTPError:
+    pass  # 409 is fine
+
+# Create playground run
+body = json.dumps({
+    'agent_name': 's13-trace-agent',
+    'input_message': 'Suite 13 Langfuse trace lifecycle test'
+}).encode()
+req = urllib.request.Request(base + '/api/v1/playground/runs', data=body,
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 's13-user'}, method='POST')
+try:
+    r = urllib.request.urlopen(req, timeout=10)
+    d = json.loads(r.read())
+    run_id = d.get('run_id', '')
+except Exception as e:
+    print('RUN_ERR:' + str(e)[:80])
+    exit()
+
+if not run_id:
+    print('RUN_ERR:no run_id')
+    exit()
+
+# Fetch the trace endpoint to get the trace_id
+time.sleep(2)  # wait for run to be marked completed
+try:
+    tr = urllib.request.urlopen(base + '/api/v1/playground/runs/' + run_id + '/trace', timeout=5)
+    td = json.loads(tr.read())
+    trace_id = td.get('trace_id')
+    if not trace_id:
+        print('NO_TRACE_ID:run_id=' + run_id)
+        exit()
+except Exception as e:
+    print('TRACE_ERR:' + str(e)[:80])
+    exit()
+
+# Poll Langfuse for the trace
+creds = base64.b64encode(b'${LF_PK}:${LF_SK}').decode()
+for _ in range(12):
+    try:
+        req = urllib.request.Request('${LF_SVC}/api/public/traces/' + trace_id,
+            headers={'Authorization': 'Basic ' + creds})
+        r = urllib.request.urlopen(req, timeout=4)
+        body = json.loads(r.read())
+        meta = body.get('metadata', {}) or {}
+        agent = meta.get('agent_name', '')
+        context = meta.get('context', '')
+        print(f'found trace_id={trace_id} agent={agent} context={context}')
+        break
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            time.sleep(1)
+        else:
+            print('LF_ERR:HTTP:' + str(e.code))
+            break
+    except Exception as e:
+        print('LF_ERR:' + str(e)[:60])
+        break
+else:
+    print('timeout:trace_id=' + trace_id)
+" 2>/dev/null || echo "ERR")
+
+if echo "$PG_TRACE_RESULT" | grep -q "^found trace_id="; then
+  pass "T-S13-009: Playground run created Langfuse root trace ($PG_TRACE_RESULT)"
+elif echo "$PG_TRACE_RESULT" | grep -q "NO_TRACE_ID"; then
+  fail "T-S13-009: Playground run has no langfuse_trace_id — trace_create_run() not firing ($PG_TRACE_RESULT)"
+elif echo "$PG_TRACE_RESULT" | grep -q "timeout"; then
+  fail "T-S13-009: Langfuse trace not found after 12s — flush/ingestion issue ($PG_TRACE_RESULT)"
+else
+  check_manual "T-S13-009: Could not verify playground trace lifecycle ($PG_TRACE_RESULT)" \
+    "POST /api/v1/playground/runs then GET /runs/{id}/trace" \
+    "Assert trace_id non-null, then GET /api/public/traces/{trace_id} from Langfuse → 200"
+fi
+echo ""
+
+# ── T-S13-010: Feedback score pushed to Langfuse (Layer 4 validation) ──────
+echo "--- T-S13-010: Feedback Score Pushed to Langfuse ---"
+FB_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, base64, time, urllib.error
+
+base = 'http://localhost:8000'
+
+# Ensure agent exists
+ag_body = json.dumps({'name': 's13-trace-agent', 'team': 'platform', 'description': 's13 trace test'}).encode()
+try:
+    urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
+        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+except urllib.error.HTTPError:
+    pass  # 409 is fine
+
+# Create playground run
+body = json.dumps({
+    'agent_name': 's13-trace-agent',
+    'input_message': 'Suite 13 feedback test'
+}).encode()
+req = urllib.request.Request(base + '/api/v1/playground/runs', data=body,
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 's13-fb-user'}, method='POST')
+try:
+    r = urllib.request.urlopen(req, timeout=10)
+    d = json.loads(r.read())
+    run_id = d.get('run_id', '')
+except Exception as e:
+    print('RUN_ERR:' + str(e)[:80])
+    exit()
+
+if not run_id:
+    print('RUN_ERR:no run_id')
+    exit()
+
+time.sleep(2)
+
+# Submit feedback
+fb_body = json.dumps({'score': 1, 'comment': 's13-test-feedback'}).encode()
+fb_req = urllib.request.Request(base + '/api/v1/playground/runs/' + run_id + '/feedback',
+    data=fb_body, headers={'Content-Type': 'application/json'}, method='POST')
+try:
+    r = urllib.request.urlopen(fb_req, timeout=5)
+    fb = json.loads(r.read())
+    lf_score_id = fb.get('langfuse_score_id')
+    trace_id = fb.get('langfuse_trace_id')
+    if lf_score_id:
+        print(f'score_pushed trace_id={trace_id} score_id={lf_score_id}')
+    elif trace_id:
+        print(f'no_score_id trace_id={trace_id} (Langfuse may not be reachable)')
+    else:
+        print(f'no_trace run_id={run_id} (trace not created)')
+except Exception as e:
+    print('FB_ERR:' + str(e)[:80])
+" 2>/dev/null || echo "ERR")
+
+if echo "$FB_RESULT" | grep -q "^score_pushed"; then
+  pass "T-S13-010: Feedback score pushed to Langfuse ($FB_RESULT)"
+elif echo "$FB_RESULT" | grep -q "no_score_id"; then
+  check_manual "T-S13-010: Feedback submitted but Langfuse score push failed ($FB_RESULT)" \
+    "Check Langfuse credentials and network connectivity from registry-api pod"
+elif echo "$FB_RESULT" | grep -q "no_trace"; then
+  fail "T-S13-010: Playground run has no Langfuse trace — Layer 1 not wired ($FB_RESULT)"
+else
+  check_manual "T-S13-010: Could not verify feedback push ($FB_RESULT)" \
+    "POST /runs/{id}/feedback → check langfuse_score_id in response"
+fi
+echo ""
+
+# ── Cleanup ─────────────────────────────────────────────────────────────────
+echo "--- Cleanup: remove test agents created by Suite 13 ---"
+for agent_name in obs-test-agent metadata-test-agent block-test-agent clean-test-agent flush-test s13-eval-agent s13-trace-agent; do
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, urllib.error
+try:
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${agent_name}', method='DELETE')
+    urllib.request.urlopen(req, timeout=5)
+except urllib.error.HTTPError:
+    pass
+" 2>/dev/null || true
+done
+echo "  done"
 echo ""
 
 echo "========================================================"

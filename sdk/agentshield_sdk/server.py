@@ -162,12 +162,14 @@ async def metrics():
 
 
 @app.post("/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    trace_id = request.headers.get("x-agentshield-trace-id")
     try:
         result = await runner.run(
-            req.message, thread_id=req.thread_id, metadata=req.metadata
+            req.message, thread_id=req.thread_id, metadata=req.metadata,
+            trace_id=trace_id,
         )
         return result
     except SafetyBlockedError as exc:
@@ -179,17 +181,16 @@ async def chat(req: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    trace_id = request.headers.get("x-agentshield-trace-id")
 
     async def sse_generator():
         try:
             async for chunk in runner.run_streamed(
-                req.message, thread_id=req.thread_id
+                req.message, thread_id=req.thread_id, trace_id=trace_id
             ):
-                # EventSourceResponse expects plain strings; we yield pre-formatted
-                # SSE frames from streaming.py.
                 yield chunk
         except SafetyBlockedError as exc:
             SAFETY_BLOCKS.inc()

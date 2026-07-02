@@ -502,9 +502,11 @@ except urllib.error.HTTPError as e:
     else:
         raise
 
-# Create version with adversarial_eval_passed=false (default)
+# Create version with eval_passed=true but adversarial_eval_passed=false
+# Uses a high-risk tool to trigger adversarial eval gate
 v = json.dumps({'agent_name': agent_name, 'description': 'v1',
-                 'tools': [{'name': 'search', 'risk': 'low'}],
+                 'tools': [{'name': 'issue_refund', 'risk': 'high'}],
+                 'eval_passed': True,
                  'adversarial_eval_passed': False}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
@@ -517,7 +519,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
                  'deployer_team': 'platform'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(
-        base + '/api/v1/agents/' + agent_name + '/deployments',
+        base + '/api/v1/agents/' + agent_name + '/deploy',
         data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
@@ -558,7 +560,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
                  'deployer_team': 'platform'}).encode()
 try:
     r2 = urllib.request.urlopen(urllib.request.Request(
-        base + '/api/v1/agents/' + agent_name + '/deployments',
+        base + '/api/v1/agents/' + agent_name + '/deploy',
         data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
     print('DEPLOY_OK status=' + str(r2.getcode()))
 except urllib.error.HTTPError as e:
@@ -588,6 +590,7 @@ except urllib.error.HTTPError as e:
 
 v = json.dumps({'agent_name': agent_name, 'description': 'v1',
                  'tools': [{'name': 'nuke_everything', 'risk': 'critical'}],
+                 'eval_passed': True,
                  'adversarial_eval_passed': True}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
@@ -598,7 +601,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
                  'deployer_team': 'platform'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(
-        base + '/api/v1/agents/' + agent_name + '/deployments',
+        base + '/api/v1/agents/' + agent_name + '/deploy',
         data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
@@ -621,7 +624,7 @@ d = json.dumps({'agent_name': 'nonexistent-agent-' + ts, 'version_id': '00000000
                  'deployer_team': 'platform'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(
-        base + '/api/v1/agents/nonexistent-agent-' + ts + '/deployments',
+        base + '/api/v1/agents/nonexistent-agent-' + ts + '/deploy',
         data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
     raise AssertionError('Expected 4xx but got 200')
 except urllib.error.HTTPError as e:

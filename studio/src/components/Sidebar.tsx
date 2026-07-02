@@ -1,26 +1,34 @@
 import { ChevronDown, ChevronRight, LogOut } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
+import { listAgents } from "../api/registryApi";
 
 // ── Nav item groups ──────────────────────────────────────────────────────────
 
 const PLAYGROUND_BUILD = [
-  { label: "Agents",    to: "/",          end: true },
+  { label: "Agents",    to: "/",          end: true  },
   { label: "Skills",    to: "/skills",    end: false },
   { label: "Tools",     to: "/tools",     end: false },
   { label: "Workflows", to: "/workflows", end: false },
 ];
 
-const PLAYGROUND_TEST = [
-  { label: "Test",     to: "/playground",         end: true },
+const PLAYGROUND_EVAL = [
+  { label: "Evaluate", to: "/playground",          end: true  },
   { label: "Datasets", to: "/playground/datasets", end: false },
 ];
 
+const ORG_ITEMS = [
+  { label: "Catalog",     to: "/catalog"     },
+  { label: "Deployments", to: "/deployments" },
+];
+
 const ADMIN_ITEMS = [
-  { label: "Access Control", to: "/admin/access" },
-  { label: "Publish Queue",  to: "/admin/publish-requests" },
-  { label: "HITL Queue",     to: "/hitl" },
+  { label: "All Artifacts",  to: "/admin/artifacts"          },
+  { label: "Publish Queue",  to: "/admin/publish-requests"   },
+  { label: "Access Control", to: "/admin/access"             },
+  { label: "HITL Queue",     to: "/hitl"                     },
   { label: "Approvers",      to: "/admin/approval-authority" },
 ];
 
@@ -33,8 +41,13 @@ function isPlaygroundRoute(pathname: string) {
     pathname.startsWith("/skills") ||
     pathname.startsWith("/tools") ||
     pathname.startsWith("/workflows") ||
-    pathname.startsWith("/playground")
+    pathname.startsWith("/playground") ||
+    pathname.startsWith("/my-agents")
   );
+}
+
+function isOrgRoute(p: string) {
+  return p.startsWith("/catalog") || p.startsWith("/deployments");
 }
 
 function isAdminRoute(pathname: string) {
@@ -94,19 +107,47 @@ export default function Sidebar() {
   const { pathname } = useLocation();
   const { user, logout } = useAuth();
 
+  const { data: sidebarTeams } = useQuery({
+    queryKey: ["sidebar-teams"],
+    queryFn: () => fetch("/api/v1/admin/teams-summary").then((r) => r.json()),
+    staleTime: 60_000,
+  });
+
+  const { data: sidebarAgents } = useQuery({
+    queryKey: ["sidebar-agents"],
+    queryFn: () => listAgents(200, 0, "active"),
+    staleTime: 60_000,
+  });
+
+  const myTeamGrants = useMemo(() => {
+    const myTeam = (sidebarTeams ?? []).find((t: any) =>
+      t.members?.some((m: any) => m.user_sub === user?.sub)
+    );
+    const grantedNames = new Set(
+      (myTeam?.grants ?? [])
+        .filter((g: any) => g.asset_type === "agent")
+        .map((g: any) => g.asset_name as string)
+    );
+    return (sidebarAgents?.items ?? [])
+      .filter((a) => grantedNames.has(a.name))
+      .slice(0, 5);
+  }, [sidebarTeams, sidebarAgents, user?.sub]);
+
   const [open, setOpen] = useState({
     playground: isPlaygroundRoute(pathname),
+    org: isOrgRoute(pathname),
     admin: isAdminRoute(pathname),
   });
 
   // auto-expand the right section when navigating directly to a deep route
   useEffect(() => {
     if (isPlaygroundRoute(pathname)) setOpen((o) => ({ ...o, playground: true }));
-    if (isAdminRoute(pathname)) setOpen((o) => ({ ...o, admin: true }));
+    if (isOrgRoute(pathname))        setOpen((o) => ({ ...o, org: true }));
+    if (isAdminRoute(pathname))      setOpen((o) => ({ ...o, admin: true }));
   }, [pathname]);
 
-  const toggle = (key: "playground" | "admin") =>
-    setOpen((o) => ({ ...o, [key]: !o[key] }));
+  const toggle = (section: "playground" | "org" | "admin") =>
+    setOpen((o) => ({ ...o, [section]: !o[section] }));
 
   return (
     <aside className="w-56 shrink-0 bg-slate-900 flex flex-col min-h-screen border-r border-slate-800">
@@ -123,47 +164,60 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-2 py-4 space-y-4 overflow-y-auto">
-        {/* Playground section */}
-        <Section
-          label="Playground"
-          open={open.playground}
-          onToggle={() => toggle("playground")}
-        >
-          {PLAYGROUND_BUILD.map((item) => (
-            <SideLink key={item.to} to={item.to} label={item.label} end={item.end} />
+        {/* Playground */}
+        <Section label="Playground" open={open.playground} onToggle={() => toggle("playground")}>
+          {PLAYGROUND_BUILD.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />
           ))}
-
           <div className="my-2 border-t border-slate-800" />
-
-          {PLAYGROUND_TEST.map((item) => (
-            <SideLink key={item.to} to={item.to} label={item.label} end={item.end} />
+          {PLAYGROUND_EVAL.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />
           ))}
         </Section>
 
-        {/* Catalog — shared artifacts */}
-        <div>
+        {/* My Agents */}
+        <div className="mt-2">
           <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Org
+            My Agents
           </p>
-          <SideLink to="/catalog" label="Catalog" />
+          {myTeamGrants.length === 0 ? (
+            <p className="px-3 py-1 text-xs text-slate-500 italic">No agents granted yet</p>
+          ) : (
+            <>
+              {myTeamGrants.map((a) => (
+                <SideLink key={a.name} to={`/agents/${a.name}/chat`} label={a.name} end={false} />
+              ))}
+              <NavLink
+                to="/my-agents"
+                className={({ isActive }) =>
+                  `block px-3 py-1 text-xs transition-colors ${
+                    isActive ? "text-white" : "text-slate-500 hover:text-slate-300"
+                  }`
+                }
+              >
+                See all →
+              </NavLink>
+            </>
+          )}
         </div>
 
-        {/* Providers — standalone */}
-        <div>
-          <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
-            Config
-          </p>
-          <SideLink to="/providers" label="Providers" />
+        {/* Org */}
+        <Section label="Org" open={open.org} onToggle={() => toggle("org")}>
+          {ORG_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} />
+          ))}
+        </Section>
+
+        {/* Config */}
+        <div className="mt-2">
+          <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">Config</p>
+          <SideLink to="/providers" label="Providers" end={false} />
         </div>
 
-        {/* Administration section */}
-        <Section
-          label="Administration"
-          open={open.admin}
-          onToggle={() => toggle("admin")}
-        >
-          {ADMIN_ITEMS.map((item) => (
-            <SideLink key={item.to} to={item.to} label={item.label} />
+        {/* Administration */}
+        <Section label="Administration" open={open.admin} onToggle={() => toggle("admin")}>
+          {ADMIN_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} />
           ))}
         </Section>
       </nav>

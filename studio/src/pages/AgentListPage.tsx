@@ -51,7 +51,7 @@ export default function AgentListPage() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["agents"],
-    queryFn: () => listAgents(200, 0),
+    queryFn: () => listAgents(200, 0, "active"),
     refetchInterval: 15_000,
   });
 

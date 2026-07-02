@@ -62,8 +62,13 @@ class Tracer:
         session_id: str,
         agent_name: str,
         team: str | None = None,
+        trace_id: str | None = None,
     ) -> TraceContext:
-        """Start a new root trace.
+        """Start or attach to a trace.
+
+        If *trace_id* is provided (from X-AgentShield-Trace-ID header),
+        attaches spans to the existing root trace created by the registry-api.
+        Otherwise creates a new root trace.
 
         Returns a TraceContext that must be passed to :meth:`end_trace`.
         """
@@ -71,12 +76,15 @@ class Tracer:
             return TraceContext()
 
         try:
-            trace = self._client.trace(
-                name=name,
-                session_id=session_id,
-                metadata={"agent_name": agent_name, "team": team},
-                tags=[agent_name] + ([team] if team else []),
-            )
+            kwargs: dict = {
+                "name": name,
+                "session_id": session_id,
+                "metadata": {"agent_name": agent_name, "team": team},
+                "tags": [agent_name] + ([team] if team else []),
+            }
+            if trace_id:
+                kwargs["id"] = trace_id
+            trace = self._client.trace(**kwargs)
             return TraceContext(trace_id=trace.id, _trace=trace, _client=self._client)
         except Exception as exc:
             logger.warning("start_trace failed: %s", exc)

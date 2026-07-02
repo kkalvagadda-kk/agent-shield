@@ -32,7 +32,7 @@ export interface Agent {
   agent_class: string | null;
   created_at: string;
   updated_at: string;
-  created_by: string | null;
+  created_by: string;
   metadata: Record<string, unknown>;
 }
 
@@ -134,10 +134,11 @@ export interface Skill {
 // ---------------------------------------------------------------------------
 export const listAgents = async (
   limit = 100,
-  offset = 0
+  offset = 0,
+  status?: string
 ): Promise<Paginated<Agent>> => {
   const { data } = await http.get<Paginated<Agent>>("/agents/", {
-    params: { limit, offset },
+    params: { limit, offset, ...(status !== undefined ? { status } : {}) },
   });
   return data;
 };
@@ -213,6 +214,32 @@ export const getDeployments = async (
   const { data } = await http.get<Deployment[]>(
     `/agents/${agentName}/deployments/`
   );
+  return data;
+};
+
+export interface AgentChatStart {
+  run_id: string;
+  session_id: string;
+  stream_url: string;
+  agent_name: string;
+  deployment_id: string;
+}
+
+export const startAgentChat = async (
+  name: string,
+  body: { message: string; session_id?: string }
+): Promise<AgentChatStart> => {
+  const { data } = await http.post<AgentChatStart>(`/agents/${name}/chat`, body);
+  return data;
+};
+
+export const listAllDeployments = async (
+  status?: string,
+  limit = 100
+): Promise<Paginated<Deployment>> => {
+  const { data } = await http.get<Paginated<Deployment>>("/deployments/", {
+    params: { limit, ...(status ? { status } : {}) },
+  });
   return data;
 };
 
@@ -333,8 +360,14 @@ export const listAuthConfigs = async (): Promise<Paginated<AuthConfig>> => {
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
-export const listTools = async (params?: { team?: string }): Promise<Paginated<RegistryTool>> => {
-  const { data } = await http.get<Paginated<RegistryTool>>('/tools/', { params });
+export const listTools = async (
+  limit = 100,
+  offset = 0,
+  params?: { team?: string }
+): Promise<Paginated<RegistryTool>> => {
+  const { data } = await http.get<Paginated<RegistryTool>>('/tools/', {
+    params: { limit, offset, ...params },
+  });
   return data;
 };
 
@@ -372,8 +405,14 @@ export const deleteTool = async (id: string): Promise<void> => {
 // ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------
-export const listSkills = async (params?: { team?: string }): Promise<Paginated<Skill>> => {
-  const { data } = await http.get<Paginated<Skill>>('/skills/', { params });
+export const listSkills = async (
+  limit = 100,
+  offset = 0,
+  params?: { team?: string }
+): Promise<Paginated<Skill>> => {
+  const { data } = await http.get<Paginated<Skill>>('/skills/', {
+    params: { limit, offset, ...params },
+  });
   return data;
 };
 
@@ -441,7 +480,7 @@ export const listPublishRequests = async (params?: {
 
 export const approvePublishRequest = async (
   id: string,
-  body: { grantee_teams: string[]; expires_at?: string }
+  body: { grantee_teams?: string[]; expires_at?: string } = {}
 ): Promise<{ approved: boolean; grants_created: number }> => {
   const { data } = await http.post<{ approved: boolean; grants_created: number }>(
     `/admin/publish-requests/${id}/approve`,

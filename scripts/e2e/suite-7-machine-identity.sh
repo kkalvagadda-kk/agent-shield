@@ -402,7 +402,8 @@ except Exception as e:
 
 # Create version with critical-risk tool in snapshot
 v_body = json.dumps({'agent_name': agent_name, 'description': 'critical-test',
-                      'tools': [{'name': 'rm_prod_db', 'risk': 'critical'}]}).encode()
+                      'tools': [{'name': 'rm_prod_db', 'risk': 'critical'}],
+                      'eval_passed': True, 'adversarial_eval_passed': True}).encode()
 try:
     r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/versions',
         data=v_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
@@ -416,7 +417,7 @@ except Exception as e:
 d_body = json.dumps({'agent_name': agent_name, 'version_id': version_id,
                       'deployer_team': 'platform'}).encode()
 try:
-    req = urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/deployments',
+    req = urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/deploy',
         data=d_body, headers={'Content-Type': 'application/json'}, method='POST')
     r = urllib.request.urlopen(req, timeout=5)
     print('DEPLOY_ALLOWED:status=' + str(r.getcode()))  # Should not reach here

@@ -299,6 +299,20 @@ async def decide_approval(
         "decide_approval: id=%s decision=%s reviewer=%s",
         approval.id, body.decision, body.reviewer_id,
     )
+
+    # Emit Langfuse platform action trace
+    from tracing import trace_platform_action
+    trace_platform_action(
+        trace_id=str(approval.id),
+        action=f"approval.{body.decision}",
+        user_id=body.reviewer_id or "unknown",
+        agent_name=approval.agent_name,
+        metadata={
+            "tool_name": approval.tool_name,
+            "context": approval.context,
+        },
+    )
+
     return ApprovalResponse.model_validate(approval)
 
 
