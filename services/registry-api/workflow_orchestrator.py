@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
 
 import httpx
@@ -34,7 +35,7 @@ from sqlalchemy import select
 
 from db import AsyncSessionLocal
 from filter_engine import evaluate_filters
-from models import AgentRun
+from models import AgentRun, Approval
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +49,19 @@ def _team_namespace(team: str) -> str:
     return f"agents-{(team or 'platform').lower().replace(' ', '-')}"
 
 
-async def _dispatch(agent_name: str, team: str, message: str) -> tuple[str, str | None, str | None]:
-    """POST the message to the member agent's production pod. Returns (status, output, error)."""
+async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | None = None) -> tuple[str, str | None, str | None]:
+    """POST the message to the member agent's production pod. Returns (status, output, error).
+
+    Passing `thread_id` lets a member that pauses for approval create its Approval
+    row under a thread_id the orchestrator can correlate (see `_run_step`).
+    """
     url = f"http://{agent_name}-production.{_team_namespace(team)}.svc.cluster.local:8080/chat"
+    body: dict = {"message": message}
+    if thread_id:
+        body["thread_id"] = thread_id
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json={"message": message})
+            resp = await client.post(url, json=body)
         if resp.status_code == 200:
             data = resp.json()
             return "completed", (data.get("output") or data.get("response") or json.dumps(data)), None
@@ -187,19 +195,58 @@ async def _mark_parent(parent_run_id: str, status_val: str, output: str | None =
 
 
 async def _fail_parent(parent_run_id: str, error_message: str) -> None:
-    """Mark the parent run failed with a diagnostic error_message."""
+    """Mark the parent run failed with a diagnostic error_message. Clears any checkpoint."""
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
         if parent:
             parent.status = "failed"
             parent.error_message = error_message[:4000]
+            parent.orchestrator_state = None
             parent.completed_at = datetime.now(timezone.utc)
             await s.commit()
 
 
+async def _save_checkpoint(parent_run_id: str, state: dict) -> None:
+    """Persist the orchestrator's resumable position on the parent run."""
+    async with AsyncSessionLocal() as s:
+        parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
+        if parent:
+            parent.orchestrator_state = state
+            await s.commit()
+
+
+async def _clear_checkpoint(parent_run_id: str) -> None:
+    async with AsyncSessionLocal() as s:
+        parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
+        if parent:
+            parent.orchestrator_state = None
+            await s.commit()
+
+
+async def _halt_for_approval(parent_run_id: str, mode: str, team: str, workflow_id: str) -> None:
+    """Checkpoint + park a non-sequential run at 'awaiting_approval'.
+
+    These modes now halt correctly (instead of silently mis-advancing on a paused
+    member), but automatic resume-advance is deferred — resume_orchestration
+    completes them with the member's output. See gap ledger.
+    """
+    await _save_checkpoint(parent_run_id, {"mode": mode, "team": team, "workflow_id": workflow_id})
+    await _mark_parent(parent_run_id, "awaiting_approval")
+    logger.info("workflow %s (%s): paused — awaiting approval (auto-advance deferred for this mode)",
+                parent_run_id, mode)
+
+
 async def _run_step(parent_run_id: str, team: str, agent_name: str, current_input: str) -> tuple[str, str | None, str | None]:
-    """Create a child run, dispatch to the member, record the outcome. Returns (status, output, err)."""
+    """Create a child run, dispatch to the member, record the outcome. Returns (status, output, err).
+
+    If the member pauses for HITL approval (a pending Approval row appears for the
+    child's thread_id after dispatch), returns status 'awaiting_approval' and leaves
+    the child in 'awaiting_approval' (no completed_at) so the caller can checkpoint
+    and halt. The pending-approval row — not an empty response — is the authoritative
+    pause signal (a member's sync /chat returns 200 with empty output on interrupt).
+    """
     start = time.perf_counter()
+    thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
         child = AgentRun(
             agent_name=agent_name,
@@ -209,23 +256,41 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
             trigger_type="workflow",
             parent_run_id=parent_run_id,
             team=team,
+            thread_id=thread_id,
         )
         s.add(child)
         await s.commit()
         await s.refresh(child)
         child_id = str(child.id)
 
-    status_val, output, err = await _dispatch(agent_name, team, current_input)
+    status_val, output, err = await _dispatch(agent_name, team, current_input, thread_id)
     elapsed_ms = int((time.perf_counter() - start) * 1000)
+
+    # Authoritative pause detection: a member that hit interrupt() will have POSTed
+    # a pending Approval under this thread_id before suspending.
+    if status_val == "completed":
+        async with AsyncSessionLocal() as s:
+            pending = (await s.execute(
+                select(Approval).where(Approval.thread_id == thread_id, Approval.status == "pending")
+            )).scalar_one_or_none()
+        if pending is not None:
+            status_val = "awaiting_approval"
+            logger.info("workflow %s: member '%s' paused for approval (thread_id=%s, approval=%s)",
+                        parent_run_id, agent_name, thread_id, pending.id)
 
     async with AsyncSessionLocal() as s:
         child = (await s.execute(select(AgentRun).where(AgentRun.id == child_id))).scalar_one_or_none()
         if child:
             child.status = status_val
-            child.output = (output[:4000] if output else None)
-            child.error_message = err
             child.latency_ms = elapsed_ms
-            child.completed_at = datetime.now(timezone.utc)
+            if status_val == "awaiting_approval":
+                # Not terminal — completed_at/output are filled when the approval
+                # is decided and the member resumes (see approvals.decide_approval).
+                pass
+            else:
+                child.output = (output[:4000] if output else None)
+                child.error_message = err
+                child.completed_at = datetime.now(timezone.utc)
             await s.commit()
     return status_val, output, err
 
@@ -259,42 +324,101 @@ def _parse_next_agent(output: str, candidate_names: list[str]) -> str | None:
 # ---------------------------------------------------------------------------
 # Orchestration modes
 # ---------------------------------------------------------------------------
+def _compute_sequential_order(member_names: list[str], graph: dict[str, list[tuple[str, str | None]]]) -> list[str]:
+    """Resolve the linear member order: edge chain (default/first edge) or positional."""
+    if not graph:
+        # Backward-compatible: no edges → positional order (original behavior).
+        return list(member_names)
+    order: list[str] = []
+    visited: set[str] = set()
+    node = find_start_node(graph, member_names)
+    while node and node not in visited and len(order) < _MAX_STEPS:
+        order.append(node)
+        visited.add(node)
+        outs = graph.get(node, [])
+        # Prefer the default (blank) edge; else the first edge.
+        nxt = next((t for (t, c) in outs if not (c and c.strip())), None)
+        node = nxt if nxt is not None else (outs[0][0] if outs else None)
+    return order
+
+
+async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
+                               order: list[str], start_index: int, current_input: str) -> None:
+    """Run members order[start_index:] in sequence. Pausable + resumable.
+
+    On a member pausing for approval, checkpoints {next_index=i+1} and halts the
+    parent at 'awaiting_approval'; `resume_orchestration` re-enters here with the
+    resumed member's output as `current_input` and start_index=next_index.
+    """
+    for i in range(start_index, len(order)):
+        agent_name = order[i]
+        status_val, output, _err = await _run_step(parent_run_id, team, agent_name, current_input)
+        if status_val == "awaiting_approval":
+            await _save_checkpoint(parent_run_id, {
+                "mode": "sequential",
+                "order": order,
+                "next_index": i + 1,
+                "team": team,
+                "workflow_id": workflow_id,
+            })
+            await _mark_parent(parent_run_id, "awaiting_approval")
+            logger.info("workflow %s (sequential): paused at member %d ('%s') — awaiting approval",
+                        parent_run_id, i, agent_name)
+            return
+        if status_val == "failed":
+            await _mark_parent(parent_run_id, "failed", None)
+            logger.warning("workflow %s: member '%s' failed — fail-fast stop", parent_run_id, agent_name)
+            return
+        current_input = output or ""
+
+    await _mark_parent(parent_run_id, "completed", current_input)
+    logger.info("workflow run %s (sequential) finished: completed", parent_run_id)
+
+
 async def orchestrate_graph_sequential(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
     """Walk the edge chain (default/first outgoing edge) or member order if no edges. Fail-fast."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
+    order = _compute_sequential_order(member_names, graph)
+    await _run_sequential_from(parent_run_id, team, workflow_id, order, 0, input_message or "")
 
-    current_input = input_message or ""
-    failed = False
 
-    if not graph:
-        # Backward-compatible: no edges → positional order (original behavior).
-        order = member_names
-    else:
-        order = []
-        visited: set[str] = set()
-        node = find_start_node(graph, member_names)
-        while node and node not in visited and len(order) < _MAX_STEPS:
-            order.append(node)
-            visited.add(node)
-            outs = graph.get(node, [])
-            # Prefer the default (blank) edge; else the first edge.
-            nxt = next((t for (t, c) in outs if not (c and c.strip())), None)
-            node = nxt if nxt is not None else (outs[0][0] if outs else None)
+async def resume_orchestration(parent_run_id: str, member_output: str, member_status: str) -> None:
+    """Re-enter a paused workflow run after its blocked member's approval is decided.
 
-    for agent_name in order:
-        status_val, output, _err = await _run_step(parent_run_id, team, agent_name, current_input)
-        if status_val == "failed":
-            failed = True
-            logger.warning("workflow %s: member '%s' failed — fail-fast stop", parent_run_id, agent_name)
-            break
-        current_input = output or ""
+    Called (fire-and-forget) from approvals.decide_approval once the member pod has
+    resumed and produced its final output. Only 'sequential' mode auto-advances; other
+    modes halt correctly but complete on resume (auto-advance deferred — see gaps).
+    """
+    async with AsyncSessionLocal() as s:
+        parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
+        state = parent.orchestrator_state if parent else None
+    if not state:
+        logger.warning("resume_orchestration: no checkpoint for parent %s — nothing to advance", parent_run_id)
+        return
 
-    await _mark_parent(parent_run_id, "failed" if failed else "completed",
-                       None if failed else current_input)
-    logger.info("workflow run %s (sequential) finished: %s", parent_run_id, "failed" if failed else "completed")
+    if member_status == "failed":
+        await _fail_parent(parent_run_id, "workflow member failed after its approval was decided")
+        return
+
+    mode = state.get("mode")
+    if mode != "sequential":
+        # Detection halted this mode correctly; auto resume-advance isn't wired for
+        # conditional/supervisor/handoff yet. Complete with the member's output.
+        await _clear_checkpoint(parent_run_id)
+        await _mark_parent(parent_run_id, "completed", member_output or "")
+        logger.info("resume_orchestration: mode '%s' not auto-advanced (deferred) — parent %s completed",
+                    mode, parent_run_id)
+        return
+
+    await _clear_checkpoint(parent_run_id)
+    await _mark_parent(parent_run_id, "running")
+    await _run_sequential_from(
+        parent_run_id, state["team"], state["workflow_id"],
+        state["order"], int(state["next_index"]), member_output or "",
+    )
 
 
 async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
@@ -312,6 +436,9 @@ async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: st
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
+        if status_val == "awaiting_approval":
+            await _halt_for_approval(parent_run_id, "conditional", team, workflow_id)
+            return
         if status_val == "failed":
             failed = True
             logger.warning("workflow %s: node '%s' failed — stop", parent_run_id, node)
@@ -355,6 +482,9 @@ async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, i
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
+        if status_val == "awaiting_approval":
+            await _halt_for_approval(parent_run_id, "handoff", team, workflow_id)
+            return
         if status_val == "failed":
             failed = True
             break
@@ -403,6 +533,9 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
     for _ in range(max_iters):
         # 1. supervisor decides
         s_status, s_out, _e = await _run_step(parent_run_id, team, supervisor["name"], current_input)
+        if s_status == "awaiting_approval":
+            await _halt_for_approval(parent_run_id, "supervisor", team, workflow_id)
+            return
         if s_status == "failed":
             failed = True
             break
@@ -413,6 +546,9 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
             break
         # 2. dispatch to the chosen worker; thread its output back to the supervisor
         w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
+        if w_status == "awaiting_approval":
+            await _halt_for_approval(parent_run_id, "supervisor", team, workflow_id)
+            return
         if w_status == "failed":
             failed = True
             break
@@ -461,6 +597,11 @@ async def orchestrate_sequential(parent_run_id: str, team: str, member_agent_nam
     failed = False
     for agent_name in member_agent_names:
         status_val, output, _err = await _run_step(parent_run_id, team, agent_name, current_input)
+        if status_val == "awaiting_approval":
+            # No workflow_id here (legacy signature) → cannot checkpoint/resume; halt safely.
+            await _mark_parent(parent_run_id, "awaiting_approval")
+            logger.info("workflow %s (legacy sequential): paused — awaiting approval", parent_run_id)
+            return
         if status_val == "failed":
             failed = True
             logger.warning("workflow %s: member '%s' failed — fail-fast stop", parent_run_id, agent_name)

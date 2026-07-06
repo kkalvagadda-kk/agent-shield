@@ -62,6 +62,8 @@ function statusBadgeCls(status: string): string {
       return 'bg-green-100 text-green-700';
     case 'failed':
       return 'bg-red-100 text-red-700';
+    case 'awaiting_approval':
+      return 'bg-amber-100 text-amber-700';
     case 'queued':
     case 'pending':
     default:

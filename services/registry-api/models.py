@@ -1366,6 +1366,11 @@ class AgentRun(Base):
     )
     trigger_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Durable orchestrator checkpoint for a PARENT composite-workflow run. Set
+    # when a member pauses for HITL approval (parent → 'awaiting_approval') so the
+    # run tree can resume and advance after the approval is decided. Shape:
+    # {mode, order[], next_index, team, workflow_id}. NULL when not paused.
+    orchestrator_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     # Relationships
     # run_steps.run_id has no DB-level FK (it's a polymorphic reference to either

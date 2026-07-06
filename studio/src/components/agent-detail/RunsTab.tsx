@@ -7,6 +7,7 @@ const STATUS_BADGE: Record<string, string> = {
   completed: "bg-green-100 text-green-700",
   running: "bg-blue-100 text-blue-700",
   failed: "bg-red-100 text-red-700",
+  awaiting_approval: "bg-amber-100 text-amber-700",
   cancelled: "bg-slate-100 text-slate-600",
 };
 
@@ -63,6 +64,7 @@ export default function RunsTab({ agentName }: { agentName: string }) {
           <option value="">All statuses</option>
           <option value="completed">Completed</option>
           <option value="running">Running</option>
+          <option value="awaiting_approval">Awaiting approval</option>
           <option value="failed">Failed</option>
           <option value="cancelled">Cancelled</option>
         </select>

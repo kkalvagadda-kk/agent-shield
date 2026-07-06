@@ -448,7 +448,7 @@ All three produce agents governed by the same safety, OPA, HITL, and tracing pip
 
 **Production single-agent HITL resume (bug fix).** `PATCH /api/v1/approvals/{id}` (the production decide path) now best-effort fire-and-forget POSTs to the agent pod `/resume/{thread_id}` after recording the decision. Previously only the playground path did this, leaving a production approval with the LangGraph thread suspended. Errors are swallowed so a failed resume never fails the decision. Mirrors `approval_timeout_worker.py`.
 
-**Deferred (honest ledger):** the pausable workflow-HITL orchestrator — a member agent's approval pausing/resuming the whole workflow run tree — is not yet implemented. The orchestrator still dispatches member agents one-shot via `/chat`, and the Safety Orchestrator (`require_approval` via OPA) is disabled in this deployment, so end-to-end workflow-level HITL cannot be verified; it gets its own pass. Also: adding a schedule/webhook trigger to an agent already in a workflow is not blocked at the data layer — only the add-time composable filter guards it.
+**Deferred (honest ledger):** the pausable workflow-HITL orchestrator — a member agent's approval pausing/resuming the whole workflow run tree — was not yet implemented at this point. The orchestrator dispatched member agents one-shot via `/chat`. ~~(Prior note said "Safety Orchestrator disabled" — that was a misdiagnosis; see Decision 26.)~~ Also: adding a schedule/webhook trigger to an agent already in a workflow is not blocked at the data layer — only the add-time composable filter guards it. **[RESOLVED in WS-B — see Decision 26.]**
 
 ---
 
@@ -554,6 +554,39 @@ Production HITL queue filtering changes from "show all pending to the team" to "
 
 ---
 
+## Decision 26: Pausable Workflow-HITL Orchestrator (WS-B)
+
+**Date:** 2026-07-06
+
+**Context:** Decision 24 deferred the pausable-workflow-HITL orchestrator and noted (incorrectly) that "the Safety Orchestrator (`require_approval` via OPA) is disabled in this deployment, so end-to-end workflow-level HITL cannot be verified." That was a misdiagnosis. Two separate facts:
+
+1. **The Safety Orchestrator is NOT the approval origin.** `services/safety-orchestrator/orchestrator.py` is a PII/content scanner (Presidio / LLM Guard / NeMo Guardrails). It has zero awareness of tools, OPA, or approvals. It never was the origin of `require_approval`.
+
+2. **The real blocker was an env-var mismatch.** `manifest_builder.py` (deploy-controller) injected `OPA_URL=http://localhost:8181`, but the SDK reads `AGENTSHIELD_OPA_URL` (`sdk/agentshield_sdk/config.py:21`). With `AGENTSHIELD_OPA_URL` unset, the SDK set `DEV_MODE=True` and used a mock OPA client that returned `require_approval=False, allow=True` for every tool call — silently — on every deployed agent. The injected OPA sidecar was never consulted. **Fix (WS-B):** `manifest_builder.py` now also injects `AGENTSHIELD_OPA_URL=http://localhost:8181`.
+
+**The real approval origin** (unchanged by this fix) is: agent pod → `opa_client.check_tool()` → OPA sidecar at `localhost:8181` → returns `require_approval` → SDK `graph_builder.py` governed tool wrapper → `hitl.require_approval()` → LangGraph `interrupt()` → graph state checkpointed to Postgres by `thread_id` → pod returns HTTP 200 with empty output. `POST /resume/{thread_id}` reloads the checkpoint and continues. The Safety Orchestrator is on a different path entirely (input/output content scanning, not tool gating).
+
+**WS-B implementation (sequential auto-advance):**
+
+- **Durable checkpoint:** new nullable JSONB column `agent_runs.orchestrator_state` (migration 0032, down_revision 0031) stores `{mode, order[], next_index, team, workflow_id}` on the parent composite-workflow run when a member pauses for HITL.
+- **Authoritative pause-detection:** after dispatching a member via `/chat` and receiving a 200, the orchestrator queries for a pending `Approval` row keyed on that member's `thread_id`. Its presence (not empty output) is the authoritative signal that the child is paused — this avoids the prior bug where an empty response was mis-classified as "completed."
+- **On pause:** parent run set to `awaiting_approval`; checkpoint saved. Amber badge rendered in Studio run tree.
+- **On approval decide:** `routers/approvals.py::decide_approval` fires a best-effort background `_resume_and_advance(...)` that POSTs the member pod `/resume/{thread_id}`, closes the paused child, and calls `resume_orchestration(parent_run_id, member_output, member_status)`.
+- **`resume_orchestration` re-entry (sequential):** clears checkpoint, marks parent `running`, resumes the sequential loop from `next_index` with the member's output as input. On failed member → fail parent.
+
+**Scope and deferred items:**
+
+| Item | Status |
+|------|--------|
+| Sequential pause → resume-advance | ✅ Implemented (WS-B) |
+| conditional / supervisor / handoff pause → halt at `awaiting_approval` (bug fix, no auto-advance) | ✅ Implemented (WS-B) |
+| Non-sequential auto-advance (routing re-derivation after resume) | **deferred (intentional)** |
+| Organic OPA canary: verify the allow-path (projected SA token identity + bundle load) before relying on `require_approval` in production | **not-yet-wired (debt)** — the env fix is in but the allow-path must be canary-verified before real governance fires |
+
+**Global governance-activation risk:** flipping `AGENTSHIELD_OPA_URL` on is a global behavior change — every deployed agent transitions from mock-allow to enforced OPA. The allow-path (identity_present / identity_matches with the projected SA token + bundle load via `/api/v1/bundle/bundle.tar.gz` → nginx bundle-sync → sidecar poll) must be canary-verified on the actual cluster before relying on `require_approval` firing organically. Suite-37 covers this gate (gated on OPA bundle/identity path being green).
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -583,3 +616,4 @@ Production HITL queue filtering changes from "show all pending to the team" to "
 | 23 | Failure-alert transport | Control-plane SMTP in registry-api (`alerting.py`), NOT the risk=high HITL-gated `send_email` agent tool; must fire when the agent is dead and must not be gated. Shared notification service (Option C) deferred until a 2nd channel/source appears. |
 | 24 | Builder unification & full orchestration | Hide "Agent Graphs" nav; composite Workflow builder is the single builder (per-node config + edges + inline/existing agents); `workflow_edges` table (0029); all four orchestration modes run (sequential/conditional/supervisor/handoff); 4-way create-agent wizard + trigger-create UI in Settings. Deferred: canvas tool-editing, workflow-level triggers. |
 | 25 | Platform RBAC | Two-tier: global roles (`platform-admin`, `contributor`, `viewer`) + artifact-scoped roles (`agent-admin`, `approver`) in `artifact_role_grants` table. Grants target users or teams. Creator auto-gets `agent-admin`. Production deploy requires `platform-admin` or `agent-admin`. HITL routed to scoped `approver` holders. Deferred: tool-level approver granularity, mandatory deploy gate, revocation cascading. |
+| 26 | Pausable workflow-HITL orchestrator (WS-B) | Approval origin is the OPA sidecar in the agent pod (not the Safety Orchestrator, which is a PII scanner). Real blocker was `OPA_URL` vs `AGENTSHIELD_OPA_URL` env mismatch → global DEV_MODE mock-allow; fixed in `manifest_builder.py`. Durable checkpoint in `agent_runs.orchestrator_state` (JSONB, migration 0032). Authoritative pause-detection via pending `Approval` keyed by child `thread_id`. Sequential auto-advance implemented; non-sequential modes halt without auto-advance (deferred). OPA allow-path canary verification required before organic `require_approval` fires (debt). |

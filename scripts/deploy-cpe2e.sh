@@ -3,6 +3,9 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.64  (Pausable workflow-HITL: migration 0032 agent_runs.orchestrator_state JSONB checkpoint; workflow_orchestrator per-child thread_id + authoritative pending-Approval pause detection (halts all 4 modes at awaiting_approval); resume_orchestration re-entry (sequential auto-advance); decide_approval _resume_and_advance workflow hook)
+#   - deploy-controller:0.1.8  (inject AGENTSHIELD_OPA_URL=http://localhost:8181 into agent pods so SDK exits DEV_MODE and consults real OPA — fixes global mock-allow governance bypass)
+#   - studio:0.1.48        (awaiting_approval amber badge in workflow run tree + RunsTab status filter option)
 #   - registry-api:0.2.63  (Decision 24 impl#3: composable agent filter (?composable=true); workflow-level trigger CRUD (/workflows/{id}/triggers); production HITL resume (PATCH /approvals fires agent pod /resume); migration 0031 agent_events.workflow_id)
 #   - studio:0.1.47        (Decision 24 impl#3: AddAgentModal composable filter + reactive/durable inline toggle; WorkflowTriggersPanel + Triggers button; execution_shape in workflow Save modal)
 #   - scheduler:0.1.1      (fires workflow schedule triggers via UNION over agent+workflow trigger rows)
@@ -50,10 +53,10 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.63"
+REGISTRY_API_TAG="0.2.64"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.7"
-STUDIO_TAG="0.1.47"
+DEPLOY_CONTROLLER_TAG="0.1.8"
+STUDIO_TAG="0.1.48"
 EVAL_RUNNER_TAG="0.1.1"
 DECLARATIVE_RUNNER_TAG="0.1.7"
 PYTHON_EXECUTOR_TAG="0.1.0"

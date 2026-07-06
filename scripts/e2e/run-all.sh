@@ -82,6 +82,8 @@ run_suite "Suite 32: Per-schedule Input Payload"  "suite-32-schedule-payload.sh"
 run_suite "Suite 33: Composable Agent Filter"     "suite-33-composable-agents.sh"
 run_suite "Suite 34: Workflow Triggers"           "suite-34-workflow-triggers.sh"
 run_suite "Suite 35: Approval Resume"             "suite-35-approval-resume.sh"
+run_suite "Suite 36: Workflow HITL Pause-Resume"  "suite-36-workflow-hitl-pause-resume.sh"
+run_suite "Suite 37: Workflow HITL OPA (gated)"   "suite-37-workflow-hitl-opa.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

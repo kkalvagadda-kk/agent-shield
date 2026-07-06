@@ -514,7 +514,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.63"
+    tag: "0.2.64"
     pullPolicy: IfNotPresent
 
   service:
@@ -571,7 +571,7 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.7"
+    tag: "0.1.8"
     pullPolicy: IfNotPresent
 
   # Image tag used for the declarative-runner pods the controller provisions
@@ -818,7 +818,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.47"
+    tag: "0.1.48"
     pullPolicy: IfNotPresent
 
   service:

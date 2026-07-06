@@ -11,6 +11,7 @@ Endpoints
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -23,8 +24,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_timeout_worker import _agent_pod_url
-from db import get_db
-from models import Approval, ApprovalAuthority
+from db import AsyncSessionLocal, get_db
+from models import AgentRun, Approval, ApprovalAuthority
 from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, PaginatedResponse
 
 # Roles that always have authority to see/decide production approvals,
@@ -38,6 +39,67 @@ class ReopenRequest(BaseModel):
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
+
+
+async def _resume_and_advance(
+    agent_name: str, team: str, thread_id: str,
+    decision: str, reviewer_id: str | None, reason: str | None,
+) -> None:
+    """Background: resume the paused agent pod, then advance the workflow if this
+    approval belonged to a composite-workflow member.
+
+    Runs fire-and-forget from decide_approval so the reviewer's request returns
+    immediately (the member may take a while to finish the rest of its graph).
+    Best-effort throughout — never raises.
+    """
+    member_output, member_status = "", "failed"
+    try:
+        pod_url = _agent_pod_url(agent_name, team)
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{pod_url}/resume/{thread_id}",
+                json={"decision": decision, "reviewer_id": reviewer_id, "reason": reason},
+            )
+        member_status = "completed" if resp.status_code == 200 else "failed"
+        try:
+            member_output = (resp.json() or {}).get("response", "") or ""
+        except Exception:
+            member_output = ""
+        logger.info("resume posted thread_id=%s status=%d", thread_id, resp.status_code)
+    except Exception as exc:
+        logger.warning("failed to resume agent pod for thread_id=%s: %s", thread_id, exc)
+        return
+
+    # Workflow re-entry: is this thread a member of a paused composite workflow?
+    try:
+        async with AsyncSessionLocal() as s:
+            child = (await s.execute(
+                select(AgentRun)
+                .where(AgentRun.thread_id == thread_id, AgentRun.parent_run_id.isnot(None))
+                .order_by(AgentRun.started_at.desc())
+            )).scalars().first()
+            if not child or not child.parent_run_id:
+                return
+            parent = (await s.execute(
+                select(AgentRun).where(AgentRun.id == child.parent_run_id)
+            )).scalar_one_or_none()
+            if not parent or not parent.workflow_id or not parent.orchestrator_state:
+                return
+            # Close out the paused child with the resumed member's result.
+            child.status = member_status
+            child.output = member_output[:4000] if member_output else None
+            child.completed_at = datetime.now(tz=timezone.utc)
+            await s.commit()
+            parent_id = str(parent.id)
+    except Exception as exc:
+        logger.warning("workflow re-entry lookup failed for thread_id=%s: %s", thread_id, exc)
+        return
+
+    try:
+        from workflow_orchestrator import resume_orchestration
+        asyncio.create_task(resume_orchestration(parent_id, member_output, member_status))
+    except Exception as exc:
+        logger.warning("failed to schedule resume_orchestration for parent %s: %s", parent_id, exc)
 
 
 async def _resolve(approval_id: uuid.UUID, db: AsyncSession) -> Approval:
@@ -306,30 +368,14 @@ async def decide_approval(
     )
 
     # Best-effort resume: notify the agent pod so the suspended LangGraph thread
-    # can continue.  Mirrors the pattern in playground_approvals.py.
-    # A failed resume MUST NOT fail the decision response — wrap and swallow.
+    # can continue, and (if this approval belonged to a composite-workflow member)
+    # advance the paused workflow run tree. Runs in the background so the reviewer's
+    # request returns immediately; a failed resume MUST NOT fail the decision.
     if approval.thread_id and approval.agent_name and approval.team:
-        try:
-            pod_url = _agent_pod_url(approval.agent_name, approval.team)
-            resume_url = f"{pod_url}/resume/{approval.thread_id}"
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(
-                    resume_url,
-                    json={
-                        "decision": body.decision,
-                        "reviewer_id": body.reviewer_id,
-                        "reason": body.reviewer_notes,
-                    },
-                )
-            logger.info(
-                "decide_approval: resume posted thread_id=%s status=%d",
-                approval.thread_id, resp.status_code,
-            )
-        except Exception as exc:
-            logger.warning(
-                "decide_approval: failed to resume agent pod for thread_id=%s: %s",
-                approval.thread_id, exc,
-            )
+        asyncio.create_task(_resume_and_advance(
+            approval.agent_name, approval.team, approval.thread_id,
+            body.decision, body.reviewer_id, body.reviewer_notes,
+        ))
 
     # Emit Langfuse platform action trace
     from tracing import trace_platform_action

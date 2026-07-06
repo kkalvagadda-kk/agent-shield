@@ -430,7 +430,74 @@ CREATE TABLE workflow_members (
 
 > **[IMPLEMENTED — Decision 24]** All four orchestration modes now run in `registry-api/workflow_orchestrator.py::orchestrate()`: **sequential** (walk the edge chain / member order), **conditional** (evaluate `workflow_edges.condition` via the reused `filter_engine` predicate DSL), **supervisor** (`role=supervisor` member routes to workers with a `max_iterations` cap), **handoff** (each agent signals the next hop). Edges are a first-class `workflow_edges` table (migration 0029). The Studio "Workflows" builder is the unified graph builder (per-node config + edge conditions + inline/existing agents); "Agent Graphs" is hidden from the nav. Deferred: per-node tool editing on the canvas.
 
-> **[IMPLEMENTED — Decision 24 pass #3]** Workflow-level triggers: `POST /api/v1/workflows/{id}/triggers` (schedule + webhook; `agent_triggers.workflow_id` set, `agent_id NULL`); the scheduler UNION-queries agent and workflow trigger rows; the event-gateway exposes `POST /hooks/workflow/{name}/{token}`. Both dispatch to `POST /internal/runs/start` with `workflow_id`; `_start_workflow_run` resolves input from `trigger.input_payload` (mirrors agent path). Migration 0031: nullable `agent_events.workflow_id`. Studio: Triggers panel in the workflow builder + `execution_shape` selector in Save modal. Workflow members are restricted to **composable** agents (`GET /api/v1/agents/?composable=true` — no active schedule/webhook trigger) to prevent double-firing; inline Create-New is limited to reactive/durable shapes. Deferred: pausable workflow-HITL orchestrator (a member agent's approval pausing/resuming the whole run tree; orchestrator dispatches one-shot, Safety Orchestrator disabled in this deployment).
+> **[IMPLEMENTED — Decision 24 pass #3]** Workflow-level triggers: `POST /api/v1/workflows/{id}/triggers` (schedule + webhook; `agent_triggers.workflow_id` set, `agent_id NULL`); the scheduler UNION-queries agent and workflow trigger rows; the event-gateway exposes `POST /hooks/workflow/{name}/{token}`. Both dispatch to `POST /internal/runs/start` with `workflow_id`; `_start_workflow_run` resolves input from `trigger.input_payload` (mirrors agent path). Migration 0031: nullable `agent_events.workflow_id`. Studio: Triggers panel in the workflow builder + `execution_shape` selector in Save modal. Workflow members are restricted to **composable** agents (`GET /api/v1/agents/?composable=true` — no active schedule/webhook trigger) to prevent double-firing; inline Create-New is limited to reactive/durable shapes.
+
+### 4.6 Orchestrator Checkpoint & Pause/Resume State Machine
+
+> **[IMPLEMENTED — Decision 26 / WS-B]** Sequential pause + resume-advance is implemented. Non-sequential modes halt at `awaiting_approval` but do not auto-advance yet (routing re-derivation deferred). See Decision 26 for the full record; this section documents the backend design.
+
+**Why this is needed.** A single-agent durable run checkpoints its LangGraph graph state to Postgres (via `PostgresSaver`, keyed by `thread_id`) — the LangGraph checkpointer is the agent's pause/resume mechanism. A composite workflow has *no* equivalent: the orchestrator (`workflow_orchestrator.py`) is an imperative loop in registry-api, not a LangGraph graph. When one member pauses for HITL, the orchestrator must itself be checkpointed so it can resume from the right place after the approval is decided. `agent_runs.orchestrator_state` JSONB is that durable checkpoint — the **orchestrator's analog of the LangGraph `PostgresSaver`**.
+
+**Data model.**
+
+```sql
+-- Migration 0032 (down_revision 0031)
+ALTER TABLE agent_runs
+  ADD COLUMN orchestrator_state JSONB;  -- NULL on non-workflow / non-paused runs
+```
+
+`orchestrator_state` schema (only set on the parent workflow run while paused):
+
+```json
+{
+  "mode":       "sequential",
+  "order":      ["<agent_id_1>", "<agent_id_2>", "<agent_id_3>"],
+  "next_index": 1,
+  "team":       "commerce-team",
+  "workflow_id": "<workflow_uuid>"
+}
+```
+
+**Pause/resume state machine.**
+
+```
+parent run = running
+    │
+    ▼  dispatch member via POST /chat (with assigned thread_id)
+member pod → LangGraph interrupt() → Postgres checkpoint → pod returns 200 (empty output)
+    │
+    ▼  orchestrator checks: pending Approval WHERE thread_id = member.thread_id?
+YES → parent run = awaiting_approval
+      orchestrator_state saved (mode + order + next_index)
+      Studio: amber "awaiting approval" badge on run tree
+    │
+    ▼  reviewer approves/rejects via PATCH /approvals/{id}
+decide_approval fires background _resume_and_advance(parent_run_id, approval_id)
+    │
+    ├─ POST member-pod /resume/{thread_id}   (reloads LangGraph checkpoint, runs tool, resumes)
+    ├─ child run marked completed/failed
+    └─ resume_orchestration(parent_run_id, member_output, member_status) called
+           │
+           ├─ member failed? → parent = failed; orchestrator_state cleared
+           └─ member completed + mode=sequential?
+                  → parent = running; orchestrator_state.next_index++
+                  → loop continues from next member with prior output as input
+                  → if last member: parent = completed; orchestrator_state cleared
+```
+
+**Authoritative pause-detection.** A 200 response with empty output from `/chat` is ambiguous — an agent can legitimately return nothing. The orchestrator does NOT infer "paused" from empty output. Instead, after every member dispatch, it queries:
+
+```sql
+SELECT id FROM approvals
+WHERE thread_id = :member_thread_id AND status = 'pending'
+LIMIT 1;
+```
+
+Row exists → member is paused for HITL. No row → member completed normally (even if output is empty). This removes the heuristic that caused the prior bug where empty output advanced the workflow with no input.
+
+**Non-sequential modes (conditional / supervisor / handoff).** These modes now correctly halt at `awaiting_approval` when a member pauses — fixing a latent bug where empty output was mis-classified as completed and the run tree advanced. However, they do **not** auto-resume-advance after approval (routing re-derivation — which member to run next — is not trivially replayable). They are deferred(intentional).
+
+**OPA activation note.** The approval flow above fires only when `require_approval=True` comes back from the OPA sidecar. For this to work in a real deployed cluster, `AGENTSHIELD_OPA_URL` must be set (now injected by `manifest_builder.py`) **and** the OPA allow-path must be canary-verified (projected SA token identity + bundle load). Until that canary is green, `require_approval` remains `False` in practice — the pause mechanism exists but won't trigger organically. See Decision 26 + Mi-06.
 
 ---
 
