@@ -22,8 +22,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import get_optional_user
 from db import get_db
-from models import EvalRun, EvalRunResult, PlaygroundDataset
+from k8s import create_eval_job
+from models import AgentVersion, EvalRun, EvalRunResult, PlaygroundDataset
 from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
 from schemas import (
     EvalRunCreate,
@@ -34,6 +36,10 @@ from schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Score at or above this threshold automatically sets eval_passed=True on the
+# associated AgentVersion.  Kept in sync with eval-runner/main.py _JUDGE_PASS_THRESHOLD.
+EVAL_PASS_THRESHOLD = 0.7
 
 router = APIRouter(prefix="/api/v1/playground", tags=["eval-runner"])
 
@@ -62,11 +68,12 @@ async def _resolve_eval_run(
 async def create_eval_run(
     body: EvalRunCreate,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> EvalRunResponse:
     """Create an EvalRun record. The eval-runner K8s Job will be launched
     (currently stubbed — logs intent, does not create the Job)."""
-    caller = x_user_sub or "dev"
+    caller = (user or {}).get("sub") or x_user_sub or "dev"
 
     # Validate dataset exists
     ds_result = await db.execute(
@@ -94,17 +101,25 @@ async def create_eval_run(
         user_id=caller,
     )
 
-    # Stub: K8s Job creation deferred — log intent
-    logger.info(
-        "create_eval_run: would create K8s Job eval-runner-%s "
-        "in agentshield-playground namespace with EVAL_RUN_ID=%s "
-        "AGENT_NAME=%s DATASET_ID=%s",
-        str(eval_run.id)[:8],
-        eval_run.id,
-        body.agent_name,
-        body.dataset_id,
-    )
+    # Launch the eval-runner K8s Job; fail fast if it cannot be created.
+    try:
+        await create_eval_job(
+            eval_run_id=str(eval_run.id),
+            agent_name=body.agent_name,
+            dataset_id=str(body.dataset_id),
+        )
+        eval_run.status = "running"
+    except Exception as exc:
+        logger.error("create_eval_run: K8s Job creation failed for run %s: %s", eval_run.id, exc)
+        eval_run.status = "failed"
+        await db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to launch eval-runner Job: {exc}",
+        )
 
+    await db.commit()
+    await db.refresh(eval_run)
     return EvalRunResponse.model_validate(eval_run)
 
 
@@ -118,11 +133,13 @@ async def create_eval_run(
 )
 async def list_eval_runs(
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[EvalRunResponse]:
+    caller = (user or {}).get("sub") or x_user_sub
     q = select(EvalRun).order_by(EvalRun.created_at.desc())
-    if x_user_sub:
-        q = q.where(EvalRun.user_id == x_user_sub)
+    if caller:
+        q = q.where(EvalRun.user_id == caller)
     result = await db.execute(q)
     return [EvalRunResponse.model_validate(r) for r in result.scalars().all()]
 
@@ -210,6 +227,25 @@ async def update_eval_run(
             status=body.status,
             overall_score=body.overall_score,
         )
+    # Auto-promote: if this run completed with a passing score, mark the
+    # associated AgentVersion as eval_passed=True so the publish gate opens
+    # without requiring a manual PATCH.
+    if (
+        body.status == "completed"
+        and run.overall_score is not None
+        and run.overall_score >= EVAL_PASS_THRESHOLD
+        and run.agent_version_id is not None
+    ):
+        ver_result = await db.execute(
+            select(AgentVersion).where(AgentVersion.id == run.agent_version_id)
+        )
+        version = ver_result.scalar_one_or_none()
+        if version is not None:
+            version.eval_passed = True
+            logger.info(
+                "auto-set eval_passed=True for version %s (score=%.2f >= %.2f)",
+                version.id, run.overall_score, EVAL_PASS_THRESHOLD,
+            )
     await db.flush()
     logger.info(
         "update_eval_run: id=%s status=%s score=%s",

@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
 from db import get_db
-from models import Agent, AssetGrant, Deployment, PlaygroundRun
+from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
 
 router = APIRouter(prefix="/api/v1/agents", tags=["consumer-chat"])
 logger = logging.getLogger(__name__)
@@ -100,11 +100,12 @@ async def _running_deployment(db: AsyncSession, agent_id: uuid.UUID) -> Optional
 
 
 async def _complete_chat_run(
-    run_id: str, output_text: str, trace_id: str | None
+    run_id: str, output_text: str, trace_id: str | None, agent_run_id: str | None = None
 ) -> None:
     """Background: mark the consumer chat run as completed and update Langfuse."""
     from db import AsyncSessionLocal
 
+    now = datetime.now(tz=timezone.utc)
     async with AsyncSessionLocal() as session:
         try:
             parsed = uuid.UUID(run_id)
@@ -114,13 +115,30 @@ async def _complete_chat_run(
             run = result.scalar_one_or_none()
             if run:
                 run.status = "completed"
-                run.completed_at = datetime.now(tz=timezone.utc)
+                run.completed_at = now
                 if output_text:
                     run.output_text = output_text
                 await session.commit()
         except Exception as exc:
             logger.warning("_complete_chat_run: %s: %s", run_id, exc)
             return
+
+    if agent_run_id:
+        async with AsyncSessionLocal() as session:
+            try:
+                ar_result = await session.execute(
+                    select(AgentRun).where(AgentRun.id == uuid.UUID(agent_run_id))
+                )
+                ar = ar_result.scalar_one_or_none()
+                if ar:
+                    ar.status = "completed"
+                    ar.completed_at = now
+                    ar.output = output_text[:4000] if output_text else None
+                    if ar.started_at:
+                        ar.latency_ms = int((now - ar.started_at).total_seconds() * 1000)
+                    await session.commit()
+            except Exception as exc:
+                logger.warning("_complete_chat_run agent_run: %s: %s", agent_run_id, exc)
 
     if trace_id:
         from tracing import trace_complete_run
@@ -272,6 +290,7 @@ async def start_chat(
     session_id = body.session_id or str(uuid.uuid4())
 
     # -- Record the run -------------------------------------------------------
+    now = datetime.now(tz=timezone.utc)
     run = PlaygroundRun(
         user_id=user_sub,
         agent_name=name,
@@ -279,11 +298,28 @@ async def start_chat(
         sandbox=False,
         input_message=body.message,
         status="running",
-        started_at=datetime.now(tz=timezone.utc),
+        started_at=now,
     )
     db.add(run)
     await db.flush()
     run_id = str(run.id)
+
+    # Create AgentRun for production tracking
+    agent_run = AgentRun(
+        agent_name=name,
+        session_id=session_id,
+        user_id=user_sub,
+        input=body.message,
+        context="production",
+        trigger_type="api",
+        run_by=user_sub,
+        team=agent.team,
+        status="running",
+        started_at=now,
+    )
+    db.add(agent_run)
+    await db.flush()
+    agent_run_id = str(agent_run.id)
 
     # Create Langfuse root trace for this consumer chat run
     from tracing import trace_create_run
@@ -296,17 +332,19 @@ async def start_chat(
     )
     if trace_id:
         run.langfuse_trace_id = trace_id
+        agent_run.langfuse_trace_id = trace_id
         await db.flush()
 
     await db.commit()
 
     logger.info(
-        "chat: run_id=%s agent=%s user=%s team=%s deployment=%s trace=%s",
-        run_id, name, user_sub, caller_team, deployment.id, trace_id,
+        "chat: run_id=%s agent_run_id=%s agent=%s user=%s team=%s deployment=%s trace=%s",
+        run_id, agent_run_id, name, user_sub, caller_team, deployment.id, trace_id,
     )
 
     return {
         "run_id": run_id,
+        "agent_run_id": agent_run_id,
         "session_id": session_id,
         "stream_url": f"/api/v1/agents/{name}/chat/{run_id}/stream",
         "agent_name": name,
@@ -387,6 +425,18 @@ async def stream_chat(
         f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
     )
     trace_id = run.langfuse_trace_id
+
+    # Find the corresponding AgentRun for production tracking
+    ar_result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.agent_name == name,
+            AgentRun.context == "production",
+            AgentRun.user_id == caller.get("sub", ""),
+        ).order_by(AgentRun.started_at.desc()).limit(1)
+    )
+    ar = ar_result.scalar_one_or_none()
+    agent_run_id = str(ar.id) if ar else None
+
     logger.info(
         "stream: run_id=%s agent=%s service_url=%s trace=%s",
         run_id, name, service_url, trace_id,
@@ -405,9 +455,8 @@ async def stream_chat(
                 except Exception:
                     pass
             yield chunk
-        # Mark run as completed in background
         asyncio.get_event_loop().create_task(
-            _complete_chat_run(run_id, "".join(output_parts), trace_id)
+            _complete_chat_run(run_id, "".join(output_parts), trace_id, agent_run_id)
         )
 
     return StreamingResponse(

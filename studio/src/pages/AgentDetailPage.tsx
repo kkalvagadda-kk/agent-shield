@@ -1,8 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Bot, Loader2, Rocket, Send } from "lucide-react";
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { getAgent, publishAgent } from "../api/registryApi";
+import MemoryTab from "../components/agent-detail/MemoryTab";
+import OverviewDurable from "../components/agent-detail/OverviewDurable";
+import OverviewReactive from "../components/agent-detail/OverviewReactive";
+import OverviewScheduled from "../components/agent-detail/OverviewScheduled";
+import OverviewEventDriven from "../components/agent-detail/OverviewEventDriven";
+import RunsTab from "../components/agent-detail/RunsTab";
+import SettingsTab from "../components/agent-detail/SettingsTab";
+import { listTriggers } from "../api/registryApi";
 
 const PUBLISH_STATUS: Record<string, { label: string; cls: string }> = {
   private:        { label: "Private",        cls: "bg-slate-100 text-slate-600" },
@@ -17,16 +26,27 @@ const OP_STATUS: Record<string, { label: string; cls: string }> = {
   quarantined: { label: "Quarantined", cls: "bg-red-100 text-red-700" },
 };
 
+type Tab = "overview" | "runs" | "memory" | "versions" | "settings";
+
 export default function AgentDetailPage() {
   const { name } = useParams<{ name: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
 
   const { data: agent, isLoading, error } = useQuery({
     queryKey: ["agent", name],
     queryFn: () => getAgent(name!),
     enabled: !!name,
   });
+
+  const { data: triggers = [] } = useQuery({
+    queryKey: ["triggers", name],
+    queryFn: () => listTriggers(name!),
+    enabled: !!name,
+  });
+  const hasSchedule = triggers.some((t) => t.trigger_type === "schedule");
+  const hasWebhook = triggers.some((t) => t.trigger_type === "webhook");
 
   const publishMutation = useMutation({
     mutationFn: () => publishAgent(name!),
@@ -88,7 +108,7 @@ export default function AgentDetailPage() {
     { label: agent.status, cls: "bg-slate-100 text-slate-600" };
 
   return (
-    <div className="max-w-3xl mx-auto px-6 py-8">
+    <div className="max-w-4xl mx-auto px-6 py-8">
       {/* Back */}
       <button
         onClick={() => navigate("/")}
@@ -99,16 +119,20 @@ export default function AgentDetailPage() {
       </button>
 
       {/* Header */}
-      <div className="flex items-start justify-between mb-8">
+      <div className="flex items-start justify-between mb-6">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
             <Bot size={18} className="text-blue-600" />
           </div>
           <div>
             <h1 className="text-2xl font-bold text-slate-900 font-mono">{agent.name}</h1>
-            {agent.description && (
-              <p className="text-sm text-slate-500 mt-0.5">{agent.description}</p>
-            )}
+            <div className="flex items-center gap-2 mt-1">
+              <span className={`badge text-xs ${os.cls}`}>{os.label}</span>
+              <span className={`badge text-xs ${ps.cls}`}>{ps.label}</span>
+              <span className={`badge text-xs ${agent.execution_shape === "durable" ? "bg-purple-100 text-purple-700" : "bg-sky-100 text-sky-700"}`}>
+                {agent.execution_shape === "durable" ? "Durable" : "Reactive"}
+              </span>
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -137,71 +161,106 @@ export default function AgentDetailPage() {
         </div>
       </div>
 
-      {/* Details card */}
-      <div className="card divide-y divide-slate-100">
-        <div className="grid grid-cols-2 gap-0">
-          <DetailRow label="Team" value={agent.team} />
-          <DetailRow label="Type" value={agent.agent_type} mono />
-        </div>
-        <div className="grid grid-cols-2 gap-0">
-          <DetailRow
-            label="Operational Status"
-            value={<span className={`badge ${os.cls}`}>{os.label}</span>}
-          />
-          <DetailRow
-            label="Publish Status"
-            value={<span className={`badge ${ps.cls}`}>{ps.label}</span>}
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-0">
-          <DetailRow
-            label="Created"
-            value={new Date(agent.created_at).toLocaleString()}
-          />
-          <DetailRow
-            label="Last Updated"
-            value={new Date(agent.updated_at).toLocaleString()}
-          />
-        </div>
-        {agent.created_by !== "system" && (
-          <DetailRow label="Created By" value={agent.created_by} mono />
-        )}
+      {/* Tabs */}
+      <div className="border-b border-slate-200 mb-6">
+        <nav className="flex gap-6">
+          {(["overview", "runs", "memory", "versions", "settings"] as Tab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`pb-2 text-sm font-medium capitalize transition-colors ${
+                activeTab === tab
+                  ? "border-b-2 border-blue-500 text-blue-600"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </nav>
       </div>
 
-      {/* Publish flow hint */}
-      {agent.publish_status === "private" && (
-        <div className="mt-4 rounded-lg bg-blue-50 border border-blue-200 p-4 text-sm text-blue-700">
-          This agent is private. Click <strong>Publish</strong> to submit it for admin review.
-          Once approved, it will be visible to other teams with an active grant.
-        </div>
+      {/* Tab content */}
+      {activeTab === "overview" && (
+        hasWebhook
+          ? <OverviewEventDriven agentName={agent.name} />
+          : hasSchedule
+            ? <OverviewScheduled agentName={agent.name} />
+            : agent.execution_shape === "durable"
+              ? <OverviewDurable agentName={agent.name} />
+              : <OverviewReactive agentName={agent.name} />
       )}
-      {agent.publish_status === "pending_review" && (
-        <div className="mt-4 rounded-lg bg-amber-50 border border-amber-200 p-4 text-sm text-amber-700">
-          A publish request is pending admin review. You'll be notified when it's approved or rejected.
-        </div>
+      {activeTab === "runs" && (
+        <RunsTab agentName={agent.name} />
       )}
-      {agent.publish_status === "published" && (
-        <div className="mt-4 rounded-lg bg-green-50 border border-green-200 p-4 text-sm text-green-700">
-          This agent is published and visible to teams with an active grant.
+      {activeTab === "memory" && (
+        <MemoryTab agentName={agent.name} />
+      )}
+      {activeTab === "versions" && (
+        <VersionsContent agent={agent} />
+      )}
+      {activeTab === "settings" && (
+        <div className="space-y-4">
+          <SettingsContent agent={agent} />
+          <SettingsTab agentName={agent.name} memoryEnabled={agent.memory_enabled} />
         </div>
       )}
     </div>
   );
 }
 
-function DetailRow({
-  label,
-  value,
-  mono = false,
-}: {
-  label: string;
-  value: React.ReactNode;
-  mono?: boolean;
-}) {
+function VersionsContent({ agent }: { agent: { name: string; agent_type: string; team: string; created_at: string; updated_at: string; created_by: string; description?: string | null } }) {
   return (
-    <div className="px-5 py-4">
-      <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{label}</p>
-      <p className={`text-sm text-slate-800 ${mono ? "font-mono" : ""}`}>{value}</p>
+    <div className="card p-5">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">Agent Details</h3>
+      <div className="grid grid-cols-2 gap-4 text-sm">
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Type</p>
+          <p className="font-mono text-slate-700">{agent.agent_type}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Team</p>
+          <p className="text-slate-700">{agent.team}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Created</p>
+          <p className="text-slate-700">{new Date(agent.created_at).toLocaleString()}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Updated</p>
+          <p className="text-slate-700">{new Date(agent.updated_at).toLocaleString()}</p>
+        </div>
+        {agent.created_by !== "system" && (
+          <div>
+            <p className="text-xs text-slate-400 uppercase mb-0.5">Created By</p>
+            <p className="font-mono text-slate-700">{agent.created_by}</p>
+          </div>
+        )}
+        {agent.description && (
+          <div className="col-span-2">
+            <p className="text-xs text-slate-400 uppercase mb-0.5">Description</p>
+            <p className="text-slate-700">{agent.description}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SettingsContent({ agent }: { agent: { memory_enabled?: boolean; execution_shape?: string } }) {
+  return (
+    <div className="card p-5 space-y-4">
+      <h3 className="text-sm font-semibold text-slate-700 mb-3">Configuration</h3>
+      <div className="grid grid-cols-2 gap-4 text-sm">
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Execution Shape</p>
+          <p className="font-mono text-slate-700">{agent.execution_shape || "reactive"}</p>
+        </div>
+        <div>
+          <p className="text-xs text-slate-400 uppercase mb-0.5">Memory</p>
+          <p className="text-slate-700">{agent.memory_enabled ? "Enabled" : "Disabled"}</p>
+        </div>
+      </div>
     </div>
   );
 }

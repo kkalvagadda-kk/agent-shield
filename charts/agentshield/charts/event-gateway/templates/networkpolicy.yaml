@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+  L4 defense-in-depth for threat-model T-8. IMPORTANT: NetworkPolicy is
+  pod/port-level and CANNOT filter by HTTP path — it cannot, by itself, protect
+  /api/v1/internal/* while leaving the public API open on the same port. The
+  PRIMARY control is the ingress (only /hooks/* is publicly routed). This policy
+  restricts *who at L4* may open a connection to registry-api:8000 to known
+  in-cluster platform components, so a rogue pod in another namespace can't
+  reach the internal endpoint directly.
+
+  Disabled by default (Docker Desktop's CNI does not enforce NetworkPolicy, and
+  an over-broad policy can black-hole registry-api). Enable only on an enforcing
+  CNI after confirming all legitimate callers (studio, agents, scheduler,
+  event-gateway, ingress controller, kubelet probes) are allowed.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-registry-api-internal
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: registry-api
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # In-cluster platform components in this namespace.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+        # Everything else in the platform namespace (studio, probes, jobs).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - protocol: TCP
+          port: 8000
+{{- end }}

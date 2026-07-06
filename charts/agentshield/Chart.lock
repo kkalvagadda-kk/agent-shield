@@ -1,7 +1,7 @@
 dependencies:
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.7.10
+  version: 18.7.11
 - name: pgbouncer
   repository: file://charts/pgbouncer
   version: 0.1.0
@@ -29,6 +29,9 @@ dependencies:
 - name: deploy-controller
   repository: file://charts/deploy-controller
   version: 0.1.6
+- name: scheduler
+  repository: file://charts/scheduler
+  version: 0.1.0
 - name: safety-orchestrator
   repository: file://charts/safety-orchestrator
   version: 0.1.1
@@ -53,5 +56,8 @@ dependencies:
 - name: python-executor
   repository: file://charts/python-executor
   version: 0.1.0
-digest: sha256:22cf32f1c776f2d170856307f73d1f2371c3b48e2a1989a1f74b6eeb849560bb
-generated: "2026-07-01T20:55:39.561809-05:00"
+- name: envoy-gateway
+  repository: file://charts/envoy-gateway
+  version: 0.1.0
+digest: sha256:a0e2e74d084ef75477764a03dd26a436596952f538b7bf3af18457175229aee5
+generated: "2026-07-05T08:07:31.958644-05:00"

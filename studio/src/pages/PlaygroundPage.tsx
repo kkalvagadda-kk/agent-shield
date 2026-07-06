@@ -1,10 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import ChatPane from "../components/playground/ChatPane";
+import InteractionSurface from "../components/playground/InteractionSurface";
 import HitlPanel, { type HitlRequest } from "../components/playground/HitlPanel";
 import TracePanel, { type TraceEvent } from "../components/playground/TracePanel";
 import VersionSelector from "../components/playground/VersionSelector";
 import { Database } from "lucide-react";
+import { getAgent, listTriggers } from "../api/registryApi";
 
 export default function PlaygroundPage() {
   const navigate = useNavigate();
@@ -12,6 +15,27 @@ export default function PlaygroundPage() {
   const [hitlRequest, setHitlRequest] = useState<HitlRequest | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
+
+  const { data: agentData } = useQuery({
+    queryKey: ["agent", selectedAgent],
+    queryFn: () => getAgent(selectedAgent!),
+    enabled: !!selectedAgent,
+  });
+
+  const executionShape = agentData?.execution_shape ?? "reactive";
+
+  const { data: triggers } = useQuery({
+    queryKey: ["triggers", selectedAgent],
+    queryFn: () => listTriggers(selectedAgent!),
+    enabled: !!selectedAgent,
+  });
+
+  const triggerMode: "none" | "schedule" | "webhook" = (() => {
+    if (!triggers || triggers.length === 0) return "none";
+    if (triggers.some((t) => t.trigger_type === "webhook")) return "webhook";
+    if (triggers.some((t) => t.trigger_type === "schedule")) return "schedule";
+    return "none";
+  })();
 
   const handleApprovalRequested = (
     approvalId: string,
@@ -86,13 +110,26 @@ export default function PlaygroundPage() {
           <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
             <span className="text-sm font-medium text-slate-700">{selectedAgent}</span>
             <span className="badge bg-purple-100 text-purple-700 text-xs">sandbox</span>
+            <span className={`badge text-xs ${executionShape === "durable" ? "bg-purple-100 text-purple-700" : "bg-sky-100 text-sky-700"}`}>
+              {executionShape}
+            </span>
           </div>
         )}
-        <ChatPane
-          agentName={selectedAgent}
-          onApprovalRequested={handleApprovalRequested}
-          onTraceEvent={handleTraceEvent}
-        />
+        {executionShape === "durable" || triggerMode !== "none" ? (
+          <div className="flex-1 overflow-y-auto p-4">
+            <InteractionSurface
+              agentName={selectedAgent!}
+              executionShape={executionShape as "reactive" | "durable"}
+              triggerMode={triggerMode}
+            />
+          </div>
+        ) : (
+          <ChatPane
+            agentName={selectedAgent}
+            onApprovalRequested={handleApprovalRequested}
+            onTraceEvent={handleTraceEvent}
+          />
+        )}
       </div>
 
       {/* Right panel — trace */}

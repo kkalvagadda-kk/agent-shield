@@ -1,7 +1,7 @@
 import axios from "axios";
 import { getKeycloak } from "../lib/keycloak";
 
-const http = axios.create({ baseURL: "/api/v1" });
+export const http = axios.create({ baseURL: "/api/v1" });
 
 // Attach Bearer token on every request; refresh if stale first
 http.interceptors.request.use(async (config) => {
@@ -30,6 +30,8 @@ export interface Agent {
   agent_type: string;
   publish_status: string;
   agent_class: string | null;
+  execution_shape: "reactive" | "durable";
+  memory_enabled: boolean;
   created_at: string;
   updated_at: string;
   created_by: string;
@@ -41,7 +43,7 @@ export interface AgentVersion {
   agent_id: string;
   version_number: number;
   image_tag: string | null;
-  workflow_id: string | null;
+  agent_graph_id: string | null;
   tools: { name: string; risk: string; description?: string }[];
   eval_passed: boolean;
   git_sha: string | null;
@@ -135,10 +137,16 @@ export interface Skill {
 export const listAgents = async (
   limit = 100,
   offset = 0,
-  status?: string
+  status?: string,
+  opts?: { composable?: boolean }
 ): Promise<Paginated<Agent>> => {
   const { data } = await http.get<Paginated<Agent>>("/agents/", {
-    params: { limit, offset, ...(status !== undefined ? { status } : {}) },
+    params: {
+      limit,
+      offset,
+      ...(status !== undefined ? { status } : {}),
+      ...(opts?.composable ? { composable: true } : {}),
+    },
   });
   return data;
 };
@@ -153,7 +161,10 @@ export const createAgent = async (body: {
   team: string;
   description?: string;
   agent_type?: string;
-  llm_provider_id?: string;
+  execution_shape?: "reactive" | "durable";
+  memory_enabled?: boolean;
+  metadata?: Record<string, unknown>;
+  tools?: string[];
 }): Promise<Agent> => {
   const { data } = await http.post<Agent>("/agents/", body);
   return data;
@@ -161,7 +172,13 @@ export const createAgent = async (body: {
 
 export const updateAgent = async (
   name: string,
-  body: { description?: string; status?: string }
+  body: {
+    description?: string;
+    status?: string;
+    execution_shape?: "reactive" | "durable";
+    memory_enabled?: boolean;
+    metadata?: Record<string, unknown>;
+  }
 ): Promise<Agent> => {
   const { data } = await http.put<Agent>(`/agents/${name}`, body);
   return data;
@@ -279,25 +296,25 @@ export const deleteProvider = async (id: string): Promise<void> => {
 };
 
 // ---------------------------------------------------------------------------
-// Workflows
+// Agent Graphs (renamed from Workflows — canvas-based single-agent graphs)
 // ---------------------------------------------------------------------------
-export interface WorkflowVersion {
+export interface AgentGraphVersion {
   id: string;
-  workflow_id: string;
+  agent_graph_id: string;
   version_number: number;
   definition: { nodes: unknown[]; edges: unknown[] };
   change_summary: string | null;
   created_at: string;
 }
 
-export interface Workflow {
+export interface AgentGraph {
   id: string;
   name: string;
   team: string;
   description: string | null;
   status: string;
   current_version_number?: number | null;
-  current_definition?: WorkflowVersion | null;
+  current_definition?: AgentGraphVersion | null;
   created_at: string;
   updated_at: string;
 }
@@ -307,39 +324,256 @@ export interface WorkflowDefinition {
   edges: unknown[];
 }
 
-export const createWorkflow = async (body: {
+export const createAgentGraph = async (body: {
   name: string;
   team: string;
   description?: string;
   definition: WorkflowDefinition;
-}): Promise<Workflow> => {
-  const { data } = await http.post<Workflow>("/workflows/", body);
+}): Promise<AgentGraph> => {
+  const { data } = await http.post<AgentGraph>("/agent-graphs/", body);
   return data;
 };
 
-export const updateWorkflow = async (
+export const updateAgentGraph = async (
   id: string,
   body: { definition: WorkflowDefinition; change_summary?: string }
-): Promise<Workflow> => {
-  const { data } = await http.put<Workflow>(`/workflows/${id}`, body);
+): Promise<AgentGraph> => {
+  const { data } = await http.put<AgentGraph>(`/agent-graphs/${id}`, body);
   return data;
 };
 
-export const deployWorkflow = async (
+export const deployAgentGraph = async (
   id: string,
   body?: { replicas?: number }
 ): Promise<unknown> => {
-  const { data } = await http.post(`/workflows/${id}/deploy`, body ?? {});
+  const { data } = await http.post(`/agent-graphs/${id}/deploy`, body ?? {});
   return data;
 };
 
-export const listWorkflows = async (params?: { team?: string }): Promise<Workflow[]> => {
-  const { data } = await http.get<Workflow[]>('/workflows/', { params });
+export const listAgentGraphs = async (params?: { team?: string }): Promise<AgentGraph[]> => {
+  const { data } = await http.get<AgentGraph[]>('/agent-graphs/', { params });
   return data;
 };
 
-export const getWorkflow = async (id: string): Promise<Workflow> => {
-  const { data } = await http.get<Workflow>(`/workflows/${id}`);
+export const getAgentGraph = async (id: string): Promise<AgentGraph> => {
+  const { data } = await http.get<AgentGraph>(`/agent-graphs/${id}`);
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Composite Workflows (Decision 22 — new /api/v1/workflows endpoint)
+// ---------------------------------------------------------------------------
+export interface CompositeWorkflow {
+  id: string;
+  name: string;
+  team: string;
+  description: string | null;
+  execution_shape: 'reactive' | 'durable';
+  orchestration: WorkflowOrchestration;
+  memory_enabled: boolean;
+  status: 'draft' | 'published' | 'archived';
+  publish_status: string;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+}
+
+export type WorkflowOrchestration = 'sequential' | 'conditional' | 'supervisor' | 'handoff';
+
+export interface WorkflowMember {
+  workflow_id: string;
+  agent_id: string;
+  agent_name: string | null;
+  role: string | null;
+  position: number | null;
+  routing: Record<string, unknown>;
+  added_at: string;
+}
+
+export interface WorkflowEdge {
+  id: string;
+  workflow_id: string;
+  source_agent_id: string;
+  target_agent_id: string;
+  condition: string | null;
+  position: number | null;
+  created_at: string;
+}
+
+export interface CompositeWorkflowWithMembers extends CompositeWorkflow {
+  members: WorkflowMember[];
+  edges: WorkflowEdge[];
+}
+
+export interface CreateCompositeWorkflowRequest {
+  name: string;
+  team: string;
+  description?: string;
+  execution_shape?: 'reactive' | 'durable';
+  orchestration?: WorkflowOrchestration;
+  memory_enabled?: boolean;
+}
+
+export interface WorkflowRunResult {
+  run_id: string;
+  workflow_id: string;
+  status: string;
+  started_at: string;
+  warning?: string | null;
+}
+
+export interface WorkflowRunTree {
+  parent: AgentRunItem;
+  children: AgentRunItem[];
+}
+
+export const listCompositeWorkflows = async (params?: { team?: string }): Promise<CompositeWorkflow[]> => {
+  const { data } = await http.get<CompositeWorkflow[]>('/workflows', { params });
+  return data;
+};
+
+export const createCompositeWorkflow = async (
+  body: CreateCompositeWorkflowRequest,
+): Promise<CompositeWorkflow> => {
+  const { data } = await http.post<CompositeWorkflow>('/workflows', body);
+  return data;
+};
+
+export const getCompositeWorkflow = async (id: string): Promise<CompositeWorkflowWithMembers> => {
+  const { data } = await http.get<CompositeWorkflowWithMembers>(`/workflows/${id}`);
+  return data;
+};
+
+export const updateCompositeWorkflow = async (
+  id: string,
+  body: Partial<CreateCompositeWorkflowRequest> & { status?: string },
+): Promise<CompositeWorkflow> => {
+  const { data } = await http.patch<CompositeWorkflow>(`/workflows/${id}`, body);
+  return data;
+};
+
+export const deleteCompositeWorkflow = async (id: string): Promise<void> => {
+  await http.delete(`/workflows/${id}`);
+};
+
+export const addWorkflowMember = async (
+  workflowId: string,
+  body: { agent_id: string; role?: string; position?: number; routing?: Record<string, unknown> },
+): Promise<WorkflowMember> => {
+  const { data } = await http.post<WorkflowMember>(`/workflows/${workflowId}/members`, body);
+  return data;
+};
+
+export const removeWorkflowMember = async (
+  workflowId: string,
+  agentId: string,
+): Promise<void> => {
+  await http.delete(`/workflows/${workflowId}/members/${agentId}`);
+};
+
+export const addWorkflowEdge = async (
+  workflowId: string,
+  body: { source_agent_id: string; target_agent_id: string; condition?: string | null; position?: number },
+): Promise<WorkflowEdge> => {
+  const { data } = await http.post<WorkflowEdge>(`/workflows/${workflowId}/edges`, body);
+  return data;
+};
+
+export const listWorkflowEdges = async (workflowId: string): Promise<WorkflowEdge[]> => {
+  const { data } = await http.get<WorkflowEdge[]>(`/workflows/${workflowId}/edges`);
+  return data;
+};
+
+export const removeWorkflowEdge = async (workflowId: string, edgeId: string): Promise<void> => {
+  await http.delete(`/workflows/${workflowId}/edges/${edgeId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Workflow-level triggers (schedule / webhook) — fired by scheduler / event-gateway
+// ---------------------------------------------------------------------------
+export const listWorkflowTriggers = async (
+  workflowId: string,
+): Promise<AgentTrigger[]> => {
+  const { data } = await http.get<AgentTrigger[]>(`/workflows/${workflowId}/triggers`);
+  return data;
+};
+
+export const createWorkflowTrigger = async (
+  workflowId: string,
+  body: {
+    trigger_type: 'schedule' | 'webhook';
+    cron_expression?: string;
+    timezone?: string;
+    enabled?: boolean;
+    filter_conditions?: Record<string, unknown> | Record<string, unknown>[];
+    input_payload?: Record<string, unknown> | null;
+    alert_email?: string | null;
+    alert_on_failure?: boolean;
+  },
+): Promise<AgentTrigger> => {
+  const { data } = await http.post<AgentTrigger>(`/workflows/${workflowId}/triggers`, body);
+  return data;
+};
+
+export const updateWorkflowTrigger = async (
+  workflowId: string,
+  triggerId: string,
+  body: {
+    cron_expression?: string;
+    timezone?: string;
+    enabled?: boolean;
+    filter_conditions?: Record<string, unknown> | Record<string, unknown>[];
+    input_payload?: Record<string, unknown> | null;
+    alert_email?: string | null;
+    alert_on_failure?: boolean;
+  },
+): Promise<AgentTrigger> => {
+  const { data } = await http.patch<AgentTrigger>(
+    `/workflows/${workflowId}/triggers/${triggerId}`,
+    body,
+  );
+  return data;
+};
+
+export const deleteWorkflowTrigger = async (
+  workflowId: string,
+  triggerId: string,
+): Promise<void> => {
+  await http.delete(`/workflows/${workflowId}/triggers/${triggerId}`);
+};
+
+export const rotateWorkflowToken = async (
+  workflowId: string,
+  triggerId: string,
+): Promise<RotateTokenResponse> => {
+  const { data } = await http.post<RotateTokenResponse>(
+    `/workflows/${workflowId}/triggers/${triggerId}/rotate-token`,
+  );
+  return data;
+};
+
+export const triggerWorkflowRun = async (
+  workflowId: string,
+  body: { input_payload: Record<string, unknown>; trigger_type?: string; run_by?: string },
+): Promise<WorkflowRunResult> => {
+  const { data } = await http.post<WorkflowRunResult>(`/workflows/${workflowId}/runs`, body);
+  return data;
+};
+
+export const getWorkflowRunTree = async (
+  workflowId: string,
+  runId: string,
+): Promise<WorkflowRunTree> => {
+  const { data } = await http.get<WorkflowRunTree>(`/workflows/${workflowId}/runs/${runId}/tree`);
+  return data;
+};
+
+export const listWorkflowRuns = async (
+  workflowId: string,
+  params?: { limit?: number; offset?: number; status?: string },
+): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>(`/workflows/${workflowId}/runs`, { params });
   return data;
 };
 
@@ -594,4 +828,296 @@ export const createApprovalAuthority = async (body: {
 
 export const revokeApprovalAuthority = async (id: string): Promise<void> => {
   await http.delete(`/admin/approval-authority/${id}`);
+};
+
+// ---------------------------------------------------------------------------
+// Current User
+// ---------------------------------------------------------------------------
+export interface MeResponse {
+  sub: string;
+  email: string | null;
+  preferred_username: string | null;
+  team: string | null;
+  role: string | null;
+}
+
+export const getMe = async (): Promise<MeResponse> => {
+  const { data } = await http.get<MeResponse>("/me");
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Agent Triggers
+// ---------------------------------------------------------------------------
+export interface AgentTrigger {
+  id: string;
+  agent_id: string | null;
+  workflow_id?: string | null;
+  trigger_type: "schedule" | "webhook";
+  cron_expression: string | null;
+  timezone: string | null;
+  enabled: boolean;
+  filter_conditions: Record<string, unknown> | Record<string, unknown>[] | null;
+  // Per-schedule job parameters fed to the agent as input on each fire (schedule triggers).
+  input_payload?: Record<string, unknown> | null;
+  alert_email: string | null;
+  alert_on_failure: boolean;
+  // Populated ONLY in the create response (shown once) for webhook triggers.
+  token?: string | null;
+  webhook_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export const createTrigger = async (
+  agentName: string,
+  body: {
+    trigger_type: "schedule" | "webhook";
+    cron_expression?: string;
+    timezone?: string;
+    enabled?: boolean;
+    filter_conditions?: Record<string, unknown> | Record<string, unknown>[];
+    input_payload?: Record<string, unknown> | null;
+    alert_email?: string | null;
+    alert_on_failure?: boolean;
+  }
+): Promise<AgentTrigger> => {
+  const { data } = await http.post<AgentTrigger>(
+    `/agents/${agentName}/triggers`,
+    body
+  );
+  return data;
+};
+
+export const listTriggers = async (
+  agentName: string
+): Promise<AgentTrigger[]> => {
+  const { data } = await http.get<AgentTrigger[]>(
+    `/agents/${agentName}/triggers`
+  );
+  return data;
+};
+
+export const updateTrigger = async (
+  agentName: string,
+  triggerId: string,
+  body: {
+    cron_expression?: string;
+    timezone?: string;
+    enabled?: boolean;
+    filter_conditions?: Record<string, unknown> | Record<string, unknown>[];
+    input_payload?: Record<string, unknown> | null;
+    alert_email?: string | null;
+    alert_on_failure?: boolean;
+  }
+): Promise<AgentTrigger> => {
+  const { data } = await http.patch<AgentTrigger>(
+    `/agents/${agentName}/triggers/${triggerId}`,
+    body
+  );
+  return data;
+};
+
+export const enableTrigger = (agentName: string, triggerId: string) =>
+  updateTrigger(agentName, triggerId, { enabled: true });
+
+export const disableTrigger = (agentName: string, triggerId: string) =>
+  updateTrigger(agentName, triggerId, { enabled: false });
+
+export const deleteTrigger = async (
+  agentName: string,
+  triggerId: string
+): Promise<void> => {
+  await http.delete(`/agents/${agentName}/triggers/${triggerId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Webhook token rotation + event log (Phase 9 — event gateway)
+// ---------------------------------------------------------------------------
+export interface RotateTokenResponse {
+  trigger_id: string;
+  token: string; // plaintext, shown once
+  webhook_url: string;
+}
+
+export const rotateToken = async (
+  agentName: string,
+  triggerId: string
+): Promise<RotateTokenResponse> => {
+  const { data } = await http.post<RotateTokenResponse>(
+    `/agents/${agentName}/triggers/${triggerId}/rotate-token`
+  );
+  return data;
+};
+
+export interface AgentEvent {
+  id: string;
+  trigger_id: string | null;
+  agent_name: string;
+  status: "matched" | "filtered" | "rejected";
+  filter_reason: string | null;
+  payload: Record<string, unknown> | null;
+  run_id: string | null;
+  source_ip: string | null;
+  received_at: string;
+}
+
+export const listAgentEvents = async (
+  agentName: string,
+  params?: { trigger_id?: string; status?: string; limit?: number }
+): Promise<AgentEvent[]> => {
+  const { data } = await http.get<AgentEvent[]>(`/agents/${agentName}/events`, {
+    params,
+  });
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Agent Stats
+// ---------------------------------------------------------------------------
+export interface AgentStats {
+  run_count: number;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+  error_rate: number;
+  total_cost_usd: number;
+}
+
+export const getAgentStats = async (name: string): Promise<AgentStats> => {
+  const { data } = await http.get<AgentStats>(`/agents/${name}/stats`);
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Agent Health (mode-aware signals, Phase 8)
+// ---------------------------------------------------------------------------
+export type AgentHealthStatus = "healthy" | "degraded" | "failing";
+
+export interface AgentHealth {
+  agent_name: string;
+  mode: "reactive" | "durable" | "scheduled" | "event-driven";
+  health: AgentHealthStatus;
+  // reactive
+  p95_latency_ms: number | null;
+  error_rate: number | null;
+  runs_24h: number | null;
+  cost_24h: number | null;
+  // durable
+  awaiting_approval_count: number | null;
+  failed_24h: number | null;
+  avg_duration_ms: number | null;
+  // scheduled
+  last_run_status: string | null;
+  next_fire_at: string | null;
+  missed_fires: number | null;
+  // event-driven
+  match_rate_24h: number | null;
+  rejected_count_24h: number | null;
+}
+
+export const getAgentHealth = async (name: string): Promise<AgentHealth> => {
+  const { data } = await http.get<AgentHealth>(`/agents/${name}/health`);
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Agent Runs (production)
+// ---------------------------------------------------------------------------
+export interface AgentRunItem {
+  id: string;
+  agent_name: string;
+  status: string;
+  context: string;
+  trigger_type: string | null;
+  run_by: string | null;
+  team: string | null;
+  latency_ms: number | null;
+  cost_usd: number | null;
+  started_at: string;
+  completed_at: string | null;
+  langfuse_trace_id: string | null;
+}
+
+export const listAgentRuns = async (params?: {
+  agent_name?: string;
+  trigger_type?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>("/agent-runs", { params });
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Approvals Inbox
+// ---------------------------------------------------------------------------
+export interface ApprovalInboxItem {
+  id: string;
+  agent_name: string;
+  team: string;
+  step_name: string | null;
+  tool_name: string;
+  risk_level: string;
+  tool_args: Record<string, unknown>;
+  thread_context_snippet: string | null;
+  sla_remaining_seconds: number;
+  created_at: string;
+  context: string;
+  version: number;
+}
+
+export const listPendingApprovals = async (
+  team?: string
+): Promise<ApprovalInboxItem[]> => {
+  const params: Record<string, string> = { status: "pending" };
+  if (team) params.team = team;
+  const { data } = await http.get<{ items: ApprovalInboxItem[] }>("/approvals", { params });
+  return data.items;
+};
+
+export const decideApproval = async (
+  approvalId: string,
+  decision: "approved" | "rejected",
+  version: number
+): Promise<void> => {
+  await http.patch(`/approvals/${approvalId}`, {
+    decision,
+    version,
+    reviewer_id: "studio-user",
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------
+export interface MemoryMessage {
+  id: string;
+  agent_name: string;
+  thread_id: string;
+  role: string;
+  content: string;
+  message_index: number;
+  session_id: string | null;
+  user_id: string | null;
+  created_at: string;
+}
+
+export const listMemory = async (
+  agentName: string,
+  params?: { thread_id?: string; limit?: number; offset?: number }
+): Promise<MemoryMessage[]> => {
+  const resp = await http.get(`/agents/${agentName}/memory`, { params });
+  return resp.data;
+};
+
+export const deleteMemoryThread = async (
+  agentName: string,
+  threadId: string
+): Promise<void> => {
+  await http.delete(`/agents/${agentName}/memory/${threadId}`);
+};
+
+export const clearAgentMemory = async (agentName: string): Promise<void> => {
+  await http.delete(`/agents/${agentName}/memory/clear`);
 };

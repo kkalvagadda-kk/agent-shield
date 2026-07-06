@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
-import { listAgents, listTools, listSkills, listWorkflows } from "../api/registryApi";
+import { listAgents, listTools, listSkills, listAgentGraphs } from "../api/registryApi";
 
 interface ArtifactRow {
   id: string;
@@ -55,7 +55,7 @@ export default function AdminArtifactsPage() {
 
   const { data: workflowsList, isLoading: loadingWorkflows } = useQuery({
     queryKey: ["artifacts-workflows"],
-    queryFn: () => listWorkflows(),
+    queryFn: () => listAgentGraphs(),
   });
 
   const isLoading = loadingAgents || loadingTools || loadingSkills || loadingWorkflows;

@@ -41,6 +41,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# Suite 11 exercises safety-orchestrator resilience; skip cleanly if it's not deployed.
+if ! kubectl get svc agentshield-safety-orchestrator -n "$NAMESPACE" >/dev/null 2>&1; then
+  echo "  NOTE: safety-orchestrator not deployed (enabled=false) — Suite 11 (resilience) SKIPPED."
+  echo "  Enable safety-orchestrator (safety-orchestrator.enabled=true) and re-run."
+  exit 0
+fi
+
 PASS=0
 FAIL=0
 MANUAL=0

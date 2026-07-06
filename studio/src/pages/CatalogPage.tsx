@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { BookOpen, Loader2, MessageSquare, RefreshCw, Rocket, ShieldOff } from "lucide-react";
 import { Link } from "react-router-dom";
-import { listAgents, listTools, listSkills, listWorkflows } from "../api/registryApi";
+import { listAgents, listTools, listSkills, listAgentGraphs } from "../api/registryApi";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -72,8 +72,8 @@ export default function CatalogPage() {
     queryFn: () => listSkills(),
   });
   const { data: workflows = [], isLoading: loadingWorkflows } = useQuery({
-    queryKey: ["catalog-workflows"],
-    queryFn: () => listWorkflows(),
+    queryKey: ["catalog-agent-graphs"],
+    queryFn: () => listAgentGraphs(),
   });
   const { data: teams = [], isLoading: loadingTeams, refetch, isFetching } = useQuery({
     queryKey: ["admin-teams-summary"],

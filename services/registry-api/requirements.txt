@@ -12,3 +12,4 @@ cryptography==42.*
 langfuse==2.*
 redis==5.*
 kubernetes==31.*
+croniter==3.*

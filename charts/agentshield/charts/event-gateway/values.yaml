@@ -1,0 +1,48 @@
+enabled: true
+replicaCount: 2
+
+image:
+  repository: registry.internal/agentshield/event-gateway
+  tag: "0.1.1"
+  pullPolicy: IfNotPresent
+
+logLevel: INFO
+
+# Rate limit + replay tunables (threat model T-3/T-4)
+rateLimit:
+  windowSeconds: "60"
+  maxPerAgent: "100"
+  maxPerIp: "60"
+replayMaxSkewSeconds: "300"
+maxBodyBytes: "262144"      # 256 KiB (T-5)
+trustedProxyHops: "1"       # X-Forwarded-For trusted hop count (T-11)
+
+service:
+  type: ClusterIP
+  port: 8091
+
+# Public Ingress exposing ONLY /hooks/* (never /api/v1/internal/*). Disabled by
+# default for the local Docker Desktop composition (no ingress controller);
+# e2e/smoke tests hit the Service in-cluster. Enable + set host/tls in prod.
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tls: false
+  annotations: {}
+
+# L4 defense-in-depth (threat model T-8). NOTE: NetworkPolicy is pod/port-level
+# and CANNOT filter by HTTP path — the PRIMARY /internal control is that the
+# public ingress simply never routes /api/v1/internal/*. Disabled by default:
+# Docker Desktop's CNI does not enforce NetworkPolicy, and a bad policy can
+# black-hole registry-api traffic. Enable in clusters with an enforcing CNI.
+networkPolicy:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 192Mi

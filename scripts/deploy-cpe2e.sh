@@ -3,12 +3,27 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.30  (artifact isolation: created_by NOT NULL, visibility filter on list)
+#   - registry-api:0.2.63  (Decision 24 impl#3: composable agent filter (?composable=true); workflow-level trigger CRUD (/workflows/{id}/triggers); production HITL resume (PATCH /approvals fires agent pod /resume); migration 0031 agent_events.workflow_id)
+#   - studio:0.1.47        (Decision 24 impl#3: AddAgentModal composable filter + reactive/durable inline toggle; WorkflowTriggersPanel + Triggers button; execution_shape in workflow Save modal)
+#   - scheduler:0.1.1      (fires workflow schedule triggers via UNION over agent+workflow trigger rows)
+#   - event-gateway:0.1.1  (POST /hooks/workflow/{name}/{token} fires workflow webhook triggers)
+#   - registry-api:0.2.62  (Per-schedule input_payload on agent_triggers (migration 0030); internal.py resolves scheduled input from the trigger; type-aware instruction templates support)
+#   - studio:0.1.46        (Type-aware create-wizard instruction templates (scheduled/event-driven) + JSON input-payload field in wizard & Settings new-schedule form)
+#   - registry-api:0.2.59  (Decision 22: composite workflows — rename agent_graphs, workflow members, run-tree orchestration, trigger_type=workflow)
+#   - studio:0.1.43        (Decision 22: agent-graphs rename + composite workflow builder — add existing agents)
+#   - declarative-runner:0.1.7 (Decision 22: WorkflowOrchestrator module + /workflow-run — future-state)
+#   - registry-api:0.2.55  (Bug fix: deny-by-default agent/playground-run visibility for anonymous callers)
+#   - registry-api:0.2.54  (Phase 9: agent_events + /events + rotate-token; FIX internal.py Deployment.agent_id/deployed_at; FIX AgentEventResponse INET→str coercion)
+#   - event-gateway:0.1.0  (Phase 9 NEW: public webhook ingress — token + rate-limit + replay + filter + dispatch)
+#   - studio:0.1.42        (Phase 9: OverviewEventDriven + webhook token rotation in Settings)
+#   - registry-api:0.2.52  (Phase 8: alert config on triggers + SMTP failure alerts + /health endpoint; create_trigger persists alert fields)
+#   - studio:0.1.41        (Phase 8: trigger alert config in Settings + health dots on agent list)
+#   - registry-api:0.2.42  (Phase 4: AgentRun production tracking + /stats endpoint)
 #   - safety-orchestrator:0.1.3 (per-scanner Langfuse spans + trace_id propagation)
 #   - deploy-controller:0.1.7 (Phase 9.1 ensure_service_account wired in)
-#   - studio:0.1.28        (Agent.created_by type fix, suppress system in detail view)
-#   - eval-runner:0.1.0    (NEW: batch eval K8s Job image)
-#   - declarative-runner:0.1.1 (PythonToolNodeExecutor)
+#   - studio:0.1.37        (Phase 4: AgentDetail tabbed layout + RunsTab + OverviewReactive)
+#   - eval-runner:0.1.1    (batch eval 403 fix (service-identity) + Haiku judge poll)
+#   - declarative-runner:0.1.4 (Phase 4: production AgentRun creation + completion tracking)
 #   - python-executor:0.1.0 (sandboxed Python code runner)
 #   - Langfuse:3.x         (LLM observability — auto-bootstrapped, internal to platform)
 #   - PostgreSQL, Redis (infra)
@@ -35,13 +50,15 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.30"
+REGISTRY_API_TAG="0.2.63"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.7"
-STUDIO_TAG="0.1.28"
-EVAL_RUNNER_TAG="0.1.0"
-DECLARATIVE_RUNNER_TAG="0.1.1"
+STUDIO_TAG="0.1.47"
+EVAL_RUNNER_TAG="0.1.1"
+DECLARATIVE_RUNNER_TAG="0.1.7"
 PYTHON_EXECUTOR_TAG="0.1.0"
+SCHEDULER_TAG="0.1.1"
+EVENT_GATEWAY_TAG="0.1.1"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -51,7 +68,7 @@ echo ""
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (artifact isolation: created_by NOT NULL, list visibility filter)"
+echo "  → registry-api:${REGISTRY_API_TAG} (Phase 7 — internal run-start endpoint for scheduler/events)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
@@ -60,10 +77,10 @@ docker build -t "registry.internal/agentshield/safety-orchestrator:${SAFETY_ORCH
 echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (pre-flight gate in reconciler)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
-echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (PythonToolNodeExecutor support)"
+echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (memory context load/save integration)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" services/declarative-runner/
 
-echo "  → studio:${STUDIO_TAG} (Agent.created_by non-nullable type, suppress system sentinel in detail)"
+echo "  → studio:${STUDIO_TAG} (MemoryTab component + memory API functions)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
 echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"
@@ -71,6 +88,12 @@ docker build -t "registry.internal/agentshield/eval-runner:${EVAL_RUNNER_TAG}" s
 
 echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"
 docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR_TAG}" services/python-executor/
+
+echo "  → scheduler:${SCHEDULER_TAG} (Phase 7 — fires scheduled agents on cron, HA)"
+docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" services/scheduler/
+
+echo "  → event-gateway:${EVENT_GATEWAY_TAG} (Phase 9 — public webhook ingress)"
+docker build -t "registry.internal/agentshield/event-gateway:${EVENT_GATEWAY_TAG}" services/event-gateway/
 
 # ── Step 2: Namespaces ────────────────────────────────────────────────────────
 echo ""
@@ -179,6 +202,18 @@ kubectl apply -f infra/opa-bundle-server/configmap-nginx-conf.yaml 2>/dev/null |
 kubectl apply -f infra/opa-bundle-server/service.yaml 2>/dev/null || true
 kubectl apply -f infra/opa-bundle-server/deployment.yaml 2>/dev/null || true
 
+# opa-sidecar-config ConfigMap must exist in every agents-* namespace — the
+# deploy-controller mounts it into each agent pod's OPA sidecar (bundle polling).
+# Without it, agent pods hang in ContainerCreating ("configmap opa-sidecar-config
+# not found"). The manifest targets agents-platform; mirror it to other team ns.
+kubectl apply -f infra/opa-bundle-server/configmap-opa-config.yaml 2>/dev/null || true
+for team_ns in agents-operations; do
+  kubectl get ns "$team_ns" >/dev/null 2>&1 && \
+    kubectl get configmap opa-sidecar-config -n agents-platform -o yaml 2>/dev/null \
+    | sed "s/namespace: agents-platform/namespace: ${team_ns}/" \
+    | kubectl apply -f - 2>/dev/null || true
+done
+
 # ── Step 5: Helm upgrade ──────────────────────────────────────────────────────
 echo ""
 echo "[5/8] Helm upgrade/install '${RELEASE}'..."
@@ -186,42 +221,16 @@ echo "[5/8] Helm upgrade/install '${RELEASE}'..."
 # Clean up stale realm-init job if it exists (hook fails on re-deploy otherwise)
 kubectl delete job "${RELEASE}-realm-init" -n "$NAMESPACE" --ignore-not-found=true
 
+# Image tags, component enable/disable toggles, dev sizing, and global.postgresHost
+# are now baked into charts/agentshield/values.yaml as the default composition, so
+# a plain `helm upgrade --install` (no --set flags) deploys the full local platform.
+# Keep image-tag bumps in sync between this script's build steps and values.yaml.
+# To override per-environment, add a -f <values-override>.yaml or --set here.
 helm upgrade --install "$RELEASE" "$CHART" \
   --namespace "$NAMESPACE" \
   --create-namespace \
-  --timeout "$TIMEOUT" \
-  \
-  --set "registry-api.image.tag=${REGISTRY_API_TAG}" \
-  --set "studio.image.tag=${STUDIO_TAG}" \
-  --set "deploy-controller.declarativeRunnerTag=${DECLARATIVE_RUNNER_TAG}" \
-  --set "python-executor.image.tag=${PYTHON_EXECUTOR_TAG}" \
-  \
-  --set deploy-controller.enabled=true \
-  --set studio.enabled=true \
-  --set python-executor.enabled=true \
-  --set safety-orchestrator.enabled=false \
-  --set safety-orchestrator.llmguardEnabled=false \
-  --set safety-orchestrator.presidioEnabled=false \
-  --set safety-orchestrator.nemoEnabled=false \
-  --set llm-guard.enabled=false \
-  --set presidio.enabled=false \
-  --set nemo.enabled=false \
-  --set portkey.enabled=false \
-  --set opa.enabled=false \
-  --set langfuse.enabled=true \
-  --set clickhouse.enabled=false \
-  --set appsmith.enabled=false \
-  --set minio.enabled=false \
-  --set pgbouncer.enabled=false \
-  --set keycloak.enabled=false \
-  \
-  --set "global.postgresHost=${RELEASE}-postgresql" \
-  \
-  --set postgresql.readReplicas.replicaCount=0 \
-  --set postgresql.primary.replication.synchronousCommit=off \
-  --set postgresql.primary.replication.numSynchronousReplicas=0 \
-  --set postgresql.primary.persistence.size=5Gi \
-  --set redis.master.persistence.size=1Gi
+  --reset-values \
+  --timeout "$TIMEOUT"
 
 # ── Step 6: Wait for rollouts ─────────────────────────────────────────────────
 echo ""
@@ -232,6 +241,7 @@ kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --tim
 kubectl rollout status deployment/agentshield-deploy-controller -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --timeout=3m
+kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeout=3m || echo "  (Scheduler starting)"
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
 

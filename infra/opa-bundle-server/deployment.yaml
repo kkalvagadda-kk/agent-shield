@@ -29,12 +29,13 @@ spec:
             - |
               set -e
               REGISTRY_URL="${REGISTRY_API_URL:-http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000}"
-              mkdir -p /data/agentshield
-              echo "Fetching initial bundle from $REGISTRY_URL..."
-              curl -sf "${REGISTRY_URL}/api/v1/bundle/data.json" -o /data/agentshield/data.json \
-                || (echo "Warning: bundle data fetch failed, using fallback" && echo '{"agents":{},"grants":{}}' > /data/agentshield/data.json)
-              curl -sf "${REGISTRY_URL}/api/v1/bundle/policy.rego" -o /data/agentshield/policy.rego \
-                || (echo "Warning: policy fetch failed, using fallback" && echo 'package agentshield.agent' > /data/agentshield/policy.rego)
+              mkdir -p /data
+              echo "Fetching initial bundle tarball from $REGISTRY_URL..."
+              curl -sf "${REGISTRY_URL}/api/v1/bundle/bundle.tar.gz" -o /data/agentshield \
+                || (echo "Warning: bundle tarball fetch failed, writing empty fallback" && \
+                    printf '{"agents":{},"grants":{}}' > /tmp/data.json && \
+                    printf 'package agentshield\nimport rego.v1\ndefault allow := false\n' > /tmp/policy.rego && \
+                    tar czf /data/agentshield /tmp/data.json /tmp/policy.rego 2>/dev/null || true)
               echo "Initial bundle written."
           env:
             - name: REGISTRY_API_URL
@@ -73,13 +74,13 @@ spec:
               memory: 128Mi
           livenessProbe:
             httpGet:
-              path: /bundles/agentshield/data.json
+              path: /health
               port: 80
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /bundles/agentshield/data.json
+              path: /bundles/agentshield
               port: 80
             initialDelaySeconds: 3
             periodSeconds: 5
@@ -94,12 +95,9 @@ spec:
               echo "bundle-sync: starting poll loop (every 30s)"
               while true; do
                 sleep 30
-                curl -sf "${REGISTRY_URL}/api/v1/bundle/data.json" -o /data/agentshield/data.json.tmp \
-                  && mv /data/agentshield/data.json.tmp /data/agentshield/data.json \
-                  && echo "bundle-sync: data.json refreshed at $(date -u +%H:%M:%S)"
-                curl -sf "${REGISTRY_URL}/api/v1/bundle/policy.rego" -o /data/agentshield/policy.rego.tmp \
-                  && mv /data/agentshield/policy.rego.tmp /data/agentshield/policy.rego \
-                  && echo "bundle-sync: policy.rego refreshed at $(date -u +%H:%M:%S)"
+                curl -sf "${REGISTRY_URL}/api/v1/bundle/bundle.tar.gz" -o /data/agentshield.tmp \
+                  && mv /data/agentshield.tmp /data/agentshield \
+                  && echo "bundle-sync: bundle tarball refreshed at $(date -u +%H:%M:%S)"
               done
           env:
             - name: REGISTRY_API_URL

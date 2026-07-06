@@ -84,7 +84,7 @@ async def create_version(
         agent_id=agent.id,
         version_number=next_version,
         image_tag=body.image_tag,
-        workflow_id=body.workflow_id,
+        agent_graph_id=body.agent_graph_id,
         tools=[t.model_dump() for t in body.tools],
         eval_passed=body.eval_passed,
         adversarial_eval_passed=body.adversarial_eval_passed,

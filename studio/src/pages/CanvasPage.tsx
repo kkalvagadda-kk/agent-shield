@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { getWorkflow } from '../api/registryApi';
+import { getAgentGraph } from '../api/registryApi';
 import { useWorkflowStore } from '../stores/workflowStore';
 import { deserializeWorkflow, type WorkflowDefinition } from '../utils/workflowSerializer';
 import Canvas from '../components/Canvas';
@@ -11,8 +11,8 @@ export default function CanvasPage() {
   const store = useWorkflowStore();
 
   const { data: workflow, isLoading } = useQuery({
-    queryKey: ['workflow', id],
-    queryFn: () => getWorkflow(id!),
+    queryKey: ['agent-graph', id],
+    queryFn: () => getAgentGraph(id!),
     enabled: !!id,
   });
 

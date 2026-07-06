@@ -33,6 +33,27 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+AUTHORITY_ID=""
+cleanup() {
+  echo ""
+  echo "==> Cleanup..."
+  if [ -n "$AUTHORITY_ID" ]; then
+    kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+  fi
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/hitl-s5-agent', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 PASS=0
 FAIL=0
 MANUAL=0

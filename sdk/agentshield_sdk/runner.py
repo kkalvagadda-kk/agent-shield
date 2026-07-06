@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage  # type: ignore[import]
 
 from .agent import Agent
 from .checkpointer import get_checkpointer
-from .graph_builder import build_graph, _current_thread_id
+from .graph_builder import build_graph, resolve_agent_tools, _current_thread_id
 from .safety_client import scan_input, scan_output, SafetyBlockedError
 from .streaming import stream_events
 from .tracing import tracer
@@ -39,15 +39,23 @@ class Runner:
         self._checkpointer = None
 
     async def setup(self) -> None:
-        """Initialise the checkpointer and compile the LangGraph graph.
+        """Initialise the checkpointer, resolve tools, and compile the graph.
+
+        Resolves platform tool references (strings in agent.tools) from the
+        registry API, then builds the governed LangGraph agent.
 
         Must be called once before :meth:`run` or :meth:`run_streamed`.
         """
         self._checkpointer = await get_checkpointer()
-        self._graph = build_graph(self.agent, self._checkpointer)
+
+        # Resolve platform tool names + collect inline tools
+        resolved_tools = await resolve_agent_tools(self.agent)
+
+        self._graph = build_graph(self.agent, self._checkpointer, resolved_tools=resolved_tools)
         logger.info(
-            "Runner ready: agent=%s checkpointer=%s",
+            "Runner ready: agent=%s tools=%d checkpointer=%s",
             self.agent.name,
+            len(resolved_tools),
             type(self._checkpointer).__name__,
         )
 

@@ -28,6 +28,7 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   deleteAgent,
+  getAgentHealth,
   listAgents,
   updateAgent,
   type Agent,
@@ -39,6 +40,31 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   deprecated:  { label: "Deprecated", cls: "bg-amber-100 text-amber-700" },
   quarantined: { label: "Quarantined", cls: "bg-red-100 text-red-700" },
 };
+
+const HEALTH_DOT: Record<string, string> = {
+  healthy: "bg-green-500",
+  degraded: "bg-amber-500",
+  failing: "bg-red-500",
+};
+
+// Per-agent health dot. Fetches /agents/{name}/health independently and
+// renders a green/yellow/red status dot; falls back to a neutral dot on error.
+function HealthDot({ name }: { name: string }) {
+  const { data, isError } = useQuery({
+    queryKey: ["agent-health", name],
+    queryFn: () => getAgentHealth(name),
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const cls = isError || !data ? "bg-slate-300" : HEALTH_DOT[data.health] ?? "bg-slate-300";
+  const title = data ? `${data.mode} · ${data.health}` : "health unknown";
+  return (
+    <span
+      title={title}
+      className={`inline-block w-2 h-2 rounded-full shrink-0 ${cls}`}
+    />
+  );
+}
 
 const col = createColumnHelper<Agent>();
 
@@ -73,6 +99,7 @@ export default function AgentListPage() {
       header: "Name",
       cell: (info) => (
         <div className="flex items-center gap-2">
+          <HealthDot name={info.getValue()} />
           <div className="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
             <Bot size={13} className="text-blue-600" />
           </div>
@@ -195,7 +222,7 @@ export default function AgentListPage() {
           </button>
           <button onClick={() => navigate("/agents/new")} className="btn-primary">
             <Plus size={14} />
-            Register Agent
+            Create Agent
           </button>
         </div>
       </div>
@@ -251,10 +278,10 @@ export default function AgentListPage() {
             <div className="flex flex-col items-center py-16 text-center">
               <Bot size={40} className="text-slate-300 mb-3" />
               <p className="text-slate-500 font-medium">No agents yet</p>
-              <p className="text-slate-400 text-sm mt-1">Register your first agent to get started.</p>
+              <p className="text-slate-400 text-sm mt-1">Create your first agent to get started.</p>
               <button onClick={() => navigate("/agents/new")} className="btn-primary mt-5">
                 <Plus size={14} />
-                Register Agent
+                Create Agent
               </button>
             </div>
           ) : (

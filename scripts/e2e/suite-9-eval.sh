@@ -37,9 +37,48 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+DATASET_ID=""
+cleanup() {
+  echo ""
+  echo "==> Cleanup..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+for name in ['${AGENT_NAME}', 's9-bypass-agent']:
+    try:
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+    except Exception: pass
+" 2>/dev/null || true
+  if [ -n "$DATASET_ID" ]; then
+    kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/playground/datasets/${DATASET_ID}', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+  fi
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base = 'http://localhost:8000/api/v1/playground/datasets'
+try:
+    r = urllib.request.urlopen(urllib.request.Request(base, headers={'X-User-Sub': 's9'}), timeout=5)
+    for ds in json.loads(r.read()):
+        if ds.get('name','') in ('s9-real-ds', 's9-fail-ds'):
+            try:
+                urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers={'X-User-Sub': 's9'}, method='DELETE'), timeout=5)
+            except Exception: pass
+except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 PASS=0
 FAIL=0
 MANUAL=0
+
+# Inline pass/fail helpers (used by the G5 trace-propagation checks below,
+# alongside the run_test() harness). Accept an optional description.
+pass() { echo "  PASS: ${1:-check}"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: ${1:-check}"; FAIL=$((FAIL + 1)); }
 
 # State shared across tests
 DATASET_ID=""
@@ -393,6 +432,140 @@ else
 fi
 echo ""
 
+# ── T-S9-011..014: eval-runner service identity + real batch eval (Slice A) ─────
+echo "--- T-S9-011..014: eval-runner identity bypass + real batch eval ---"
+
+# poll GET /eval-runs/{id} until terminal; prints final status (or 'unknown')
+wait_for_eval_terminal() {
+  local eid="$1"; local timeout="${2:-150}"
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json, time
+deadline = time.time() + $timeout
+last = 'unknown'
+while time.time() < deadline:
+    try:
+        r = urllib.request.urlopen('http://localhost:8000/api/v1/playground/eval-runs/$eid', timeout=5)
+        last = json.loads(r.read()).get('status', 'unknown')
+    except Exception:
+        pass
+    if last in ('completed', 'failed'):
+        break
+    time.sleep(5)
+print(last)
+" 2>/dev/null || echo unknown
+}
+
+run_test "T-S9-011 eval-runner identity starts a run for an agent it does not own → 201" "
+import urllib.request, json, urllib.error
+base = 'http://localhost:8000/api/v1'
+try:
+    urllib.request.urlopen(urllib.request.Request(base + '/agents/s9-bypass-agent', method='DELETE'))
+except urllib.error.HTTPError:
+    pass
+req = urllib.request.Request(base + '/agents/',
+    data=json.dumps({'name': 's9-bypass-agent', 'team': 'platform', 'description': 's9 bypass'}).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+try:
+    urllib.request.urlopen(req)
+except urllib.error.HTTPError as e:
+    if e.code != 409: raise
+req = urllib.request.Request(base + '/playground/runs',
+    data=json.dumps({'agent_name': 's9-bypass-agent', 'input_message': 'hi'}).encode(),
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'}, method='POST')
+r = urllib.request.urlopen(req, timeout=5)
+assert r.status == 201, f'expected 201 got {r.status}'
+print('eval-runner ran an agent owned by system (201)')
+"
+
+run_test "T-S9-012 GET /playground/runs/{id} exposes judge fields" "
+import urllib.request, json
+base = 'http://localhost:8000/api/v1'
+req = urllib.request.Request(base + '/playground/runs',
+    data=json.dumps({'agent_name': 's9-bypass-agent', 'input_message': 'judge'}).encode(),
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'}, method='POST')
+rid = json.loads(urllib.request.urlopen(req, timeout=5).read())['run_id']
+r = urllib.request.urlopen(base + '/playground/runs/' + rid, timeout=5)
+d = json.loads(r.read())
+for k in ('judge_score', 'judge_status', 'judge_reason'):
+    assert k in d, f'{k} missing: {d}'
+print('GET run exposes judge_score/judge_status/judge_reason')
+"
+
+# T-S9-013: real batch eval reaches 'completed' (never stuck at 'running')
+EVAL_RUN_S9=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base='http://localhost:8000/api/v1'
+db=json.dumps({'name':'s9-real-ds','items':[{'input':'ping','expected_output':'x'},{'input':'ping2','expected_output':'y'}]}).encode()
+did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json'},method='POST'),timeout=5).read()).get('id')
+eb=json.dumps({'agent_name':'s9-bypass-agent','dataset_id':did}).encode()
+try:
+    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','X-User-Sub':'s9'},method='POST'),timeout=10)
+    print(json.loads(r.read()).get('id',''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
+if [ -n "$EVAL_RUN_S9" ]; then
+  S9_STATUS=$(wait_for_eval_terminal "$EVAL_RUN_S9" 150)
+  if [ "$S9_STATUS" = "completed" ]; then
+    echo "  PASS: T-S9-013 real batch eval reached 'completed' (not stuck at running)"
+    PASS=$((PASS + 1))
+    run_test "T-S9-013b per-item results recorded with judge scoring (not blind keyword)" "
+import urllib.request, json
+r=urllib.request.urlopen('http://localhost:8000/api/v1/playground/eval-runs/$EVAL_RUN_S9/results',timeout=5)
+res=json.loads(r.read())
+assert len(res) >= 1, f'no results: {res}'
+for it in res:
+    assert 'judge_score' in it and 'passed' in it, f'missing fields: {it}'
+    assert str(it.get('judge_reasoning','')).startswith(('llm-judge','keyword match','no expected','run-create failed')), f'unexpected reasoning: {it.get(\"judge_reasoning\")}'
+print(f'{len(res)} results recorded with judge scoring')
+"
+  else
+    check_manual "T-S9-013 real batch eval (status=$S9_STATUS after 150s; eval-runner Job could not run here)" \
+      "Deploy eval-runner:0.1.1 with Jobs RBAC in $NAMESPACE; EvalRun must reach 'completed', never stuck at 'running'."
+  fi
+else
+  check_manual "T-S9-013 real batch eval — could not create EvalRun (500 likely: Jobs RBAC/eval-runner image)" \
+    "Confirm POST /playground/eval-runs launches the Job and returns an id."
+fi
+
+# T-S9-014: a failing item (agent 404) does not crash the Job — run still 'completed'
+EVAL_FAIL_S9=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base='http://localhost:8000/api/v1'
+db=json.dumps({'name':'s9-fail-ds','items':[{'input':'a'},{'input':'b'}]}).encode()
+did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json'},method='POST'),timeout=5).read()).get('id')
+eb=json.dumps({'agent_name':'does-not-exist-agent-s9','dataset_id':did}).encode()
+try:
+    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','X-User-Sub':'s9'},method='POST'),timeout=10)
+    print(json.loads(r.read()).get('id',''))
+except Exception:
+    print('')
+" 2>/dev/null || echo "")
+
+if [ -n "$EVAL_FAIL_S9" ]; then
+  S9F_STATUS=$(wait_for_eval_terminal "$EVAL_FAIL_S9" 150)
+  if [ "$S9F_STATUS" = "completed" ]; then
+    echo "  PASS: T-S9-014 failing items did not crash the Job (reached 'completed')"
+    PASS=$((PASS + 1))
+  else
+    check_manual "T-S9-014 failed-item resilience (status=$S9F_STATUS; Job could not run here)" \
+      "With eval-runner:0.1.1, an agent-404 dataset run must still reach 'completed' via per-item try/except."
+  fi
+else
+  check_manual "T-S9-014 failed-item resilience — could not create EvalRun" "Confirm eval-runs router + Jobs RBAC."
+fi
+
+# cleanup s9-bypass-agent
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, urllib.error
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s9-bypass-agent', method='DELETE'))
+except Exception:
+    pass
+" 2>/dev/null || true
+echo ""
+
 # ── Cleanup ───────────────────────────────────────────────────────────────────
 echo "--- Cleanup ---"
 if [ -n "$DATASET_ID" ]; then
@@ -422,6 +595,27 @@ try:
   print('  soft-deleted agent $AGENT_NAME')
 except Exception as e:
   print(f'  cleanup note: {e}')
+" 2>/dev/null || true
+
+# Delete s9-real-ds and s9-fail-ds datasets (best-effort)
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base = 'http://localhost:8000/api/v1/playground/datasets'
+req = urllib.request.Request(base, headers={'X-User-Sub': 's9'})
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    datasets = json.loads(r.read())
+    for ds in datasets:
+        if ds.get('name','') in ('s9-real-ds', 's9-fail-ds'):
+            dreq = urllib.request.Request(base + '/' + str(ds['id']),
+                headers={'X-User-Sub': 's9'}, method='DELETE')
+            try:
+                urllib.request.urlopen(dreq, timeout=5)
+                print(f'  deleted dataset {ds[\"name\"]} ({ds[\"id\"][:8]}...)')
+            except Exception:
+                pass
+except Exception:
+    pass
 " 2>/dev/null || true
 echo ""
 

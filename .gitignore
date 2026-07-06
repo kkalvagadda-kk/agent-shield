@@ -51,3 +51,7 @@ sdk/agentshield_sdk/__pycache__/
 sdk/dist/
 sdk/*.egg-info/
 examples/order-agent/__pycache__/
+studio/playwright-report/
+studio/test-results/
+studio/playwright/.cache/
+.claude/worktrees/

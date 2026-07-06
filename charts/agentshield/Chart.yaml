@@ -77,6 +77,11 @@ dependencies:
     repository: "file://charts/deploy-controller"
     condition: deploy-controller.enabled
 
+  - name: scheduler
+    version: "0.1.0"
+    repository: "file://charts/scheduler"
+    condition: scheduler.enabled
+
   - name: safety-orchestrator
     version: "0.1.1"
     repository: "file://charts/safety-orchestrator"
@@ -121,3 +126,15 @@ dependencies:
     version: "0.1.0"
     repository: "file://charts/python-executor"
     condition: python-executor.enabled
+
+  # ── API gateway (local sub-chart; STUB — no templates yet, disabled by default) ──
+  - name: envoy-gateway
+    version: "0.1.0"
+    repository: "file://charts/envoy-gateway"
+    condition: envoy-gateway.enabled
+
+  # ── Event gateway (local sub-chart; Phase 9 — public webhook ingress) ──────
+  - name: event-gateway
+    version: "0.1.0"
+    repository: "file://charts/event-gateway"
+    condition: event-gateway.enabled

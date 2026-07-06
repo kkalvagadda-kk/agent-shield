@@ -20,7 +20,6 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from k8s import apply_configmap
 from models import AgentPolicy, AgentVersion
 
 logger = logging.getLogger(__name__)
@@ -117,15 +116,8 @@ async def generate_and_store(
     result = await session.execute(stmt)
     policy = result.scalar_one()
 
-    # Write K8s ConfigMap (non-fatal if K8s is unavailable in dev)
-    try:
-        apply_configmap(
-            namespace=namespace,
-            name=configmap_name,
-            data={"policy.rego": rego},
-        )
-        logger.info("OPA ConfigMap %s/%s applied", namespace, configmap_name)
-    except Exception as exc:
-        logger.warning("OPA ConfigMap write failed (non-fatal in dev): %s", exc)
+    # Phase 9.1 completion: per-agent ConfigMap is retired — OPA sidecars now poll
+    # the unified bundle from the central bundle server. The DB write above is kept
+    # for audit (risk_map, tool_allowlist) but the ConfigMap write is a no-op.
 
     return policy

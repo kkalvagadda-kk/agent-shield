@@ -1,0 +1,543 @@
+"""
+Composite Workflows router (Decision 22) — a Workflow is a collection of
+EXISTING member agents, orchestrated as a run tree.
+
+  GET    /api/v1/workflows                         — list (team + visibility filtered)
+  POST   /api/v1/workflows                         — create (409 on dup name+team)
+  GET    /api/v1/workflows/{id}                    — get with members
+  PATCH  /api/v1/workflows/{id}                    — update
+  DELETE /api/v1/workflows/{id}                    — archive (status=archived)
+  POST   /api/v1/workflows/{id}/members            — add existing agent (same team)
+  DELETE /api/v1/workflows/{id}/members/{agent_id} — remove member
+  POST   /api/v1/workflows/{id}/edges              — add a routing edge (source→target)
+  GET    /api/v1/workflows/{id}/edges              — list edges
+  DELETE /api/v1/workflows/{id}/edges/{edge_id}    — remove edge
+  POST   /api/v1/workflows/{id}/runs               — start a run (sequential/conditional/supervisor/handoff)
+  GET    /api/v1/workflows/{id}/runs/{run_id}/tree — run tree (parent + child runs)
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+import asyncio
+
+from auth_middleware import get_optional_user
+from db import get_db
+from models import Agent, AgentRun, AgentTrigger, CompositeWorkflow, WorkflowEdge, WorkflowMember
+from schemas import (
+    AgentRunResponse,
+    AgentTriggerCreate,
+    AgentTriggerUpdate,
+    CompositeWorkflowCreate,
+    CompositeWorkflowResponse,
+    CompositeWorkflowUpdate,
+    CompositeWorkflowWithMembersResponse,
+    RotateTokenResponse,
+    WorkflowEdgeCreate,
+    WorkflowEdgeResponse,
+    WorkflowMemberCreate,
+    WorkflowMemberResponse,
+    WorkflowRunCreate,
+    WorkflowRunStartResponse,
+    WorkflowRunTreeResponse,
+    WorkflowTriggerResponse,
+)
+from trigger_utils import _new_token, workflow_webhook_url
+from workflow_orchestrator import orchestrate, resolve_member_names
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
+
+
+async def _get_workflow(workflow_id: uuid.UUID, db: AsyncSession) -> CompositeWorkflow:
+    result = await db.execute(select(CompositeWorkflow).where(CompositeWorkflow.id == workflow_id))
+    wf = result.scalar_one_or_none()
+    if wf is None:
+        raise HTTPException(status_code=404, detail=f"Workflow '{workflow_id}' not found.")
+    return wf
+
+
+async def _member_count(db: AsyncSession, workflow_id: uuid.UUID) -> int:
+    return int(
+        (await db.execute(
+            select(func.count()).select_from(WorkflowMember).where(WorkflowMember.workflow_id == workflow_id)
+        )).scalar() or 0
+    )
+
+
+def _to_response(wf: CompositeWorkflow, member_count: int) -> CompositeWorkflowResponse:
+    return CompositeWorkflowResponse(
+        id=wf.id, name=wf.name, team=wf.team, description=wf.description,
+        execution_shape=wf.execution_shape, orchestration=wf.orchestration,
+        memory_enabled=wf.memory_enabled, status=wf.status, publish_status=wf.publish_status,
+        created_by=wf.created_by, created_at=wf.created_at, updated_at=wf.updated_at,
+        member_count=member_count,
+    )
+
+
+@router.get("", response_model=list[CompositeWorkflowResponse])
+async def list_workflows(
+    team: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[CompositeWorkflowResponse]:
+    caller = (user or {}).get("sub") or x_user_sub
+    q = select(CompositeWorkflow)
+    # Deny-by-default visibility (mirrors agents): published to all, private to creator.
+    if caller:
+        q = q.where(or_(CompositeWorkflow.publish_status == "published", CompositeWorkflow.created_by == caller))
+    else:
+        q = q.where(CompositeWorkflow.publish_status == "published")
+    if team is not None:
+        q = q.where(CompositeWorkflow.team == team)
+    q = q.where(CompositeWorkflow.status != "archived").order_by(CompositeWorkflow.created_at.desc()).limit(limit).offset(offset)
+    rows = (await db.execute(q)).scalars().all()
+    return [_to_response(wf, await _member_count(db, wf.id)) for wf in rows]
+
+
+@router.post("", response_model=CompositeWorkflowResponse, status_code=status.HTTP_201_CREATED)
+async def create_workflow(
+    body: CompositeWorkflowCreate,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> CompositeWorkflowResponse:
+    caller = (user or {}).get("sub") or x_user_sub or "system"
+    dup = (await db.execute(
+        select(CompositeWorkflow).where(
+            CompositeWorkflow.name == body.name, CompositeWorkflow.team == body.team
+        )
+    )).scalar_one_or_none()
+    if dup is not None:
+        raise HTTPException(status_code=409, detail=f"Workflow '{body.name}' already exists for team '{body.team}'.")
+    wf = CompositeWorkflow(
+        name=body.name, team=body.team, description=body.description,
+        execution_shape=body.execution_shape, orchestration=body.orchestration,
+        memory_enabled=body.memory_enabled, created_by=caller,
+    )
+    db.add(wf)
+    await db.commit()
+    await db.refresh(wf)
+    logger.info("created composite workflow '%s' (id=%s) by %s", wf.name, wf.id, caller)
+    return _to_response(wf, 0)
+
+
+@router.get("/{workflow_id}", response_model=CompositeWorkflowWithMembersResponse)
+async def get_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> CompositeWorkflowWithMembersResponse:
+    wf = await _get_workflow(workflow_id, db)
+    rows = (await db.execute(
+        select(WorkflowMember, Agent.name)
+        .join(Agent, Agent.id == WorkflowMember.agent_id)
+        .where(WorkflowMember.workflow_id == workflow_id)
+        .order_by(WorkflowMember.position.nulls_last(), WorkflowMember.added_at)
+    )).all()
+    members = [
+        WorkflowMemberResponse(
+            workflow_id=m.workflow_id, agent_id=m.agent_id, agent_name=agent_name,
+            role=m.role, position=m.position, routing=m.routing or {}, added_at=m.added_at,
+        )
+        for (m, agent_name) in rows
+    ]
+    edge_rows = (await db.execute(
+        select(WorkflowEdge)
+        .where(WorkflowEdge.workflow_id == workflow_id)
+        .order_by(WorkflowEdge.position.nulls_last(), WorkflowEdge.created_at)
+    )).scalars().all()
+    edges = [WorkflowEdgeResponse.model_validate(e) for e in edge_rows]
+    base = _to_response(wf, len(members))
+    return CompositeWorkflowWithMembersResponse(**base.model_dump(), members=members, edges=edges)
+
+
+@router.patch("/{workflow_id}", response_model=CompositeWorkflowResponse)
+async def update_workflow(
+    workflow_id: uuid.UUID, body: CompositeWorkflowUpdate, db: AsyncSession = Depends(get_db)
+) -> CompositeWorkflowResponse:
+    wf = await _get_workflow(workflow_id, db)
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(wf, field, value)
+    wf.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(wf)
+    return _to_response(wf, await _member_count(db, wf.id))
+
+
+@router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def archive_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
+    wf = await _get_workflow(workflow_id, db)
+    wf.status = "archived"
+    wf.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+
+@router.post("/{workflow_id}/members", response_model=WorkflowMemberResponse, status_code=status.HTTP_201_CREATED)
+async def add_member(
+    workflow_id: uuid.UUID, body: WorkflowMemberCreate, db: AsyncSession = Depends(get_db)
+) -> WorkflowMemberResponse:
+    wf = await _get_workflow(workflow_id, db)
+    agent = (await db.execute(select(Agent).where(Agent.id == body.agent_id))).scalar_one_or_none()
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{body.agent_id}' not found.")
+    if agent.team != wf.team:
+        raise HTTPException(status_code=400, detail="Member agent must be in the same team as the workflow.")
+    existing = (await db.execute(
+        select(WorkflowMember).where(
+            WorkflowMember.workflow_id == workflow_id, WorkflowMember.agent_id == body.agent_id
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="Agent is already a member of this workflow.")
+    member = WorkflowMember(
+        workflow_id=workflow_id, agent_id=body.agent_id, role=body.role,
+        position=body.position, routing=body.routing or {},
+    )
+    db.add(member)
+    await db.commit()
+    await db.refresh(member)
+    return WorkflowMemberResponse(
+        workflow_id=member.workflow_id, agent_id=member.agent_id, agent_name=agent.name,
+        role=member.role, position=member.position, routing=member.routing or {},
+        added_at=member.added_at,
+    )
+
+
+@router.delete("/{workflow_id}/members/{agent_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def remove_member(workflow_id: uuid.UUID, agent_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
+    member = (await db.execute(
+        select(WorkflowMember).where(
+            WorkflowMember.workflow_id == workflow_id, WorkflowMember.agent_id == agent_id
+        )
+    )).scalar_one_or_none()
+    if member is None:
+        raise HTTPException(status_code=404, detail="Member not found.")
+    await db.delete(member)
+    await db.commit()
+
+
+# --- Edge endpoints (orchestration graph) ---
+async def _is_member(db: AsyncSession, workflow_id: uuid.UUID, agent_id: uuid.UUID) -> bool:
+    return (await db.execute(
+        select(WorkflowMember.agent_id).where(
+            WorkflowMember.workflow_id == workflow_id, WorkflowMember.agent_id == agent_id
+        )
+    )).scalar_one_or_none() is not None
+
+
+@router.post("/{workflow_id}/edges", response_model=WorkflowEdgeResponse, status_code=status.HTTP_201_CREATED)
+async def add_edge(
+    workflow_id: uuid.UUID, body: WorkflowEdgeCreate, db: AsyncSession = Depends(get_db)
+) -> WorkflowEdge:
+    await _get_workflow(workflow_id, db)
+    # Both endpoints must be members of this workflow.
+    for aid in (body.source_agent_id, body.target_agent_id):
+        if not await _is_member(db, workflow_id, aid):
+            raise HTTPException(status_code=400, detail=f"Agent '{aid}' is not a member of this workflow.")
+    if body.source_agent_id == body.target_agent_id:
+        raise HTTPException(status_code=400, detail="An edge cannot connect an agent to itself.")
+    existing = (await db.execute(
+        select(WorkflowEdge).where(
+            WorkflowEdge.workflow_id == workflow_id,
+            WorkflowEdge.source_agent_id == body.source_agent_id,
+            WorkflowEdge.target_agent_id == body.target_agent_id,
+        )
+    )).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="An edge between these agents already exists.")
+    edge = WorkflowEdge(
+        workflow_id=workflow_id, source_agent_id=body.source_agent_id,
+        target_agent_id=body.target_agent_id, condition=body.condition, position=body.position,
+    )
+    db.add(edge)
+    await db.commit()
+    await db.refresh(edge)
+    return edge
+
+
+@router.get("/{workflow_id}/edges", response_model=list[WorkflowEdgeResponse])
+async def list_edges(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> list[WorkflowEdge]:
+    await _get_workflow(workflow_id, db)
+    return list((await db.execute(
+        select(WorkflowEdge)
+        .where(WorkflowEdge.workflow_id == workflow_id)
+        .order_by(WorkflowEdge.position.nulls_last(), WorkflowEdge.created_at)
+    )).scalars().all())
+
+
+@router.delete("/{workflow_id}/edges/{edge_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def remove_edge(workflow_id: uuid.UUID, edge_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
+    edge = (await db.execute(
+        select(WorkflowEdge).where(
+            WorkflowEdge.id == edge_id, WorkflowEdge.workflow_id == workflow_id
+        )
+    )).scalar_one_or_none()
+    if edge is None:
+        raise HTTPException(status_code=404, detail="Edge not found.")
+    await db.delete(edge)
+    await db.commit()
+
+
+# --- Run endpoints (W3) ---
+@router.post("/{workflow_id}/runs", response_model=WorkflowRunStartResponse, status_code=status.HTTP_202_ACCEPTED)
+async def start_workflow_run(
+    workflow_id: uuid.UUID, body: WorkflowRunCreate, db: AsyncSession = Depends(get_db)
+) -> WorkflowRunStartResponse:
+    wf = await _get_workflow(workflow_id, db)
+    if wf.status == "archived":
+        raise HTTPException(status_code=422, detail="Cannot run an archived workflow.")
+    member_names = await resolve_member_names(db, workflow_id)
+    if not member_names:
+        raise HTTPException(status_code=422, detail="Workflow has no members to run.")
+
+    message = body.input_message or ""
+    if not message and body.input_payload:
+        import json as _json
+        message = body.input_payload.get("message") or _json.dumps(body.input_payload)
+
+    # Soft pre-flight: members with no running/deploying deployment will fail at
+    # dispatch (no production pod). Don't block the run (this is fine for testing),
+    # but surface a warning so the caller/UI knows which steps can't succeed yet.
+    from models import Deployment
+    deployed = set((await db.execute(
+        select(Agent.name)
+        .join(Deployment, Deployment.agent_id == Agent.id)
+        .where(Agent.name.in_(member_names), Deployment.status.in_(("deploying", "running")))
+    )).scalars().all())
+    undeployed = [n for n in member_names if n not in deployed]
+    warning = (
+        f"Agents without a running deployment will fail at dispatch — deploy them first: {', '.join(undeployed)}"
+        if undeployed else None
+    )
+
+    parent = AgentRun(
+        agent_name=wf.name,
+        input=message[:4000] if message else None,
+        context="production",
+        status="queued",
+        trigger_type=body.trigger_type,
+        run_by=body.run_by,
+        team=wf.team,
+        workflow_id=wf.id,
+    )
+    db.add(parent)
+    await db.commit()
+    await db.refresh(parent)
+
+    asyncio.create_task(
+        orchestrate(str(parent.id), wf.team, str(workflow_id), message, wf.orchestration)
+    )
+    logger.info(
+        "started workflow run %s for workflow '%s' (mode=%s, %d members%s)",
+        parent.id, wf.name, wf.orchestration, len(member_names),
+        f", {len(undeployed)} undeployed" if undeployed else "",
+    )
+    return WorkflowRunStartResponse(workflow_id=wf.id, run_id=parent.id, status="queued", warning=warning)
+
+
+@router.get("/{workflow_id}/runs", response_model=list[AgentRunResponse])
+async def list_workflow_runs(
+    workflow_id: uuid.UUID,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentRun]:
+    await _get_workflow(workflow_id, db)
+    q = select(AgentRun).where(AgentRun.workflow_id == workflow_id)
+    if status_filter:
+        q = q.where(AgentRun.status == status_filter)
+    q = q.order_by(AgentRun.started_at.desc()).limit(limit).offset(offset)
+    return list((await db.execute(q)).scalars().all())
+
+
+@router.get("/{workflow_id}/runs/{run_id}/tree", response_model=WorkflowRunTreeResponse)
+async def get_workflow_run_tree(
+    workflow_id: uuid.UUID, run_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> WorkflowRunTreeResponse:
+    parent = (await db.execute(select(AgentRun).where(AgentRun.id == run_id))).scalar_one_or_none()
+    if parent is None or parent.workflow_id != workflow_id:
+        raise HTTPException(status_code=404, detail="Workflow run not found.")
+    children = list((await db.execute(
+        select(AgentRun).where(AgentRun.parent_run_id == run_id).order_by(AgentRun.started_at)
+    )).scalars().all())
+    return WorkflowRunTreeResponse(
+        parent=AgentRunResponse.model_validate(parent),
+        children=[AgentRunResponse.model_validate(c) for c in children],
+    )
+
+
+# --- Trigger endpoints (schedule + webhook) ---
+# Mirrors the agent trigger CRUD in routers/triggers.py; targets workflow_id
+# instead of agent_id so the ck_agent_triggers_target CHECK constraint is satisfied.
+
+@router.post(
+    "/{workflow_id}/triggers",
+    response_model=WorkflowTriggerResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_workflow_trigger(
+    workflow_id: uuid.UUID,
+    body: AgentTriggerCreate,
+    db: AsyncSession = Depends(get_db),
+) -> AgentTrigger:
+    wf = await _get_workflow(workflow_id, db)
+    plaintext = None
+    token_hash = None
+    if body.trigger_type == "webhook":
+        plaintext, token_hash = _new_token()
+    trigger = AgentTrigger(
+        workflow_id=wf.id,
+        agent_id=None,
+        trigger_type=body.trigger_type,
+        cron_expression=body.cron_expression,
+        timezone=body.timezone,
+        enabled=body.enabled,
+        filter_conditions=body.filter_conditions,
+        input_payload=body.input_payload,
+        alert_email=body.alert_email,
+        alert_on_failure=body.alert_on_failure,
+        token_hash=token_hash,
+    )
+    db.add(trigger)
+    await db.commit()
+    await db.refresh(trigger)
+    # Attach the plaintext token + full webhook URL as transient attributes so they
+    # are returned ONCE in this create response (never persisted, never in list/get).
+    trigger.token = plaintext
+    trigger.webhook_url = workflow_webhook_url(wf.name, plaintext) if plaintext else None
+    logger.info(
+        "created %s trigger for workflow '%s' (id=%s)", body.trigger_type, wf.name, trigger.id
+    )
+    return trigger
+
+
+@router.get("/{workflow_id}/triggers", response_model=list[WorkflowTriggerResponse])
+async def list_workflow_triggers(
+    workflow_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentTrigger]:
+    await _get_workflow(workflow_id, db)
+    result = await db.execute(
+        select(AgentTrigger)
+        .where(AgentTrigger.workflow_id == workflow_id)
+        .order_by(AgentTrigger.created_at)
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/{workflow_id}/triggers/{trigger_id}", response_model=WorkflowTriggerResponse)
+async def get_workflow_trigger(
+    workflow_id: uuid.UUID,
+    trigger_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> AgentTrigger:
+    await _get_workflow(workflow_id, db)
+    result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.id == trigger_id,
+            AgentTrigger.workflow_id == workflow_id,
+        )
+    )
+    trigger = result.scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    return trigger
+
+
+@router.patch("/{workflow_id}/triggers/{trigger_id}", response_model=WorkflowTriggerResponse)
+async def update_workflow_trigger(
+    workflow_id: uuid.UUID,
+    trigger_id: uuid.UUID,
+    body: AgentTriggerUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> AgentTrigger:
+    await _get_workflow(workflow_id, db)
+    result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.id == trigger_id,
+            AgentTrigger.workflow_id == workflow_id,
+        )
+    )
+    trigger = result.scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(trigger, field, value)
+    trigger.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(trigger)
+    return trigger
+
+
+@router.delete(
+    "/{workflow_id}/triggers/{trigger_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
+)
+async def delete_workflow_trigger(
+    workflow_id: uuid.UUID,
+    trigger_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _get_workflow(workflow_id, db)
+    result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.id == trigger_id,
+            AgentTrigger.workflow_id == workflow_id,
+        )
+    )
+    trigger = result.scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    await db.delete(trigger)
+    await db.commit()
+    logger.info("deleted trigger %s for workflow '%s'", trigger_id, workflow_id)
+
+
+@router.post(
+    "/{workflow_id}/triggers/{trigger_id}/rotate-token",
+    response_model=RotateTokenResponse,
+)
+async def rotate_workflow_trigger_token(
+    workflow_id: uuid.UUID,
+    trigger_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> RotateTokenResponse:
+    """Generate a new webhook token for a workflow trigger, store its sha256, and
+    return the plaintext ONCE. The old hash is invalidated immediately."""
+    wf = await _get_workflow(workflow_id, db)
+    result = await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.id == trigger_id,
+            AgentTrigger.workflow_id == workflow_id,
+        )
+    )
+    trigger = result.scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+    if trigger.trigger_type != "webhook":
+        raise HTTPException(
+            status_code=400, detail="Only webhook triggers have rotatable tokens"
+        )
+
+    plaintext, token_hash = _new_token()
+    trigger.token_hash = token_hash
+    trigger.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info("rotated webhook token for workflow '%s' trigger %s", wf.name, trigger_id)
+    return RotateTokenResponse(
+        trigger_id=trigger.id,
+        token=plaintext,
+        webhook_url=workflow_webhook_url(wf.name, plaintext),
+    )

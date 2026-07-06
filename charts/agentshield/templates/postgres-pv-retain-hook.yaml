@@ -1,0 +1,119 @@
+{{- /*
+  postgres-pv-retain-hook.yaml
+
+  Data-durability guard. The local-path StorageClass (`standard`) provisions PVs
+  with reclaimPolicy=Delete, so if the Postgres PVC is ever removed the volume —
+  and every user/row in it — is destroyed. The StatefulSet already retains its
+  PVC (persistentVolumeClaimRetentionPolicy), so the remaining gap is the PV's
+  own reclaim policy.
+
+  This post-install/post-upgrade hook finds the PV bound to the Postgres PVC and
+  patches its reclaimPolicy to Retain (idempotent). Runs on every deploy so a
+  fresh install is protected from the first reconcile onward.
+
+  NOTE: this protects against PVC/PV *object* deletion. It does NOT protect
+  against the node's local-path directory being wiped by a full "Reset
+  Kubernetes Cluster" / Docker Desktop VM reset — that's what the pg_dump
+  backup (scripts/backup-postgres.sh) is for.
+*/}}
+{{- /* Disabled by default: the Job needs a kubectl image (bitnami/kubectl) which
+       may not be pullable in offline/air-gapped or local Docker Desktop clusters
+       — a failed hook fails the whole release. Enable only where that image is
+       available. Otherwise protect the volume with a one-time manual patch:
+         kubectl patch pv <pv> -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+       (see docs/runbooks/postgres-backup.md). */}}
+{{- if and .Values.pvRetainHook.enabled (index .Values "postgresql" "enabled") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-pv-retain
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-pv-retain
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-pv-retain
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-pv-retain
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-pv-retain
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-pv-retain
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pv-retain-guard
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-pv-retain
+      restartPolicy: OnFailure
+      containers:
+        - name: patch
+          image: bitnami/kubectl:1.31
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              PVC="data-{{ .Release.Name }}-postgresql-0"
+              echo "==> Ensuring PV backing ${PVC} has reclaimPolicy=Retain"
+              PV=$(kubectl get pvc "${PVC}" -n {{ .Release.Namespace }} -o jsonpath='{.spec.volumeName}' 2>/dev/null || true)
+              if [ -z "${PV}" ]; then
+                echo "    PVC not bound yet — nothing to patch (will run again next deploy)."
+                exit 0
+              fi
+              CUR=$(kubectl get pv "${PV}" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}')
+              if [ "${CUR}" = "Retain" ]; then
+                echo "    PV ${PV} already Retain — nothing to do."
+              else
+                kubectl patch pv "${PV}" -p '{"spec":{"persistentVolumeReclaimPolicy":"Retain"}}'
+                echo "    PV ${PV} reclaimPolicy ${CUR} -> Retain."
+              fi
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+{{- end }}

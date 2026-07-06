@@ -1,15 +1,15 @@
 """
-AgentShield Registry API — Workflows router.
+AgentShield Registry API — AgentGraphs router.
 
 Endpoints
 ---------
-  POST  /api/v1/workflows                                              — create a workflow
-  GET   /api/v1/workflows                                              — list workflows (filterable)
-  GET   /api/v1/workflows/{workflow_id}                                — get workflow + current definition
-  PUT   /api/v1/workflows/{workflow_id}                                — update workflow definition
-  POST  /api/v1/workflows/{workflow_id}/deploy                         — mark workflow as deployed
-  GET   /api/v1/workflows/{workflow_id}/versions                       — list all version snapshots
-  POST  /api/v1/workflows/{workflow_id}/versions/{version_number}/restore — restore a prior version
+  POST  /api/v1/agent-graphs                                              — create a workflow
+  GET   /api/v1/agent-graphs                                              — list workflows (filterable)
+  GET   /api/v1/agent-graphs/{agent_graph_id}                                — get workflow + current definition
+  PUT   /api/v1/agent-graphs/{agent_graph_id}                                — update workflow definition
+  POST  /api/v1/agent-graphs/{agent_graph_id}/deploy                         — mark workflow as deployed
+  GET   /api/v1/agent-graphs/{agent_graph_id}/versions                       — list all version snapshots
+  POST  /api/v1/agent-graphs/{agent_graph_id}/versions/{version_number}/restore — restore a prior version
 """
 
 from __future__ import annotations
@@ -24,56 +24,56 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Workflow, WorkflowVersion
+from models import AgentGraph, AgentGraphVersion
 from schemas import (
-    WorkflowCreate,
-    WorkflowDeployRequest,
-    WorkflowResponse,
-    WorkflowUpdate,
-    WorkflowVersionResponse,
-    WorkflowWithDefinitionResponse,
+    AgentGraphCreate,
+    AgentGraphDeployRequest,
+    AgentGraphResponse,
+    AgentGraphUpdate,
+    AgentGraphVersionResponse,
+    AgentGraphWithDefinitionResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/workflows", tags=["workflows"])
+router = APIRouter(prefix="/api/v1/agent-graphs", tags=["agent-graphs"])
 
 
 # ---------------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------------
-async def _resolve_workflow(workflow_id: uuid.UUID, db: AsyncSession) -> Workflow:
-    """Return the Workflow with the given id or raise 404."""
+async def _resolve_workflow(agent_graph_id: uuid.UUID, db: AsyncSession) -> AgentGraph:
+    """Return the AgentGraph with the given id or raise 404."""
     result = await db.execute(
-        select(Workflow).where(Workflow.id == workflow_id)
+        select(AgentGraph).where(AgentGraph.id == agent_graph_id)
     )
     workflow = result.scalar_one_or_none()
     if workflow is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Workflow '{workflow_id}' not found.",
+            detail=f"AgentGraph '{agent_graph_id}' not found.",
         )
     return workflow
 
 
 async def _get_latest_version(
-    workflow_id: uuid.UUID, db: AsyncSession
-) -> WorkflowVersion | None:
-    """Return the highest-numbered WorkflowVersion for this workflow, or None."""
+    agent_graph_id: uuid.UUID, db: AsyncSession
+) -> AgentGraphVersion | None:
+    """Return the highest-numbered AgentGraphVersion for this workflow, or None."""
     result = await db.execute(
-        select(WorkflowVersion)
-        .where(WorkflowVersion.workflow_id == workflow_id)
-        .order_by(WorkflowVersion.version_number.desc())
+        select(AgentGraphVersion)
+        .where(AgentGraphVersion.agent_graph_id == agent_graph_id)
+        .order_by(AgentGraphVersion.version_number.desc())
         .limit(1)
     )
     return result.scalar_one_or_none()
 
 
 def _build_workflow_response(
-    workflow: Workflow,
+    workflow: AgentGraph,
     current_version_number: int | None,
 ) -> dict:
-    """Build a plain dict accepted by WorkflowResponse.model_validate."""
+    """Build a plain dict accepted by AgentGraphResponse.model_validate."""
     return {
         "id": workflow.id,
         "name": workflow.name,
@@ -92,22 +92,22 @@ def _build_workflow_response(
 # ---------------------------------------------------------------------------
 @router.post(
     "/",
-    response_model=WorkflowResponse,
+    response_model=AgentGraphResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new workflow",
 )
 async def create_workflow(
-    body: WorkflowCreate,
+    body: AgentGraphCreate,
     db: AsyncSession = Depends(get_db),
-) -> WorkflowResponse:
+) -> AgentGraphResponse:
     """Create a workflow record and persist its initial definition as version 1.
 
     Returns 409 if a workflow with the same name already exists for the team.
     """
     existing = await db.execute(
-        select(Workflow).where(
-            Workflow.name == body.name,
-            Workflow.team == body.team,
+        select(AgentGraph).where(
+            AgentGraph.name == body.name,
+            AgentGraph.team == body.team,
         )
     )
     if existing.scalar_one_or_none() is not None:
@@ -124,7 +124,7 @@ async def create_workflow(
             ),
         )
 
-    workflow = Workflow(
+    workflow = AgentGraph(
         name=body.name,
         team=body.team,
         description=body.description,
@@ -133,8 +133,8 @@ async def create_workflow(
     await db.flush()  # populate server-generated id / timestamps
 
     # Persist the initial definition as version 1
-    initial_version = WorkflowVersion(
-        workflow_id=workflow.id,
+    initial_version = AgentGraphVersion(
+        agent_graph_id=workflow.id,
         version_number=1,
         definition=body.definition,
         change_summary=body.change_summary,
@@ -149,7 +149,7 @@ async def create_workflow(
         workflow.id,
         workflow.team,
     )
-    return WorkflowResponse.model_validate(
+    return AgentGraphResponse.model_validate(
         _build_workflow_response(workflow, current_version_number=1)
     )
 
@@ -159,28 +159,28 @@ async def create_workflow(
 # ---------------------------------------------------------------------------
 @router.get(
     "/",
-    response_model=list[WorkflowResponse],
+    response_model=list[AgentGraphResponse],
     summary="List workflows",
 )
 async def list_workflows(
     team: Optional[str] = Query(None, description="Filter by team name"),
     db: AsyncSession = Depends(get_db),
-) -> list[WorkflowResponse]:
+) -> list[AgentGraphResponse]:
     """Return all workflows, optionally filtered by team, ordered by created_at DESC."""
-    query = select(Workflow)
+    query = select(AgentGraph)
     if team is not None:
-        query = query.where(Workflow.team == team)
-    query = query.order_by(Workflow.created_at.desc())
+        query = query.where(AgentGraph.team == team)
+    query = query.order_by(AgentGraph.created_at.desc())
 
     result = await db.execute(query)
     workflows = result.scalars().all()
 
     # Resolve latest version number for each workflow
-    items: list[WorkflowResponse] = []
+    items: list[AgentGraphResponse] = []
     for wf in workflows:
         latest = await _get_latest_version(wf.id, db)
         items.append(
-            WorkflowResponse.model_validate(
+            AgentGraphResponse.model_validate(
                 _build_workflow_response(
                     wf,
                     current_version_number=latest.version_number if latest else None,
@@ -195,23 +195,23 @@ async def list_workflows(
 
 
 # ---------------------------------------------------------------------------
-# GET /{workflow_id}
+# GET /{agent_graph_id}
 # ---------------------------------------------------------------------------
 @router.get(
-    "/{workflow_id}",
-    response_model=WorkflowWithDefinitionResponse,
+    "/{agent_graph_id}",
+    response_model=AgentGraphWithDefinitionResponse,
     summary="Get workflow with current definition",
 )
 async def get_workflow(
-    workflow_id: uuid.UUID,
+    agent_graph_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-) -> WorkflowWithDefinitionResponse:
+) -> AgentGraphWithDefinitionResponse:
     """Return a workflow along with its latest definition snapshot."""
-    workflow = await _resolve_workflow(workflow_id, db)
+    workflow = await _resolve_workflow(agent_graph_id, db)
     latest = await _get_latest_version(workflow.id, db)
 
     current_definition = (
-        WorkflowVersionResponse.model_validate(latest) if latest else None
+        AgentGraphVersionResponse.model_validate(latest) if latest else None
     )
 
     base = _build_workflow_response(
@@ -226,29 +226,29 @@ async def get_workflow(
         workflow.id,
         latest.version_number if latest else None,
     )
-    return WorkflowWithDefinitionResponse.model_validate(base)
+    return AgentGraphWithDefinitionResponse.model_validate(base)
 
 
 # ---------------------------------------------------------------------------
-# PUT /{workflow_id}
+# PUT /{agent_graph_id}
 # ---------------------------------------------------------------------------
 @router.put(
-    "/{workflow_id}",
-    response_model=WorkflowResponse,
+    "/{agent_graph_id}",
+    response_model=AgentGraphResponse,
     summary="Update workflow definition",
 )
 async def update_workflow(
-    workflow_id: uuid.UUID,
-    body: WorkflowUpdate,
+    agent_graph_id: uuid.UUID,
+    body: AgentGraphUpdate,
     db: AsyncSession = Depends(get_db),
-) -> WorkflowResponse:
+) -> AgentGraphResponse:
     """Update a workflow's definition (and/or metadata).
 
     Each call that includes a new ``definition`` increments the version counter
-    and saves the prior definition as a WorkflowVersion record.  Metadata-only
+    and saves the prior definition as a AgentGraphVersion record.  Metadata-only
     updates (name, description) do not create a new version.
     """
-    workflow = await _resolve_workflow(workflow_id, db)
+    workflow = await _resolve_workflow(agent_graph_id, db)
 
     changed = False
     if body.name is not None:
@@ -265,8 +265,8 @@ async def update_workflow(
         latest = await _get_latest_version(workflow.id, db)
         next_version = (latest.version_number if latest else 0) + 1
 
-        wf_version = WorkflowVersion(
-            workflow_id=workflow.id,
+        wf_version = AgentGraphVersion(
+            agent_graph_id=workflow.id,
             version_number=next_version,
             definition=body.definition,
             change_summary=body.change_summary,
@@ -291,30 +291,30 @@ async def update_workflow(
         workflow.id,
         new_version_number,
     )
-    return WorkflowResponse.model_validate(
+    return AgentGraphResponse.model_validate(
         _build_workflow_response(workflow, current_version_number=new_version_number)
     )
 
 
 # ---------------------------------------------------------------------------
-# POST /{workflow_id}/deploy
+# POST /{agent_graph_id}/deploy
 # ---------------------------------------------------------------------------
 @router.post(
-    "/{workflow_id}/deploy",
-    response_model=WorkflowResponse,
+    "/{agent_graph_id}/deploy",
+    response_model=AgentGraphResponse,
     summary="Mark workflow as deployed",
 )
 async def deploy_workflow(
-    workflow_id: uuid.UUID,
-    body: WorkflowDeployRequest,
+    agent_graph_id: uuid.UUID,
+    body: AgentGraphDeployRequest,
     db: AsyncSession = Depends(get_db),
-) -> WorkflowResponse:
+) -> AgentGraphResponse:
     """Set the workflow status to ``deployed`` and record ``deployed_at``.
 
     The Deploy Controller polls for workflows in this state and creates the
     corresponding Kubernetes pod/service.
     """
-    workflow = await _resolve_workflow(workflow_id, db)
+    workflow = await _resolve_workflow(agent_graph_id, db)
 
     # Ensure there is at least one version to deploy
     latest = await _get_latest_version(workflow.id, db)
@@ -322,7 +322,7 @@ async def deploy_workflow(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
-                f"Workflow '{workflow_id}' has no versions — "
+                f"AgentGraph '{agent_graph_id}' has no versions — "
                 "save a definition before deploying."
             ),
         )
@@ -337,7 +337,7 @@ async def deploy_workflow(
         workflow.name,
         workflow.id,
     )
-    return WorkflowResponse.model_validate(
+    return AgentGraphResponse.model_validate(
         _build_workflow_response(
             workflow, current_version_number=latest.version_number
         )
@@ -345,52 +345,52 @@ async def deploy_workflow(
 
 
 # ---------------------------------------------------------------------------
-# GET /{workflow_id}/versions
+# GET /{agent_graph_id}/versions
 # ---------------------------------------------------------------------------
 @router.get(
-    "/{workflow_id}/versions",
-    response_model=list[WorkflowVersionResponse],
+    "/{agent_graph_id}/versions",
+    response_model=list[AgentGraphVersionResponse],
     summary="List all versions for a workflow",
 )
 async def list_workflow_versions(
-    workflow_id: uuid.UUID,
+    agent_graph_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-) -> list[WorkflowVersionResponse]:
-    """Return all WorkflowVersion records ordered by version DESC (newest first)."""
+) -> list[AgentGraphVersionResponse]:
+    """Return all AgentGraphVersion records ordered by version DESC (newest first)."""
     # Confirm the workflow exists first
-    await _resolve_workflow(workflow_id, db)
+    await _resolve_workflow(agent_graph_id, db)
 
     result = await db.execute(
-        select(WorkflowVersion)
-        .where(WorkflowVersion.workflow_id == workflow_id)
-        .order_by(WorkflowVersion.version_number.desc())
+        select(AgentGraphVersion)
+        .where(AgentGraphVersion.agent_graph_id == agent_graph_id)
+        .order_by(AgentGraphVersion.version_number.desc())
     )
     versions = result.scalars().all()
 
     logger.debug(
         "list_workflow_versions: found %d version(s) for workflow '%s'",
         len(versions),
-        workflow_id,
+        agent_graph_id,
     )
-    return [WorkflowVersionResponse.model_validate(v) for v in versions]
+    return [AgentGraphVersionResponse.model_validate(v) for v in versions]
 
 
 # ---------------------------------------------------------------------------
-# POST /{workflow_id}/versions/{version_number}/restore
+# POST /{agent_graph_id}/versions/{version_number}/restore
 # ---------------------------------------------------------------------------
 @router.post(
-    "/{workflow_id}/versions/{version_number}/restore",
-    response_model=WorkflowResponse,
+    "/{agent_graph_id}/versions/{version_number}/restore",
+    response_model=AgentGraphResponse,
     summary="Restore a prior workflow version",
 )
 async def restore_workflow_version(
-    workflow_id: uuid.UUID,
+    agent_graph_id: uuid.UUID,
     version_number: int,
     db: AsyncSession = Depends(get_db),
-) -> WorkflowResponse:
+) -> AgentGraphResponse:
     """Restore a prior workflow version.
 
-    Saves the current latest definition as a new ``WorkflowVersion`` snapshot,
+    Saves the current latest definition as a new ``AgentGraphVersion`` snapshot,
     then copies the target version's definition as another new version, making
     it the effective current definition.
 
@@ -399,13 +399,13 @@ async def restore_workflow_version(
     Returns 404 if the workflow or the requested version number does not exist.
     """
     # 1. Fetch workflow — raises 404 if missing
-    workflow = await _resolve_workflow(workflow_id, db)
+    workflow = await _resolve_workflow(agent_graph_id, db)
 
-    # 2. Fetch the target WorkflowVersion row — raises 404 if missing
+    # 2. Fetch the target AgentGraphVersion row — raises 404 if missing
     target_result = await db.execute(
-        select(WorkflowVersion).where(
-            WorkflowVersion.workflow_id == workflow_id,
-            WorkflowVersion.version_number == version_number,
+        select(AgentGraphVersion).where(
+            AgentGraphVersion.agent_graph_id == agent_graph_id,
+            AgentGraphVersion.version_number == version_number,
         )
     )
     target_version = target_result.scalar_one_or_none()
@@ -413,20 +413,20 @@ async def restore_workflow_version(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                f"Version {version_number} not found for workflow '{workflow_id}'."
+                f"Version {version_number} not found for workflow '{agent_graph_id}'."
             ),
         )
 
     # 3. Determine the next two version numbers: one to snapshot current, one for restored
-    latest = await _get_latest_version(workflow_id, db)
+    latest = await _get_latest_version(agent_graph_id, db)
     current_max = latest.version_number if latest else 0
     snapshot_version_number = current_max + 1
     restored_version_number = current_max + 2
 
     # 4. Save current latest definition as a new snapshot (preserves history)
     if latest is not None:
-        snapshot = WorkflowVersion(
-            workflow_id=workflow.id,
+        snapshot = AgentGraphVersion(
+            agent_graph_id=workflow.id,
             version_number=snapshot_version_number,
             definition=latest.definition,
             change_summary=f"Auto-snapshot before restore to version {version_number}",
@@ -435,8 +435,8 @@ async def restore_workflow_version(
         db.add(snapshot)
 
     # 5. Copy target definition as a new version, making it the current head
-    restored = WorkflowVersion(
-        workflow_id=workflow.id,
+    restored = AgentGraphVersion(
+        agent_graph_id=workflow.id,
         version_number=restored_version_number if latest is not None else snapshot_version_number,
         definition=target_version.definition,
         change_summary=f"Restored from version {version_number}",
@@ -457,6 +457,6 @@ async def restore_workflow_version(
         version_number,
         new_version_number,
     )
-    return WorkflowResponse.model_validate(
+    return AgentGraphResponse.model_validate(
         _build_workflow_response(workflow, current_version_number=new_version_number)
     )

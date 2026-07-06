@@ -226,7 +226,8 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Deployment | An active deployment of a version | status, replicas, canary_percent, agent_identity_id | Links agent to version; machine identity provisioned at first deploy |
 | AgentIdentity | Machine identity for a deployed agent (K8s SA + SPIFFE) | k8s_service_account, sa_subject, issued_at, revoked_at | 1:1 with Deployment; sa_subject is the OPA policy key — see [authorization-model-spec.md](design/authorization-model-spec.md) |
 | Approval | A human decision on a high-risk action | status, context (production/playground), user_id, reviewer_id, expires_at | Production: routed to authorized reviewers; Playground: self-approved by asset owner |
-| ApprovalAuthority | Who can approve HITL for a given resource | resource_type (agent/tool/skill), resource_id, approver_user_id, approver_role | Scoped per-resource; admin-managed |
+| ApprovalAuthority | *(Deprecated — replaced by ArtifactRoleGrant)* Who can approve HITL for a given resource | resource_type, resource_id, approver_user_id, approver_role | Kept for historical records; new HITL routing uses artifact_role_grants |
+| ArtifactRoleGrant | Artifact-scoped RBAC role grant (Decision 25) | artifact_type (agent/workflow), artifact_id, role (agent-admin/approver), grantee_type (user/team), grantee_id | Many-per-user; creator auto-granted agent-admin; see [rbac-design.md](design/rbac-design.md) |
 | OPADecision | Audit log for every OPA policy evaluation | agent_identity_id, tool_name, decision, deny_reason, user_id, context (production/playground) | Written on every tool-call authorization |
 | OPAPolicy | Centralized bundle (OPA Bundle Server) | registered_agents (SA-keyed), team_grants | One bundle for all agents; sidecars poll every 30s; replaces per-agent ConfigMaps |
 | PublishRequest | Tracks asset transition from private to shared | asset_id, dependency_declaration, highest_risk_level, status | Created on publish; admin approves/rejects |
@@ -300,7 +301,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Component | Responsibility | Owns | Depends On |
 |-----------|---------------|------|------------|
 | Envoy Gateway | TLS, auth (JWT validation via Keycloak), rate limiting; routes all agent chat requests to Safety Orchestrator (not directly to agent pods); routes /api/v1/* to registry-api | Ingress rules, rate limit config | Keycloak (public key) |
-| Safety Orchestrator | Acts as input proxy — receives requests from Envoy, scans (LLM Guard + Presidio + NeMo in parallel), proxies sanitized request to agent pod; also called by agent SDK for output scanning and PII de-anonymization at tool-call time. Fail-closed: blocked or error → 422, never reaches agent. Must include a PodDisruptionBudget with `minAvailable: 1` — a rolling update that takes all scanner pods down simultaneously causes a complete platform traffic blackout. | Scan orchestration logic, PII session mappings (scoped to request lifetime) | LLM Guard, Presidio, NeMo |
+| Safety Orchestrator | Acts as input proxy — receives requests from Envoy, scans (LLM Guard + Presidio + NeMo in parallel), proxies sanitized request to agent pod; also called by agent SDK for output scanning and PII de-anonymization at tool-call time. **Must also scan Event Gateway webhook payloads** — external webhook bodies are a second untrusted-input entry point (alongside chat), so when this component is (re)enabled its scope includes wiring the event-gateway → input-scan path for event-driven agents (Phase 9 T-10 ships without this; input-scan deferred here). Fail-closed: blocked or error → 422, never reaches agent. Must include a PodDisruptionBudget with `minAvailable: 1` — a rolling update that takes all scanner pods down simultaneously causes a complete platform traffic blackout. | Scan orchestration logic, PII session mappings (scoped to request lifetime) | LLM Guard, Presidio, NeMo |
 | LLM Guard | Prompt injection detection (DeBERTa), toxicity, secrets. Must include a PodDisruptionBudget with `minAvailable: 1`. | ML models, thresholds | None (stateless) |
 | Presidio | PII detection and anonymization. Must include a PodDisruptionBudget with `minAvailable: 1`. | Entity recognizers, PII mapping | Postgres (mapping store) |
 | NeMo Guardrails | YARA injection rules, AlignScore fact-checking. Must include a PodDisruptionBudget with `minAvailable: 1`. | Rule definitions | None (stateless) |
@@ -313,6 +314,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | AgentShield Studio | Visual drag-and-drop agent builder (React + React Flow) with embedded Playground tab for interactive testing, trace inspection, eval runs, and dataset curation | Workflow definitions (JSON), playground session state | Registry API, Tool Registry, Langfuse API, Python Executor |
 | Declarative Runner | Generic pod that interprets visual workflow JSON at runtime | Runtime execution of no-code agents | Postgres, Safety Orchestrator, Langfuse, Tool Registry, Python Executor |
 | Python Executor | Sandboxed Python code runner — receives `{code, args}`, executes `run_tool(args)` in a subprocess, returns `{result, error}` | Subprocess isolation, per-call timeout | None (stateless microservice) |
+| Event Gateway (Phase 9) | Public webhook ingress (`POST /hooks/{agent}/{token}`) for event-driven agents. Validates SHA-256 token (constant-time, agent-scoped, uniform 401), 2D Redis sliding-window rate limit (per-agent + per-IP, fail-closed), replay protection (timestamp/nonce), filter evaluation (ReDoS-bounded), then dispatches to `/api/v1/internal/runs/start`. Persists every event to `agent_events` (matched/filtered/rejected). Only publicly-exposed service; threat-modeled (`docs/design/event-gateway-threat-model.md`). Ingress exposes ONLY `/hooks/*` — never `/internal`. | Token validation, rate/replay state (Redis) | Postgres, Redis, Registry API (internal endpoint) |
 | Tool Registry | First-class CRUD for tools (native, HTTP, MCP server, Python) and auth configs | Tool definitions, auth configs, agent-tool bindings | Postgres, K8s Secrets |
 | MCP Proxy | Manages connections to registered MCP servers, discovers tools, proxies calls | MCP server sessions, tool cache | MCP servers (remote), Tool Registry |
 | Langfuse | Tracing, cost tracking, eval scoring, dashboards | Traces, scores, datasets | Postgres, ClickHouse, Redis, MinIO |
@@ -399,6 +401,15 @@ POST   /api/v1/agents/{name}/deploy      — Deploy version
 POST   /api/v1/agents/{name}/rollback    — Rollback to previous
 POST   /api/v1/agents/{name}/promote     — Promote canary to full
 GET    /api/v1/agents/{name}/deployments — Deployment history
+GET    /api/v1/agents/{name}/stats       — Last-24h run aggregates (run_count, p50/p95 latency, error_rate, cost)
+GET    /api/v1/agents/{name}/events      — Event Gateway webhook log (Phase 9): paginated, filter by trigger_id + status (matched|filtered|rejected)
+POST   /api/v1/agents/{name}/triggers/{id}/rotate-token — Rotate a webhook trigger's token (Phase 9); returns plaintext + webhook_url ONCE, old hash invalidated
+GET    /api/v1/agents/{name}/health      — Mode-aware health signals (Phase 8):
+  — reactive:     p95_latency_ms, error_rate, runs_24h, cost_24h
+  — durable:      awaiting_approval_count, failed_24h, avg_duration_ms
+  — scheduled:    last_run_status, next_fire_at, missed_fires
+  — event-driven: match_rate_24h, rejected_count_24h
+  — rolled up to health = healthy | degraded | failing (Studio agent-list dots)
 
 POST   /api/v1/agents/{name}/quarantine
   — Immediately applies a dynamic NetworkPolicy blocking all egress from the agent pod
@@ -962,6 +973,22 @@ You write a natural-language condition on the edge (e.g., "the user mentioned a 
 
 A Monaco editor embedded in Studio allows users to write `agent.py` directly in the browser. A Kaniko build service compiles it into a Docker image without requiring a local toolchain. Users never need to clone the repo, install Python, or run Docker locally to create SDK agents. The platform handles the full build-push-deploy loop from a browser tab.
 
+### Execution-Mode Runtime + Memory (Phase 3 design, deferred)
+
+Four first-class execution modes (reactive / durable / scheduled / event-driven) plus layered agent memory are designed but not yet implemented. Specs:
+- `docs/design/execution-models-and-memory.md` — backend/data model (revised by Decisions 20–21)
+- `docs/design/playground-execution-modes.md` — pre-publish evaluate surface (all modes)
+- `docs/design/execution-modes-production.md` — production runtime + operations (all modes)
+
+Scope decisions recorded 2026-07-03 (ship-simple-first, ideal deferred):
+- **Reactive entry points** — both a consumer chat page *and* a public API endpoint for third-party integration.
+- **Failure alerting** — launches **email-only**; multi-channel (Slack / webhook / PagerDuty), per-agent routing, and digests are future work. _Implemented (Phase 8):_ `agent_triggers.alert_email` + `alert_on_failure` columns; when an internal (scheduled/webhook) run completes `status=failed`, `alerting.dispatch_failure_alert` emails the configured recipient over SMTP (`SMTP_HOST/PORT/FROM` env; log-only fallback when `SMTP_HOST` unset). Configured per-trigger in Studio Settings.
+- **Webhook token rotation** — launches **manual** (button); automatic expiry + dual-token overlap during cutover is future work.
+- **System-run identity** — launches with a service-account name string as the run principal (scheduler/webhook runs); a dedicated managed Keycloak service principal with scoped RBAC + full audit is future work.
+- **Internal-auth on `/api/v1/internal/*`** — the cluster-internal run-start endpoint (called by scheduler + event-gateway) launches protected by **NetworkPolicy only** (Phase 9 decision 2026-07-05). Adding a shared internal token / mTLS between callers and registry-api — so a rogue in-namespace pod can't dispatch runs freely — is a tracked future improvement (see `docs/design/event-gateway-threat-model.md` T-8).
+
+Also resolved 2026-07-03 (v1, not deferred): reviewer approval view is **anonymized** (PII never shown to reviewer/LLM/agents); scheduler runs **2 replicas + distributed lock**; long-running run timeout is a **configurable** per-agent setting.
+
 ---
 
 ## Phased Rollout
@@ -1080,14 +1107,22 @@ Authorization covers three lifecycle stages: authoring (private workspace), cont
 
 **Asset lifecycle** — assets move through `private → pending_review → published`. Admin approval gates the transition and grants access to specific teams. A team must have an active grant to every tool in an agent's dependency graph before deployment is permitted.
 
-**HITL approval authority** — approval rights are scoped per-agent, per-tool, or per-skill via an `approval_authority` table. Reviewers see only requests within their granted scope. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
+**HITL approval authority** — approval rights are scoped per-agent via the `approver` artifact-scoped role (see RBAC below). Reviewers see only HITL requests for agents they hold the `approver` role on. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
+
+**Platform RBAC (Decision 25)** — two-tier role model for control-plane authorization:
+
+> **Full spec**: [`docs/design/rbac-design.md`](design/rbac-design.md)
+
+- **Global roles** (one per user, stored in `user_team_assignments.role`): `platform-admin` (full access), `contributor` (create/deploy sandbox/submit publish), `viewer` (read-only, no playground)
+- **Artifact-scoped roles** (many per user, stored in `artifact_role_grants`): `agent-admin` (manage production deployments, delegate roles), `approver` (receive and decide HITL requests)
+- Grants target users or teams (polymorphic grantee). Creator auto-receives `agent-admin` on artifact creation. Production deploy requires `platform-admin` or `agent-admin`. HITL routed to `approver` holders.
 
 **Implementation phasing** (3 phases — see spec for detail):
 - Phase 1: OPA Bundle Server + K8s SA tokens + agent_class field (replaces per-agent ConfigMaps)
 - Phase 2: publish/grant lifecycle + deploy gate in Registry API
 - Phase 3: migrate from OPA sidecar per-pod to centralized Waypoint + OPA (Option B — no intermediate phase)
 
-Key decisions captured in [`docs/decisions.md`](decisions.md) (D16–D19).
+Key decisions captured in [`docs/decisions.md`](decisions.md) (D16–D19, D25).
 
 ---
 

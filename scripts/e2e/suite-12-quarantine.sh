@@ -44,6 +44,11 @@ FAIL=0
 MANUAL=0
 AGENT_CREATED=false
 
+# Inline pass/fail helpers (used by the G5 trace-propagation checks below,
+# alongside the run_test() harness). Accept an optional description.
+pass() { echo "  PASS: ${1:-check}"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: ${1:-check}"; FAIL=$((FAIL + 1)); }
+
 run_test() {
   local desc="$1"
   local code="$2"

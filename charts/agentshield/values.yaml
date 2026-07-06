@@ -40,7 +40,7 @@ global:
   storageClass: ""
 
   # Hostname (ClusterIP service name) of PgBouncer — all services connect here
-  postgresHost: "agentshield-pgbouncer"
+  postgresHost: "agentshield-postgresql"
 
   # Internal hostname of Langfuse web service for SDK tracing
   langfuseHost: "http://agentshield-langfuse-web:3000"
@@ -56,30 +56,38 @@ global:
   imagePullSecrets: []
 
 # ── Sub-chart enable flags ────────────────────────────────────────────────────
-# Set a flag to false to skip a component (e.g. if you bring your own Postgres)
+# NOTE: these short toggles are intentionally kept in sync with the detailed
+# per-component blocks further down. Because YAML resolves duplicate top-level
+# keys as last-wins, the DETAILED block for each component (below) is the
+# authoritative one — the flags here are set to the same values for clarity and
+# safety. Default composition = the known-good local/single-node platform:
+# heavy governance sidecars (safety-orchestrator, llm-guard, presidio, nemo,
+# portkey) and OPA/appsmith are OFF by default; keycloak/minio/pgbouncer/
+# clickhouse Bitnami sub-charts are OFF because raw templates / langfuse provide
+# those components. Enable any of them per-environment as needed.
 postgresql:
   enabled: true
 
 pgbouncer:
-  enabled: true
+  enabled: false
 
 redis:
   enabled: true
 
 minio:
-  enabled: true
+  enabled: false
 
 keycloak:
-  enabled: true
+  enabled: false
 
 langfuse:
   enabled: true
 
 clickhouse:
-  enabled: true
+  enabled: false
 
 appsmith:
-  enabled: true
+  enabled: false
 
 registry-api:
   enabled: true
@@ -87,23 +95,47 @@ registry-api:
 deploy-controller:
   enabled: true
 
-safety-orchestrator:
+python-executor:
   enabled: true
+
+scheduler:
+  enabled: true
+
+# event-gateway: Phase 9 public webhook ingress. Image tag + tunables come from
+# the sub-chart defaults (charts/event-gateway/values.yaml); Ingress + L4
+# NetworkPolicy are OFF by default there (local Docker Desktop has no ingress
+# controller / non-enforcing CNI — tests hit the Service in-cluster).
+event-gateway:
+  enabled: true
+
+# envoy-gateway is a stub sub-chart (no templates yet) — keep OFF until implemented.
+envoy-gateway:
+  enabled: false
+
+# Postgres PV reclaim=Retain guard hook. OFF by default: it needs a kubectl image
+# (bitnami/kubectl) that may be unpullable offline, and a failed Helm hook fails
+# the release. Enable only where that image is available; otherwise patch the PV
+# reclaim policy manually once (see docs/runbooks/postgres-backup.md).
+pvRetainHook:
+  enabled: false
+
+safety-orchestrator:
+  enabled: false
 
 llm-guard:
-  enabled: true
+  enabled: false
 
 presidio:
-  enabled: true
+  enabled: false
 
 nemo:
-  enabled: true
+  enabled: false
 
 portkey:
-  enabled: true
+  enabled: false
 
 opa:
-  enabled: true
+  enabled: false
 
 studio:
   enabled: true
@@ -124,12 +156,12 @@ postgresql:
   primary:
     persistence:
       enabled: true
-      size: 20Gi
+      size: 5Gi
       # storageClass inherits global.storageClass if set
 
     replication:
-      synchronousCommit: "on"
-      numSynchronousReplicas: 1
+      synchronousCommit: "off"
+      numSynchronousReplicas: 0
 
     initdb:
       # Post-boot SQL: create all platform databases and users.
@@ -180,7 +212,7 @@ postgresql:
           psql -v ON_ERROR_STOP=1 -U postgres -c "ALTER ROLE appsmith_user WITH PASSWORD '${PW}'"
 
   readReplicas:
-    replicaCount: 1
+    replicaCount: 0
     persistence:
       enabled: true
       size: 20Gi
@@ -190,7 +222,7 @@ postgresql:
 
 # ── PgBouncer (Bitnami) ───────────────────────────────────────────────────────
 pgbouncer:
-  enabled: true
+  enabled: false
 
   # PgBouncer connects to the Postgres primary service.
   postgresql:
@@ -227,7 +259,7 @@ redis:
   master:
     persistence:
       enabled: true
-      size: 8Gi
+      size: 1Gi
     # AOF persistence for durability
     extraFlags:
       - "--appendonly yes"
@@ -238,7 +270,7 @@ redis:
 
 # ── MinIO (Bitnami) ───────────────────────────────────────────────────────────
 minio:
-  enabled: true
+  enabled: false
 
   auth:
     existingSecret: minio-credentials
@@ -261,7 +293,7 @@ minio:
 
 # ── Keycloak (Bitnami) ────────────────────────────────────────────────────────
 keycloak:
-  enabled: true
+  enabled: false
 
   auth:
     adminUser: admin
@@ -461,7 +493,7 @@ clickhouse:
 
 # ── Appsmith (Community Edition) ──────────────────────────────────────────────
 appsmith:
-  enabled: true
+  enabled: false
 
   persistence:
     enabled: true
@@ -482,12 +514,22 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.2"
+    tag: "0.2.63"
     pullPolicy: IfNotPresent
 
   service:
     type: ClusterIP
     port: 8000
+
+  # Failure-alert SMTP (Phase 8). host="" ⇒ alerting runs log-only (no email).
+  # Set host/port/from to deliver; existingSecret+userKey/passwordKey for auth.
+  smtp:
+    host: ""
+    port: 25
+    from: "alerts@agentshield.local"
+    existingSecret: ""
+    userKey: "username"
+    passwordKey: "password"
 
   env:
     DATABASE_URL:
@@ -529,8 +571,12 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.0"
+    tag: "0.1.7"
     pullPolicy: IfNotPresent
+
+  # Image tag used for the declarative-runner pods the controller provisions
+  # for declarative/durable agents. Must be a real, built tag (not "latest").
+  declarativeRunnerTag: "0.1.7"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -550,7 +596,7 @@ deploy-controller:
 
 # ── Safety Orchestrator (local sub-chart) ─────────────────────────────────────
 safety-orchestrator:
-  enabled: true
+  enabled: false
 
   # Scanner enable flags — set to false to make the orchestrator skip that
   # scanner entirely (pass-through, no fail-closed). Should match the
@@ -603,7 +649,7 @@ safety-orchestrator:
 
 # ── LLM Guard (local sub-chart) ───────────────────────────────────────────────
 llm-guard:
-  enabled: true
+  enabled: false
 
   replicaCount: 2
 
@@ -631,7 +677,7 @@ llm-guard:
 
 # ── Presidio (local sub-chart) ────────────────────────────────────────────────
 presidio:
-  enabled: true
+  enabled: false
 
   replicaCount: 1
 
@@ -668,7 +714,7 @@ presidio:
 
 # ── NeMo Guardrails (local sub-chart) ─────────────────────────────────────────
 nemo:
-  enabled: true
+  enabled: false
 
   replicaCount: 1
 
@@ -694,7 +740,7 @@ nemo:
 
 # ── Portkey OSS (local sub-chart) ─────────────────────────────────────────────
 portkey:
-  enabled: true
+  enabled: false
 
   replicaCount: 1
 
@@ -736,7 +782,7 @@ portkey:
 # Note: per-agent OPA sidecars are injected by the Deploy Controller, not this chart.
 # This sub-chart runs a standalone OPA instance for policy bundle hosting and audit.
 opa:
-  enabled: true
+  enabled: false
 
   replicaCount: 1
 
@@ -772,7 +818,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.0"
+    tag: "0.1.47"
     pullPolicy: IfNotPresent
 
   service:

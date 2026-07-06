@@ -146,7 +146,8 @@ async def deploy_agent(
     - Deployer team must match agent owner team OR have a cross-team AssetGrant (403).
     - All tools assigned to the agent must have an active AssetGrant for deployer's team (422).
     - No tool may have risk_level='critical' (422).
-    - Version must have ``eval_passed=True`` (422 if not).
+    - Version must have ``eval_passed=True`` **only when environment='production'** (422 if not);
+      sandbox/staging/canary deploys are ungated (the eval gate moved to publish — Decision 20).
 
     Returns 201 with the new Deployment in ``pending`` status (deploy-controller picks it up).
     """
@@ -232,35 +233,38 @@ async def deploy_agent(
             },
         )
 
-    # ── Pre-flight gate 3: eval gate (already existed) ────────────────────────
-    # Eval gate — only passed versions may be deployed
-    if not version.eval_passed:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Version '{body.version_id}' has not passed evaluation "
-                "(eval_passed=False). Run evals before deploying."
-            ),
-        )
+    # ── Pre-flight gate 3 + 3b: eval gates — PRODUCTION ONLY (Decision 20) ─────
+    # Sandbox/staging/canary deploys are ungated so an agent can be deployed and
+    # evaluated in the playground before it earns eval_passed. The eval gate now
+    # lives on PUBLISH (see routers/agents.py publish_agent).
+    if body.environment == "production":
+        # Gate 3: eval gate — only passed versions may reach production
+        if not version.eval_passed:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Version '{body.version_id}' has not passed evaluation "
+                    "(eval_passed=False). Run evals before deploying to production."
+                ),
+            )
 
-    # ── Pre-flight gate 3b: adversarial eval gate ────────────────────────────
-    # Adversarial eval required when the version declares high/critical-risk tools
-    version_tools_list = version.tools or []
-    has_risky_tools = any(
-        isinstance(t, dict) and t.get("risk", "low") in ("high", "critical")
-        for t in version_tools_list
-    )
-    has_risky_bound_tools = any(
-        t.risk_level in ("high", "critical") for t in agent_tools
-    )
-    if (has_risky_tools or has_risky_bound_tools) and not version.adversarial_eval_passed:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Version '{body.version_id}' has not passed adversarial evaluation "
-                "(adversarial_eval_passed=False). Run adversarial evals before deploying."
-            ),
+        # Gate 3b: adversarial eval required when the version declares high/critical-risk tools
+        version_tools_list = version.tools or []
+        has_risky_tools = any(
+            isinstance(t, dict) and t.get("risk", "low") in ("high", "critical")
+            for t in version_tools_list
         )
+        has_risky_bound_tools = any(
+            t.risk_level in ("high", "critical") for t in agent_tools
+        )
+        if (has_risky_tools or has_risky_bound_tools) and not version.adversarial_eval_passed:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Version '{body.version_id}' has not passed adversarial evaluation "
+                    "(adversarial_eval_passed=False). Run adversarial evals before deploying to production."
+                ),
+            )
 
     # Resolve LLM provider and write K8s Secret if configured
     llm_secret_name = None

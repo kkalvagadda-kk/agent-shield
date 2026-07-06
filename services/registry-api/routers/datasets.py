@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import get_optional_user
 from db import get_db
 from models import PlaygroundDataset
 from schemas import (
@@ -62,12 +63,14 @@ async def _resolve_dataset(
 )
 async def list_datasets(
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[PlaygroundDatasetResponse]:
-    """List datasets owned by the caller (or all if no header)."""
+    """List datasets owned by the caller."""
+    caller = (user or {}).get("sub") or x_user_sub
     q = select(PlaygroundDataset).order_by(PlaygroundDataset.created_at.desc())
-    if x_user_sub:
-        q = q.where(PlaygroundDataset.owner_user_id == x_user_sub)
+    if caller:
+        q = q.where(PlaygroundDataset.owner_user_id == caller)
     result = await db.execute(q)
     return [PlaygroundDatasetResponse.model_validate(d) for d in result.scalars().all()]
 
@@ -84,9 +87,10 @@ async def list_datasets(
 async def create_dataset(
     body: PlaygroundDatasetCreate,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PlaygroundDatasetResponse:
-    caller = x_user_sub or "dev"
+    caller = (user or {}).get("sub") or x_user_sub or "dev"
     ds = PlaygroundDataset(
         owner_user_id=caller,
         name=body.name,
@@ -109,9 +113,11 @@ async def create_dataset(
 async def get_dataset(
     dataset_id: uuid.UUID,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PlaygroundDatasetResponse:
-    ds = await _resolve_dataset(dataset_id, x_user_sub, db, require_owner=False)
+    caller = (user or {}).get("sub") or x_user_sub
+    ds = await _resolve_dataset(dataset_id, caller, db, require_owner=False)
     return PlaygroundDatasetResponse.model_validate(ds)
 
 
@@ -127,9 +133,11 @@ async def update_dataset(
     dataset_id: uuid.UUID,
     body: PlaygroundDatasetUpdate,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PlaygroundDatasetResponse:
-    ds = await _resolve_dataset(dataset_id, x_user_sub, db, require_owner=True)
+    caller = (user or {}).get("sub") or x_user_sub
+    ds = await _resolve_dataset(dataset_id, caller, db, require_owner=True)
     if body.name is not None:
         ds.name = body.name
     if body.items is not None:
@@ -150,9 +158,11 @@ async def update_dataset(
 async def delete_dataset(
     dataset_id: uuid.UUID,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    ds = await _resolve_dataset(dataset_id, x_user_sub, db, require_owner=True)
+    caller = (user or {}).get("sub") or x_user_sub
+    ds = await _resolve_dataset(dataset_id, caller, db, require_owner=True)
     await db.delete(ds)
     try:
         await db.flush()

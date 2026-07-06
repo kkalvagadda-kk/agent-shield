@@ -1,0 +1,6 @@
+apiVersion: v2
+name: scheduler
+description: AgentShield Scheduler — fires published scheduled agents on their cron expression (HA)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

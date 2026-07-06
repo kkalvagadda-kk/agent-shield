@@ -8,7 +8,7 @@ import {
   listPublishRequests,
   listSkills,
   listTools,
-  listWorkflows,
+  listAgentGraphs,
   rejectPublishRequest,
   type PublishRequest,
 } from "../api/registryApi";
@@ -40,7 +40,7 @@ export default function AdminPublishRequestsPage() {
   const { data: agentsPage }    = useQuery({ queryKey: ["pq-agents"],    queryFn: () => listAgents(200, 0, "active") });
   const { data: toolsPage }     = useQuery({ queryKey: ["pq-tools"],     queryFn: () => listTools(200, 0) });
   const { data: skillsPage }    = useQuery({ queryKey: ["pq-skills"],    queryFn: () => listSkills(200, 0) });
-  const { data: workflowsList } = useQuery({ queryKey: ["pq-workflows"], queryFn: () => listWorkflows() });
+  const { data: workflowsList } = useQuery({ queryKey: ["pq-agent-graphs"], queryFn: () => listAgentGraphs() });
 
   const assetNameMap = useMemo(() => {
     const m: Record<string, { name: string; description?: string | null; team?: string | null }> = {};

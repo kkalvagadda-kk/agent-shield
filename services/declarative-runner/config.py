@@ -31,6 +31,11 @@ DIRECT_DATABASE_URL: str = os.getenv("DIRECT_DATABASE_URL", "")
 # --- Identity injected by deploy controller ---
 AGENT_NAME: str = os.getenv("AGENT_NAME", "declarative-agent")
 
+# --- Composite-workflow mode (Decision 22, future-state) ---
+# When set by the deploy controller (deferred), this pod runs as a workflow
+# orchestrator rather than a single agent. Unset on all current deployments.
+COMPOSITE_WORKFLOW_ID: str | None = os.getenv("COMPOSITE_WORKFLOW_ID")
+
 # --- LLM provider ---
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "anthropic")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-6")

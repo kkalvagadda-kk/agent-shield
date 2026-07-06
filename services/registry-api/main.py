@@ -65,7 +65,9 @@ from routers.skills import router as skills_router
 from routers.teams import router as teams_router
 from routers.tools import router as tools_router
 from routers.versions import router as versions_router, versions_global_router
-from routers.workflows import router as workflows_router
+from routers.workflows import router as agent_graphs_router
+from routers.composite_workflows import router as composite_workflows_router
+from routers.triggers import router as triggers_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -79,6 +81,10 @@ logger = logging.getLogger(__name__)
 from routers.agent_tools import router as agent_tools_router
 from routers.admin_users import router as admin_users_router, teams_router as admin_teams_router
 from routers.chat import router as chat_router
+from routers.me import router as me_router
+from routers.memory import router as memory_router
+from routers.internal import router as internal_router
+from routers.events import router as events_router
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +164,9 @@ def create_app() -> FastAPI:
     app.include_router(versions_global_router)
     app.include_router(deployments_router)
     app.include_router(global_deployments_router)
-    app.include_router(workflows_router)
+    app.include_router(agent_graphs_router)
+    app.include_router(composite_workflows_router)
+    app.include_router(triggers_router)
 
     # --- Phase 2 gap routers ---
     app.include_router(approvals_router)
@@ -197,6 +205,18 @@ def create_app() -> FastAPI:
     # Mounts POST /api/v1/agents/{name}/chat and GET /api/v1/agents/{name}/chat/{run_id}/stream
     # Must come after agents_router to avoid route-ordering conflicts.
     app.include_router(chat_router)
+
+    # --- Memory router (Phase 6) ---
+    app.include_router(memory_router)
+
+    # --- Internal run-start router (Phase 7: scheduler/event gateway) ---
+    app.include_router(internal_router)
+
+    # --- Agent events router (Phase 9: event gateway webhook log) ---
+    app.include_router(events_router)
+
+    # --- Current user router ---
+    app.include_router(me_router)
 
     # --- System endpoints ---
     @app.get(

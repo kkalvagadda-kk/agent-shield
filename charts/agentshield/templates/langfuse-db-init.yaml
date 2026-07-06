@@ -1,15 +1,22 @@
 {{- if (index .Values "langfuse" "enabled") }}
-# Pre-install/upgrade Job that creates the `langfuse` database if it doesn't exist.
+# Post-install/upgrade Job that creates the `langfuse` database if it doesn't exist.
 # The PostgreSQL initdb scripts in the postgresql sub-chart only run on the very
-# first PVC init, so this hook ensures the DB is present on fresh installs even
-# when the PVC was pre-formatted or the initdb scripts were skipped.
+# first PVC init, so this hook ensures the DB is present even when the PVC was
+# pre-formatted or the initdb scripts were skipped.
+#
+# NOTE: this MUST be a post-install hook, not pre-install. Postgres is a normal
+# chart resource that Helm only creates after all pre-install hooks succeed — so
+# a pre-install hook waiting on Postgres deadlocks on a fresh install (the hook
+# waits for a Postgres that can't deploy until the hook finishes). Running it
+# post-install lets Postgres come up first; the retry loop below then waits for
+# readiness before creating the langfuse DB.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: {{ .Release.Name }}-langfuse-db-init
   namespace: {{ .Release.Namespace }}
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "-10"
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
   labels:

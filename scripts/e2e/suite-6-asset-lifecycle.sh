@@ -39,11 +39,48 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+CRITICAL_TOOL_ID=""
+cleanup() {
+  echo ""
+  echo "==> Cleanup..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+  if [ -n "$CRITICAL_TOOL_ID" ]; then
+    kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+  fi
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/?limit=200', timeout=5)
+    agents = json.loads(r.read()).get('items', [])
+    for a in agents:
+        if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
+            try:
+                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE'), timeout=5)
+            except Exception: pass
+except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 PASS=0
 FAIL=0
 MANUAL=0
 
-AGENT_NAME="publish-test-s6-agent"
+# Timestamped so a soft-deleted (deprecated) agent from a prior run can't cause
+# a name conflict at T-S6-001 (agents are soft-deleted; the name stays reserved).
+AGENT_NAME="publish-test-s6-agent-$(date +%s)"
+# Same for the critical tool (a fixed name lingers and 409s on re-run).
+CRITICAL_TOOL_NAME="s6-critical-tool-$(date +%s)"
 
 run_test() {
   local desc="$1"
@@ -143,7 +180,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/tools/',
     data=json.dumps({
-        'name': 's6-critical-tool',
+        'name': '${CRITICAL_TOOL_NAME}',
         'type': 'native',
         'risk_level': 'critical',
         'description': 'Suite 6 critical risk test tool'
@@ -215,6 +252,19 @@ r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
 "
 fi
+
+# Create an eval-passed version so the publish gate (Decision 20) is satisfied.
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+req = urllib.request.Request(
+    'http://localhost:8000/api/v1/agents/${AGENT_NAME}/versions',
+    data=json.dumps({'image_tag': 'registry.internal/s6-publish:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+try:
+    urllib.request.urlopen(req)
+except Exception as e:
+    print('s6 version create:', e)
+" 2>/dev/null || true
 
 PUBLISH_REQUEST_ID_1=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
@@ -461,7 +511,7 @@ assert r.status == 204, f'expected 204 got {r.status}'
 "
 
 if [ -n "$CRITICAL_TOOL_ID" ]; then
-  run_test "Cleanup: DELETE /tools/s6-critical-tool (id=${CRITICAL_TOOL_ID:0:8}...) → 204" "
+  run_test "Cleanup: DELETE /tools/${CRITICAL_TOOL_NAME} (id=${CRITICAL_TOOL_ID:0:8}...) → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}',
@@ -492,7 +542,7 @@ ts = '${TS6LG}'
 ag = json.dumps({'name': 'high-risk-gate-' + ts, 'team': 'platform',
                   'description': 'gate test', 'risk_level': 'high'}).encode()
 try:
-    r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
+    r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
         data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
     agent = json.loads(r.read())
     agent_name = agent.get('name')
@@ -583,7 +633,7 @@ agent_name = 'crit-tool-gate-' + ts
 
 ag = json.dumps({'name': agent_name, 'team': 'platform', 'description': 'gate test'}).encode()
 try:
-    urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
+    urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
         data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
@@ -636,6 +686,26 @@ except urllib.error.HTTPError as e:
 "
 
 echo ""
+
+# Cleanup deploy-gate test agents (best-effort)
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/?limit=200', timeout=5)
+    agents = json.loads(r.read()).get('items', [])
+    for a in agents:
+        if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
+            req = urllib.request.Request(
+                'http://localhost:8000/api/v1/agents/' + a['name'],
+                method='DELETE')
+            try:
+                urllib.request.urlopen(req, timeout=5)
+                print('  deleted: ' + a['name'])
+            except Exception:
+                pass
+except Exception:
+    pass
+" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Summary

@@ -39,7 +39,10 @@ echo "--- T-S3-001..T-S3-005: Delegating to smoke-test-cp3-safety.sh ---"
 echo "    (covers injection block, jailbreak block, PII detection, fail-closed, output PII redaction)"
 echo ""
 SAFETY_SCRIPT="${SCRIPT_DIR}/../smoke-test-cp3-safety.sh"
-if [ ! -f "$SAFETY_SCRIPT" ]; then
+if ! kubectl get svc agentshield-safety-orchestrator -n "$NAMESPACE" >/dev/null 2>&1; then
+  check_manual "T-S3-001..005: safety-orchestrator not deployed (enabled=false) — SKIPPING safety scans" \
+    "Enable safety-orchestrator (safety-orchestrator.enabled=true) and re-run to exercise injection/jailbreak/PII scanning."
+elif [ ! -f "$SAFETY_SCRIPT" ]; then
   fail "T-S3-001..005: smoke-test-cp3-safety.sh not found at $SAFETY_SCRIPT"
 else
   if NAMESPACE="$NAMESPACE" bash "$SAFETY_SCRIPT" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; then

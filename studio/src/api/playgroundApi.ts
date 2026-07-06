@@ -1,6 +1,4 @@
-import axios from "axios";
-
-const http = axios.create({ baseURL: "/api/v1" });
+import { http } from "./registryApi";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,9 +11,37 @@ export interface PlaygroundRun {
   context: string;
   sandbox: boolean;
   input_message: string | null;
+  execution_shape: "reactive" | "durable";
+  input_payload: Record<string, unknown> | null;
+  trigger_type: string | null;
+  trigger_payload: Record<string, unknown> | null;
   status: string;
   started_at: string | null;
   completed_at: string | null;
+  output_text: string | null;
+}
+
+export interface StepUpdateEvent {
+  event: "step_update";
+  step_number: number;
+  step_name: string;
+  status: string;
+  output?: unknown;
+  approval_id?: string;
+}
+
+export interface DurableRunResponse {
+  run_id: string;
+  stream_url: string;
+  execution_shape: string;
+}
+
+export interface TestEventResponse {
+  matched: boolean;
+  reason: string;
+  trigger_id?: string;
+  run_id?: string;
+  stream_url?: string;
 }
 
 export interface PlaygroundDataset {
@@ -169,5 +195,61 @@ export async function getEvalRun(id: string): Promise<EvalRun> {
 
 export async function getEvalRunResults(id: string): Promise<EvalRunResult[]> {
   const { data } = await http.get<EvalRunResult[]>(`/playground/eval-runs/${id}/results`);
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Durable runs
+// ---------------------------------------------------------------------------
+export async function launchDurableRun(
+  agentName: string,
+  inputPayload: Record<string, unknown>,
+  versionId?: string
+): Promise<DurableRunResponse> {
+  const { data } = await http.post<DurableRunResponse>("/playground/runs", {
+    agent_name: agentName,
+    agent_version_id: versionId || undefined,
+    execution_shape: "durable",
+    input_payload: inputPayload,
+  });
+  return data;
+}
+
+export async function listRunSteps(
+  runId: string
+): Promise<StepUpdateEvent[]> {
+  const { data } = await http.get<StepUpdateEvent[]>(
+    `/playground/runs/${runId}/steps`
+  );
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// General playground run creation (used by RunNowPanel)
+// ---------------------------------------------------------------------------
+export async function createPlaygroundRun(
+  agentName: string,
+  inputMessage?: string,
+  versionId?: string
+): Promise<DurableRunResponse> {
+  const { data } = await http.post<DurableRunResponse>("/playground/runs", {
+    agent_name: agentName,
+    agent_version_id: versionId || undefined,
+    input_message: inputMessage || "Manual test-fire",
+  });
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// Test event (webhook trigger testing)
+// ---------------------------------------------------------------------------
+export async function testEvent(
+  agentName: string,
+  payload: Record<string, unknown>
+): Promise<TestEventResponse> {
+  const { data } = await http.post<TestEventResponse>("/playground/test-event", {
+    agent_name: agentName,
+    payload,
+  });
   return data;
 }

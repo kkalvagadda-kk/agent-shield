@@ -1,0 +1,118 @@
+import { useQuery } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
+import { useState } from "react";
+import { AgentRunItem, listAgentRuns } from "../../api/registryApi";
+
+const STATUS_BADGE: Record<string, string> = {
+  completed: "bg-green-100 text-green-700",
+  running: "bg-blue-100 text-blue-700",
+  failed: "bg-red-100 text-red-700",
+  cancelled: "bg-slate-100 text-slate-600",
+};
+
+const TRIGGER_ICONS: Record<string, string> = {
+  api: "🔌",
+  manual: "👤",
+  schedule: "⏰",
+  webhook: "🔗",
+};
+
+export default function RunsTab({ agentName }: { agentName: string }) {
+  const [triggerFilter, setTriggerFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+
+  const { data: runs, isLoading } = useQuery({
+    queryKey: ["agent-runs", agentName, triggerFilter, statusFilter],
+    queryFn: () =>
+      listAgentRuns({
+        agent_name: agentName,
+        trigger_type: triggerFilter || undefined,
+        status: statusFilter || undefined,
+        limit: 50,
+      }),
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12 text-slate-400">
+        <Loader2 size={16} className="animate-spin mr-2" />
+        Loading runs…
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex gap-3 mb-4">
+        <select
+          value={triggerFilter}
+          onChange={(e) => setTriggerFilter(e.target.value)}
+          className="text-xs border border-slate-200 rounded px-2 py-1"
+        >
+          <option value="">All triggers</option>
+          <option value="api">API</option>
+          <option value="manual">Manual</option>
+          <option value="schedule">Schedule</option>
+          <option value="webhook">Webhook</option>
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="text-xs border border-slate-200 rounded px-2 py-1"
+        >
+          <option value="">All statuses</option>
+          <option value="completed">Completed</option>
+          <option value="running">Running</option>
+          <option value="failed">Failed</option>
+          <option value="cancelled">Cancelled</option>
+        </select>
+      </div>
+
+      {!runs || runs.length === 0 ? (
+        <p className="text-sm text-slate-400 py-8 text-center">No runs yet.</p>
+      ) : (
+        <div className="border border-slate-200 rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-xs text-slate-500 uppercase tracking-wider">
+              <tr>
+                <th className="px-4 py-2">Trigger</th>
+                <th className="px-4 py-2">Status</th>
+                <th className="px-4 py-2">Duration</th>
+                <th className="px-4 py-2">Cost</th>
+                <th className="px-4 py-2">Run By</th>
+                <th className="px-4 py-2">Started</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {runs.map((run: AgentRunItem) => (
+                <tr key={run.id} className="hover:bg-slate-50">
+                  <td className="px-4 py-2">
+                    {TRIGGER_ICONS[run.trigger_type || ""] || "?"}{" "}
+                    <span className="text-xs text-slate-500">{run.trigger_type || "—"}</span>
+                  </td>
+                  <td className="px-4 py-2">
+                    <span className={`badge text-xs ${STATUS_BADGE[run.status] || "bg-slate-100 text-slate-600"}`}>
+                      {run.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-2 font-mono text-xs">
+                    {run.latency_ms != null ? `${run.latency_ms}ms` : "—"}
+                  </td>
+                  <td className="px-4 py-2 font-mono text-xs">
+                    {run.cost_usd != null ? `$${run.cost_usd.toFixed(4)}` : "—"}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-slate-500">
+                    {run.run_by || "—"}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-slate-500">
+                    {new Date(run.started_at).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -4,15 +4,25 @@ import "./index.css";
 import App from "./App";
 import { AuthContext, buildAuthValue } from "./contexts/AuthContext";
 import { initKeycloak, getParsedToken } from "./lib/keycloak";
+import { getMe } from "./api/registryApi";
 
 const root = createRoot(document.getElementById("root")!);
 
 initKeycloak()
-  .then(() => {
+  .then(async () => {
     const user = getParsedToken();
+    let team: string | null = null;
+    let role: string | null = null;
+    try {
+      const me = await getMe();
+      team = me.team;
+      role = me.role;
+    } catch (err) {
+      console.warn("Failed to fetch /me (team will be null):", err);
+    }
     root.render(
       <StrictMode>
-        <AuthContext.Provider value={buildAuthValue(user)}>
+        <AuthContext.Provider value={buildAuthValue(user, team, role)}>
           <App />
         </AuthContext.Provider>
       </StrictMode>

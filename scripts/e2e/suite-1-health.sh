@@ -41,6 +41,10 @@ for p in data.get('items', []):
     if any(s in name for s in SKIP_PATTERNS):
         continue
     phase = p['status'].get('phase', 'Unknown')
+    # Succeeded/Completed = a finished Job pod (e.g. eval-runner batch jobs, ttl-retained) —
+    # a valid terminal state, not an unhealthy platform pod.
+    if phase in ('Succeeded', 'Completed'):
+        continue
     if phase != 'Running':
         bad.append(name + ':' + phase)
         continue
@@ -147,6 +151,9 @@ print(' | '.join(results))
 " 2>/dev/null || echo "ERR")
   if echo "$SO_RESULT" | grep -q "health=200"; then
     pass "T-S1-006: Safety Orchestrator /health 200 ($SO_RESULT)"
+  elif ! kubectl get svc agentshield-safety-orchestrator -n "$NAMESPACE" >/dev/null 2>&1; then
+    check_manual "T-S1-006: safety-orchestrator not deployed (enabled=false) — SKIPPING" \
+      "Enable safety-orchestrator (safety-orchestrator.enabled=true) and re-run."
   else
     fail "T-S1-006: Safety Orchestrator check failed: $SO_RESULT"
   fi
@@ -171,7 +178,15 @@ if [ -n "$LF_POD" ]; then
   if echo "$LF_HEALTH" | grep -q '"status":"OK"'; then
     pass "T-S1-007: Langfuse web /api/public/health returned OK"
   else
-    fail "T-S1-007: Langfuse web health check failed: $LF_HEALTH"
+    # In-pod probe failed (the Langfuse Node image has no wget/curl). Fall back to
+    # the pod's own readiness — a Ready pod is the authoritative health signal.
+    LF_READY=$(kubectl get pod "$LF_POD" -n "$NAMESPACE" \
+      -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+    if [ "$LF_READY" = "true" ]; then
+      pass "T-S1-007: Langfuse web pod Ready (in-pod HTTP probe unavailable: $LF_HEALTH)"
+    else
+      fail "T-S1-007: Langfuse web not ready: $LF_HEALTH"
+    fi
   fi
 else
   check_manual "T-S1-007: Langfuse web pod not found" \

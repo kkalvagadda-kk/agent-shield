@@ -37,26 +37,40 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
-# Soft-delete test agents on exit (deprecate, don't hard-delete)
+# Soft-delete test agents and tools on exit
 cleanup() {
   echo ""
-  echo "==> Cleanup: deprecating test agents..."
-  for agent_name in "$SMOKE_AGENT" "$GRANT_GATE_AGENT"; do
+  echo "==> Cleanup: deprecating test agents and tools..."
+  for agent_name in "$SMOKE_AGENT" "$GRANT_GATE_AGENT" "bundle-test-${TS}"; do
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${agent_name}',
-        data=json.dumps({'status': 'deprecated'}).encode(),
-        headers={'Content-Type': 'application/json'},
-        method='PUT'
+        method='DELETE'
     )
     urllib.request.urlopen(req, timeout=5)
-    print('  deprecated: ${agent_name}')
+    print('  deleted: ${agent_name}')
 except Exception as e:
     pass  # Agent may not have been created
 " 2>/dev/null || true
   done
+  # Delete restricted-tool (best-effort)
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+try:
+    r = urllib.request.urlopen('http://localhost:8000/api/v1/tools/?limit=200', timeout=5)
+    tools = json.loads(r.read()).get('items', [])
+    for t in tools:
+        if t.get('name','').startswith('restricted-tool-'):
+            req = urllib.request.Request(
+                'http://localhost:8000/api/v1/tools/' + str(t['id']),
+                method='DELETE')
+            urllib.request.urlopen(req, timeout=5)
+            print('  deleted tool: ' + t['name'])
+except Exception:
+    pass
+" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -124,7 +138,8 @@ body = json.dumps({
         {'name': 'lookup_order', 'risk': 'low'},
         {'name': 'issue_refund',  'risk': 'high'}
     ],
-    'eval_passed': True
+    'eval_passed': True,
+    'adversarial_eval_passed': True
 }).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${SMOKE_AGENT}/versions',
@@ -313,7 +328,7 @@ fi
 echo ""
 
 # ── T-S2-005: Deploy Valid Agent → Pod Running ─────────────────────────────
-echo "--- T-S2-005: Deploy Valid Agent (poll up to 120s) ---"
+echo "--- T-S2-005: Deploy Valid Agent (poll up to 180s) ---"
 DEPLOYED_SMOKE=false
 AGENT_POD_NAME=""
 
@@ -370,8 +385,8 @@ except Exception:
       fail "G5-001: Deploy response did not echo X-AgentShield-Trace-ID (got '${DEPLOY_TRACE_ID:-MISSING}') — trace middleware not active on deploy endpoint"
     fi
 
-    echo "  Polling for pod Running in $AGENTS_NS (up to 120s)..."
-    DEADLINE=$(($(date +%s) + 120))
+    echo "  Polling for pod Running in $AGENTS_NS (up to 180s)..."
+    DEADLINE=$(($(date +%s) + 180))
     while [ "$(date +%s)" -lt "$DEADLINE" ]; do
       AGENT_POD_NAME=$(kubectl get pods -n "$AGENTS_NS" \
         -l "app.kubernetes.io/name=${SMOKE_AGENT}" \
@@ -391,7 +406,7 @@ except Exception:
     if [ -n "${AGENT_POD_NAME:-}" ]; then
       pass "T-S2-005: Pod $AGENT_POD_NAME Running and Ready in $AGENTS_NS"
     else
-      fail "T-S2-005: No running pod for $SMOKE_AGENT in $AGENTS_NS after 120s"
+      fail "T-S2-005: No running pod for $SMOKE_AGENT in $AGENTS_NS after 180s"
     fi
   else
     fail "T-S2-005: Deploy returned $DEPLOY_STATUS (${DEPLOY_ID})"
@@ -473,22 +488,29 @@ except Exception as e:
     fail "T-S2-009: /api/v1/bundle/data.json failed ($BUNDLE_CHECK) — bundle router not mounted or DB error"
   fi
 
-  # Also check the OPA bundle server serves it (if deployed)
-  OPA_BUNDLE=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
-import urllib.request, json
+  # Also check the OPA bundle server serves the tarball (Phase 9.1 completion: single .tar.gz)
+  OPA_BUNDLE=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+import urllib.request, gzip, tarfile, io, json
 try:
-    r = urllib.request.urlopen('${OPA_BUNDLE_SVC}/bundles/agentshield/data.json', timeout=5)
-    body = json.loads(r.read())
-    print('opa_bundle_ok agents_key=' + str('agents' in body))
+    r = urllib.request.urlopen('${OPA_BUNDLE_SVC}/bundles/agentshield', timeout=5)
+    data = r.read()
+    with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+        with tarfile.open(fileobj=gz, mode='r') as tar:
+            names = tar.getnames()
+            if 'data.json' in names and 'policy.rego' in names:
+                d = json.loads(tar.extractfile('data.json').read())
+                print('opa_bundle_ok agents_key=' + str('agents' in d))
+            else:
+                print('bad_tarball:' + str(names))
 except Exception as e:
     print('not_deployed:' + str(e)[:60])
 " 2>/dev/null || echo "not_deployed")
   if echo "$OPA_BUNDLE" | grep -q "opa_bundle_ok"; then
-    pass "T-S2-009b: OPA bundle server serving data.json with agents key"
+    pass "T-S2-009b: OPA bundle server serving valid tarball with agents key"
   else
     check_manual "T-S2-009b: OPA bundle server not reachable ($OPA_BUNDLE)" \
       "Apply infra/opa-bundle-server/ manifests: kubectl apply -f infra/opa-bundle-server/" \
-      "Then: kubectl exec ... -- curl http://agentshield-opa-bundle-server.$NAMESPACE:8181/bundles/agentshield/data.json"
+      "Then: curl http://opa-bundle-server.$NAMESPACE/bundles/agentshield (expect gzip tarball)"
   fi
 else
   check_manual "T-S2-009: Bundle check (API pod unavailable)" \

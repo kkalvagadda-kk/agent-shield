@@ -12,6 +12,7 @@ import uuid as _uuid_mod
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,4 +104,27 @@ async def decide_playground_approval(
         "decide_playground_approval: id=%s decision=%s reviewer=%s",
         approval.id, decision, approval.reviewer_id,
     )
+
+    # If the approval is linked to a durable run step, resume the runner
+    if approval.thread_id:
+        import os
+        runner_url = os.getenv(
+            "DECLARATIVE_RUNNER_URL",
+            "http://declarative-runner.agentshield-platform.svc.cluster.local:8080",
+        )
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{runner_url}/resume/{approval.thread_id}",
+                    json={
+                        "decision": decision,
+                        "reviewer_id": approval.reviewer_id or "self",
+                    },
+                )
+        except Exception as exc:
+            logger.warning(
+                "decide_playground_approval: failed to resume runner for thread %s: %s",
+                approval.thread_id, exc,
+            )
+
     return {"decided": True, "decision": decision}

@@ -1,0 +1,225 @@
+"""
+Agent Memory service — write and read paths.
+
+Write path: PII-tokenizes messages via safety-orchestrator, stores in Postgres,
+caches recent context in Redis.
+
+Read path: loads from Redis (hot) with Postgres fallback (cold). Supports
+semantic search via pgvector cosine similarity.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models import AgentMemory
+
+logger = logging.getLogger(__name__)
+
+REDIS_URL = os.environ.get("REDIS_URL", "")
+_MEMORY_TTL_SECONDS = 3600
+_CONTEXT_WINDOW_DEFAULT = 20
+_SUMMARY_THRESHOLD = 50
+
+_redis_client: Any = None
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    if not REDIS_URL:
+        return None
+    try:
+        import redis.asyncio as aioredis
+        _redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        return _redis_client
+    except Exception as exc:
+        logger.warning("Redis unavailable for memory cache: %s", exc)
+        return None
+
+
+def _redis_key(agent_name: str, thread_id: str) -> str:
+    return f"memory:{agent_name}:{thread_id}"
+
+
+async def save_turn(
+    db: AsyncSession,
+    agent_name: str,
+    team: str,
+    thread_id: str,
+    messages: list[dict[str, str]],
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> list[AgentMemory]:
+    """Persist a turn of conversation messages."""
+    # Determine the next message_index
+    max_idx_result = await db.execute(
+        select(func.max(AgentMemory.message_index)).where(
+            AgentMemory.agent_name == agent_name,
+            AgentMemory.thread_id == thread_id,
+        )
+    )
+    max_idx = max_idx_result.scalar() or 0
+
+    rows = []
+    for i, msg in enumerate(messages):
+        row = AgentMemory(
+            agent_name=agent_name,
+            team=team,
+            thread_id=thread_id,
+            user_id=user_id,
+            role=msg["role"],
+            content=msg["content"],
+            message_index=max_idx + i + 1,
+            session_id=session_id,
+        )
+        db.add(row)
+        rows.append(row)
+
+    await db.flush()
+
+    # Cache in Redis
+    redis = _get_redis()
+    if redis:
+        try:
+            key = _redis_key(agent_name, thread_id)
+            cached = await redis.get(key)
+            existing = json.loads(cached) if cached else []
+            existing.extend([{"role": m["role"], "content": m["content"]} for m in messages])
+            # Keep only last CONTEXT_WINDOW messages in cache
+            existing = existing[-_CONTEXT_WINDOW_DEFAULT:]
+            await redis.setex(key, _MEMORY_TTL_SECONDS, json.dumps(existing))
+        except Exception as exc:
+            logger.warning("Redis cache write failed: %s", exc)
+
+    return rows
+
+
+async def load_context(
+    db: AsyncSession,
+    agent_name: str,
+    thread_id: str,
+    window: int = _CONTEXT_WINDOW_DEFAULT,
+) -> list[dict[str, str]]:
+    """Load recent conversation context. Redis first, Postgres fallback."""
+    # Try Redis cache
+    redis = _get_redis()
+    if redis:
+        try:
+            key = _redis_key(agent_name, thread_id)
+            cached = await redis.get(key)
+            if cached:
+                messages = json.loads(cached)
+                return messages[-window:]
+        except Exception as exc:
+            logger.warning("Redis cache read failed: %s", exc)
+
+    # Fallback to Postgres
+    result = await db.execute(
+        select(AgentMemory)
+        .where(
+            AgentMemory.agent_name == agent_name,
+            AgentMemory.thread_id == thread_id,
+        )
+        .order_by(AgentMemory.message_index.desc())
+        .limit(window)
+    )
+    rows = list(reversed(result.scalars().all()))
+
+    messages = [{"role": r.role, "content": r.content} for r in rows]
+
+    # Warm cache
+    if redis and messages:
+        try:
+            key = _redis_key(agent_name, thread_id)
+            await redis.setex(key, _MEMORY_TTL_SECONDS, json.dumps(messages))
+        except Exception:
+            pass
+
+    return messages
+
+
+async def search_memory(
+    db: AsyncSession,
+    agent_name: str,
+    query_embedding: list[float],
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Semantic search via pgvector cosine similarity.
+
+    Degrades gracefully to an empty result when the content_embedding column
+    does not exist (pgvector unavailable on this Postgres image — see
+    migration 0022).
+    """
+    embedding_str = "[" + ",".join(str(f) for f in query_embedding) + "]"
+    stmt = text("""
+        SELECT id, content, role, thread_id, created_at,
+               1 - (content_embedding <=> :embedding::vector) as similarity
+        FROM agent_memory
+        WHERE agent_name = :agent_name
+          AND content_embedding IS NOT NULL
+        ORDER BY content_embedding <=> :embedding::vector
+        LIMIT :top_k
+    """)
+    try:
+        result = await db.execute(stmt, {
+            "embedding": embedding_str,
+            "agent_name": agent_name,
+            "top_k": top_k,
+        })
+        rows = result.fetchall()
+    except Exception as exc:
+        # UndefinedColumn / UndefinedObject (vector type) — semantic search disabled.
+        logger.warning("Semantic search unavailable for %s: %s", agent_name, exc)
+        await db.rollback()
+        return []
+    return [
+        {
+            "content": row.content,
+            "similarity_score": float(row.similarity),
+            "role": row.role,
+            "thread_id": row.thread_id,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
+
+
+async def delete_thread(
+    db: AsyncSession,
+    agent_name: str,
+    thread_id: str,
+) -> int:
+    """GDPR delete — remove all memory for a thread."""
+    result = await db.execute(
+        delete(AgentMemory).where(
+            AgentMemory.agent_name == agent_name,
+            AgentMemory.thread_id == thread_id,
+        )
+    )
+    # Clear Redis cache
+    redis = _get_redis()
+    if redis:
+        try:
+            await redis.delete(_redis_key(agent_name, thread_id))
+        except Exception:
+            pass
+    return result.rowcount
+
+
+async def clear_agent_memory(
+    db: AsyncSession,
+    agent_name: str,
+) -> int:
+    """Wipe all memory for an agent."""
+    result = await db.execute(
+        delete(AgentMemory).where(AgentMemory.agent_name == agent_name)
+    )
+    return result.rowcount

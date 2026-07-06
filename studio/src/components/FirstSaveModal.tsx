@@ -3,7 +3,7 @@ import axios from 'axios';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { X } from 'lucide-react';
-import { listTeams, createWorkflow } from '../api/registryApi';
+import { listTeams, createAgentGraph } from '../api/registryApi';
 import { useWorkflowStore } from '../stores/workflowStore';
 import { serializeWorkflow } from '../utils/workflowSerializer';
 
@@ -50,13 +50,13 @@ export default function FirstSaveModal({ onClose, onSaved }: FirstSaveModalProps
     setIsSaving(true);
     try {
       const definition = serializeWorkflow(nodes, edges);
-      const workflow = await createWorkflow({
+      const workflow = await createAgentGraph({
         name,
         team,
         description: description || undefined,
         definition,
       });
-      toast.success(`Workflow "${workflow.name}" saved`);
+      toast.success(`Agent graph "${workflow.name}" saved`);
       onSaved(workflow.id, workflow.name, workflow.team);
     } catch (err) {
       if (axios.isAxiosError(err) && err.response?.status === 409) {

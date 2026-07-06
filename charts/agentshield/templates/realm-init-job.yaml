@@ -214,10 +214,18 @@ spec:
                 | grep -c "^\"platform-admin\"" || true)
 
               if [ "${USER_EXISTS}" -eq 0 ]; then
+                # email/emailVerified/firstName/lastName are REQUIRED: Keycloak's
+                # declarative user profile (VERIFY_PROFILE action) rejects a
+                # direct-grant login with "Account is not fully set up" when these
+                # profile fields are missing, even with requiredActions=[].
                 /opt/keycloak/bin/kcadm.sh create users \
                   -r "${REALM}" \
                   -s username=platform-admin \
                   -s enabled=true \
+                  -s email=platform-admin@agentshield.local \
+                  -s emailVerified=true \
+                  -s firstName=Platform \
+                  -s lastName=Admin \
                   -s 'requiredActions=[]'
                 /opt/keycloak/bin/kcadm.sh set-password \
                   -r "${REALM}" \
@@ -240,6 +248,10 @@ spec:
                   -r "${REALM}" \
                   -s username=agent-reviewer \
                   -s enabled=true \
+                  -s email=agent-reviewer@agentshield.local \
+                  -s emailVerified=true \
+                  -s firstName=Agent \
+                  -s lastName=Reviewer \
                   -s 'requiredActions=[]'
                 /opt/keycloak/bin/kcadm.sh set-password \
                   -r "${REALM}" \

@@ -20,7 +20,7 @@ import Toolbar from './Toolbar';
 import FirstSaveModal from './FirstSaveModal';
 import { useWorkflowStore } from '../stores/workflowStore';
 import { serializeWorkflow } from '../utils/workflowSerializer';
-import { updateWorkflow, deployWorkflow as deployWorkflowApi } from '../api/registryApi';
+import { updateAgentGraph, deployAgentGraph as deployAgentGraphApi } from '../api/registryApi';
 
 // ---------------------------------------------------------------------------
 // Node type registry — http_tool removed (legacy only, not on canvas)
@@ -84,9 +84,9 @@ export default function Canvas() {
     setIsSaving(true);
     try {
       const definition = serializeWorkflow(store.nodes, store.edges);
-      const updated = await updateWorkflow(store.workflowId, { definition });
+      const updated = await updateAgentGraph(store.workflowId, { definition });
       store.markSaved(updated.id, updated.name, updated.team);
-      toast.success('Workflow saved');
+      toast.success('Agent graph saved');
     } catch (err) {
       toast.error(`Save failed: ${String(err)}`);
     } finally {
@@ -99,7 +99,7 @@ export default function Canvas() {
     if (!store.workflowId) return;
     setIsDeploying(true);
     try {
-      await deployWorkflowApi(store.workflowId);
+      await deployAgentGraphApi(store.workflowId);
       toast.success('Deployment started');
     } catch (err) {
       toast.error(`Deploy failed: ${String(err)}`);
@@ -193,7 +193,7 @@ export default function Canvas() {
           onSaved={(id, name, team) => {
             store.markSaved(id, name, team);
             setShowFirstSaveModal(false);
-            navigate(`/workflows/${id}`, { replace: true });
+            navigate(`/agent-graphs/${id}`, { replace: true });
           }}
         />
       )}

@@ -27,8 +27,8 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.dialects.postgresql import INET, JSONB, TIMESTAMP, UUID
+from sqlalchemy.orm import Mapped, foreign, mapped_column, relationship
 
 from db import Base
 
@@ -151,6 +151,15 @@ class Agent(Base):
         "LLMProvider", back_populates="agents", foreign_keys=[llm_provider_id]
     )
 
+    # Execution shape: reactive (single-shot) or durable (checkpointed, multi-step)
+    execution_shape: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Whether cross-session memory is enabled for this agent
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
     # Authorization model fields (Phase 9.1)
     # agent_class determines which OPA flow applies at runtime
     agent_class: Mapped[str | None] = mapped_column(
@@ -215,15 +224,18 @@ class AgentIdentity(Base):
 # ---------------------------------------------------------------------------
 # workflows  (declared before agent_versions to satisfy FK ordering)
 # ---------------------------------------------------------------------------
-class Workflow(Base):
-    __tablename__ = "workflows"
+class AgentGraph(Base):
+    # Renamed from Workflow (Decision 22): this is a SINGLE declarative agent's
+    # canvas graph. The name "workflows" now belongs to the composite executable
+    # (CompositeWorkflow below).
+    __tablename__ = "agent_graphs"
     __table_args__ = (
         CheckConstraint(
             "status IN ('draft','published','archived')",
-            name="ck_workflows_status",
+            name="ck_agent_graphs_status",
         ),
-        Index("idx_workflows_team", "team"),
-        Index("idx_workflows_status", "status"),
+        Index("idx_agent_graphs_team", "team"),
+        Index("idx_agent_graphs_status", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -247,30 +259,30 @@ class Workflow(Base):
     )
 
     # Relationships
-    versions: Mapped[list[WorkflowVersion]] = relationship(
-        "WorkflowVersion", back_populates="workflow", cascade="all, delete-orphan"
+    versions: Mapped[list["AgentGraphVersion"]] = relationship(
+        "AgentGraphVersion", back_populates="agent_graph", cascade="all, delete-orphan"
     )
-    agent_versions: Mapped[list[AgentVersion]] = relationship(
-        "AgentVersion", back_populates="workflow"
+    agent_versions: Mapped[list["AgentVersion"]] = relationship(
+        "AgentVersion", back_populates="agent_graph"
     )
 
 
 # ---------------------------------------------------------------------------
-# workflow_versions
+# agent_graph_versions  (renamed from workflow_versions — Decision 22)
 # ---------------------------------------------------------------------------
-class WorkflowVersion(Base):
-    __tablename__ = "workflow_versions"
+class AgentGraphVersion(Base):
+    __tablename__ = "agent_graph_versions"
     __table_args__ = (
-        UniqueConstraint("workflow_id", "version_number", name="uq_workflow_versions"),
-        Index("idx_workflow_versions_workflow_id", "workflow_id"),
+        UniqueConstraint("agent_graph_id", "version_number", name="uq_agent_graph_versions"),
+        Index("idx_agent_graph_versions_agent_graph_id", "agent_graph_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         _UUID, primary_key=True, server_default=_GEN_UUID
     )
-    workflow_id: Mapped[uuid.UUID] = mapped_column(
+    agent_graph_id: Mapped[uuid.UUID] = mapped_column(
         _UUID,
-        ForeignKey("workflows.id", ondelete="CASCADE"),
+        ForeignKey("agent_graphs.id", ondelete="CASCADE"),
         nullable=False,
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -282,7 +294,137 @@ class WorkflowVersion(Base):
     created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     # Relationships
-    workflow: Mapped[Workflow] = relationship("Workflow", back_populates="versions")
+    agent_graph: Mapped[AgentGraph] = relationship("AgentGraph", back_populates="versions")
+
+
+# ---------------------------------------------------------------------------
+# workflows (COMPOSITE executable) + workflow_members — Decision 22 (NEW)
+# ---------------------------------------------------------------------------
+class CompositeWorkflow(Base):
+    __tablename__ = "workflows"
+    __table_args__ = (
+        CheckConstraint(
+            "execution_shape IN ('reactive','durable')",
+            name="ck_workflows_execution_shape",
+        ),
+        CheckConstraint(
+            "orchestration IN ('sequential','supervisor','handoff','conditional')",
+            name="ck_workflows_orchestration",
+        ),
+        CheckConstraint(
+            "status IN ('draft','published','archived')",
+            name="ck_workflows_status",
+        ),
+        Index("idx_workflows_team", "team"),
+        Index("idx_workflows_status", "status"),
+        UniqueConstraint("name", "team", name="uq_workflows_name_team"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_shape: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'durable'")
+    )
+    memory_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    orchestration: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'sequential'")
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'draft'")
+    )
+    publish_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'private'")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    members: Mapped[list["WorkflowMember"]] = relationship(
+        "WorkflowMember", back_populates="workflow", cascade="all, delete-orphan"
+    )
+    edges: Mapped[list["WorkflowEdge"]] = relationship(
+        "WorkflowEdge", back_populates="workflow", cascade="all, delete-orphan"
+    )
+
+
+class WorkflowMember(Base):
+    __tablename__ = "workflow_members"
+    __table_args__ = (
+        Index("idx_workflow_members_agent_id", "agent_id"),
+    )
+
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("agents.id"), primary_key=True
+    )
+    role: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    routing: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'")
+    )
+    added_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    workflow: Mapped[CompositeWorkflow] = relationship(
+        "CompositeWorkflow", back_populates="members"
+    )
+    agent: Mapped["Agent"] = relationship("Agent")
+
+
+class WorkflowEdge(Base):
+    """A directed edge between two member agents of a composite workflow.
+
+    Edges are a cross-member construct (source → target), so they live in their
+    own table rather than in `workflow_members.routing`. `condition` drives
+    conditional-routing / handoff orchestration; blank/NULL = default (fallback)
+    edge. See `workflow_orchestrator.evaluate_condition` for the DSL.
+    """
+
+    __tablename__ = "workflow_edges"
+    __table_args__ = (
+        Index("idx_workflow_edges_workflow_id", "workflow_id"),
+        Index("idx_workflow_edges_source", "source_agent_id"),
+        Index("idx_workflow_edges_target", "target_agent_id"),
+        UniqueConstraint(
+            "workflow_id", "source_agent_id", "target_agent_id",
+            name="uq_workflow_edges_src_tgt",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    source_agent_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("agents.id"), nullable=False
+    )
+    target_agent_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("agents.id"), nullable=False
+    )
+    condition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    workflow: Mapped[CompositeWorkflow] = relationship(
+        "CompositeWorkflow", back_populates="edges"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +461,9 @@ class AgentVersion(Base):
     )
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     image_tag: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
+    agent_graph_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
-        ForeignKey("workflows.id"),
+        ForeignKey("agent_graphs.id"),
         nullable=True,
     )
     tools: Mapped[list[Any]] = mapped_column(
@@ -346,8 +488,8 @@ class AgentVersion(Base):
 
     # Relationships
     agent: Mapped[Agent] = relationship("Agent", back_populates="versions")
-    workflow: Mapped[Workflow | None] = relationship(
-        "Workflow", back_populates="agent_versions"
+    agent_graph: Mapped["AgentGraph | None"] = relationship(
+        "AgentGraph", back_populates="agent_versions"
     )
     deployments: Mapped[list[Deployment]] = relationship(
         "Deployment",
@@ -368,7 +510,7 @@ class Deployment(Base):
     __tablename__ = "deployments"
     __table_args__ = (
         CheckConstraint(
-            "environment IN ('production','staging','canary')",
+            "environment IN ('production','staging','canary','sandbox')",
             name="ck_deployments_env",
         ),
         CheckConstraint(
@@ -1055,6 +1197,12 @@ class PlaygroundRun(Base):
         Boolean, nullable=False, server_default=text("true")
     )
     input_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_shape: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    input_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    trigger_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    trigger_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
@@ -1066,6 +1214,7 @@ class PlaygroundRun(Base):
     )
     judge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     judge_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1158,12 +1307,16 @@ class AgentRun(Base):
     __tablename__ = "agent_runs"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('running','completed','failed','blocked')",
+            "status IN ('queued','running','completed','failed','blocked','awaiting_approval','cancelled')",
             name="ck_agent_runs_status",
         ),
         CheckConstraint(
             "context IN ('production','playground')",
             name="ck_agent_runs_context",
+        ),
+        CheckConstraint(
+            "trigger_type IN ('manual','api','schedule','webhook','workflow')",
+            name="ck_agent_runs_trigger_type",
         ),
         Index("ix_agent_runs_agent_name", "agent_name"),
         Index("ix_agent_runs_session_id", "session_id"),
@@ -1194,6 +1347,213 @@ class AgentRun(Base):
         _TSTZ, nullable=False, server_default=_NOW
     )
     completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    # Orchestration fields (Phase 1 execution-modes)
+    trigger_type: Mapped[str | None] = mapped_column(
+        String(16), nullable=True, server_default=text("'manual'")
+    )
+    run_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    team: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("agent_runs.id"), nullable=True
+    )
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    trigger_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    # Set only on a PARENT composite-workflow run (Decision 22). Child agent
+    # runs within a workflow leave this NULL and set parent_run_id instead.
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="SET NULL"), nullable=True
+    )
+    trigger_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Relationships
+    # run_steps.run_id has no DB-level FK (it's a polymorphic reference to either
+    # agent_runs or playground_runs — see migration 0023), so the join condition
+    # must be spelled out with an explicit foreign() annotation.
+    steps: Mapped[list["RunStep"]] = relationship(
+        "RunStep",
+        back_populates="run",
+        primaryjoin="AgentRun.id == foreign(RunStep.run_id)",
+        cascade="all, delete-orphan",
+    )
+
+
+# ---------------------------------------------------------------------------
+# run_steps  (durable run step tracking)
+# ---------------------------------------------------------------------------
+class RunStep(Base):
+    __tablename__ = "run_steps"
+    __table_args__ = (
+        UniqueConstraint("run_id", "step_number", name="uq_run_steps_run_step"),
+        CheckConstraint(
+            "status IN ('pending','running','completed','failed','awaiting_approval','cancelled')",
+            name="ck_run_steps_status",
+        ),
+        Index("idx_run_steps_run_id", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    # Polymorphic reference: run_id may point at either agent_runs.id (production
+    # durable runs) or playground_runs.id (playground durable runs). No DB-level
+    # FK is enforced because it cannot reference two tables; integrity is handled
+    # in the application layer. Kept indexed for lookup performance.
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID,
+        nullable=False,
+    )
+    step_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, server_default=text("'pending'")
+    )
+    started_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    output: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("approvals.id"),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    run: Mapped["AgentRun"] = relationship(
+        "AgentRun",
+        back_populates="steps",
+        primaryjoin="AgentRun.id == foreign(RunStep.run_id)",
+    )
+    approval: Mapped[Optional["Approval"]] = relationship("Approval")
+
+
+# ---------------------------------------------------------------------------
+# agent_triggers  (schedule + webhook trigger config)
+# ---------------------------------------------------------------------------
+class AgentTrigger(Base):
+    __tablename__ = "agent_triggers"
+    __table_args__ = (
+        CheckConstraint(
+            "trigger_type IN ('schedule','webhook')",
+            name="ck_agent_triggers_type",
+        ),
+        Index("idx_agent_triggers_agent", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("agents.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    # A trigger targets EITHER an agent OR a composite workflow (Decision 22).
+    # DB CHECK ck_agent_triggers_target enforces exactly one of the two is set.
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=True
+    )
+    trigger_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    cron_expression: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    timezone: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, server_default=text("'UTC'")
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    filter_conditions: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    # Per-schedule job parameters (Decision 24 follow-on): the JSON "job spec"
+    # fed to the agent as its input on each fire. Lets one deployed agent serve
+    # many scheduled jobs with different params. Schedule triggers only; NULL for
+    # webhooks (their payload is the inbound event).
+    input_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # Failure alerting (Phase 8): notify alert_email when a run for this
+    # trigger completes with status=failed. alert_on_failure gates it.
+    alert_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    alert_on_failure: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    agent: Mapped["Agent"] = relationship("Agent")
+
+
+# ---------------------------------------------------------------------------
+# agent_events — inbound webhook log (Phase 9 event gateway)
+# ---------------------------------------------------------------------------
+
+class AgentEvent(Base):
+    __tablename__ = "agent_events"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('matched','filtered','rejected')",
+            name="ck_agent_events_status",
+        ),
+        Index("idx_agent_events_trigger_received", "trigger_id", "received_at"),
+        Index("idx_agent_events_agent_received", "agent_name", "received_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    # trigger_id is a soft FK (ON DELETE SET NULL) so events survive trigger deletion
+    trigger_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("agent_triggers.id", ondelete="SET NULL"), nullable=True
+    )
+    agent_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    filter_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # run_id references agent_runs but stays FK-free (matched events only)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    # workflow_id is set when the event is matched to a workflow trigger (nullable)
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    source_ip: Mapped[str | None] = mapped_column(INET, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    trigger: Mapped["AgentTrigger"] = relationship("AgentTrigger")
+
+
+# ---------------------------------------------------------------------------
+# agent_memory — conversation history + semantic search
+# ---------------------------------------------------------------------------
+
+class AgentMemory(Base):
+    __tablename__ = "agent_memory"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('user','assistant','system','tool')",
+            name="ck_agent_memory_role",
+        ),
+        Index("ix_agent_memory_thread_msg", "thread_id", "message_index"),
+        Index("ix_agent_memory_agent_team", "agent_name", "team"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    agent_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    message_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1209,8 +1569,11 @@ __all__ = [
     "OPADecision",
     "Approval",
     "AgentPolicy",
-    "Workflow",
-    "WorkflowVersion",
+    "AgentGraph",
+    "AgentGraphVersion",
+    "CompositeWorkflow",
+    "WorkflowMember",
+    "WorkflowEdge",
     "PiiMapping",
     "AuthConfig",
     "MCPServer",
@@ -1227,4 +1590,8 @@ __all__ = [
     "EvalRun",
     "EvalRunResult",
     "AgentRun",
+    "RunStep",
+    "AgentTrigger",
+    "AgentEvent",
+    "AgentMemory",
 ]

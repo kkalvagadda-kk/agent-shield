@@ -28,6 +28,18 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+cleanup() {
+  echo ""
+  echo "==> Cleanup..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+try:
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE'), timeout=5)
+except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 echo "=== Suite 14: Consumer Chat (Phase B) ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -89,6 +101,10 @@ r = httpx.post('http://localhost:8000/api/v1/agents/',
 if r.status_code not in (200, 201, 409):
     print(f'agent create: {r.status_code} {r.text[:80]}')
     sys.exit(0)
+
+# Create an eval-passed version so the publish gate (Decision 20) is satisfied
+httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/versions',
+    json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)
 
 # Submit for publish
 pub = httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/publish',

@@ -1,6 +1,6 @@
-# AgentShield — Execution Models & Agent Memory Design
+# AgentShield — Execution Models & Memory: Backend & Data Model
 
-**Status**: DRAFT — Design complete, not yet implemented  
+**Status**: DRAFT v2 — revised 2026-07-03. **Backend / data-model spec** — UX lives in the experience docs (see intro). Not yet implemented  
 **Date**: 2026-06-27  
 **Author**: Karthik + Claude  
 **Phase**: 3 (follows P1 safety proxy + P2 canvas/skills)
@@ -13,24 +13,30 @@ AgentShield currently treats all agents as a single category: deploy a container
 
 Additionally, no agent in the platform today has memory. Every run is stateless. This means agents can't learn from prior sessions, can't maintain conversation context across turns, and can't accumulate domain-specific knowledge over time — all of which are table-stakes for enterprise agents.
 
-This document captures the full design for four first-class execution models and a layered memory system, including backend data model changes, new services, API contracts, and Studio UX.
+This document is the **backend & data-model spec** for four first-class execution models and a layered memory system: data model, migrations, API/SSE contracts, new services, multi-tenancy internals, and memory architecture. **Per-mode UX, wireframes, and user flows live in the experience docs** — [`playground-execution-modes.md`](./playground-execution-modes.md) (pre-publish evaluate) and [`execution-modes-production.md`](./execution-modes-production.md) (production operate). This spec is the source of truth for *how it's built*; those are the source of truth for *what the user sees*.
 
 ---
 
 ## 2. Execution Models
 
-### 2.1 Overview
+### 2.1 Two orthogonal dimensions
 
-Stateless Agents: They process each request in complete isolation. They have zero memory of previous interactions, making them highly predictable and easy to scale (e.g., standard API translation utilities).Short-Term Stateful Agents: They maintain a memory of the current active session or conversation context. Once the user closes the window or the script ends, the memory is cleared.Long-Term / Semantic Memory Agents: They leverage vector databases and graph databases to store user preferences, historical errors, and past solutions indefinitely. They pull this context back into their active memory whenever a relevant scenario occurs.
+> **Scope:** These models span the **whole agent lifecycle**, not just production. Execution shape and triggers are chosen at registration, then **created and evaluated in the playground / sandbox before publish** (see Decision 20 in `docs/decisions.md`): reactive agents are chatted with; durable agents are launched as *test runs* with their step + approval flow exercised; and scheduled / event-driven agents are **test-fired manually** — a sample payload through the real code path — rather than waiting for a cron tick or a live webhook. What is *production-only* is the **automatic** firing of triggers (cron on schedule, real inbound webhooks) once the agent is published and running unattended. So: the playground is where every mode is tested; production is where triggers fire on their own. The playground's interaction surface must therefore be **mode-aware**, not chat-only (see `docs/experience/playground.md`).
 
-An **execution model** describes how an agent is invoked, how long it runs, and what relationship it has with time and external events. It is orthogonal to `agent_type` (sdk vs declarative), which describes implementation. Both can be set independently.
+The original draft used a single `execution_model` enum with four values (reactive, long-running, scheduled, event-driven). That conflates two independent things, so this revision splits them:
 
-| Model | Invoked by | Duration | State | Primary UX pattern |
-|---|---|---|---|---|
-| **Reactive** | API call / user message | Milliseconds–seconds | Stateless per call | Chat + stream |
-| **Long-running** | Manual trigger or API | Minutes–hours | Stateful, checkpointed | Job tracker + approval inbox |
-| **Scheduled** | Time (cron) | Seconds–minutes | Stateless per run | Job scheduler + run history |
-| **Event-driven** | External event (webhook) | Seconds–minutes | Stateless per run | Trigger config + event log |
+- **Execution shape** — how a *single run* behaves once started: `reactive` (single-shot request → response) or `durable` (checkpointed, broken into named steps, can pause for HITL, survives pod restarts). Set per agent as `execution_shape`.
+- **Trigger** — what *starts* a run in production: `manual`, `api`, `schedule` (cron), or `webhook` (event). Stored as one or more rows in `agent_triggers`; an agent can have several triggers of mixed types.
+
+They compose freely, and both are orthogonal to `agent_type` (sdk vs declarative), which describes implementation:
+
+| Trigger ↓ / Shape → | reactive | durable |
+|---|---|---|
+| **manual / api** | chat assistant, classifier | interactive multi-step task w/ approvals |
+| **schedule (cron)** | daily data sync | weekly compliance report (multi-step + review) |
+| **webhook (event)** | PR-opened → quick check | payment-fail → durable fraud review w/ approval |
+
+The four original "models" are just points in this grid: *Reactive* = reactive shape; *Long-running* = durable shape; *Scheduled* = schedule trigger; *Event-driven* = webhook trigger. Sections 2.2–2.3 describe the two **shapes**; 2.4–2.5 describe the two external **triggers**.
 
 ### 2.2 Reactive
 
@@ -47,12 +53,7 @@ An **execution model** describes how an agent is invoked, how long it runs, and 
 - Tool calls happen inline during the response stream
 - No approval gating needed for the run itself (individual tool calls still go through OPA)
 
-**UX in Studio:**
-- Agent Detail → Overview tab has a "Try it" panel: chat input + streamed response
-- Tool calls rendered as collapsible inline blocks mid-stream
-- Token count + latency shown in footer, updating live during stream
-- Runs tab: flat table of past invocations (status, tokens, latency, log link)
-- No step log or approval UI — those are irrelevant for this model
+**UX:** wireframes + flows in the experience docs (§3) — reactive is chat / Try-it (playground) and consumer chat + public API (production).
 
 ### 2.3 Long-Running
 
@@ -70,13 +71,7 @@ An **execution model** describes how an agent is invoked, how long it runs, and 
 - Humans can cancel, pause, or unblock runs from the Studio
 - Approval gates use the existing HITL approval flow — but now linked to a specific step
 
-**UX in Studio:**
-- Agent Detail → Overview shows active runs as cards with current step and status
-- "New Run" button opens a launch panel (input payload + optional notes)
-- Run Detail page: split layout — step list on left (✓/●/⚠ per step), interaction panel on right
-- When a step is awaiting approval: right panel shows approval card with tool args + Approve / Reject / Edit & Approve
-- Global Approvals Inbox in the nav bar (badge count of pending approvals across all agents)
-- Runs tab: table of all runs with status, duration, step count
+**UX:** wireframes + flows in the experience docs (§3) — durable run launcher, step tracker, and approvals (self-approve in playground; Global Approvals Inbox in production).
 
 ### 2.4 Scheduled
 
@@ -89,16 +84,12 @@ An **execution model** describes how an agent is invoked, how long it runs, and 
 
 **Key behaviors:**
 - Fired by a scheduler service on a cron expression
-- Each fire creates an `agent_run` record with `trigger_type=scheduled`
+- Each fire creates an `agent_runs` record with `trigger_type=schedule`
 - Runs are otherwise identical to reactive or long-running runs depending on what the agent does
 - Enable/disable without deleting the schedule
 - Alert on failure (email/webhook)
 
-**UX in Studio:**
-- Agent Detail → Overview: schedule config card (expression, timezone, enabled toggle, next 3 fire times)
-- "Edit Schedule" opens a modal: preset buttons + editable cron fields + live human-readable translation
-- Runs tab: history table with fire time, status, duration, log link — failed rows are red-tinted
-- Alert configuration inline on the schedule card, not buried in settings
+**UX:** wireframes + flows in the experience docs (§3) — schedule config + Run-Now test-fire (playground) and schedule health + failure alerting (production).
 
 ### 2.5 Event-Driven
 
@@ -116,50 +107,30 @@ An **execution model** describes how an agent is invoked, how long it runs, and 
 - Events that don't match filters are still logged as "filtered out" — critical for debugging misconfiguration
 - Webhook URL must be publicly routable (ingress)
 
-**UX in Studio:**
-- Agent Detail → Overview: trigger config panel (trigger type, generated URL + copy button, "● Listening" status)
-- Filter condition builder: `event_type == "payment.fail"` with +Add condition, no raw JSON required
-- "Test Trigger" sends a sample payload to the real webhook — same code path as production
-- Event log shows recent events: matched/filtered, payload preview, linked run if triggered
+**UX:** wireframes + flows in the experience docs (§3) — filter builder + Test Trigger with sample payload (playground) and webhook config + event log + gateway security (production).
+
+### 2.6 The executable: Agent or Workflow
+
+Execution shape and triggers don't attach to "an agent" specifically — they attach to an **executable**. There are two kinds:
+
+- **Agent** — an *atomic* executable. Runs its own logic (sdk code or a declarative graph) and produces a single run.
+- **Workflow** — a *composite* executable: **a collection of agents working together** (supervisor / sequential / handoff orchestration). Produces a **run tree** — one parent workflow run with child agent runs.
+
+Everything else is shared. Both kinds carry the same `execution_shape` + triggers + memory, write to the same `agent_runs` spine, are evaluated in the playground identically, and are operated in production identically (monitoring, approvals, alerting, publish gate, integrations). The **only** thing that differs is internal execution: an Agent runs once; a Workflow orchestrates sub-agents into a run tree. `agent_runs.parent_run_id` already models that tree, and the durable `StepTracker` renders both (an agent's internal steps, or a workflow's agent-tree) from the same `run_steps` stream.
+
+> **Design intent (anti-rework):** one run spine, one trigger system, one memory layer, one playground, one production surface. The orchestration engine is the *only* place code branches on executable kind. **Workflow is not a parallel stack — it's a composition layer on the shared substrate.** See §4.5 for the composite design; the experience docs carry only a "run-tree granularity" delta.
+
+> **Terminology (Decision 22, 2026-07-03):** "Workflow" is **redefined** to mean this composite executable — aligning with Microsoft Agent Framework and Anthropic, which both use *Agents + Workflows* as their two categories. The *current* `workflows` table (a canvas graph backing one declarative agent) is renamed **Agent Graph** — the authoring definition of a single declarative agent (§4.5).
 
 ---
 
 ## 3. Studio UX — Information Architecture
 
-### 3.1 Nav Change
-
-Add **Approvals** to the top nav with a badge count of pending approvals. This is the global inbox for long-running agent approvals — it should not require navigating to a specific agent.
-
-```
-AgentShield Studio  |  Workflows  Tools  Skills  Agents  Approvals (3)  Providers
-```
-
-### 3.2 Agent Registration — Execution Model Step
-
-`CreateAgentPage` gains an execution model selector rendered as a card grid. Selecting a model reveals model-specific configuration fields below (schedule expression for scheduled, initial trigger config for event-driven). Reactive and long-running have no extra config at registration time.
-
-### 3.3 Agent List Page
-
-The `agent_type` column is replaced with two columns: **Execution Model** (reactive / long-running / scheduled / event-driven) and **Impl** (sdk / declarative). Clicking a row navigates to `/agents/:name` instead of opening an inline edit form.
-
-### 3.4 Agent Detail Page — Shared Shell
-
-Every agent gets the same shell with model-specific tab content:
-
-```
-/agents/:name
-
-← Agents   {agent-name}              [{status badge}]
-            {execution_model} · {team} · {model}
-
-[Overview]  [Runs]  [Memory]  [Versions]  [Settings]
-──────────────────────────────────────────────────────
-{tab content varies by execution model}
-```
-
-**Tabs present on all models:** Overview, Runs, Memory, Versions, Settings  
-**Tab content that differs:** Overview (per model), Runs (columns differ slightly)  
-**Memory tab:** shared design, described in Section 5
+> **Moved to the experience docs (rev 2026-07-03).** Per-mode UX, wireframes, the Agent Detail tabbed shell (Overview / Runs / Memory / Versions / Settings), the Global Approvals Inbox, and the registration (execution-shape + triggers) flow now live in:
+> - [`playground-execution-modes.md`](./playground-execution-modes.md) — pre-publish evaluate surface + component map
+> - [`execution-modes-production.md`](./execution-modes-production.md) — production operate surface (§3 shell, §4–§7 per mode)
+>
+> This backend spec no longer duplicates the UX, to prevent drift. It owns the data model, migrations, routers/SSE contracts, isolation internals, memory architecture, and services (below).
 
 ---
 
@@ -171,52 +142,50 @@ Every agent gets the same shell with model-specific tab content:
 
 ```sql
 ALTER TABLE agents
-  ADD COLUMN execution_model VARCHAR(32)
-    CHECK (execution_model IN ('reactive','long_running','scheduled','event_driven'))
+  ADD COLUMN execution_shape VARCHAR(16)
+    CHECK (execution_shape IN ('reactive','durable'))
     NOT NULL DEFAULT 'reactive',
   ADD COLUMN memory_enabled BOOLEAN NOT NULL DEFAULT false;
+-- Triggers are NOT an enum on agents. How a production run is *started*
+-- (manual / api / schedule / webhook) lives in agent_triggers — one agent, many triggers.
 ```
 
 #### 4.1.2 `agent_runs` — new table (core primitive)
 
-The central table that everything else hangs off. Every invocation of an agent — regardless of execution model or trigger type — creates one row here.
+The central table that everything else hangs off. Every invocation of an agent — in production or the playground, regardless of shape or trigger — creates one row here.
+
+> **⚠ Reconciliation (2026-07-02): `agent_runs` already exists.** A table named `agent_runs` was built as an **observability / cost log** (columns: `session_id`, `input`, `output`, `langfuse_trace_id`, `cost_usd`, `prompt_tokens`, `completion_tokens`, `latency_ms`, `status`, `context`, `started_at`, `completed_at`). This revision **merges** the orchestration fields into that existing table rather than creating a second one. Do not `CREATE TABLE` — `ALTER` the existing one. One run spine carries both observability and orchestration.
 
 ```sql
-CREATE TABLE agent_runs (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  agent_id         UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
-  agent_name       VARCHAR(128) NOT NULL,          -- denormalized for audit resilience
-  execution_model  VARCHAR(32) NOT NULL,            -- snapshot from agent at run time
-  status           VARCHAR(32) NOT NULL DEFAULT 'queued'
-                   CHECK (status IN ('queued','running','awaiting_approval',
-                                     'completed','failed','cancelled')),
-  trigger_type     VARCHAR(32) NOT NULL DEFAULT 'manual'
-                   CHECK (trigger_type IN ('manual','scheduled','webhook','api_call')),
-  trigger_payload  JSONB,                           -- raw event/input that started the run
-  output           JSONB,
-  thread_id        TEXT,                            -- links to approvals + opa_decisions
-  parent_run_id    UUID REFERENCES agent_runs(id),  -- for sub-agent orchestration
-  run_by           TEXT,                            -- 'user:alice', 'scheduler', 'webhook:abc'
-  started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-  completed_at     TIMESTAMPTZ,
-  error_message    TEXT,
-  token_count      INTEGER,
-  latency_ms       INTEGER
-);
+-- Merge orchestration fields into the EXISTING agent_runs observability table.
+ALTER TABLE agent_runs
+  ADD COLUMN execution_shape VARCHAR(16) NOT NULL DEFAULT 'reactive',   -- snapshot at run time
+  ADD COLUMN trigger_type    VARCHAR(32) NOT NULL DEFAULT 'manual'
+    CHECK (trigger_type IN ('manual','api','schedule','webhook')),
+  ADD COLUMN trigger_payload JSONB,                                     -- raw event/input that started the run
+  ADD COLUMN thread_id       TEXT,                                      -- links to approvals + opa_decisions
+  ADD COLUMN parent_run_id   UUID REFERENCES agent_runs(id),            -- sub-agent orchestration
+  ADD COLUMN run_by          TEXT,                                      -- 'user:alice','scheduler','webhook:{trigger_id}'
+  ADD COLUMN team            VARCHAR(128) NOT NULL DEFAULT '',          -- tenant belt-and-suspenders (see §5.3)
+  ADD COLUMN error_message   TEXT;
 
-CREATE INDEX idx_runs_agent_id ON agent_runs(agent_id, started_at DESC NULLS LAST);
-CREATE INDEX idx_runs_status ON agent_runs(status);
+-- 'status' must be widened to include the orchestration states:
+--   queued, running, awaiting_approval, completed, failed, cancelled
+-- Existing observability columns are retained as-is.
+
 CREATE INDEX idx_runs_thread_id ON agent_runs(thread_id);
+CREATE INDEX idx_runs_team_agent ON agent_runs(team, agent_id, started_at DESC);
 ```
 
 **Relationship to existing tables:**
 - `approvals.thread_id` → `agent_runs.thread_id` (logical link, not FK — threads can exist without a formal run in legacy data)
 - `opa_decisions.thread_id` → `agent_runs.thread_id` (same)
+- The existing `playground_runs` / `eval_runs` tables stay separate (playground/eval scoping); production runs use this merged `agent_runs`.
 - Future: add `run_id` FK columns to `approvals` and `opa_decisions` in a migration
 
 #### 4.1.3 `run_steps` — new table (long-running only)
 
-Populated only for `execution_model = 'long_running'`. Each logical step of the agent's execution gets a row.
+Populated only for `execution_shape = 'durable'`. Each logical step of the agent's execution gets a row.
 
 ```sql
 CREATE TABLE run_steps (
@@ -241,12 +210,12 @@ CREATE INDEX idx_run_steps_run_id ON run_steps(run_id, step_number);
 
 #### 4.1.4 `agent_schedules` — new table (scheduled agents)
 
-One row per scheduled agent. Scheduler service reads this table to determine what to fire and when.
+Schedule is a **trigger subtype** (see §2.1 — triggers are orthogonal to execution shape, and an agent may have several). This table stores cron config for `schedule`-type triggers; the scheduler service reads it to decide what to fire. Today `agent_schedules` and `agent_triggers` are the per-type trigger config tables (cron and webhook respectively); a future consolidation may merge them into a single `agent_triggers(type, config JSONB)`. Every production run records its origin in `agent_runs.trigger_type`.
 
 ```sql
 CREATE TABLE agent_schedules (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  agent_id         UUID NOT NULL UNIQUE REFERENCES agents(id) ON DELETE CASCADE,
+  agent_id         UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,  -- not UNIQUE: an agent may have multiple triggers
   cron_expression  VARCHAR(128) NOT NULL,           -- '0 9 * * 1'
   timezone         VARCHAR(64) NOT NULL DEFAULT 'UTC',
   enabled          BOOLEAN NOT NULL DEFAULT true,
@@ -330,14 +299,16 @@ CREATE INDEX idx_memory_embedding ON agent_memory
 
 ### 4.2 Alembic Migration Plan
 
+> **⚠ Stale numbering (rev 2026-07-02):** migration numbers 0006–0014 are already used by *other* shipped features (auth model, asset lifecycle, HITL authority, playground, eval results, created_by). These names are **indicative of content, not the actual sequence numbers** — reassign to the next free numbers when Phase 3 starts.
+
 ```
-0006_add_execution_model_memory_flag.py   — ALTER agents (2 new columns)
-0007_add_agent_runs.py                    — agent_runs table + indexes
-0008_add_run_steps.py                     — run_steps table
-0009_add_agent_schedules.py               — agent_schedules table
-0010_add_agent_triggers_events.py         — agent_triggers + agent_events tables
-0011_add_agent_memory.py                  — agent_memory table (no embedding yet)
-0012_add_pgvector_embedding.py            — CREATE EXTENSION vector + embedding column + ivfflat index
+00NN_add_execution_shape_memory_flag.py   — ALTER agents (execution_shape + memory_enabled)
+00NN_alter_agent_runs_orchestration.py    — ALTER the EXISTING agent_runs (add orchestration fields; do NOT create a new table)
+00NN_add_run_steps.py                     — run_steps table
+00NN_add_agent_schedules.py               — agent_schedules (schedule-trigger config)
+00NN_add_agent_triggers_events.py         — agent_triggers + agent_events tables
+00NN_add_agent_memory.py                  — agent_memory table (no embedding yet)
+00NN_add_pgvector_embedding.py            — CREATE EXTENSION vector + embedding column + ivfflat index
 ```
 
 Migrations 0006–0011 have no external dependencies and can run on the existing cluster. Migration 0012 requires the `pgvector` PostgreSQL extension to be installed (available as a plugin in most managed Postgres offerings; for self-hosted: `apt install postgresql-16-pgvector`).
@@ -383,13 +354,83 @@ POST /internal/runs/start
 
 {
   "agent_name": "fraud-detector",
-  "trigger_type": "scheduled" | "webhook",
+  "trigger_type": "schedule" | "webhook",
   "trigger_payload": {...},
-  "run_by": "scheduler" | "webhook:{trigger_id}"
+  "run_by": "serviceaccount:scheduler" | "serviceaccount:webhook:{trigger_id}"
 }
 ```
 
 This endpoint is not exposed through the public ingress — only reachable cluster-internally.
+
+**Input contract per agent type `[IMPLEMENTED — Decision 24 addendum]`.** What an agent receives as its run input depends on what triggered it — and the create-agent wizard ships a **type-specific instructions template** for each so authors write for the right input:
+
+| Type | Run input | Source | Instructions written as |
+|---|---|---|---|
+| reactive / durable | the user's message | consumer/UI POST | conversational assistant |
+| **scheduled** | the trigger's **`input_payload`** (a JSON job spec) — resolved by `internal.py` from the `trigger_id`; the scheduler sends only `trigger_id` (no payload) | `agent_triggers.input_payload` | autonomous parameterized worker (no user; deliver via tools; idempotent) |
+| **event-driven** | the **webhook event body** (JSON) forwarded as `trigger_payload` | event-gateway | parse-the-event; untrusted payload; at-least-once idempotency |
+
+Because one agent can carry **multiple** schedule triggers (`agent_triggers.agent_id` is not unique), the per-job parameters live on the trigger (`input_payload`), not in the instructions — so a single deployed agent serves many parameterized scheduled jobs. See Decision 24 addendum.
+
+**Workflow run targeting `[IMPLEMENTED — Decision 24 pass #3]`.** The same `/internal/runs/start` endpoint now accepts `workflow_id` (in place of `agent_name`) to start a workflow run. The scheduler UNION-queries agent and workflow trigger rows and fires both paths here; the event-gateway's `POST /hooks/workflow/{name}/{token}` path resolves `workflow_id` by name and calls this endpoint. `_start_workflow_run` resolves run input from `trigger.input_payload` when no payload is sent explicitly — same pattern as the agent path.
+
+### 4.5 Workflows — Composite Executables
+
+A **Workflow** is a first-class executable that composes agents. It carries `execution_shape` + triggers + memory like an Agent, plus a membership + orchestration definition. **Everything in §2 (modes), §4.1–4.4 (run spine, triggers, SSE), §5 (isolation), §6 (memory), §7 (services) applies to workflows unchanged** — only the orchestration below is new.
+
+**Reactive workflows are allowed** (decided 2026-07-03): a lightweight two-agent hand-off can be `reactive` (one request → response spanning agents); multi-step orchestration is `durable`. Default is `durable`, since composition usually implies multiple steps.
+
+**Terminology reconciliation (Decision 22).** The pre-existing `workflows` / `workflow_versions` tables meant *a single declarative agent's canvas graph*. Those are renamed **`agent_graphs` / `agent_graph_versions`** (the authoring definition of one declarative agent; `agent_versions.workflow_id → agent_graph_id`). The name **`workflows`** is then freed for the composite executable below.
+
+**Data model (design-level):**
+
+```sql
+-- Rename first: old canvas-graph tables → agent_graphs (frees the 'workflows' name).
+ALTER TABLE workflows          RENAME TO agent_graphs;
+ALTER TABLE workflow_versions  RENAME TO agent_graph_versions;
+-- agent_versions.workflow_id → agent_graph_id (column rename + FK retarget).
+
+-- NEW: a Workflow is a composite executable (collection of agents).
+CREATE TABLE workflows (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(256) NOT NULL,
+  team            VARCHAR(128) NOT NULL,
+  execution_shape VARCHAR(16)  NOT NULL DEFAULT 'durable'
+                  CHECK (execution_shape IN ('reactive','durable')),
+  memory_enabled  BOOLEAN NOT NULL DEFAULT false,
+  orchestration   VARCHAR(32) NOT NULL DEFAULT 'supervisor'
+                  CHECK (orchestration IN ('supervisor','sequential','handoff')),
+  status          VARCHAR(32) NOT NULL DEFAULT 'draft',
+  created_by      TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE workflow_members (
+  workflow_id  UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+  agent_id     UUID NOT NULL REFERENCES agents(id),
+  role         VARCHAR(64),      -- 'supervisor' | 'worker' | free-form label
+  position     INTEGER,          -- ordering for sequential
+  routing      JSONB,            -- handoff edges / conditions
+  PRIMARY KEY (workflow_id, agent_id)
+);
+```
+
+**Triggers / memory / runs reuse the existing tables.** A trigger (`agent_schedules` / `agent_triggers`) targets a workflow the same way it targets an agent. **[RESOLVED — Decision 24]** The targeting model is a **nullable `workflow_id`** FK on `agent_triggers`/`agent_runs` (migration 0027, `CHECK num_nonnulls(agent_id, workflow_id)=1`) — not a polymorphic `executable_id`. A workflow fire creates a parent `agent_runs` row (`parent_run_id = NULL`); each member-agent invocation is a child run with `parent_run_id = <workflow run>`.
+
+**Orchestration patterns:**
+- **Supervisor** — a coordinator agent routes to worker agents dynamically (Bedrock / Databricks / MAF handoff style).
+- **Sequential** — fixed order A → B → C, each consuming the prior output (Google ADK SequentialAgent style).
+- **Handoff** — agents transfer control via declared edges (OpenAI Agents SDK / MAF handoff style).
+
+**Run tree + StepTracker.** One workflow run (parent) → child agent runs via `parent_run_id`. The workflow's `run_steps` are agent-level steps; each child agent run has its own `run_steps` for *its* internal steps. The durable `StepTracker` renders either zoom level from the same SSE stream.
+
+**Inter-agent HITL.** Approvals can gate the transition *between* agents (a workflow step awaiting approval before handing off), reusing the same `approvals` + `run_steps.approval_id` mechanism — no new HITL machinery.
+
+**The only new engine work** is orchestration (routing / handoff + run-tree assembly) in the run-executor (§7.3). Everything else is the shared substrate — which is the whole point of treating Agent and Workflow as two kinds of one executable.
+
+> **[IMPLEMENTED — Decision 24]** All four orchestration modes now run in `registry-api/workflow_orchestrator.py::orchestrate()`: **sequential** (walk the edge chain / member order), **conditional** (evaluate `workflow_edges.condition` via the reused `filter_engine` predicate DSL), **supervisor** (`role=supervisor` member routes to workers with a `max_iterations` cap), **handoff** (each agent signals the next hop). Edges are a first-class `workflow_edges` table (migration 0029). The Studio "Workflows" builder is the unified graph builder (per-node config + edge conditions + inline/existing agents); "Agent Graphs" is hidden from the nav. Deferred: per-node tool editing on the canvas.
+
+> **[IMPLEMENTED — Decision 24 pass #3]** Workflow-level triggers: `POST /api/v1/workflows/{id}/triggers` (schedule + webhook; `agent_triggers.workflow_id` set, `agent_id NULL`); the scheduler UNION-queries agent and workflow trigger rows; the event-gateway exposes `POST /hooks/workflow/{name}/{token}`. Both dispatch to `POST /internal/runs/start` with `workflow_id`; `_start_workflow_run` resolves input from `trigger.input_payload` (mirrors agent path). Migration 0031: nullable `agent_events.workflow_id`. Studio: Triggers panel in the workflow builder + `execution_shape` selector in Save modal. Workflow members are restricted to **composable** agents (`GET /api/v1/agents/?composable=true` — no active schedule/webhook trigger) to prevent double-firing; inline Create-New is limited to reactive/durable shapes. Deferred: pausable workflow-HITL orchestrator (a member agent's approval pausing/resuming the whole run tree; orchestrator dispatches one-shot, Safety Orchestrator disabled in this deployment).
 
 ---
 
@@ -410,7 +451,7 @@ The platform is multi-tenant (many teams share the same cluster and database) an
 
 **Conversation history (`message_history`):**
 - Strictly user-scoped. User A's messages to an agent are never visible to User B.
-- Exception: approvals reviewers can see the thread that led to an approval request, but only when explicitly viewing that approval.
+- Exception: approvals reviewers can see the thread that led to an approval request, but only when explicitly viewing that approval — and only the **anonymized** form (no PII, OQ-3).
 
 **Agent facts and knowledge (`fact`, `knowledge`):**
 - Agent-scoped and team-scoped. Shared across all users of the same agent within the team.
@@ -506,17 +547,29 @@ scope=agent    + user_id=null     → Agent-wide facts. Visible to all users of 
 scope=agent    + team=risk-team   → Tenant-scoped knowledge. Not visible to other teams.
 ```
 
-A reviewer viewing an approval can read `scope=session` memory for the specific `thread_id` tied to that approval — but cannot browse Alice's other sessions.
+A reviewer viewing an approval can read `scope=session` memory for the specific `thread_id` tied to that approval — **anonymized only** (OQ-3) — and cannot browse Alice's other sessions.
 
 ### 5.7 Data Residency Considerations
 
 For regulated industries (healthcare, finance), a team may need their memory data physically separated from other tenants. Future path: PostgreSQL schema-per-tenant (each team gets its own PG schema, row-level queries become schema-scoped queries). The current design keeps all teams in shared tables with row-level filtering — adequate for MVP and most enterprise deployments.
 
+### 5.8 Memory × PII and the Safety Proxy (added 2026-07-02)
+
+AgentShield's PII de-anonymization is **session-scoped** — a token maps back to real data only within one thread. Cross-session memory (`fact`, `knowledge`) breaks that boundary if it stores de-anonymized values, so memory is constrained to preserve it:
+
+1. **Writes pass through the safety proxy.** Anything written to `agent_memory` is scanned/redacted the same way agent *output* is, before it is persisted. Memory is not a bypass around the safety layer.
+2. **`agent_memory` never stores raw PII.** All memory — including session `message_history` — stores the **tokenized** form. Raw PII exists only in the session-scoped mapping (`pii_mappings`) and is applied **only at the output boundary** when rendering the final response to the **end user** (whose data it is). The LLM, agents, reviewers, and stored memory see tokens, never raw values (OQ-3). Session `message_history` TTLs with the session (default 24h).
+3. **Cross-session `fact` / `knowledge` store tokenized form only** and never carry a session's PII mapping across sessions — a token from session A is meaningless in session B, so no PII can leak between sessions or users.
+4. **Reviewers see the anonymized (tokenized) form** — PII is never surfaced to a human reviewer, only to the end user in their own session output (OQ-3, §5.5).
+5. **Injected memory re-enters the context window through the same input path** — so it is subject to input scanning for the reading session.
+
+Without these rules, memory is a covert channel that defeats the platform's core guarantee. This gate is a prerequisite for the memory build phase (§9).
+
 ---
 
 ## 6. Agent Memory Architecture
 
-### 5.1 Memory Types
+### 6.1 Memory Types
 
 | Type | Scope | Description | Lifetime |
 |---|---|---|---|
@@ -525,7 +578,7 @@ For regulated industries (healthcare, finance), a team may need their memory dat
 | `fact` | agent or user | Key-value facts the agent has been told or inferred | Indefinite |
 | `knowledge` | agent | Longer-form domain knowledge (procedures, policies) | Indefinite |
 
-### 5.2 Memory Access Patterns
+### 6.2 Memory Access Patterns
 
 **Hot path — during a run:**
 
@@ -567,7 +620,7 @@ Agent calls remember_fact(key="preferred_format", value="bullet points")
   → Background job generates embedding for the fact
 ```
 
-### 5.3 Memory in the Context Window
+### 6.3 Memory in the Context Window
 
 An agent with memory enabled receives additional context at the start of each run:
 
@@ -589,7 +642,7 @@ What were the fraud trends last week?
 
 The platform handles injection. The agent doesn't need to call a memory API explicitly unless it wants to write a new fact or do semantic search.
 
-### 5.4 Memory Configuration per Agent
+### 6.4 Memory Configuration per Agent
 
 Stored in the agent's `metadata_` JSONB column until a dedicated config table is warranted:
 
@@ -606,11 +659,11 @@ Stored in the agent's `metadata_` JSONB column until a dedicated config table is
 }
 ```
 
-### 5.5 Memory and Approvals
+### 6.5 Memory and Approvals
 
-When a long-running agent reaches an approval checkpoint, the approval detail view in Studio should show the conversation history that led to the approval request. This is read from `agent_memory WHERE thread_id = approval.thread_id`. Reviewers get full context without the agent needing to repeat itself in the tool args.
+When a long-running agent reaches an approval checkpoint, the approval detail view in Studio shows the conversation history that led to the approval request, read from `agent_memory WHERE thread_id = approval.thread_id`. **The conversation is shown anonymized** — PII placeholders stay tokenized; the reviewer, like the LLM and agents, never sees de-anonymized PII (OQ-3, §5.8). Reviewers get enough context to decide without the agent repeating tool args, but no raw personal data.
 
-### 5.6 Memory UI in Studio
+### 6.6 Memory UI in Studio
 
 **Memory tab on Agent Detail page:**
 
@@ -637,11 +690,11 @@ Memory Usage
 
 ## 7. New Services
 
-### 6.1 Scheduler Service
+### 7.1 Scheduler Service
 
 **Purpose:** Fire scheduled agent runs at the right time.
 
-**Implementation:** Python service using APScheduler (AsyncIOScheduler). Deployed as a single-replica Deployment (not scaled — leader election not needed at this scale).
+**Implementation:** Python service using APScheduler (AsyncIOScheduler). Deployed as a **2-replica** Deployment with a **distributed lock** (Postgres advisory lock / Redis SETNX) so exactly one replica fires each tick — survives a single-pod crash without missed fires (OQ-9).
 
 **Behavior:**
 1. On startup: load all `agent_schedules WHERE enabled = true` from registry-api
@@ -655,7 +708,7 @@ Memory Usage
 
 **Location:** `services/scheduler/`
 
-### 6.2 Event Gateway
+### 7.2 Event Gateway
 
 **Purpose:** Receive external webhook events, validate, filter, and dispatch to run executor.
 
@@ -680,7 +733,7 @@ Content-Type: application/json
 
 **Location:** `services/event-gateway/`
 
-### 6.3 Run Executor (extend declarative-runner)
+### 7.3 Run Executor (extend declarative-runner)
 
 **Purpose:** Execute agent runs for long-running, scheduled, and event-driven agents. Reactive runs go directly to the agent's own HTTP endpoint.
 
@@ -695,16 +748,18 @@ Content-Type: application/json
 
 **For scheduled/event-driven agents:** They run the same execution logic as long-running or reactive agents depending on the agent's `agent_type`. The execution model determines *when* the run is triggered, not *how* the agent executes internally.
 
-### 6.4 Deploy Controller Extensions
+### 7.4 Deploy Controller Extensions
 
 The deploy-controller currently reconciles `Deployment` records into K8s Deployments. Two new reconciliation targets:
 
-- **Scheduled agents:** On agent deploy with `execution_model=scheduled` → signal scheduler service to register the schedule (or optionally create a K8s CronJob)
-- **Event-driven agents:** On agent deploy with `execution_model=event_driven` → call event-gateway to register the trigger and return the generated webhook URL → store token hash in `agent_triggers`
+- **Schedule triggers:** On agent deploy, for each `schedule` trigger → signal scheduler service to register it (or optionally create a K8s CronJob)
+- **Webhook triggers:** On agent deploy, for each `webhook` trigger → call event-gateway to register it and return the generated webhook URL → store token hash in `agent_triggers`
 
 ---
 
 ## 8. Architecture Diagram
+
+> The Studio box below is illustrative (old per-mode labels kept for the sketch); the authoritative per-mode UX lives in the experience docs (§3). This diagram is about backend components and data flow.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -778,46 +833,41 @@ Redis (new dependency)
 
 ## 9. Build Sequence
 
-The phases below are ordered by dependency and value delivered. Each phase is independently deployable.
+The phases below are **resequenced by risk and value** (revised 2026-07-02), not just dependency: reactive foundation → durable+approvals (reuses existing HITL) → memory (after the §5.8 PII rule) → scheduled → event-driven last (biggest attack surface). Each phase is independently deployable.
 
-### Phase 3a — Foundation (unblocks all Studio work)
-- [ ] Migrations 0006–0007: `execution_model` on agents + `agent_runs` table
-- [ ] `runs.py` router: CRUD + basic SSE skeleton
-- [ ] `CreateAgentPage`: execution model selector (UI only, no model-specific config yet)
-- [ ] `AgentListPage`: execution model column + row click → detail page
-- [ ] `AgentDetailPage`: shell with tabs (Overview placeholder per model, Runs table, Settings)
+### Phase 3a — Foundation (reactive + the run spine)
+- [ ] Migrations: `execution_shape` + `memory_enabled` on agents; **ALTER** `agent_runs` to add orchestration fields (do NOT create a second table — see §4.1.2)
+- [ ] `runs.py` router: CRUD + SSE skeleton over the merged `agent_runs`
+- [ ] `CreateAgentPage`: execution-shape selector + trigger config (UI)
+- [ ] `AgentListPage`: execution-shape + trigger columns; row click → detail page
+- [ ] `AgentDetailPage`: tabbed shell (Overview per shape, Runs table, Settings)
 
-### Phase 3b — Reactive + Memory
-- [ ] Migrations 0011–0012: `agent_memory` + pgvector extension
+### Phase 3b — Durable / long-running + Global Approvals Inbox
+- [ ] Migration: `run_steps`
+- [ ] `run_steps.py` router; SSE fully wired (step + approval events)
+- [ ] Extend `declarative-runner` → run-executor: writes steps, pauses on approvals
+- [ ] Studio: Run Detail (split step log + approval cards); Global Approvals Inbox in nav
+- [ ] Studio: durable Overview tab (active-run cards + New Run button)
+- **Why second:** reuses the existing HITL approval flow — highest value for least new infra.
+
+### Phase 3c — Memory (gated on §5.8)
+- [ ] Resolve §5.8 memory×PII rules first (writes through safety proxy; cross-session facts anonymized)
+- [ ] Migrations: `agent_memory` + pgvector extension
 - [ ] `memory.py` router: read/write facts, search, clear
-- [ ] Redis for session buffer (deploy Redis if not present)
-- [ ] Memory SDK client (`services/memory-sdk/` or part of agent base image)
-- [ ] Studio: Reactive "Try it" panel + streaming tool call display
-- [ ] Studio: Memory tab (session list, facts, usage stats)
+- [ ] Redis session buffer; memory SDK client; platform-side context injection
+- [ ] Studio: Memory tab (sessions, facts, usage)
 
-### Phase 3c — Scheduled
-- [ ] Migration 0009: `agent_schedules`
-- [ ] `schedules.py` router: CRUD + enable/disable
-- [ ] `services/scheduler/`: APScheduler service, Dockerfile, Helm chart entry
-- [ ] Studio: Schedule config card + human-readable cron editor modal
-- [ ] Studio: Scheduled runs tab with history table
+### Phase 3d — Scheduled trigger
+- [ ] Migration: `agent_schedules` (as a trigger subtype)
+- [ ] `schedules.py` router: CRUD + enable/disable; `services/scheduler/` (APScheduler)
+- [ ] Studio: schedule config card + cron editor; scheduled runs history
 
-### Phase 3d — Long-Running + Global Approvals Inbox
-- [ ] Migration 0008: `run_steps`
-- [ ] `run_steps.py` router
-- [ ] SSE stream fully wired (step events, approval events)
-- [ ] Extend `declarative-runner` → `run-executor`: writes steps, pauses on approvals
-- [ ] Studio: Run Detail page (split step log + approval cards)
-- [ ] Studio: Global Approvals Inbox in nav
-- [ ] Studio: Long-running Overview tab (active runs cards + New Run button)
-
-### Phase 3e — Event-Driven
-- [ ] Migration 0010: `agent_triggers` + `agent_events`
-- [ ] `triggers.py` + `events.py` routers
-- [ ] `services/event-gateway/`: FastAPI service, Dockerfile, Helm chart + Ingress rule
+### Phase 3e — Event-driven trigger (LAST — biggest attack surface)
+- [ ] **Threat model the public webhook gateway first:** rate limiting, replay protection, inbound payload sanitization through the safety proxy
+- [ ] Migration: `agent_triggers` + `agent_events`
+- [ ] `triggers.py` + `events.py` routers; `services/event-gateway/` (FastAPI + Ingress)
 - [ ] Deploy controller: webhook registration on agent deploy
-- [ ] Studio: Trigger config panel + filter builder + event log
-- [ ] Studio: Test Trigger modal
+- [ ] Studio: trigger config + filter builder + event log + Test Trigger modal
 
 ---
 
@@ -829,9 +879,8 @@ The phases below are ordered by dependency and value delivered. Each phase is in
 
 ### Multi-Tenancy & Isolation
 
-**OQ-1** `[OPEN]` **System principal for scheduler/webhook runs**
-When the scheduler or event gateway fires a run, there's no human user. The `user_id` on `agent_runs` would be a system value like `scheduler` or `webhook:{trigger_id}`. Should these be treated as a named system principal in Keycloak (cleaner audit trail, more setup), or as a special bypass in the auth middleware (simpler, but a carve-out in the auth model)?
-_Blocks: Phase 3a. Decision needed from: platform architect / security._
+**OQ-1** `[RESOLVED 2026-07-03]` **System principal for scheduler/webhook runs**
+Use a named **service account** as the run principal — `run_by = 'serviceaccount:scheduler'` / `'serviceaccount:webhook:{trigger_id}'`. Simple string identity now; a dedicated managed Keycloak service principal per component with scoped RBAC + richer audit is deferred (see production doc §14 FI-3).
 
 ---
 
@@ -841,9 +890,8 @@ _Blocks: Phase 3b. Decision needed from: product._
 
 ---
 
-**OQ-3** `[OPEN]` **Reviewer access to full conversation history**
-The design lets approvals reviewers read `scope=session` memory for the thread tied to their approval — meaning they see the full user conversation. Is that acceptable under the platform's data policy, or should reviewers get a summarized view that omits personal messages?
-_Blocks: Phase 3b + 3d. Decision needed from: legal / data privacy._
+**OQ-3** `[RESOLVED 2026-07-03]` **Reviewer access to conversation history — anonymized only**
+Reviewers see the **anonymized** conversation only. **PII is never shown to the reviewer, the LLM, or agents** — de-anonymization placeholders stay tokenized in the reviewer view. This is a hard privacy rule, reinforcing §5.8: PII lives only in session-scoped mappings and is never surfaced to a human reviewer or persisted where an agent could read it.
 
 ---
 
@@ -881,15 +929,13 @@ _Blocks: Phase 3e (UX + schema). Decision needed from: product._
 
 ---
 
-**OQ-9** `[OPEN]` **Scheduler high-availability**
-The scheduler service is designed as single-replica. A crash causes missed fires for all scheduled agents until the pod restarts. For critical schedules, is single-replica + fast restart (K8s liveness probe) acceptable, or do we need a distributed lock (Postgres advisory lock or Redis SETNX) to support multi-replica deployment from day one?
-_Blocks: Phase 3c. Decision needed from: engineering / SRE._
+**OQ-9** `[RESOLVED 2026-07-03]` **Scheduler high-availability**
+Run **2 replicas** with a distributed lock (Postgres advisory lock or Redis SETNX) so exactly one replica fires each tick. Survives a single-pod crash without missed fires; no single point of failure from day one.
 
 ---
 
-**OQ-10** `[OPEN]` **Long-running run timeout policy**
-What is the maximum wall-clock time a long-running run can stay in `awaiting_approval` or `running` before the platform auto-cancels it? The deploy-controller already has an `approval_timeout_worker.py` pattern. Should run timeout use the same configurable-per-agent TTL, or a global platform default?
-_Blocks: Phase 3d. Decision needed from: product / engineering._
+**OQ-10** `[RESOLVED 2026-07-03]` **Long-running run timeout policy**
+A **configurable setting** — per-agent run timeout with a platform default fallback. Applies to both `running` and `awaiting_approval`; reuses the `approval_timeout_worker.py` pattern. Same mechanism as the sandbox TTL (playground doc OQ-A).
 
 ---
 
@@ -899,11 +945,16 @@ _Blocks: Phase 3d. Decision needed from: product / engineering._
 |---|---|---|
 | Memory primary store | PostgreSQL + pgvector | Keeps stack minimal; pgvector handles semantic search without separate vector DB |
 | Session memory cache | Redis | Fast reads during hot run path; persist to PG on session end |
-| Scheduler implementation | APScheduler (single process) | Sub-minute granularity, timezone-aware, simpler ops than K8s CronJob-per-agent |
+| Scheduler implementation | APScheduler, **2 replicas + distributed lock** (OQ-9) | Sub-minute granularity, timezone-aware, simpler ops than K8s CronJob-per-agent; HA from day one |
 | Event gateway separation | Separate service | Registry-api is internal; gateway must be public-facing |
 | `agent_runs` as central primitive | All invocations → one table | Approvals, OPA decisions, memory all link via `thread_id`; simplifies querying |
-| Execution model vs agent_type | Separate fields | `agent_type` = implementation (sdk/declarative); `execution_model` = runtime behavior |
+| Execution shape/trigger vs agent_type | Separate fields | `agent_type` = implementation (sdk/declarative); `execution_shape` + triggers = runtime behavior (superseded by rev 2026-07-02 rows above) |
 | Approval context from memory | Reviewers see message history | Read `agent_memory WHERE thread_id = approval.thread_id`; no schema change needed |
 | Multi-tenant isolation strategy | Application-layer enforcement + explicit `team` column on all new tables | Simpler than PostgreSQL RLS for MVP; adds defense-in-depth team column as belt-and-suspenders |
 | Thread ID generation | Platform-generated, format `{team}:{agent}:{user_id}:{uuid}` | Prevents accidental thread sharing across users; agents never generate thread IDs |
 | User isolation for conversation history | `user_id` column on `agent_runs` and `agent_memory`; non-admins see only own runs | Default private; reviewers and admins can access others' threads with explicit role |
+| **Execution shape vs trigger (rev 2026-07-02)** | Two orthogonal fields, not one enum | `execution_shape` (reactive/durable) is how a run behaves; `trigger` (manual/api/schedule/webhook) is what starts it; composable, multiple triggers per agent |
+| **`agent_runs` reconciliation (rev 2026-07-02)** | Merge into the existing table | The built observability `agent_runs` is ALTERed to add orchestration fields — one run spine, not two tables |
+| **Memory × session-scoped PII (rev 2026-07-02)** | Constrain memory to preserve PII scoping | Writes scanned by safety proxy; only session `message_history` holds de-anon PII; cross-session facts store anonymized form (§5.8) |
+| **Build sequence (rev 2026-07-02)** | Event-driven last | Public webhook gateway is the highest new attack surface; needs a threat model before build |
+| **Executable = Agent \| Workflow (rev 2026-07-03)** | Workflow redefined as a composite executable (collection of agents) on the shared substrate | Modes / triggers / memory / runs / playground / production are identical; only orchestration differs (run tree via `parent_run_id`). Old canvas "workflow" → "agent graph". No parallel stack (§2.6, §4.5, Decision 22) |

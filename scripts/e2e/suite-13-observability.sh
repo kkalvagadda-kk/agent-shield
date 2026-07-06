@@ -51,6 +51,40 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+cleanup() {
+  echo ""
+  echo "==> Cleanup: removing test agents and datasets..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+for name in ['obs-test-agent', 'metadata-test-agent', 'block-test-agent', 'clean-test-agent', 'flush-test', 's13-eval-agent', 's13-trace-agent']:
+    try:
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+    except Exception: pass
+" 2>/dev/null || true
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base = 'http://localhost:8000/api/v1/playground/datasets'
+for user in ('s13-user', 's13-fb-user', 's13-test'):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(base, headers={'X-User-Sub': user}), timeout=5)
+        for ds in json.loads(r.read()):
+            if 's13-eval-ds' in ds.get('name', ''):
+                try:
+                    urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers={'X-User-Sub': user}, method='DELETE'), timeout=5)
+                except Exception: pass
+    except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Suite 13 verifies safety-orchestrator emits Langfuse traces during scans.
+# If safety-orchestrator is not deployed (enabled=false) there is nothing to trace — skip cleanly.
+if ! kubectl get svc agentshield-safety-orchestrator -n "$NAMESPACE" >/dev/null 2>&1; then
+  echo "  NOTE: safety-orchestrator not deployed (enabled=false) — Suite 13 (observability) SKIPPED."
+  echo "  Enable safety-orchestrator + Langfuse and re-run to verify tracing."
+  exit 0
+fi
+
 # Helper: poll Langfuse for a trace by ID, wait up to N seconds
 # Prints "found" or "timeout" to stdout
 lf_poll_trace() {
@@ -564,6 +598,27 @@ except urllib.error.HTTPError:
     pass
 " 2>/dev/null || true
 done
+
+# Delete s13 datasets (best-effort)
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+base = 'http://localhost:8000/api/v1/playground/datasets'
+for user in ('s13-user', 's13-fb-user', 's13-test'):
+    req = urllib.request.Request(base, headers={'X-User-Sub': user})
+    try:
+        r = urllib.request.urlopen(req, timeout=5)
+        datasets = json.loads(r.read())
+        for ds in datasets:
+            if 's13-eval-ds' in ds.get('name', ''):
+                dreq = urllib.request.Request(base + '/' + str(ds['id']),
+                    headers={'X-User-Sub': user}, method='DELETE')
+                try:
+                    urllib.request.urlopen(dreq, timeout=5)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+" 2>/dev/null || true
 echo "  done"
 echo ""
 

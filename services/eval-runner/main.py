@@ -5,7 +5,7 @@ Reads DATASET_ID, AGENT_NAME, EVAL_RUN_ID, REGISTRY_API_URL from env.
 For each dataset item:
   1. Calls the agent via playground run endpoint
   2. Collects SSE stream response
-  3. Scores with LLM judge (keyword match for now)
+  3. Scores with the LLM judge (Haiku, read back from the run); keyword fallback
   4. Records result via Registry API
   5. Updates eval run status/scores on completion
 """
@@ -32,6 +32,37 @@ AGENT_NAME = os.environ["AGENT_NAME"]
 EVAL_RUN_ID = os.environ["EVAL_RUN_ID"]
 AGENT_VERSION_ID = os.environ.get("AGENT_VERSION_ID")
 
+_JUDGE_POLL_TIMEOUT = float(os.environ.get("JUDGE_POLL_TIMEOUT", "45"))
+_JUDGE_POLL_INTERVAL = float(os.environ.get("JUDGE_POLL_INTERVAL", "3"))
+_JUDGE_PASS_THRESHOLD = float(os.environ.get("JUDGE_PASS_THRESHOLD", "0.7"))
+
+
+async def _poll_for_judge(client: httpx.AsyncClient, run_id: str) -> float | None:
+    """Return the Haiku judge score (0.0-1.0) once judge_status is terminal and a
+    score is present; None if the judge errored/timed out or the window elapsed.
+
+    The interactive playground path fires judge.py (Claude Haiku) on every run via
+    _complete_run(); we read the score back rather than re-implementing the judge.
+    """
+    deadline = asyncio.get_event_loop().time() + _JUDGE_POLL_TIMEOUT
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            resp = await client.get(f"/api/v1/playground/runs/{run_id}")
+            resp.raise_for_status()
+            run = resp.json()
+        except Exception as exc:
+            logger.debug("judge poll error for run %s: %s", run_id, exc)
+            await asyncio.sleep(_JUDGE_POLL_INTERVAL)
+            continue
+        js = run.get("judge_status")
+        score = run.get("judge_score")
+        if js == "completed" and score is not None:
+            return float(score)
+        if js in ("timeout", "error", "no_provider"):
+            return None
+        await asyncio.sleep(_JUDGE_POLL_INTERVAL)
+    return None
+
 
 async def run_eval() -> None:
     async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=120.0) as client:
@@ -56,15 +87,36 @@ async def run_eval() -> None:
             if AGENT_VERSION_ID:
                 run_body["agent_version_id"] = AGENT_VERSION_ID
 
-            run_resp = await client.post(
-                "/api/v1/playground/runs",
-                json=run_body,
-                headers={"X-User-Sub": "eval-runner"},
-            )
-            run_resp.raise_for_status()
-            run_data = run_resp.json()
-            run_id = run_data.get("run_id")
-            logger.info("item=%d run_id=%s", idx, run_id)
+            # 2b. Start playground run per item (isolated — one failure must not kill the Job)
+            run_id = None
+            try:
+                run_resp = await client.post(
+                    "/api/v1/playground/runs",
+                    json=run_body,
+                    headers={"X-User-Sub": "eval-runner"},
+                )
+                run_resp.raise_for_status()
+                run_id = run_resp.json().get("run_id")
+                logger.info("item=%d run_id=%s", idx, run_id)
+            except Exception as exc:
+                logger.warning("item=%d run-create failed: %s", idx, exc)
+                results.append({"passed": False, "score": 0.0})
+                try:
+                    await client.post(
+                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                        json={
+                            "dataset_item_idx": idx,
+                            "input_message": input_text,
+                            "response": "",
+                            "judge_score": 0.0,
+                            "judge_reasoning": f"run-create failed: {exc}",
+                            "passed": False,
+                        },
+                        headers={"X-User-Sub": "eval-runner"},
+                    )
+                except Exception:
+                    pass
+                continue
 
             # 3. Collect SSE stream response
             response_text = ""
@@ -86,11 +138,16 @@ async def run_eval() -> None:
             except Exception as exc:
                 logger.warning("item=%d stream error: %s", idx, exc)
 
-            # 4. Score: keyword match (or pass if no expected output)
-            if expected:
+            # 4. Score: prefer the real Haiku judge (read back from the run), else keyword fallback
+            judge_score = await _poll_for_judge(client, run_id)
+            if judge_score is not None:
+                score = judge_score
+                passed = judge_score >= _JUDGE_PASS_THRESHOLD
+                reasoning = "llm-judge (haiku)"
+            elif expected:
                 passed = expected.lower() in response_text.lower()
                 score = 1.0 if passed else 0.0
-                reasoning = "keyword match"
+                reasoning = "keyword match (judge unavailable)"
             else:
                 passed = True
                 score = 1.0

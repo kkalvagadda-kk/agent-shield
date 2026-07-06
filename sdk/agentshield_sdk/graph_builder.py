@@ -3,18 +3,20 @@ Graph builder — constructs a governed LangGraph ReAct agent from an Agent desc
 
 Architecture:
 - Uses ``create_react_agent`` as the base.
+- Platform tool references (strings) are resolved from the registry at setup time.
 - Each tool is wrapped with an async governance layer that:
     1. Calls OPA to get a policy decision.
-    2. If ``require_approval=True`` or the tool's risk is "high", calls
+    2. If OPA returns ``require_approval=True``, calls
        ``hitl.require_approval()`` which internally calls LangGraph ``interrupt()``.
     3. If ``allow=False``, returns a denial string (tool is not executed).
-    4. Otherwise executes the original tool function.
+    4. Otherwise executes the tool (HTTP call to platform or python-executor).
 - Wrapped tools are converted to LangChain tools via @langchain_core.tools.tool
   so they can be bound to the LLM.
 """
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import logging
 from typing import Any
@@ -24,10 +26,11 @@ from .agent import Agent
 from .hitl import require_approval
 from .llm import get_llm
 from . import opa_client
+from .tool_resolver import resolve_tools
 
 logger = logging.getLogger(__name__)
 
-# Registry mapping tool name → risk level so streaming.py can look it up.
+# Registry mapping tool name -> risk level so streaming.py can look it up.
 _TOOL_RISK_REGISTRY: dict[str, str] = {}
 
 
@@ -54,13 +57,9 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
             )
             return f"Tool '{fn.tool_name}' denied by policy: {decision.reason}"
 
-        # 2. HITL for high-risk tools or when OPA requires approval.
-        needs_approval = decision.require_approval or fn.risk == "high"
+        # 2. HITL — trust OPA's require_approval (risk→action is centralized in Rego).
+        needs_approval = decision.require_approval
         if needs_approval:
-            # require_approval internally calls interrupt(); the graph pauses
-            # here and resumes when the reviewer acts.
-            from contextvars import copy_context
-            import contextvars
             thread_id = _current_thread_id.get("")
             approval_result = await require_approval(
                 agent_name=agent_name,
@@ -74,7 +73,7 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
                 reason = approval_result.get("reason", "rejected by reviewer")
                 return f"Tool '{fn.tool_name}' was not approved: {reason}"
 
-        # 3. Execute the original tool.
+        # 3. Execute the tool (HTTP call to platform endpoint or python-executor).
         if asyncio.iscoroutinefunction(fn):
             return await fn(**kwargs)
         return fn(**kwargs)
@@ -84,26 +83,47 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
     governed_tool.__doc__ = fn.__doc__
     governed_tool.risk = fn.risk
     governed_tool.tool_name = fn.tool_name
-    # Copy annotations so LangChain can build the tool schema.
     governed_tool.__annotations__ = getattr(fn, "__annotations__", {})
     return governed_tool
 
 
 # ContextVar used by governed_tool to access the current LangGraph thread_id.
 # Set by the Runner before invoking the graph.
-import contextvars
 _current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_thread_id", default=""
 )
 
 
-def build_graph(agent: Agent, checkpointer: Any = None) -> Any:
+async def resolve_agent_tools(agent: Agent) -> list[Any]:
+    """Resolve all tools for an agent: platform references + inline callables.
+
+    Platform tool names (strings) are fetched from the registry API.
+    Inline callables (legacy @tool decorated functions) are passed through as-is.
+    """
+    all_tools: list[Any] = []
+
+    # Resolve platform tool references
+    platform_names = agent.platform_tool_names
+    if platform_names:
+        resolved = await resolve_tools(platform_names)
+        all_tools.extend(resolved)
+
+    # Pass through legacy inline tools
+    all_tools.extend(agent.inline_tools)
+
+    return all_tools
+
+
+def build_graph(agent: Agent, checkpointer: Any = None, resolved_tools: list[Any] | None = None) -> Any:
     """Build and compile a governed LangGraph ReAct agent.
 
     Args:
-        agent:        The Agent descriptor (name, instructions, tools, model).
-        checkpointer: LangGraph checkpointer (AsyncPostgresSaver or MemorySaver).
-                      If None, graph is stateless (no HITL resume support).
+        agent:          The Agent descriptor (name, instructions, tools, model).
+        checkpointer:   LangGraph checkpointer (AsyncPostgresSaver or MemorySaver).
+                        If None, graph is stateless (no HITL resume support).
+        resolved_tools: Pre-resolved tool callables. If None, only inline tools
+                        from the agent are used (platform tools must be resolved
+                        via resolve_agent_tools first).
 
     Returns:
         A compiled LangGraph graph ready for ainvoke / astream_events.
@@ -114,15 +134,17 @@ def build_graph(agent: Agent, checkpointer: Any = None) -> Any:
     # Resolve the LLM (uses agent.model override if set, else env var).
     llm = get_llm(model_override=agent.model)
 
+    # Use provided resolved tools, or fall back to inline-only.
+    tools = resolved_tools if resolved_tools is not None else agent.inline_tools
+
     # Wrap each tool with governance and register its risk level.
     lc_tools: list[Any] = []
-    for fn in agent.tools:
+    for fn in tools:
         _TOOL_RISK_REGISTRY[fn.tool_name] = fn.risk
 
         governed = _wrap_tool_with_governance(fn, agent.name)
 
         # Convert to a LangChain-compatible tool.
-        # We use the lc_tool decorator with the function's name and docstring.
         lc_fn = lc_tool(governed)
         lc_tools.append(lc_fn)
 

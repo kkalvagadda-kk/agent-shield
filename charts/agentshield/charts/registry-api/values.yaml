@@ -10,6 +10,17 @@ image:
 
 logLevel: "INFO"
 
+# Failure-alert SMTP transport (Phase 8). Leave host empty to run alerting in
+# log-only mode (no email sent). Set host/port/from to enable delivery; provide
+# existingSecret (with userKey/passwordKey) for authenticated relays.
+smtp:
+  host: ""
+  port: 25
+  from: "alerts@agentshield.local"
+  existingSecret: ""
+  userKey: "username"
+  passwordKey: "password"
+
 service:
   type: ClusterIP
   port: 8000

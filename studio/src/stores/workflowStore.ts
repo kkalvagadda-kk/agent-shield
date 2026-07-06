@@ -26,6 +26,10 @@ interface WorkflowState {
   workflowName: string | null;
   team: string | null;
 
+  // Composite workflow (Decision 22) — separate from the agent-graph canvas above
+  compositeWorkflowId: string | null;
+  compositeWorkflowName: string | null;
+
   // Actions
   setNodes: (nodes: Node[] | ((nodes: Node[]) => Node[])) => void;
   setEdges: (edges: Edge[] | ((edges: Edge[]) => Edge[])) => void;
@@ -34,9 +38,12 @@ interface WorkflowState {
   selectNode: (id: string | null) => void;
   selectEdge: (id: string | null) => void;
   updateNodeConfig: (id: string, config: Partial<NodeConfig>) => void;
+  updateNodeData: (id: string, data: Record<string, unknown>) => void;
   updateEdgeCondition: (id: string, condition: string) => void;
   markSaved: (workflowId: string, name: string, team: string) => void;
   resetCanvas: () => void;
+  markCompositeWorkflowSaved: (id: string, name: string, team: string) => void;
+  resetCompositeCanvas: () => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
@@ -48,6 +55,8 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
   workflowId: null,
   workflowName: null,
   team: null,
+  compositeWorkflowId: null,
+  compositeWorkflowName: null,
 
   setNodes: (nodes) => {
     set((state) => ({
@@ -120,6 +129,15 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
     }));
   },
 
+  updateNodeData: (id, data) => {
+    set((state) => ({
+      nodes: state.nodes.map((node) =>
+        node.id === id ? { ...node, data: { ...node.data, ...data } } : node
+      ),
+      isDirty: true,
+    }));
+  },
+
   markSaved: (workflowId, name, team) => {
     set({ workflowId, workflowName: name, team, isDirty: false });
   },
@@ -134,6 +152,22 @@ export const useWorkflowStore = create<WorkflowState>()((set, get) => ({
       workflowId: null,
       workflowName: null,
       team: null,
+    });
+  },
+
+  markCompositeWorkflowSaved: (id, name, team) => {
+    set({ compositeWorkflowId: id, compositeWorkflowName: name, team, isDirty: false });
+  },
+
+  resetCompositeCanvas: () => {
+    set({
+      nodes: [],
+      edges: [],
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      isDirty: false,
+      compositeWorkflowId: null,
+      compositeWorkflowName: null,
     });
   },
 }));

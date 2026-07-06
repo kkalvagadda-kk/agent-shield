@@ -1,0 +1,6 @@
+apiVersion: v2
+name: event-gateway
+description: AgentShield Event Gateway — public webhook ingress for event-driven agents (token + rate-limit + replay + filter + dispatch)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

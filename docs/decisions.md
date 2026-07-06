@@ -350,6 +350,210 @@ All three produce agents governed by the same safety, OPA, HITL, and tracing pip
 
 ---
 
+## Decision 20: Agent Lifecycle & Eval-Gate Placement
+
+**Context:** The playground evaluates an agent by streaming from its live pod, so evaluation *requires* a running deployment. But the deploy pre-flight gate (`deployments.py`) requires `version.eval_passed=True`. That is a chicken-and-egg: you cannot evaluate before deploying, yet deploy is gated on eval. In practice the gate is a rubber stamp — Studio's `DeployAgentPage` hardcodes `eval_passed: true` at version creation. Question: where should the eval gate sit in the `create → deploy → evaluate → iterate → publish` loop?
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Keep eval gate on deploy (status quo)** | Require `eval_passed` before any deploy. | Forces the rubber stamp — you can't evaluate until deployed, so `eval_passed` gets set before there's anything to base it on. Gate enforces nothing. |
+| **B: Move eval gate to publish; deploy to an ungated sandbox** | Deploy-to-sandbox needs only tool grants. Evaluate against that sandbox pod. `eval_passed` (auto-set from a passing `EvalRun`) gates **publish to catalog**, alongside the existing critical-risk + admin-approval checks. | One coherent loop; the gate sits after the thing it measures; requires introducing a sandbox environment and re-homing the gate. |
+
+**Choice: Option B — eval gate moves from deploy to publish; deploy-to-sandbox is ungated.**
+
+**Rationale:** A gate must sit *after* the thing it measures. AgentShield's governance goal is to keep unevaluated agents away from **users** — and the catalog (publish) is what reaches users, not an isolated sandbox pod. Gating publish on `eval_passed` protects the thing that matters and dissolves the chicken-and-egg. `eval_passed` should be **auto-set from a passing `EvalRun`**, never a manual or hardcoded flag. Canonical loop: `create → deploy (sandbox, ungated) → evaluate in playground → iterate → eval_passed flips automatically → publish (eval-gated)`.
+
+**Implications:**
+- Remove the `eval_passed` pre-flight check in `deployments.py` (or scope it to `environment=production` only); keep sandbox/staging ungated.
+- Add `eval_passed` (+ adversarial) check to `publish_agent` in `agents.py`.
+- Auto-set `version.eval_passed` when an `EvalRun` passes (the missing wire).
+- Studio: stop hardcoding `eval_passed: true` in `DeployAgentPage`; relabel "Deploy to Production" (it's a sandbox test deploy, not production).
+
+---
+
+## Decision 21: Execution Models & Memory — Design Revisions
+
+**Context:** `docs/design/execution-models-and-memory.md` (DRAFT, unimplemented) defines how deployed agents behave **in production** — scheduled/cron, event/webhook, durable multi-step with HITL, and cross-session memory. Review found two structural flaws and one governance gap, plus an oversized single-phase scope. These revisions are folded into the spec (now "DRAFT v2").
+
+**Corrections:**
+
+1. **Split `execution_model` into two orthogonal fields.** The spec itself admits trigger and execution shape are independent ("scheduled runs are otherwise identical to reactive or long-running"). Replace the four-value enum with `execution_shape` (`reactive` | `durable`) + composable **triggers** (`manual`/`api`/`schedule`/`webhook`, many per agent). The old four "models" become points in a shape × trigger grid.
+
+2. **Merge `agent_runs`, don't duplicate it.** A table named `agent_runs` already exists as an observability/cost log. The spec's central primitive shares the name with a different schema. Reconcile by `ALTER`-ing the existing table to add orchestration fields (`trigger_type`, `trigger_payload`, `thread_id`, `parent_run_id`, `run_by`, `team`, `error_message`; widen `status`) — one run spine, not two tables.
+
+3. **Constrain memory to preserve session-scoped PII.** AgentShield's PII de-anonymization is session-scoped; cross-session `fact`/`knowledge` memory would leak it. Rule: memory writes pass through the safety proxy; only session `message_history` may hold de-anon PII (TTL'd); cross-session facts store the anonymized/tokenized form. Prerequisite for the memory build phase. (Spec §5.8.)
+
+4. **Resequence the build by risk, event-driven last.** Order: reactive + run spine → durable + Approvals Inbox (reuses existing HITL) → memory (after rule #3) → scheduled → event-driven last. The public webhook gateway is the biggest new attack surface and needs a threat model (rate limiting, replay protection, payload sanitization) before build.
+
+**Rationale:** A gate/model must match reality: trigger and shape are orthogonal, so they get separate fields; a second `agent_runs` would fork the run history; memory that ignores the PII model is a covert channel that defeats the platform's core guarantee; and the highest-risk surface (public ingress) ships last, after the threat model.
+
+**Scope note:** Phases 3a–3e are currently 0% implemented — these are design corrections to the DRAFT before Phase 3 starts, not changes to shipped code.
+
+---
+
+## Decision 22: Workflow Redefinition & the Executable Abstraction
+
+**Context:** The execution-modes design (Decisions 20–21, and the three design docs) was agent-centric, but a **collection of agents working together** — a "workflow" in the user's mental model — is equally something that must be triggered, scheduled, run durably with HITL, evaluated in the playground, and operated in production. The docs missed it. Separately, "workflow" is overloaded: today it means *a single declarative agent's canvas graph* (`workflows` table, backing `agent_versions.workflow_id`).
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Separate multi-agent doc + stack** | Design workflows in their own doc, implement as their own feature. | Reinforces "two features → two implementations"; risks duplicating the run spine, triggers, memory, playground, and production surfaces — messy rework. |
+| **B: One executable abstraction; Workflow = composite kind** | `executable = Agent \| Workflow`. Both carry the same modes / triggers / memory / runs / playground / production / integrations; the **only** difference is orchestration (a Workflow produces a run tree). Weave into the existing docs; the new orchestration design gets one backend-spec section. | Shared substrate implemented once; orchestration engine is the only branch point. Requires redefining "Workflow" and renaming the old canvas-graph concept. |
+
+**Choice: Option B — one executable abstraction. Agent (atomic) and Workflow (composite = collection of agents) are two kinds of one executable.**
+
+**Rationale:** ~90% of the surface is shared (triggers, execution shape, memory, the `agent_runs` spine, playground evaluation, production operation, publish gate, integrations). The single genuine difference is orchestration, which surfaces as a **run tree** — and `agent_runs.parent_run_id` + the shared `StepTracker` already model exactly that. A separate doc/stack would fight the abstraction and invite the duplication/rework we want to avoid. Documents shape implementation: keeping it in the shared docs says "one run spine, one trigger system, one memory, one playground, one production surface; orchestration is the only place code branches on kind."
+
+**Naming:** "Workflow" is **redefined** to mean the composite executable — matching Microsoft Agent Framework and Anthropic, which both use *Agents + Workflows* as their two top-level categories (validated by industry survey). The current canvas-graph `workflows` / `workflow_versions` tables are renamed **`agent_graphs` / `agent_graph_versions`** (the authoring definition of one declarative agent; `agent_versions.workflow_id → agent_graph_id`).
+
+**Where captured:** backend spec §2.6 (abstraction) + §4.5 (composite design, orchestration patterns, run tree, rename); thin "run-tree granularity" deltas in the playground and production experience docs. No separate doc.
+
+**Confirmed 2026-07-03:** canvas rename name **"Agent Graph"** accepted; **reactive workflows allowed** (not always durable; default `durable`); trigger-targeting model (nullable `workflow_id` vs polymorphic `executable_id`) **deferred** — revisit before Phase 6 (tracked in `todo-workflow-executable`).
+
+## Decision 23: Failure-Alert Transport (Phase 8)
+
+**Context:** Phase 8 adds failure alerting for triggered (scheduled/event-driven) agent runs. The platform already ships a `send_email` capability as an **agent-facing tool** (registered, `risk=high` → HITL-gated in OPA) and a separate control-plane `notify_slack` path for approval notifications. Question raised: should failure alerts reuse the `send_email` tool instead of registry-api implementing SMTP directly?
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Control-plane SMTP (chosen)** | `alerting.py` in registry-api sends email directly from the run-completion path. | Fires even when the agent is dead/crashed (only needs registry-api + a mail relay); not governance-gated so alerts actually send; platform is the correct sender. Cost: registry-api owns SMTP creds — a second email integration alongside `send_email`. |
+| **B: Reuse the `send_email` agent tool** | Route failure alerts through the risk=high governed tool. | ❌ HITL-gated (every alert waits for human approval); ❌ depends on the agent tool-execution stack (python-executor/OPA sidecar) — correlated failure if the run failed *because* that subsystem is down; ❌ attributes a platform alert to the agent's SA (audit/governance mismatch). |
+| **C: Shared internal notification service** | One internal notifier owns transport + channels (email/Slack/webhook/PagerDuty) + templates + dedup; control-plane alerters call it directly, `send_email` fronts it as the governed agent door. | The DRY win without B's problems, but more upfront work. Deferred until a 2nd channel/source justifies it. |
+
+**Choice: Option A.** Keep the inlined SMTP transport (`SMTP_HOST/PORT/FROM`, log-only fallback; chart-wired via `registry-api.smtp.*`).
+
+**Rationale:** A failure alert is a control-plane signal that must fire *precisely when the agent is broken* and must not be human-gated — the exact two properties Option B destroys. `send_email` (risk=high, HITL) is correctly reserved for the different use case where an agent's *job* is to send mail. The duplication concern is real but small today; when a second channel or alert source appears, evolve toward Option C (fold `alerting.py` + `notify_slack` onto one notifier) rather than routing operator alerts through the agent tool.
+
+---
+
+## Decision 24: Builder Unification & Full Workflow Orchestration
+
+**Context:** UX review found two overlapping graph builders ("Agent Graphs" = inline-defined agents compiled to one declarative agent; "Workflows" = composite of existing agents → run tree) and three real gaps in the composite builder: it couldn't create new agents inline, its edges were never persisted (`serializeCompositeWorkflow` written but never called; `store.setEdges([])` wiped them on load), it lacked a per-node config / edge-condition panel, and only `sequential` orchestration ran (supervisor/handoff 422-rejected). Also the create-agent wizard couldn't express scheduled/event-driven agents and `createTrigger` was wired to no UI.
+
+**Choice (extends Decision 22):**
+- **Hide "Agent Graphs" from the nav** (routes remain, reachable by URL); the composite **Workflow builder is the single graph builder**, absorbing the Agent Graph canvas capabilities (per-node config panel + edge-condition editor) and adding "**existing agent OR new inline agent**" (inline = a real, shareable agent via `POST /agents`).
+- **Edges are first-class**: new `workflow_edges` table (migration 0029; `source_agent_id → target_agent_id`, `condition`) — chosen over `workflow_members.routing` JSONB because an edge is a cross-member construct. Edges persist on save and reload (closing the wipe-on-load bug).
+- **All four orchestration modes run** (`workflow_orchestrator.orchestrate()`): sequential (edge chain), conditional (edge conditions evaluated by the reused `filter_engine` predicate DSL — no `eval`), supervisor (`role=supervisor` member routes; `max_iterations` cap), handoff (agents signal the next hop). Orchestrator stays in registry-api (the declarative-runner path is inert).
+- **Create-agent wizard = 4-way adaptive type picker** (Reactive/Durable/Scheduled/Event-driven) → shape + optional trigger; shape defaults reactive for scheduled/event (flip in Settings). Trigger creation also added to **Settings**. `AgentTriggerResponse` returns `webhook_url` once on create.
+
+**Deferred (honest ledger):** per-node **tool/skill** re-editing on the workflow canvas (edit on the agent's page — `AgentUpdate` has no tool-rebind field); **workflow-level triggers** (the `agent_triggers.workflow_id` FK exists, no UI yet); node-position persistence. Node-config editing is gated by `is_inline` (existing-agent nodes are read-only to avoid mutating a shared agent from a workflow).
+
+**Addendum (type-aware instructions + per-schedule input, 2026-07-06):** the create-agent wizard now swaps the **instructions template by agent type** — reactive/durable stay conversational; **scheduled** = an autonomous parameterized-worker template (input is a JSON job spec, no user, deliver via tools, be idempotent); **event-driven** = a parse-the-event-JSON template (untrusted payload, at-least-once idempotency). This fixes the chat-only template that made headless runs stall. Separately, a schedule trigger now carries an optional **`input_payload` JSONB** (migration 0030) — the per-job parameters — because an agent is a *reusable capability* while a schedule is a *concrete job*, and one agent can have many schedule triggers (each with different params). `internal.py` resolves a scheduled run's input from the trigger's `input_payload` by `trigger_id` (single source of truth; the scheduler still sends only `trigger_id`). Payload is free-form JSON (agent parses it; no schema enforcement — documented gap). Suite 32 (backend) + wizard Vitest/Playwright cover it. registry-api 0.2.62 / studio 0.1.46.
+
+**Addendum (composable member filter + workflow-level triggers + production HITL resume, 2026-07-06):** three changes shipped in implementation pass #3.
+
+**Composable member filter.** `GET /api/v1/agents/?composable=true` returns only agents that have no enabled schedule or webhook trigger. The workflow builder's Add-Agent modal uses this filter so workflow members are pure capabilities invoked by the orchestrator and won't double-fire. The Create-New tab in that modal restricts inline agent creation to reactive/durable shapes — no new agent type was introduced; members are ordinary agents.
+
+**Workflow-level triggers (G-4 resolved).** Composite workflows are now triggerable like agents. New CRUD at `/api/v1/workflows/{id}/triggers` (schedule + webhook) stores rows with `agent_triggers.workflow_id` set and `agent_id NULL`. The scheduler UNION-queries agent and workflow trigger rows and dispatches both via `POST /internal/runs/start` with `workflow_id`. The event-gateway exposes `POST /hooks/workflow/{name}/{token}` for workflow webhooks. `_start_workflow_run` resolves the run input from `trigger.input_payload` when no explicit payload is sent — mirroring the agent path. Migration 0031 adds nullable `agent_events.workflow_id`. Studio: **Triggers** button + `WorkflowTriggersPanel` in the workflow builder; `execution_shape` (reactive/durable) selector in the workflow Save modal.
+
+**Production single-agent HITL resume (bug fix).** `PATCH /api/v1/approvals/{id}` (the production decide path) now best-effort fire-and-forget POSTs to the agent pod `/resume/{thread_id}` after recording the decision. Previously only the playground path did this, leaving a production approval with the LangGraph thread suspended. Errors are swallowed so a failed resume never fails the decision. Mirrors `approval_timeout_worker.py`.
+
+**Deferred (honest ledger):** the pausable workflow-HITL orchestrator — a member agent's approval pausing/resuming the whole workflow run tree — is not yet implemented. The orchestrator still dispatches member agents one-shot via `/chat`, and the Safety Orchestrator (`require_approval` via OPA) is disabled in this deployment, so end-to-end workflow-level HITL cannot be verified; it gets its own pass. Also: adding a schedule/webhook trigger to an agent already in a workflow is not blocked at the data layer — only the add-time composable filter guards it.
+
+---
+
+## Decision 25: Platform RBAC — Global Roles + Artifact-Scoped Roles
+
+**Date:** 2026-07-06
+
+**Context:** The platform had three Keycloak realm roles (`admin`, `operator`, `viewer`) stored in `user_team_assignments` but with no backend enforcement. HITL routing showed everything to everyone on a team. Production agent management had no delegation — only platform-admin could act. The role model needed to support both platform-wide capabilities and per-artifact authority, with grants targeting individual users or entire teams.
+
+**Decision:** Two-tier RBAC: **global roles** (platform-wide capability) + **artifact-scoped roles** (per-agent/workflow authority).
+
+### Global Roles (mutually exclusive per user, stored in `user_team_assignments.role`)
+
+| Role | What it grants |
+|------|---------------|
+| **platform-admin** | Full platform access — manage users/teams, approve publish requests, configure approval authority, deploy to production, assign artifact-scoped roles |
+| **contributor** | Create agents/workflows, develop in sandbox (playground, test runs), submit for publish, manage tools/skills. Cannot manage users or deploy to production (unless also agent-admin on the artifact). |
+| **viewer** | Read-only — browse catalog, view run history. Cannot use playground, create, or modify anything. |
+
+### Artifact-Scoped Roles (many-per-user, stored in new `artifact_role_grants` table)
+
+| Role | Scope | What it grants |
+|------|-------|---------------|
+| **agent-admin** | Per agent or workflow | Suspend, resume, scale replicas, upgrade version, rollback, edit runtime config (env vars, LLM keys), delete deployment. Can grant `agent-admin` and `approver` to other users/teams within their artifact scope. |
+| **approver** | Per agent or workflow | Receives HITL approval requests for that agent/workflow. Approves all HITL regardless of which tool triggered it (tool-level granularity is a future improvement). |
+
+### Grant Rules
+
+- **Grantee is polymorphic**: a grant targets either a `user_sub` or a `team_name` (column: `grantee_type` = `user` | `team`, `grantee_id`).
+- **Users/teams can hold multiple roles**: a user can be a global `contributor` + `agent-admin` on Agent X + `approver` on Agent Y.
+- **Creator auto-grant**: when a contributor creates an agent or workflow, they automatically receive `agent-admin` on it.
+- **Production deploy**: only `platform-admin` or a user with `agent-admin` on the artifact can deploy to production. Contributors deploy to sandbox only.
+- **Delegation**: `agent-admin` can grant both `agent-admin` and `approver` within their artifact scope. `platform-admin` can grant any scoped role on any artifact.
+
+### Data Model
+
+**Existing table — `user_team_assignments`** (rename `role` values: `admin` → `platform-admin`, `operator` → `contributor`):
+```
+user_sub, team_name, role (platform-admin | contributor | viewer), assigned_by, assigned_at
+```
+
+**New table — `artifact_role_grants`** (migration 0030):
+```
+id              UUID PK
+grantee_type    VARCHAR(16)  -- 'user' or 'team'
+grantee_id      VARCHAR(255) -- user_sub or team_name
+artifact_type   VARCHAR(32)  -- 'agent' or 'workflow'
+artifact_id     UUID         -- FK to agents.id or workflows.id
+role            VARCHAR(32)  -- 'agent-admin' or 'approver'
+granted_by      VARCHAR(255) -- user_sub of granter
+granted_at      TIMESTAMP
+revoked_at      TIMESTAMP NULL
+```
+
+**Relationship to `asset_grants`**: `asset_grants` controls **visibility** (can a team see/bind a published asset). `artifact_role_grants` controls **authority** (can a user/team manage or approve for a specific artifact). They are independent — having visibility does not imply authority, and vice versa.
+
+### Permission Check Logic (pseudocode)
+
+```
+def has_artifact_role(user, artifact_type, artifact_id, role):
+    # Direct user grant
+    if artifact_role_grants.exists(grantee_type='user', grantee_id=user.sub,
+                                    artifact_type, artifact_id, role, revoked_at=NULL):
+        return True
+    # Team grant
+    if artifact_role_grants.exists(grantee_type='team', grantee_id=user.team,
+                                    artifact_type, artifact_id, role, revoked_at=NULL):
+        return True
+    return False
+
+def can_deploy_to_production(user, artifact):
+    return user.role == 'platform-admin' or has_artifact_role(user, artifact, 'agent-admin')
+
+def can_approve_hitl(user, approval):
+    return (user.role == 'platform-admin'
+            or has_artifact_role(user, approval.artifact_type, approval.artifact_id, 'approver'))
+```
+
+### HITL Routing Change
+
+Production HITL queue filtering changes from "show all pending to the team" to "show pending approvals where the user has `approver` on that agent/workflow (direct or via team grant), or user is `platform-admin`."
+
+### Resolved Design Gaps
+
+| Gap | Resolution |
+|-----|-----------|
+| Who can deploy to production? | `platform-admin` or `agent-admin` on the artifact. Contributors deploy to sandbox only. |
+| Creator ownership | Creator auto-receives `agent-admin` at creation time. |
+| Agent-admin delegation scope | `agent-admin` can grant both `agent-admin` and `approver` within their artifact scope. |
+| Approver granularity | Scoped per agent/workflow — approves all HITL for that agent regardless of tool. |
+| Agent-admin operations | Suspend, resume, scale, upgrade, rollback, edit runtime config, delete deployment. |
+| Viewer + Playground | Playground access requires `contributor` globally. Artifact-scoped roles alone don't grant playground access. |
+| Deploy gate (mandatory?) | Advisory for now. Creator already has `agent-admin` auto-grant. |
+| Revocation cascading | Orphan-keep — revoking User A's `agent-admin` does not cascade to grants User A made. |
+| Relationship to asset_grants | Separate tables, separate concerns (visibility vs. authority). |
+
+### Future Improvements (Deferred)
+
+- **Tool-level approver granularity**: scope `approver` to a specific `(agent, tool)` pair, not just the agent.
+- **Mandatory deploy gate**: block production deploy until at least one `agent-admin` is assigned (beyond the creator).
+- **Revocation cascading**: option to cascade-revoke all grants made by a revoked `agent-admin`.
+- **Role audit log**: track who granted/revoked what, when (currently `granted_by` + `granted_at` only; no history on revoke-and-re-grant).
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -373,3 +577,9 @@ All three produce agents governed by the same safety, OPA, HITL, and tracing pip
 | 17 | OPA policy distribution | OPA Bundle Server (nginx + git-sync); replace per-agent ConfigMaps |
 | 18 | Publish/grant workflow | Extend registry-api (no new service) |
 | 19 | Authorization migration phasing | Option C now; migrate directly to full Option B (Waypoints + centralized OPA). No ztunnel-only intermediate phase. |
+| 20 | Agent lifecycle & eval-gate placement | Deploy-to-sandbox is ungated; eval gate moves to **publish**; `eval_passed` auto-set from a passing EvalRun (not manual/hardcoded). |
+| 21 | Execution models & memory design revisions | Split `execution_model` → `execution_shape` + composable triggers; merge (not duplicate) `agent_runs`; memory constrained to preserve session-scoped PII; build resequenced with event-driven last. |
+| 22 | Workflow redefinition & executable abstraction | `executable = Agent \| Workflow`; Workflow = composite (collection of agents) on the shared substrate; only orchestration differs (run tree); old canvas "workflow" → "agent graph". Woven into existing docs, no separate doc. |
+| 23 | Failure-alert transport | Control-plane SMTP in registry-api (`alerting.py`), NOT the risk=high HITL-gated `send_email` agent tool; must fire when the agent is dead and must not be gated. Shared notification service (Option C) deferred until a 2nd channel/source appears. |
+| 24 | Builder unification & full orchestration | Hide "Agent Graphs" nav; composite Workflow builder is the single builder (per-node config + edges + inline/existing agents); `workflow_edges` table (0029); all four orchestration modes run (sequential/conditional/supervisor/handoff); 4-way create-agent wizard + trigger-create UI in Settings. Deferred: canvas tool-editing, workflow-level triggers. |
+| 25 | Platform RBAC | Two-tier: global roles (`platform-admin`, `contributor`, `viewer`) + artifact-scoped roles (`agent-admin`, `approver`) in `artifact_role_grants` table. Grants target users or teams. Creator auto-gets `agent-admin`. Production deploy requires `platform-admin` or `agent-admin`. HITL routed to scoped `approver` holders. Deferred: tool-level approver granularity, mandatory deploy gate, revocation cascading. |

@@ -16,11 +16,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from approval_timeout_worker import _agent_pod_url
 from db import get_db
 from models import Approval, ApprovalAuthority
 from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, PaginatedResponse
@@ -153,6 +155,7 @@ async def list_approvals(
         pattern="^(pending|approved|rejected|timed_out)$",
     ),
     thread_id: Optional[str] = Query(None),
+    team: Optional[str] = Query(None, description="Filter by agent team"),
     context: Optional[str] = Query(
         None,
         pattern="^(production|playground)$",
@@ -177,6 +180,8 @@ async def list_approvals(
         q = q.where(Approval.status == status_filter)
     if thread_id:
         q = q.where(Approval.thread_id == thread_id)
+    if team:
+        q = q.where(Approval.team == team)
 
     if x_user_sub:
         # Scope to tools where caller has authority OR there's an authority record
@@ -299,6 +304,32 @@ async def decide_approval(
         "decide_approval: id=%s decision=%s reviewer=%s",
         approval.id, body.decision, body.reviewer_id,
     )
+
+    # Best-effort resume: notify the agent pod so the suspended LangGraph thread
+    # can continue.  Mirrors the pattern in playground_approvals.py.
+    # A failed resume MUST NOT fail the decision response — wrap and swallow.
+    if approval.thread_id and approval.agent_name and approval.team:
+        try:
+            pod_url = _agent_pod_url(approval.agent_name, approval.team)
+            resume_url = f"{pod_url}/resume/{approval.thread_id}"
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    resume_url,
+                    json={
+                        "decision": body.decision,
+                        "reviewer_id": body.reviewer_id,
+                        "reason": body.reviewer_notes,
+                    },
+                )
+            logger.info(
+                "decide_approval: resume posted thread_id=%s status=%d",
+                approval.thread_id, resp.status_code,
+            )
+        except Exception as exc:
+            logger.warning(
+                "decide_approval: failed to resume agent pod for thread_id=%s: %s",
+                approval.thread_id, exc,
+            )
 
     # Emit Langfuse platform action trace
     from tracing import trace_platform_action

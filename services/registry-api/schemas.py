@@ -75,13 +75,18 @@ class AgentCreate(BaseModel):
     description: str | None = None
     agent_type: str = Field("sdk", pattern="^(sdk|declarative)$")
     agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
+    execution_shape: str = Field("reactive", pattern="^(reactive|durable)$")
+    memory_enabled: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+    tools: list[str] | None = Field(None, description="Platform tool names to bind at creation")
 
 
 class AgentUpdate(BaseModel):
     description: str | None = None
     status: str | None = Field(None, pattern="^(active|archived|deprecated)$")
     agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
+    execution_shape: str | None = Field(None, pattern="^(reactive|durable)$")
+    memory_enabled: bool | None = None
     metadata: dict[str, Any] | None = None
 
 
@@ -93,6 +98,8 @@ class AgentResponse(BaseModel):
     status: str
     agent_type: str
     agent_class: str | None
+    execution_shape: str
+    memory_enabled: bool
     publish_status: str
     created_at: datetime
     updated_at: datetime
@@ -106,7 +113,6 @@ class AgentResponse(BaseModel):
     def _remap_metadata(cls, data: Any) -> Any:
         """ORM column is `metadata_`; expose it as `metadata` in the response."""
         if hasattr(data, "metadata_"):
-            # ORM object — create a plain dict representation
             return {
                 "id": data.id,
                 "name": data.name,
@@ -115,6 +121,8 @@ class AgentResponse(BaseModel):
                 "status": data.status,
                 "agent_type": data.agent_type,
                 "agent_class": data.agent_class,
+                "execution_shape": data.execution_shape,
+                "memory_enabled": data.memory_enabled,
                 "publish_status": data.publish_status,
                 "created_at": data.created_at,
                 "updated_at": data.updated_at,
@@ -150,7 +158,7 @@ class AgentIdentityResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class AgentVersionCreate(BaseModel):
     image_tag: str | None = Field(None, max_length=512)
-    workflow_id: uuid.UUID | None = None
+    agent_graph_id: uuid.UUID | None = None
     tools: list[ToolDefinition] = Field(default_factory=list)
     eval_passed: bool = False
     adversarial_eval_passed: bool = False
@@ -160,7 +168,7 @@ class AgentVersionCreate(BaseModel):
 
     @model_validator(mode="after")
     def _validate_agent_type_fields(self) -> "AgentVersionCreate":
-        if self.image_tag is None and self.workflow_id is None:
+        if self.image_tag is None and self.agent_graph_id is None:
             # Allow for now — router will enforce based on parent agent type
             pass
         return self
@@ -181,7 +189,7 @@ class AgentVersionResponse(BaseModel):
     agent_id: uuid.UUID
     version_number: int
     image_tag: str | None
-    workflow_id: uuid.UUID | None
+    agent_graph_id: uuid.UUID | None
     tools: list[ToolDefinition]
     eval_passed: bool
     adversarial_eval_passed: bool
@@ -201,7 +209,7 @@ class AgentVersionResponse(BaseModel):
 class DeploymentCreate(BaseModel):
     version_id: uuid.UUID
     replicas: int = Field(1, ge=1, le=10)
-    environment: str = Field("production", pattern="^(production|staging)$")
+    environment: str = Field("production", pattern="^(production|staging|sandbox)$")
 
 
 class RollbackRequest(BaseModel):
@@ -314,10 +322,27 @@ class ApprovalResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ApprovalInboxItem(BaseModel):
+    id: uuid.UUID
+    agent_name: str
+    team: str
+    step_name: str | None = None
+    tool_name: str
+    risk_level: str
+    tool_args: dict[str, Any]
+    thread_context_snippet: str | None = None
+    sla_remaining_seconds: int
+    created_at: datetime
+    context: str = "production"
+
+
 # ---------------------------------------------------------------------------
 # Workflow
 # ---------------------------------------------------------------------------
-class WorkflowCreate(BaseModel):
+# ---------------------------------------------------------------------------
+# Agent Graph (renamed from Workflow — Decision 22: a single agent's canvas graph)
+# ---------------------------------------------------------------------------
+class AgentGraphCreate(BaseModel):
     name: str = Field(..., max_length=256)
     team: str = Field(..., max_length=128)
     description: str | None = None
@@ -325,7 +350,7 @@ class WorkflowCreate(BaseModel):
     change_summary: str | None = None
 
 
-class WorkflowUpdate(BaseModel):
+class AgentGraphUpdate(BaseModel):
     name: str | None = Field(None, max_length=256)
     team: str | None = Field(None, max_length=128)
     description: str | None = None
@@ -333,7 +358,7 @@ class WorkflowUpdate(BaseModel):
     change_summary: str | None = None
 
 
-class WorkflowResponse(BaseModel):
+class AgentGraphResponse(BaseModel):
     id: uuid.UUID
     name: str
     team: str
@@ -347,9 +372,9 @@ class WorkflowResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class WorkflowVersionResponse(BaseModel):
+class AgentGraphVersionResponse(BaseModel):
     id: uuid.UUID
-    workflow_id: uuid.UUID
+    agent_graph_id: uuid.UUID
     version_number: int
     definition: dict[str, Any]
     change_summary: str | None
@@ -359,18 +384,118 @@ class WorkflowVersionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class WorkflowWithDefinitionResponse(WorkflowResponse):
-    """Extended response returned by GET /workflows/{id} — includes current version."""
+class AgentGraphWithDefinitionResponse(AgentGraphResponse):
+    """Extended response returned by GET /agent-graphs/{id} — includes current version."""
 
-    current_definition: WorkflowVersionResponse | None = None
+    current_definition: AgentGraphVersionResponse | None = None
 
 
-class WorkflowDeployRequest(BaseModel):
+class AgentGraphDeployRequest(BaseModel):
     version_number: int | None = Field(
         None,
         description="Specific version to deploy; defaults to latest",
     )
     replicas: int = Field(1, ge=1, le=10)
+
+
+# ---------------------------------------------------------------------------
+# Composite Workflow (NEW — Decision 22: a collection of member agents)
+# ---------------------------------------------------------------------------
+class CompositeWorkflowCreate(BaseModel):
+    name: str = Field(..., max_length=256)
+    team: str = Field(..., max_length=128)
+    description: str | None = None
+    execution_shape: str = Field("durable", pattern="^(reactive|durable)$")
+    orchestration: str = Field("sequential", pattern="^(sequential|supervisor|handoff|conditional)$")
+    memory_enabled: bool = False
+
+
+class CompositeWorkflowUpdate(BaseModel):
+    description: str | None = None
+    execution_shape: str | None = Field(None, pattern="^(reactive|durable)$")
+    orchestration: str | None = Field(None, pattern="^(sequential|supervisor|handoff|conditional)$")
+    memory_enabled: bool | None = None
+    status: str | None = Field(None, pattern="^(draft|published|archived)$")
+
+
+class CompositeWorkflowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    team: str
+    description: str | None = None
+    execution_shape: str
+    orchestration: str
+    memory_enabled: bool
+    status: str
+    publish_status: str
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    member_count: int = 0
+
+
+class WorkflowMemberCreate(BaseModel):
+    agent_id: uuid.UUID
+    role: str | None = Field(None, max_length=64)
+    position: int | None = None
+    routing: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowMemberResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workflow_id: uuid.UUID
+    agent_id: uuid.UUID
+    agent_name: str | None = None  # denormalized for display
+    role: str | None = None
+    position: int | None = None
+    routing: dict[str, Any] = Field(default_factory=dict)
+    added_at: datetime
+
+
+class WorkflowEdgeCreate(BaseModel):
+    source_agent_id: uuid.UUID
+    target_agent_id: uuid.UUID
+    condition: str | None = None
+    position: int | None = None
+
+
+class WorkflowEdgeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    source_agent_id: uuid.UUID
+    target_agent_id: uuid.UUID
+    condition: str | None = None
+    position: int | None = None
+    created_at: datetime
+
+
+class CompositeWorkflowWithMembersResponse(CompositeWorkflowResponse):
+    members: list[WorkflowMemberResponse] = Field(default_factory=list)
+    edges: list[WorkflowEdgeResponse] = Field(default_factory=list)
+
+
+class WorkflowRunCreate(BaseModel):
+    input_payload: dict[str, Any] | None = None
+    input_message: str | None = None
+    trigger_type: str = "manual"
+    run_by: str
+
+
+class WorkflowRunStartResponse(BaseModel):
+    workflow_id: uuid.UUID
+    run_id: uuid.UUID
+    status: str
+    warning: str | None = None
+
+
+class WorkflowRunTreeResponse(BaseModel):
+    parent: "AgentRunResponse"
+    children: list["AgentRunResponse"] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +861,11 @@ class AgentPublishRequest(BaseModel):
 class PlaygroundRunCreate(BaseModel):
     agent_name: str
     agent_version_id: Optional[uuid.UUID] = None
-    input_message: str
+    input_message: Optional[str] = None
+    execution_shape: str = Field("reactive", pattern="^(reactive|durable)$")
+    input_payload: Optional[dict[str, Any]] = None
+    trigger_type: Optional[str] = None
+    trigger_payload: Optional[dict[str, Any]] = None
 
 
 class PlaygroundRunResponse(BaseModel):
@@ -749,9 +878,17 @@ class PlaygroundRunResponse(BaseModel):
     context: str
     sandbox: bool
     input_message: Optional[str]
+    execution_shape: str
+    input_payload: Optional[dict[str, Any]] = None
+    trigger_type: Optional[str] = None
+    trigger_payload: Optional[dict[str, Any]] = None
     status: str
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
+    judge_score: Optional[float] = None
+    judge_status: Optional[str] = None
+    judge_reason: Optional[str] = None
+    output_text: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +983,29 @@ class AgentRunCreate(BaseModel):
     input: str | None = None
     langfuse_trace_id: str | None = None
     context: Literal["production", "playground"] = "production"
+    trigger_type: Literal["manual", "api", "schedule", "webhook"] | None = "manual"
+    run_by: str | None = None
+    team: str | None = None
+    thread_id: str | None = None
+
+
+class InternalRunStartRequest(BaseModel):
+    """Payload for POST /api/v1/internal/runs/start — called by the scheduler /
+    event gateway (cluster-internal only) to start a triggered run. Targets
+    EITHER an agent (agent_name) OR a composite workflow (workflow_id) — exactly
+    one must be provided (Decision 22)."""
+    agent_name: str | None = None
+    workflow_id: uuid.UUID | None = None
+    trigger_type: Literal["schedule", "webhook", "manual", "api"] = "schedule"
+    trigger_id: uuid.UUID | None = None
+    trigger_payload: dict[str, Any] | None = None
+    run_by: str
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> "InternalRunStartRequest":
+        if bool(self.agent_name) == bool(self.workflow_id):
+            raise ValueError("exactly one of agent_name or workflow_id must be set")
+        return self
 
 
 class AgentRunUpdate(BaseModel):
@@ -855,7 +1015,8 @@ class AgentRunUpdate(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: int | None = None
-    status: Literal["running", "completed", "failed", "blocked"] | None = None
+    status: Literal["queued", "running", "completed", "failed", "blocked", "awaiting_approval", "cancelled"] | None = None
+    error_message: str | None = None
 
 
 class AgentRunResponse(BaseModel):
@@ -875,6 +1036,192 @@ class AgentRunResponse(BaseModel):
     context: str
     started_at: datetime
     completed_at: datetime | None = None
+    trigger_type: str | None = None
+    run_by: str | None = None
+    team: str | None = None
+    thread_id: str | None = None
+    parent_run_id: uuid.UUID | None = None
+    workflow_id: uuid.UUID | None = None
+    trigger_payload: dict[str, Any] | None = None
+    error_message: str | None = None
+
+
+class AgentStatsResponse(BaseModel):
+    run_count: int = 0
+    p50_latency_ms: int | None = None
+    p95_latency_ms: int | None = None
+    error_rate: float = 0.0
+    total_cost_usd: float = 0.0
+
+
+class AgentHealthResponse(BaseModel):
+    """Mode-aware health signals for an agent (Phase 8).
+
+    `mode` selects which block of signals is populated; the rest stay null.
+      reactive     : p95_latency_ms, error_rate, runs_24h, cost_24h
+      durable      : awaiting_approval_count, failed_24h, avg_duration_ms
+      scheduled    : last_run_status, next_fire_at, missed_fires
+      event-driven : match_rate_24h, rejected_count_24h
+    `health` is a rolled-up traffic-light: healthy | degraded | failing.
+    """
+    agent_name: str
+    mode: str  # reactive | durable | scheduled | event-driven
+    health: str = "healthy"  # healthy | degraded | failing
+
+    # reactive
+    p95_latency_ms: int | None = None
+    error_rate: float | None = None
+    runs_24h: int | None = None
+    cost_24h: float | None = None
+
+    # durable
+    awaiting_approval_count: int | None = None
+    failed_24h: int | None = None
+    avg_duration_ms: int | None = None
+
+    # scheduled
+    last_run_status: str | None = None
+    next_fire_at: datetime | None = None
+    missed_fires: int | None = None
+
+    # event-driven
+    match_rate_24h: float | None = None
+    rejected_count_24h: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# RunStep
+# ---------------------------------------------------------------------------
+class RunStepCreate(BaseModel):
+    step_number: int
+    name: str
+    status: str = "pending"
+    output: dict[str, Any] | None = None
+    approval_id: str | None = None
+    error_message: str | None = None
+
+
+class RunStepResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    run_id: uuid.UUID
+    step_number: int
+    name: str
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    output: dict[str, Any] | None = None
+    approval_id: uuid.UUID | None = None
+    error_message: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# AgentTrigger
+# ---------------------------------------------------------------------------
+class AgentTriggerCreate(BaseModel):
+    trigger_type: str = Field(..., pattern="^(schedule|webhook)$")
+    cron_expression: str | None = Field(None, max_length=100)
+    timezone: str = "UTC"
+    enabled: bool = True
+    filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
+    # Per-schedule job parameters fed to the agent as input on each fire.
+    input_payload: dict[str, Any] | None = None
+    alert_email: str | None = Field(None, max_length=255)
+    alert_on_failure: bool = True
+
+    @model_validator(mode="after")
+    def _validate_trigger_fields(self) -> "AgentTriggerCreate":
+        if self.trigger_type == "schedule" and not self.cron_expression:
+            raise ValueError("cron_expression is required for schedule triggers")
+        return self
+
+
+class AgentTriggerUpdate(BaseModel):
+    cron_expression: str | None = None
+    timezone: str | None = None
+    enabled: bool | None = None
+    filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
+    input_payload: dict[str, Any] | None = None
+    alert_email: str | None = Field(None, max_length=255)
+    alert_on_failure: bool | None = None
+
+
+class AgentTriggerResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    trigger_type: str
+    cron_expression: str | None = None
+    timezone: str | None = None
+    enabled: bool
+    filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
+    input_payload: dict[str, Any] | None = None
+    alert_email: str | None = None
+    alert_on_failure: bool = True
+    # Plaintext webhook token — populated ONLY in the create response (shown once);
+    # never persisted (only sha256 is) and absent from list/get responses.
+    token: str | None = None
+    # Full public webhook URL (/hooks/{agent}/{token}) — populated alongside `token`
+    # in the create response only, so the UI can show a copyable URL once.
+    webhook_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentEventResponse(BaseModel):
+    """One inbound webhook the Event Gateway processed (Phase 9)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    trigger_id: uuid.UUID | None = None
+    agent_name: str
+    status: str  # matched | filtered | rejected
+    filter_reason: str | None = None
+    payload: dict[str, Any] | None = None
+    run_id: uuid.UUID | None = None
+    source_ip: str | None = None
+    received_at: datetime
+
+    @field_validator("source_ip", mode="before")
+    @classmethod
+    def _coerce_ip(cls, v: Any) -> str | None:
+        # INET columns deserialize to ipaddress.IPv4Address/IPv6Address; the
+        # response contract is a plain string.
+        return str(v) if v is not None else None
+
+
+class WorkflowTriggerResponse(BaseModel):
+    """Trigger response for composite-workflow triggers (workflow_id set, agent_id NULL)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    trigger_type: str
+    cron_expression: str | None = None
+    timezone: str | None = None
+    enabled: bool
+    filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
+    input_payload: dict[str, Any] | None = None
+    alert_email: str | None = None
+    alert_on_failure: bool = True
+    # Plaintext webhook token — populated ONLY in the create/rotate-token response
+    # (shown once, never persisted — only sha256 is stored).
+    token: str | None = None
+    # Full public webhook URL (/hooks/workflow/{name}/{token}) — populated alongside
+    # `token` in the create/rotate-token response only.
+    webhook_url: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RotateTokenResponse(BaseModel):
+    """Returned once when a webhook trigger's token is rotated — plaintext token
+    is shown only here and never persisted (only its sha256 is stored)."""
+    trigger_id: uuid.UUID
+    token: str
+    webhook_url: str
 
 
 # Error  (matches ErrorResponse in OpenAPI spec)
@@ -883,6 +1230,48 @@ class ErrorResponse(BaseModel):
     detail: str
     code: str | None = None
     field: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------
+
+class MemoryMessage(BaseModel):
+    role: str = Field(..., pattern="^(user|assistant|system|tool)$")
+    content: str
+
+
+class MemorySaveTurnRequest(BaseModel):
+    thread_id: str
+    messages: list[MemoryMessage]
+    session_id: str | None = None
+    user_id: str | None = None
+
+
+class MemorySearchRequest(BaseModel):
+    query: str
+    top_k: int = Field(5, ge=1, le=50)
+
+
+class AgentMemoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    thread_id: str
+    role: str
+    content: str
+    message_index: int
+    created_at: datetime
+    user_id: str | None = None
+    session_id: str | None = None
+
+
+class MemorySearchResult(BaseModel):
+    content: str
+    similarity_score: float
+    role: str
+    thread_id: str
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------
@@ -912,12 +1301,23 @@ __all__ = [
     "ApprovalDecision",
     "ApprovalResponse",
     # Workflow
-    "WorkflowCreate",
-    "WorkflowUpdate",
-    "WorkflowResponse",
-    "WorkflowVersionResponse",
-    "WorkflowWithDefinitionResponse",
-    "WorkflowDeployRequest",
+    "AgentGraphCreate",
+    "AgentGraphUpdate",
+    "AgentGraphResponse",
+    "AgentGraphVersionResponse",
+    "AgentGraphWithDefinitionResponse",
+    "AgentGraphDeployRequest",
+    "CompositeWorkflowCreate",
+    "CompositeWorkflowUpdate",
+    "CompositeWorkflowResponse",
+    "CompositeWorkflowWithMembersResponse",
+    "WorkflowMemberCreate",
+    "WorkflowMemberResponse",
+    "WorkflowEdgeCreate",
+    "WorkflowEdgeResponse",
+    "WorkflowRunCreate",
+    "WorkflowRunStartResponse",
+    "WorkflowRunTreeResponse",
     # Tool
     "ToolCreate",
     "ToolUpdate",
@@ -978,6 +1378,21 @@ __all__ = [
     "AgentRunCreate",
     "AgentRunUpdate",
     "AgentRunResponse",
+    # RunStep
+    "RunStepResponse",
+    # AgentTrigger / WorkflowTrigger
+    "AgentTriggerCreate",
+    "AgentTriggerUpdate",
+    "AgentTriggerResponse",
+    "WorkflowTriggerResponse",
+    # Memory
+    "MemorySaveTurnRequest",
+    "MemorySearchRequest",
+    "AgentMemoryResponse",
+    "MemorySearchResult",
     # Error
     "ErrorResponse",
 ]
+
+# Resolve the forward reference WorkflowRunTreeResponse → AgentRunResponse.
+WorkflowRunTreeResponse.model_rebuild()

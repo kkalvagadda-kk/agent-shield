@@ -76,7 +76,7 @@ export default function DeployAgentPage() {
 
   const createVersionMutation = useMutation({
     mutationFn: () =>
-      createVersion(name!, { image_tag: imageTag || undefined, eval_passed: true }),
+      createVersion(name!, { image_tag: imageTag || undefined }),
     onSuccess: () => {
       toast.success("Version created.");
       refetchVersions();
@@ -88,21 +88,18 @@ export default function DeployAgentPage() {
   const deployMutation = useMutation({
     mutationFn: async () => {
       let versionId: string;
-      const passing = (versions ?? []).filter((v) => v.eval_passed);
-      if (passing.length > 0) {
-        versionId = passing[0].id;
+      const existing = versions ?? [];
+      if (existing.length > 0) {
+        versionId = existing[0].id;            // listVersions is newest-first
       } else {
-        const v = await createVersion(name!, {
-          image_tag: imageTag || undefined,
-          eval_passed: true,
-        });
+        const v = await createVersion(name!, { image_tag: imageTag || undefined });
         versionId = v.id;
         await refetchVersions();
       }
-      return deployAgent(name!, { version_id: versionId });
+      return deployAgent(name!, { version_id: versionId, environment: "sandbox" });
     },
     onSuccess: () => {
-      toast.info("Deployment triggered — polling for status…");
+      toast.info("Sandbox deployment triggered — polling for status…");
       setPolling(true);
       refetchDeployments();
     },
@@ -197,8 +194,12 @@ export default function DeployAgentPage() {
             <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">
               2
             </div>
-            <h2 className="font-semibold text-slate-900">Deploy to Production</h2>
+            <h2 className="font-semibold text-slate-900">Deploy to Sandbox</h2>
           </div>
+
+          <p className="text-xs text-slate-500 mb-3">
+            Ungated test deploy — evaluate here before publishing.
+          </p>
 
           <button
             onClick={() => deployMutation.mutate()}

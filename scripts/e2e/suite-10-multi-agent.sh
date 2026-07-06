@@ -27,9 +27,27 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+cleanup() {
+  echo ""
+  echo "==> Cleanup: deleting test agents..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+for name in ['${AGENT_INITIATOR}', '${AGENT_TARGET}']:
+    try:
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+    except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 PASS=0
 FAIL=0
 MANUAL=0
+
+# Inline pass/fail helpers (used by the G5 trace-propagation checks below,
+# alongside the run_test() harness). Accept an optional description.
+pass() { echo "  PASS: ${1:-check}"; PASS=$((PASS + 1)); }
+fail() { echo "  FAIL: ${1:-check}"; FAIL=$((FAIL + 1)); }
 
 run_test() {
   local desc="$1"
@@ -127,12 +145,17 @@ echo ""
 echo "--- T-S10-002: Both Agents Appear in Agent List ---"
 run_test "GET /api/v1/agents → both agent-initiator and agent-target in list" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/')
+# These agents are created without auth ⇒ created_by='system' and private.
+# List as the same identity (X-User-Sub: system) so the visibility filter
+# returns them (anonymous callers now see published-only — deny-by-default).
+# High limit: fixed-name agents persist across runs and fall off the default page.
+req = urllib.request.Request('http://localhost:8000/api/v1/agents/?limit=500', headers={'X-User-Sub': 'system'})
+r = urllib.request.urlopen(req)
 assert r.status == 200
 data = json.loads(r.read())
 names = [a['name'] for a in data.get('items', [])]
-assert '$AGENT_INITIATOR' in names, f'$AGENT_INITIATOR not in list: {names[:10]}'
-assert '$AGENT_TARGET' in names, f'$AGENT_TARGET not in list: {names[:10]}'
+assert '$AGENT_INITIATOR' in names, f'$AGENT_INITIATOR not in list (total={data.get(\"total\")})'
+assert '$AGENT_TARGET' in names, f'$AGENT_TARGET not in list (total={data.get(\"total\")})'
 "
 echo ""
 
@@ -145,7 +168,8 @@ echo ""
 for AGENT_NAME in "$AGENT_INITIATOR" "$AGENT_TARGET"; do
   ROUTE_COUNT=$(kubectl get httproute -n "$AGENTS_NAMESPACE" \
     -l "agentshield.io/agent=${AGENT_NAME}" \
-    --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+    --no-headers 2>/dev/null | wc -l | tr -dc '0-9' || true)
+  ROUTE_COUNT=${ROUTE_COUNT:-0}
 
   if [ "$ROUTE_COUNT" -gt 0 ]; then
     echo "  PASS: HTTPRoute exists for $AGENT_NAME ($ROUTE_COUNT route(s))"
@@ -154,7 +178,8 @@ for AGENT_NAME in "$AGENT_INITIATOR" "$AGENT_TARGET"; do
     # Also try the agentshield-platform namespace
     ROUTE_COUNT_NS=$(kubectl get httproute -n "$NAMESPACE" \
       -l "agentshield.io/agent=${AGENT_NAME}" \
-      --no-headers 2>/dev/null | wc -l | tr -d ' ' || echo "0")
+      --no-headers 2>/dev/null | wc -l | tr -dc '0-9' || true)
+    ROUTE_COUNT_NS=${ROUTE_COUNT_NS:-0}
     if [ "$ROUTE_COUNT_NS" -gt 0 ]; then
       echo "  PASS: HTTPRoute exists for $AGENT_NAME in $NAMESPACE ($ROUTE_COUNT_NS route(s))"
       PASS=$((PASS + 1))

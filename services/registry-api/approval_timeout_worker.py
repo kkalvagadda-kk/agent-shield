@@ -24,12 +24,13 @@ import httpx
 from sqlalchemy import text, update
 
 from db import AsyncSessionLocal
-from models import Approval
+from models import AgentRun, Approval, PlaygroundRun, RunStep
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SECONDS = 60
 _RESUME_TIMEOUT_SECONDS = 5
+_DURABLE_RUN_TTL_MINUTES = 10
 
 
 def _agent_pod_url(agent_name: str, team: str, environment: str = "production") -> str:
@@ -116,7 +117,79 @@ async def _sweep_once() -> int:
     ]
     await asyncio.gather(*notify_tasks, return_exceptions=True)
 
+    # Cancel production durable runs whose approval just timed out
+    await _cancel_runs_for_timed_out_approvals(
+        [(str(row.id), row.agent_name) for row in timed_out_rows]
+    )
+
     return len(timed_out_rows)
+
+
+async def _cancel_runs_for_timed_out_approvals(timed_out: list[tuple[str, str]]) -> None:
+    """Cancel AgentRun + RunStep rows linked to timed-out approvals."""
+    if not timed_out:
+        return
+
+    from sqlalchemy import select
+    import uuid as _uuid
+
+    now = datetime.now(tz=timezone.utc)
+    async with AsyncSessionLocal() as db:
+        for approval_id_str, agent_name in timed_out:
+            try:
+                aid = _uuid.UUID(approval_id_str)
+                step_result = await db.execute(
+                    select(RunStep).where(RunStep.approval_id == aid)
+                )
+                step = step_result.scalar_one_or_none()
+                if step:
+                    step.status = "cancelled"
+                    step.completed_at = now
+                    step.error_message = "Approval timed out"
+                    # Cancel the parent run
+                    run_result = await db.execute(
+                        select(AgentRun).where(AgentRun.id == step.run_id)
+                    )
+                    run = run_result.scalar_one_or_none()
+                    if run and run.status in ("running", "awaiting_approval"):
+                        run.status = "cancelled"
+                        run.completed_at = now
+                        logger.info(
+                            "timeout_worker: cancelled run %s due to timed-out approval %s",
+                            run.id, approval_id_str,
+                        )
+            except Exception as exc:
+                logger.warning("_cancel_runs_for_timed_out_approvals: %s: %s", approval_id_str, exc)
+        await db.commit()
+
+
+async def _sweep_stale_durable_runs() -> int:
+    """Cancel durable playground runs that exceed the wall-clock TTL."""
+    from datetime import timedelta
+    from sqlalchemy import and_
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=_DURABLE_RUN_TTL_MINUTES)
+
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            update(PlaygroundRun)
+            .where(
+                and_(
+                    PlaygroundRun.execution_shape == "durable",
+                    PlaygroundRun.status.in_(["running", "blocked"]),
+                    PlaygroundRun.started_at < cutoff,
+                )
+            )
+            .values(status="cancelled", completed_at=datetime.now(tz=timezone.utc))
+            .returning(PlaygroundRun.id)
+        )
+        result = await db.execute(stmt)
+        cancelled = result.fetchall()
+        await db.commit()
+
+    if cancelled:
+        logger.info("timeout_worker: cancelled %d stale durable run(s)", len(cancelled))
+    return len(cancelled)
 
 
 async def approval_timeout_worker() -> None:
@@ -129,11 +202,13 @@ async def approval_timeout_worker() -> None:
             count = await _sweep_once()
             if count:
                 logger.info("approval_timeout_worker: swept %d expired approval(s)", count)
+            durable_count = await _sweep_stale_durable_runs()
+            if durable_count:
+                logger.info("approval_timeout_worker: cancelled %d stale durable run(s)", durable_count)
         except asyncio.CancelledError:
             logger.info("approval_timeout_worker: cancelled, shutting down")
             return
         except Exception as exc:
-            # Never let a sweep failure kill the worker; log and continue.
             logger.error("approval_timeout_worker: sweep error: %s", exc, exc_info=True)
 
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)

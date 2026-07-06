@@ -8,10 +8,13 @@ import { listAgents } from "../api/registryApi";
 // ── Nav item groups ──────────────────────────────────────────────────────────
 
 const PLAYGROUND_BUILD = [
-  { label: "Agents",    to: "/",          end: true  },
-  { label: "Skills",    to: "/skills",    end: false },
-  { label: "Tools",     to: "/tools",     end: false },
-  { label: "Workflows", to: "/workflows", end: false },
+  { label: "Agents",       to: "/",             end: true  },
+  { label: "Skills",       to: "/skills",       end: false },
+  { label: "Tools",        to: "/tools",        end: false },
+  // "Agent Graphs" hidden from nav — the composite Workflow builder now covers
+  // multi-agent authoring (inline + existing agents). Routes remain for direct-URL access.
+  // { label: "Agent Graphs", to: "/agent-graphs", end: false },
+  { label: "Workflows",    to: "/workflows",    end: false },
 ];
 
 const PLAYGROUND_EVAL = [
@@ -21,6 +24,7 @@ const PLAYGROUND_EVAL = [
 
 const ORG_ITEMS = [
   { label: "Catalog",     to: "/catalog"     },
+  { label: "Approvals",   to: "/approvals"   },
   { label: "Deployments", to: "/deployments" },
 ];
 
@@ -41,6 +45,7 @@ function isPlaygroundRoute(pathname: string) {
     pathname.startsWith("/skills") ||
     pathname.startsWith("/tools") ||
     pathname.startsWith("/workflows") ||
+    pathname.startsWith("/agent-graphs") ||
     pathname.startsWith("/playground") ||
     pathname.startsWith("/my-agents")
   );

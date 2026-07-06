@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { GitBranch, Loader2, Plus, Rocket } from 'lucide-react';
+import { GitMerge, Loader2, Plus } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
-import { listWorkflows, type Workflow } from '../api/registryApi';
+import { listCompositeWorkflows, type CompositeWorkflow } from '../api/registryApi';
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -10,6 +10,12 @@ const STATUS_BADGE: Record<string, string> = {
   draft: 'bg-slate-100 text-slate-600',
   published: 'bg-green-100 text-green-700',
   archived: 'bg-slate-200 text-slate-500',
+};
+
+const ORCHESTRATION_BADGE: Record<string, string> = {
+  sequential: 'bg-blue-50 text-blue-700',
+  supervisor: 'bg-purple-50 text-purple-700',
+  handoff: 'bg-teal-50 text-teal-700',
 };
 
 function relativeTime(iso: string): string {
@@ -30,11 +36,11 @@ export default function WorkflowsPage() {
   const navigate = useNavigate();
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['workflows'],
-    queryFn: () => listWorkflows(),
+    queryKey: ['composite-workflows'],
+    queryFn: () => listCompositeWorkflows(),
   });
 
-  const workflows: Workflow[] = data ?? [];
+  const workflows: CompositeWorkflow[] = data ?? [];
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">
@@ -43,7 +49,7 @@ export default function WorkflowsPage() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Workflows</h1>
           <p className="text-sm text-slate-500 mt-0.5">
-            Visual agent workflows — design, save, and deploy
+            Compose existing agents into multi-step pipelines
           </p>
         </div>
         <button onClick={() => navigate('/workflows/new')} className="btn-primary">
@@ -71,10 +77,10 @@ export default function WorkflowsPage() {
       {!isLoading && !error && (
         workflows.length === 0 ? (
           <div className="card flex flex-col items-center py-16 text-center">
-            <GitBranch size={40} className="text-slate-300 mb-3" />
+            <GitMerge size={40} className="text-slate-300 mb-3" />
             <p className="text-slate-500 font-medium">No workflows yet.</p>
             <p className="text-slate-400 text-sm mt-1">
-              Click + New Workflow to start.
+              Create one to compose existing agents.
             </p>
             <button onClick={() => navigate('/workflows/new')} className="btn-primary mt-5">
               <Plus size={14} />
@@ -86,7 +92,7 @@ export default function WorkflowsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {['Name', 'Team', 'Status', 'Updated', ''].map((h) => (
+                  {['Name', 'Team', 'Orchestration', 'Status', 'Members', 'Updated', ''].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -98,13 +104,15 @@ export default function WorkflowsPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {workflows.map((wf) => {
-                  const badgeCls =
+                  const statusCls =
                     STATUS_BADGE[wf.status] ?? 'bg-slate-100 text-slate-600';
+                  const orchCls =
+                    ORCHESTRATION_BADGE[wf.orchestration] ?? 'bg-slate-100 text-slate-600';
                   return (
                     <tr key={wf.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
                         <Link
-                          to={`/workflows/${wf.id}`}
+                          to={`/workflows/${wf.id}/builder`}
                           className="font-semibold text-blue-600 hover:text-blue-800 hover:underline"
                         >
                           {wf.name}
@@ -117,20 +125,27 @@ export default function WorkflowsPage() {
                       </td>
                       <td className="px-4 py-3 text-slate-600">{wf.team}</td>
                       <td className="px-4 py-3">
-                        <span className={`badge ${badgeCls} capitalize`}>
+                        <span className={`badge ${orchCls} capitalize`}>
+                          {wf.orchestration}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className={`badge ${statusCls} capitalize`}>
                           {wf.status}
                         </span>
+                      </td>
+                      <td className="px-4 py-3 text-slate-600 text-center">
+                        {wf.member_count}
                       </td>
                       <td className="px-4 py-3 text-slate-400 text-xs">
                         {relativeTime(wf.updated_at)}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <button
-                          onClick={() => navigate(`/workflows/${wf.id}`)}
+                          onClick={() => navigate(`/workflows/${wf.id}/builder`)}
                           className="btn-primary py-1.5 text-xs"
                         >
-                          <Rocket size={12} />
-                          Deploy
+                          Open
                         </button>
                       </td>
                     </tr>

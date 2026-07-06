@@ -1,0 +1,18 @@
+enabled: true
+replicaCount: 2
+
+image:
+  repository: registry.internal/agentshield/scheduler
+  tag: "0.1.1"
+  pullPolicy: IfNotPresent
+
+reloadIntervalSeconds: "60"
+logLevel: INFO
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

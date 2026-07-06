@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Release.Name }}-scheduler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-scheduler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+spec:
+  # 2 replicas for HA; a Postgres advisory lock (ha.py) makes each fire dispatch once.
+  replicas: {{ .Values.replicaCount | default 2 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Chart.Name }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
+        helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-scheduler
+      {{- with ((.Values.global).imagePullSecrets | default list) }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: scheduler
+          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/scheduler:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 8090
+          env:
+            - name: REGISTRY_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-secrets
+                  key: registry-api-url
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-secrets
+                  key: database-url
+            - name: RELOAD_INTERVAL_SECONDS
+              value: {{ .Values.reloadIntervalSeconds | default "60" | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | default "INFO" | quote }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | default "50m" }}
+              memory: {{ .Values.resources.requests.memory | default "64Mi" }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | default "200m" }}
+              memory: {{ .Values.resources.limits.memory | default "128Mi" }}

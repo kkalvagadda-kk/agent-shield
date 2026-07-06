@@ -9,7 +9,7 @@
 #   T-S15-002 — POST /agents/ without X-User-Sub → created_by == 'system'
 #   T-S15-003 — GET /agents/ with X-User-Sub: user-alice → alice's private agent in list
 #   T-S15-004 — GET /agents/ with X-User-Sub: user-bob → alice's private agent NOT in list
-#   T-S15-005 — GET /agents/ without X-User-Sub (system call) → all agents returned
+#   T-S15-005 — GET /agents/ without X-User-Sub → published-only (deny-by-default; private agents NOT leaked)
 #   T-S15-006 — Published agent visible to any authenticated user (user-bob sees it)
 #   T-S15-007 — GET /agents/{name} (direct fetch) has no isolation — known gap / MANUAL
 #   T-S15-008 — Studio UX: agent created by alice not visible to bob — MANUAL
@@ -36,12 +36,28 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+cleanup() {
+  echo ""
+  echo "==> Cleanup: deleting test agents..."
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request
+for name in ['${ALICE_AGENT}', '${SYSTEM_AGENT}']:
+    try:
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+    except Exception: pass
+" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 PASS=0
 FAIL=0
 MANUAL=0
 
-ALICE_AGENT="s15-alice-agent"
-SYSTEM_AGENT="s15-system-agent"
+# Timestamped so soft-deleted (deprecated) agents from prior runs don't cause
+# name-conflict failures on re-run (agents soft-delete; the name stays reserved).
+_S15_TS="$(date +%s)"
+ALICE_AGENT="s15-alice-agent-${_S15_TS}"
+SYSTEM_AGENT="s15-system-agent-${_S15_TS}"
 
 run_test() {
   local desc="$1"
@@ -228,40 +244,36 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T-S15-005: System call (no X-User-Sub) sees all agents
+# T-S15-005: Anonymous call (no X-User-Sub) is DENY-BY-DEFAULT → published only
 # ---------------------------------------------------------------------------
+# NOTE: previously this asserted a no-header call returned ALL agents. That was
+# the multi-tenant leak (a caller with no identity saw every tenant's private
+# agents). Fixed: an anonymous list returns ONLY published agents; private
+# agents (alice's + the system agent) must NOT appear.
 echo ""
-echo "--- T-S15-005: GET /agents/ without X-User-Sub (system call) → all agents returned ---"
+echo "--- T-S15-005: GET /agents/ without X-User-Sub → published-only (deny-by-default) ---"
 
 if [ -n "$ALICE_AGENT_ID" ] && [ -n "$SYSTEM_AGENT_ID" ]; then
-  run_test "T-S15-005 GET /agents/ no header → both ${ALICE_AGENT} and ${SYSTEM_AGENT} in list" "
+  run_test "T-S15-005 GET /agents/ no header → private agents (${ALICE_AGENT}, ${SYSTEM_AGENT}) NOT leaked" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/')
+r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/?limit=500')
 assert r.status == 200, f'expected 200 got {r.status}'
 data = json.loads(r.read())
 items = data if isinstance(data, list) else data.get('items', data.get('data', []))
 names = [item.get('name') for item in items]
-assert '${ALICE_AGENT}' in names, \
-    f'${ALICE_AGENT} missing from system-call list: {names}'
-assert '${SYSTEM_AGENT}' in names, \
-    f'${SYSTEM_AGENT} missing from system-call list: {names}'
+# Both test agents are private ⇒ must be hidden from an anonymous caller.
+assert '${ALICE_AGENT}' not in names, \
+    f'LEAK: private ${ALICE_AGENT} visible to anonymous caller: {names[:10]}'
+assert '${SYSTEM_AGENT}' not in names, \
+    f'LEAK: private ${SYSTEM_AGENT} visible to anonymous caller: {names[:10]}'
+# Anything returned must be published (deny-by-default).
+leaked = [i.get('name') for i in items if i.get('publish_status') != 'published']
+assert not leaked, f'LEAK: non-published agents in anonymous list: {leaked[:10]}'
 "
 else
   echo "  SKIP: T-S15-005 — missing alice or system agent (prior failures)"
   FAIL=$((FAIL + 1))
 fi
-
-# Also verify that system call shows agents with created_by='system'
-run_test "T-S15-005 System call returns agents with created_by=system (migration backfill)" "
-import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/agents/')
-data = json.loads(r.read())
-items = data if isinstance(data, list) else data.get('items', data.get('data', []))
-# No agent should have created_by=None (migration 0014 backfilled nulls to 'system')
-null_entries = [i.get('name') for i in items if i.get('created_by') is None]
-assert len(null_entries) == 0, \
-    f'agents with NULL created_by found (migration 0014 incomplete?): {null_entries}'
-"
 
 # ---------------------------------------------------------------------------
 # T-S15-006: Published agent is visible to any authenticated user
@@ -271,6 +283,18 @@ echo "--- T-S15-006: Publish alice's agent; user-bob can then see it ---"
 
 PUBLISH_REQUEST_ID=""
 if [ -n "$ALICE_AGENT_ID" ]; then
+  # Create an eval-passed version so the publish gate (Decision 20) is satisfied.
+  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+req = urllib.request.Request(
+    'http://localhost:8000/api/v1/agents/${ALICE_AGENT}/versions',
+    data=json.dumps({'image_tag': 'registry.internal/s15:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'user-alice'}, method='POST')
+try:
+    urllib.request.urlopen(req)
+except Exception as e:
+    print('s15 version create:', e)
+" 2>/dev/null || true
   PUBLISH_REQUEST_ID=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 req = urllib.request.Request(

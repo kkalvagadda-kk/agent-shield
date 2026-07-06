@@ -11,21 +11,11 @@ data:
 
         root /usr/share/nginx/html;
 
-        location /bundles/agentshield/data.json {
+        # OPA sidecars poll this path — it's a single gzipped bundle tarball file.
+        location = /bundles/agentshield {
             add_header Cache-Control "no-cache, must-revalidate";
-            add_header Content-Type "application/json";
+            default_type application/gzip;
             try_files $uri =404;
-        }
-
-        location /bundles/agentshield/policy.rego {
-            add_header Cache-Control "no-cache, must-revalidate";
-            add_header Content-Type "text/plain";
-            try_files $uri =404;
-        }
-
-        location /bundles/ {
-            add_header Cache-Control "no-cache, must-revalidate";
-            try_files $uri $uri/ =404;
         }
 
         location /health {

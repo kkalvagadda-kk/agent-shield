@@ -1,13 +1,15 @@
 """
 Kubernetes client helpers for the Registry API.
 
-Used only for writing K8s Secrets at agent deploy time (LLM provider
-credentials). The registry-api pod must have a ServiceAccount with
-Role: create/update Secrets in the agentshield-platform namespace.
+Permissions required on the registry-api ServiceAccount:
+  - Secrets:    create, update  in agentshield-platform  (LLM credential secrets)
+  - ConfigMaps: create, update  in agentshield-platform  (OPA policy ConfigMaps)
+  - Jobs:       create, get     in agentshield-platform  (eval-runner batch jobs)
 """
 
 import asyncio
 import logging
+import os
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
@@ -15,6 +17,16 @@ from kubernetes.client.rest import ApiException
 logger = logging.getLogger(__name__)
 
 _k8s_initialized = False
+
+_PLATFORM_NAMESPACE = "agentshield-platform"
+_REGISTRY_API_URL = os.getenv(
+    "REGISTRY_API_URL",
+    "http://agentshield-registry-api.agentshield-platform:8000",
+)
+_EVAL_RUNNER_IMAGE = os.getenv(
+    "EVAL_RUNNER_IMAGE",
+    "registry.internal/agentshield/eval-runner:0.1.0",
+)
 
 
 def _init_k8s() -> None:
@@ -78,3 +90,78 @@ def apply_configmap(namespace: str, name: str, data: dict[str, str]) -> None:
             logger.info("k8s: updated configmap %s/%s", namespace, name)
         else:
             raise
+
+
+def _create_eval_job_sync(
+    eval_run_id: str,
+    agent_name: str,
+    dataset_id: str,
+) -> None:
+    """Create a K8s batch Job that runs the eval-runner container (synchronous)."""
+    _init_k8s()
+    batch_v1 = client.BatchV1Api()
+
+    job_name = f"eval-{eval_run_id[:8]}"
+
+    job = client.V1Job(
+        api_version="batch/v1",
+        kind="Job",
+        metadata=client.V1ObjectMeta(
+            name=job_name,
+            namespace=_PLATFORM_NAMESPACE,
+            labels={
+                "app.kubernetes.io/name": "eval-runner",
+                "app.kubernetes.io/managed-by": "agentshield-registry-api",
+                "agentshield.io/eval-run-id": eval_run_id,
+            },
+        ),
+        spec=client.V1JobSpec(
+            backoff_limit=1,
+            ttl_seconds_after_finished=3600,
+            template=client.V1PodTemplateSpec(
+                metadata=client.V1ObjectMeta(
+                    labels={
+                        "app.kubernetes.io/name": "eval-runner",
+                        "agentshield.io/eval-run-id": eval_run_id,
+                    }
+                ),
+                spec=client.V1PodSpec(
+                    restart_policy="Never",
+                    containers=[
+                        client.V1Container(
+                            name="eval-runner",
+                            image=_EVAL_RUNNER_IMAGE,
+                            env=[
+                                client.V1EnvVar(name="EVAL_RUN_ID", value=eval_run_id),
+                                client.V1EnvVar(name="AGENT_NAME", value=agent_name),
+                                client.V1EnvVar(name="DATASET_ID", value=dataset_id),
+                                client.V1EnvVar(name="REGISTRY_API_URL", value=_REGISTRY_API_URL),
+                            ],
+                            resources=client.V1ResourceRequirements(
+                                requests={"cpu": "100m", "memory": "256Mi"},
+                                limits={"cpu": "500m", "memory": "512Mi"},
+                            ),
+                        )
+                    ],
+                ),
+            ),
+        ),
+    )
+
+    try:
+        batch_v1.create_namespaced_job(_PLATFORM_NAMESPACE, job)
+        logger.info("k8s: created eval-runner job %s/%s", _PLATFORM_NAMESPACE, job_name)
+    except ApiException as exc:
+        if exc.status == 409:
+            logger.warning("k8s: eval-runner job %s already exists — skipping", job_name)
+        else:
+            raise
+
+
+async def create_eval_job(
+    eval_run_id: str,
+    agent_name: str,
+    dataset_id: str,
+) -> None:
+    """Create a K8s eval-runner Job (runs sync k8s client in a thread)."""
+    await asyncio.to_thread(_create_eval_job_sync, eval_run_id, agent_name, dataset_id)
