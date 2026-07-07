@@ -108,9 +108,18 @@ scheduler:
 event-gateway:
   enabled: true
 
-# envoy-gateway is a stub sub-chart (no templates yet) — keep OFF until implemented.
+# Envoy Gateway ingress — path-based routing to all services via Gateway API.
+# Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
+# Uses nip.io wildcard DNS — no /etc/hosts needed (resolves to 127.0.0.1 via public DNS).
 envoy-gateway:
-  enabled: false
+  enabled: true
+  gateway:
+    name: agentshield-gateway
+    hostname: agentshield.127.0.0.1.nip.io
+    port: 80
+  gatewayClass:
+    name: agentshield
+    controllerName: gateway.envoyproxy.io/gatewayclass-controller
 
 # Postgres PV reclaim=Retain guard hook. OFF by default: it needs a kubectl image
 # (bitnami/kubectl) that may be unpullable offline, and a failed Helm hook fails
@@ -514,8 +523,10 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.71"
+    tag: "0.2.74"
     pullPolicy: IfNotPresent
+
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.3"
 
   service:
     type: ClusterIP
@@ -539,6 +550,8 @@ registry-api:
           key: agentshield  # Registry API reads DB password from here; full URL built in config.py
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
+    LANGFUSE_PUBLIC_URL: ""
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.3"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   resources:
@@ -818,7 +831,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.57"
+    tag: "0.1.60"
     pullPolicy: IfNotPresent
 
   service:

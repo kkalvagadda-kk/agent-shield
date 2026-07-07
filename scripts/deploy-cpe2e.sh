@@ -3,6 +3,10 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.73  (Eval results publish lifecycle: expected_output column, langfuse_trace_id in schema, trace-by-id endpoint, admin publish eval evidence)
+#   - studio:0.1.58        (Eval results UX: expandable rows, failed filter, score colors, action CTAs, TraceDrawer, publish eval gate, admin eval column, datasets eval runs)
+#   - eval-runner:0.1.2    (Include expected_output in result POST)
+#   - registry-api:0.2.72  (Batch eval fixes: judge Bedrock support via boto3, fix decrypt_json import, evalRunnerImage in values.yaml, save_run_to_dataset expected_output)
 #   - registry-api:0.2.64  (Pausable workflow-HITL: migration 0032 agent_runs.orchestrator_state JSONB checkpoint; workflow_orchestrator per-child thread_id + authoritative pending-Approval pause detection (halts all 4 modes at awaiting_approval); resume_orchestration re-entry (sequential auto-advance); decide_approval _resume_and_advance workflow hook)
 #   - deploy-controller:0.1.8  (inject AGENTSHIELD_OPA_URL=http://localhost:8181 into agent pods so SDK exits DEV_MODE and consults real OPA — fixes global mock-allow governance bypass)
 #   - studio:0.1.48        (awaiting_approval amber badge in workflow run tree + RunsTab status filter option)
@@ -53,11 +57,11 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.71"
+REGISTRY_API_TAG="0.2.74"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.12"
-STUDIO_TAG="0.1.57"
-EVAL_RUNNER_TAG="0.1.1"
+STUDIO_TAG="0.1.60"
+EVAL_RUNNER_TAG="0.1.3"
 DECLARATIVE_RUNNER_TAG="0.1.14"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
@@ -80,6 +84,15 @@ if [ -n "$PG_POD" ]; then
 fi
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
+# IMPORTANT: Always use `helm upgrade` to deploy registry-api changes.
+# `kubectl set image` only updates the main container — the alembic-migrate
+# init container stays pinned to the old Helm-rendered tag, skipping new migrations.
+# If you must use kubectl, update BOTH containers:
+#   kubectl set image deployment/agentshield-registry-api \
+#     alembic-migrate=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
+#     registry-api=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
+#     -n agentshield-platform
+
 echo "[1/8] Building images..."
 echo "  → registry-api:${REGISTRY_API_TAG} (Phase 7 — internal run-start endpoint for scheduler/events)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
@@ -316,14 +329,40 @@ echo "================================================================"
 echo ""
 kubectl get pods -n "$NAMESPACE" --no-headers | sort
 echo ""
-echo "Port-forward commands:"
-echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api    -n ${NAMESPACE} 8000:8000"
-echo "  Studio:            kubectl port-forward svc/agentshield-studio          -n ${NAMESPACE} 5173:80"
-echo "  Python Executor:   kubectl port-forward svc/agentshield-python-executor  -n ${NAMESPACE} 8081:8080"
-echo "  Langfuse UI:       kubectl port-forward svc/agentshield-langfuse-web    -n ${NAMESPACE} 4000:3000"
+
+# --- Envoy Gateway status ---
+GW_STATUS=$(kubectl get gateway agentshield-gateway -n "$NAMESPACE" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || echo "")
+if [ "$GW_STATUS" = "True" ]; then
+  GW_ADDR=$(kubectl get gateway agentshield-gateway -n "$NAMESPACE" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "pending")
+  echo "Envoy Gateway:  READY (address: ${GW_ADDR})"
+  echo ""
+  echo "Access (via nip.io — no /etc/hosts needed):"
+  echo "  Studio:        http://agentshield.127.0.0.1.nip.io"
+  echo "  Registry API:  http://agentshield.127.0.0.1.nip.io/api/v1/health"
+  echo "  Keycloak:      http://agentshield.127.0.0.1.nip.io/realms/agentshield/.well-known/openid-configuration"
+  echo "  Langfuse:      http://agentshield.127.0.0.1.nip.io/langfuse/"
+  echo "  MinIO Console: http://agentshield.127.0.0.1.nip.io/minio/"
+  echo "  Webhooks:      http://agentshield.127.0.0.1.nip.io/webhooks/"
+elif [ -n "$GW_STATUS" ]; then
+  echo "Envoy Gateway:  NOT READY (status: ${GW_STATUS})"
+  echo "  Check: kubectl get gateway -n $NAMESPACE"
+  echo ""
+  echo "Fallback port-forward commands:"
+  echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api    -n ${NAMESPACE} 8000:8000"
+  echo "  Studio:            kubectl port-forward svc/agentshield-studio          -n ${NAMESPACE} 5173:80"
+else
+  echo "Envoy Gateway:  NOT INSTALLED (controller missing or gateway not created)"
+  echo "  Install: bash scripts/setup-envoy-gateway.sh"
+  echo ""
+  echo "Port-forward commands (legacy access):"
+  echo "  Registry API:      kubectl port-forward svc/agentshield-registry-api    -n ${NAMESPACE} 8000:8000"
+  echo "  Studio:            kubectl port-forward svc/agentshield-studio          -n ${NAMESPACE} 5173:80"
+  echo "  Python Executor:   kubectl port-forward svc/agentshield-python-executor  -n ${NAMESPACE} 8081:8080"
+  echo "  Langfuse UI:       kubectl port-forward svc/agentshield-langfuse-web    -n ${NAMESPACE} 4000:3000"
+fi
 echo ""
 echo "Langfuse default credentials:"
-echo "  URL:      http://localhost:4000"
+echo "  URL:      http://agentshield.local/langfuse/ (or http://localhost:4000 via port-forward)"
 echo "  Email:    admin@agentshield.local"
 echo "  Password: AdminPass2024"
 echo "  Project:  AgentShield Platform"

@@ -1,0 +1,86 @@
+{{- if .Values.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentshield-routes
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "envoy-gateway.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+  hostnames:
+    - {{ .Values.gateway.hostname | quote }}
+  rules:
+    # Registry API
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/
+      backendRefs:
+        - name: {{ .Release.Name }}-registry-api
+          port: 8000
+
+    # Keycloak OIDC + static assets
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /realms/
+        - path:
+            type: PathPrefix
+            value: /resources/
+        - path:
+            type: PathPrefix
+            value: /js/
+      backendRefs:
+        - name: {{ .Release.Name }}-keycloak
+          port: 80
+
+    # Langfuse observability dashboard
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /langfuse/
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: {{ .Release.Name }}-langfuse-web
+          port: 3000
+
+    # MinIO console
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /minio/
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        - name: {{ .Release.Name }}-minio
+          port: 9001
+
+    # Event Gateway webhooks
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /webhooks/
+      backendRefs:
+        - name: {{ .Release.Name }}-event-gateway
+          port: 8091
+
+    # Studio SPA (catch-all — must be last)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ .Release.Name }}-studio
+          port: 80
+{{- end }}

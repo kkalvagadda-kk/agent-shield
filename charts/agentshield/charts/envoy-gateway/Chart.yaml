@@ -1,6 +1,6 @@
 apiVersion: v2
 name: envoy-gateway
-description: AgentShield envoy-gateway service (stub — not yet implemented)
+description: AgentShield ingress layer — Envoy Gateway (Gateway API) with path-based routing
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "1.8.2"
