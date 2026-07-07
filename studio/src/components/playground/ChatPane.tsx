@@ -20,6 +20,18 @@ interface Props {
   onTraceEvent: (event: { ts: string; event: string; content?: string; tool_name?: string; result?: string }) => void;
 }
 
+function coerceToString(val: unknown): string {
+  if (val == null) return "";
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) {
+    return val.map((b: Record<string, unknown>) => (b as { text?: string }).text ?? JSON.stringify(b)).join("");
+  }
+  if (typeof val === "object") {
+    return (val as { text?: string }).text ?? JSON.stringify(val);
+  }
+  return String(val);
+}
+
 export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -72,20 +84,14 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
           const ts = new Date().toISOString();
 
           if (event && event !== "message") {
-            const traceContent = payload.content != null ? String(payload.content) : undefined;
+            const traceContent = payload.content != null ? coerceToString(payload.content) : undefined;
             const traceTool = payload.tool_name != null ? String(payload.tool_name) : undefined;
-            const traceResult = payload.result != null ? String(payload.result) : undefined;
+            const traceResult = payload.result != null ? coerceToString(payload.result) : undefined;
             onTraceEvent({ ts, event, content: traceContent, tool_name: traceTool, result: traceResult });
           }
 
           if (event === "text_delta") {
-            let rawContent = payload.content;
-            if (Array.isArray(rawContent)) {
-              rawContent = rawContent.map((b: Record<string, unknown>) => (b as { text?: string }).text ?? String(b)).join("");
-            } else if (typeof rawContent === "object" && rawContent !== null) {
-              rawContent = (rawContent as { text?: string }).text ?? JSON.stringify(rawContent);
-            }
-            const content = typeof rawContent === "string" ? rawContent : String(rawContent ?? "");
+            const content = coerceToString(payload.content);
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
