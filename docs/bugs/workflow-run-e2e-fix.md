@@ -78,8 +78,8 @@ Deploying agents from Studio worked, but running composite workflows produced no
 |---------|-----|
 | registry-api | 0.2.70 |
 | deploy-controller | 0.1.11 |
-| declarative-runner | 0.1.12 |
-| studio | 0.1.53 |
+| declarative-runner | 0.1.14 |
+| studio | 0.1.57 |
 
 ## Files Changed
 
@@ -94,7 +94,7 @@ Deploying agents from Studio worked, but running composite workflows produced no
 - `studio/src/pages/ProvidersPage.tsx` — lowercase credential keys + correct Bedrock model IDs
 - `studio/src/pages/WorkflowBuilderPage.tsx` — render output + extended polling
 - `studio/src/api/registryApi.ts` — `AgentRunItem` output/input/error_message fields
-- `studio/src/components/playground/ChatPane.tsx` — filter `message` events from trace
+- `studio/src/components/playground/ChatPane.tsx` — `coerceToString()` helper, filter text_delta from trace
 - `charts/agentshield/charts/registry-api/templates/rbac.yaml` — ClusterRole
 
 ### 12. TracePanel crashes on non-string tool results (blank screen)
@@ -102,6 +102,18 @@ Deploying agents from Studio worked, but running composite workflows produced no
 **Where:** `studio/src/components/playground/TracePanel.tsx`, `studio/src/components/playground/ChatPane.tsx`, `sdk/agentshield_sdk/streaming.py`
 **Problem:** Fix #11 unmasked a latent bug. Before the fix, SSE double-wrapping caused all events to arrive as `event: "message"` — the ChatPane filter skipped them, so TracePanel never saw `tool_call_end` events. After the fix, events arrive with correct types. TracePanel renders `ev.result.slice(0, 40)` but tool results can be dicts/lists (not strings). `.slice()` on a non-string throws `TypeError`, crashing React. No ErrorBoundary existed, so the entire app unmounted → blank white screen.
 **Fix:** (a) `String()` coercion in TracePanel before `.slice()`. (b) ChatPane coerces `result`/`content`/`tool_name` to string via `String()` before passing to trace. (c) SDK `streaming.py` now `json.dumps()` dict/list results instead of passing raw objects. (d) Added `ErrorBoundary` component wrapping Routes in `App.tsx` to prevent future blank screens.
+
+### 13. Anthropic content blocks render as [object Object]
+
+**Where:** `sdk/agentshield_sdk/streaming.py`, `studio/src/components/playground/ChatPane.tsx`
+**Problem:** Anthropic's `on_chat_model_stream` returns `chunk.content` as a list of content blocks (e.g. `[{"type": "text", "text": "Hello"}]`), not a plain string. SDK passed it through raw → JSON serialized as array → frontend `as string` cast did nothing → JS string concatenation produced `[object Object]` flooding both chat pane and event trace.
+**Fix:** (a) SDK: extract `.text` from content block lists before emitting `text_delta`. (b) ChatPane: `coerceToString()` helper handles arrays/objects by extracting `.text` or falling back to `JSON.stringify()`. Applied to both trace event path and chat message rendering.
+
+### 14. text_delta noise in Event Trace
+
+**Where:** `studio/src/components/playground/ChatPane.tsx`
+**Problem:** Every LLM token chunk generated a `text_delta` trace entry — dozens per response, showing fragments like `" the"`, `" key"`. No diagnostic value; drowns out structural events (tool calls, approvals).
+**Fix:** Excluded `text_delta` from `onTraceEvent` emission. Trace now only shows tool_call_start, tool_call_end, approval_requested, done, and error.
 
 ## Lessons
 
@@ -113,3 +125,5 @@ Deploying agents from Studio worked, but running composite workflows produced no
 6. **Don't double-wrap SSE.** If `format_sse()` already produces `event: X\ndata: {...}\n\n`, use raw `StreamingResponse`, not `EventSourceResponse` which adds its own framing.
 7. **Never trust TypeScript `as` casts at runtime.** `payload.result as string` does zero runtime validation — the value stays whatever type the JSON parser produced. Always `String()` coerce before calling string methods.
 8. **Add an ErrorBoundary.** A React app without one produces a blank white screen on any render error. The actual error is only visible in DevTools console — users see nothing.
+9. **Anthropic content is not always a string.** `chunk.content` from `on_chat_model_stream` can be a list of typed blocks (`[{"type": "text", "text": "..."}]`). Always normalize before serializing or rendering. The SDK must own this normalization — don't push provider quirks to the frontend.
+10. **Filter noise from diagnostic panels.** Token-level `text_delta` events have no diagnostic value in an event trace — they duplicate what's already in the chat pane. Only show structural events (tool calls, approvals, errors) in trace views.
