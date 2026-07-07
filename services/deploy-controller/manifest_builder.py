@@ -166,11 +166,20 @@ def build_deployment(
     if llm_provider_model:
         env_vars.append(k8s_client.V1EnvVar(name="LLM_MODEL", value=llm_provider_model))
 
+    # Map secret keys to the canonical env var names expected by provider SDKs.
+    _ENV_NAME_MAP = {
+        "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+        "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+        "aws_region": "AWS_DEFAULT_REGION",
+        "api_key": "ANTHROPIC_API_KEY",
+    }
+
     if llm_secret_name and llm_env_keys:
         for key in llm_env_keys:
+            env_name = _ENV_NAME_MAP.get(key, key.upper())
             env_vars.append(
                 k8s_client.V1EnvVar(
-                    name=key,
+                    name=env_name,
                     value_from=k8s_client.V1EnvVarSource(
                         secret_key_ref=k8s_client.V1SecretKeySelector(
                             name=llm_secret_name,

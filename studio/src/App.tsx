@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import AgentDetailPage from "./pages/AgentDetailPage";
 import CatalogPage from "./pages/CatalogPage";
@@ -41,6 +42,7 @@ export default function App() {
         <div className="flex min-h-screen">
           <Sidebar />
           <main className="flex-1 overflow-auto">
+            <ErrorBoundary>
             <Routes>
               <Route path="/" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
@@ -70,6 +72,7 @@ export default function App() {
               <Route path="/playground/datasets" element={<DatasetsPage />} />
               <Route path="/playground/eval-runs/:evalRunId" element={<EvalResultsPage />} />
             </Routes>
+            </ErrorBoundary>
           </main>
         </div>
         <Toaster position="top-right" richColors closeButton />

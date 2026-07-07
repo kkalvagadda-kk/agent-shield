@@ -90,6 +90,7 @@ async def create_agent(
         execution_shape=body.execution_shape,
         memory_enabled=body.memory_enabled,
         metadata_=body.metadata,
+        llm_provider_id=body.metadata.get("llm_provider_id") if body.metadata else None,
         created_by=caller,
     )
     db.add(agent)
@@ -273,6 +274,7 @@ async def update_agent(
         changed = True
     if body.metadata is not None:
         agent.metadata_ = body.metadata
+        agent.llm_provider_id = body.metadata.get("llm_provider_id")
         changed = True
     if body.execution_shape is not None:
         agent.execution_shape = body.execution_shape

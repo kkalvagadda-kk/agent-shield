@@ -642,7 +642,8 @@ class WorkflowExecutor:
     # ------------------------------------------------------------------
 
     async def run(
-        self, message: str, thread_id: str | None = None, trace_id: str | None = None
+        self, message: str, thread_id: str | None = None, trace_id: str | None = None,
+        memory_context: list[dict] | None = None,
     ) -> dict:
         """Invoke the workflow synchronously and return a response dict.
 
@@ -679,8 +680,15 @@ class WorkflowExecutor:
                     output={"sanitized": scan_result.sanitized_text != message})
 
         # 3. Invoke the graph.
+        from langchain_core.messages import AIMessage
+        history = []
+        for m in (memory_context or []):
+            if m.get("role") == "user":
+                history.append(HumanMessage(content=m["content"]))
+            elif m.get("role") == "assistant":
+                history.append(AIMessage(content=m["content"]))
         config = {"configurable": {"thread_id": thread_id}}
-        state = {"messages": [HumanMessage(content=safe_message)]}
+        state = {"messages": history + [HumanMessage(content=safe_message)]}
         result = await self.graph.ainvoke(state, config)
 
         # 4. Extract last AI message.

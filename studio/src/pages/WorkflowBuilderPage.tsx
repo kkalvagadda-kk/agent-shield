@@ -358,16 +358,17 @@ export default function WorkflowBuilderPage() {
           setRunTree(tree);
           const done =
             tree.parent.status === 'completed' ||
-            tree.parent.status === 'failed';
-          if (done || pollCountRef.current >= 15) {
+            tree.parent.status === 'failed' ||
+            tree.parent.status === 'cancelled';
+          if (done || pollCountRef.current >= 90) {
             stopPolling();
           }
         } catch {
-          if (pollCountRef.current >= 15) {
+          if (pollCountRef.current >= 90) {
             stopPolling();
           }
         }
-      }, 2000);
+      }, 3000);
     } catch (err) {
       toast.error(`Failed to trigger run: ${String(err)}`);
     } finally {
@@ -604,6 +605,17 @@ export default function WorkflowBuilderPage() {
                       Polling for updates…
                     </div>
                   )}
+                  {runTree.parent.output && !isPolling && (
+                    <div className="mt-3">
+                      <p className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Final Output</p>
+                      <pre className="text-xs text-slate-700 bg-white border border-slate-200 rounded p-2 whitespace-pre-wrap max-h-60 overflow-y-auto">
+                        {runTree.parent.output}
+                      </pre>
+                    </div>
+                  )}
+                  {runTree.parent.error_message && (
+                    <p className="mt-2 text-xs text-red-600">{runTree.parent.error_message}</p>
+                  )}
                 </div>
 
                 {/* Child runs */}
@@ -616,24 +628,34 @@ export default function WorkflowBuilderPage() {
                       {runTree.children.map((child, idx) => (
                         <div
                           key={child.id}
-                          className="flex items-center gap-3 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
+                          className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2"
                         >
-                          <span className="text-xs font-bold text-slate-400 w-4 shrink-0">
-                            {idx + 1}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <p className="text-xs font-medium text-slate-700 truncate">
-                              {child.agent_name}
-                            </p>
-                            <p className="text-[10px] text-slate-400">
-                              {fmtLatency(child.latency_ms)}
-                            </p>
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-bold text-slate-400 w-4 shrink-0">
+                              {idx + 1}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-medium text-slate-700 truncate">
+                                {child.agent_name}
+                              </p>
+                              <p className="text-[10px] text-slate-400">
+                                {fmtLatency(child.latency_ms)}
+                              </p>
+                            </div>
+                            <span
+                              className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full capitalize shrink-0 ${statusBadgeCls(child.status)}`}
+                            >
+                              {child.status}
+                            </span>
                           </div>
-                          <span
-                            className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full capitalize shrink-0 ${statusBadgeCls(child.status)}`}
-                          >
-                            {child.status}
-                          </span>
+                          {child.output && (
+                            <pre className="mt-2 text-xs text-slate-600 bg-white border border-slate-200 rounded p-2 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                              {child.output}
+                            </pre>
+                          )}
+                          {child.error_message && (
+                            <p className="mt-1 text-xs text-red-600">{child.error_message}</p>
+                          )}
                         </div>
                       ))}
                     </div>

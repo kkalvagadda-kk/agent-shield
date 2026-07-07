@@ -90,11 +90,12 @@ async def stream_events(
                 output = event["data"].get("output")
                 run_id = event.get("run_id", "")
                 # Convert output to a JSON-safe form.
-                result: Any = output
                 if hasattr(output, "content"):
-                    result = output.content
-                elif hasattr(output, "__dict__"):
-                    result = str(output)
+                    result: Any = output.content
+                elif isinstance(output, (dict, list)):
+                    result = json.dumps(output, default=str)
+                else:
+                    result = str(output) if output is not None else ""
                 yield format_sse(
                     "tool_call_end",
                     {

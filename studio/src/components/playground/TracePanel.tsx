@@ -49,11 +49,11 @@ export default function TracePanel({ events, collapsed, onToggle }: Props) {
                 {ev.tool_name && <span className="ml-1">{ev.tool_name}</span>}
                 {ev.content && (
                   <span className="ml-1 text-slate-500">
-                    {ev.content.length > 60 ? ev.content.slice(0, 60) + "…" : ev.content}
+                    {String(ev.content).length > 60 ? String(ev.content).slice(0, 60) + "…" : String(ev.content)}
                   </span>
                 )}
                 {ev.result && (
-                  <span className="ml-1 text-green-500">→ {ev.result.slice(0, 40)}</span>
+                  <span className="ml-1 text-green-500">→ {String(ev.result).slice(0, 40)}</span>
                 )}
               </div>
             ))

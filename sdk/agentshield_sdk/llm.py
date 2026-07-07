@@ -50,7 +50,14 @@ def get_llm(model_override: str | None = None) -> Any:
                 "langchain-aws is required for LLM_PROVIDER=bedrock. "
                 "Install it with: pip install langchain-aws"
             ) from exc
-        return ChatBedrockConverse(model=model)  # reads AWS_* from env
+        from botocore.config import Config as BotoConfig  # type: ignore[import]
+
+        region = os.getenv("AWS_DEFAULT_REGION") or None
+        return ChatBedrockConverse(
+            model=model,
+            region_name=region,
+            config=BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 2}),
+        )
 
     raise ValueError(
         f"Unknown LLM_PROVIDER: {provider!r}. Supported values: 'anthropic', 'bedrock'."

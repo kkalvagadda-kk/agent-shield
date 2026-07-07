@@ -26,7 +26,7 @@ from prometheus_client import (  # type: ignore[import]
     generate_latest,
 )
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse  # type: ignore[import]
+from starlette.responses import StreamingResponse  # type: ignore[import]
 
 import config as cfg
 from agentshield_sdk.safety_client import SafetyBlockedError  # type: ignore[import]
@@ -437,7 +437,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                 f"data: {_json.dumps({'reason': str(exc), 'type': 'internal_error'})}\n\n"
             )
 
-    return EventSourceResponse(sse_generator())
+    return StreamingResponse(sse_generator(), media_type="text/event-stream")
 
 
 @app.post("/resume/{thread_id}")

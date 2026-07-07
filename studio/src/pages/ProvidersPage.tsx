@@ -27,9 +27,10 @@ import { cn } from "../lib/utils";
 const MODELS: Record<string, string[]> = {
   anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
   bedrock: [
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "anthropic.claude-3-5-sonnet-20241022-v2:0",
     "anthropic.claude-3-haiku-20240307-v1:0",
-    "amazon.titan-text-lite-v1",
   ],
 };
 
@@ -263,12 +264,12 @@ function AddProviderForm({
     mutationFn: (values: FormValues) => {
       let credentials: Record<string, string>;
       if (values.provider === "anthropic") {
-        credentials = { ANTHROPIC_API_KEY: values.ANTHROPIC_API_KEY };
+        credentials = { api_key: values.ANTHROPIC_API_KEY };
       } else {
         credentials = {
-          AWS_ACCESS_KEY_ID: values.AWS_ACCESS_KEY_ID,
-          AWS_SECRET_ACCESS_KEY: values.AWS_SECRET_ACCESS_KEY,
-          AWS_DEFAULT_REGION: values.AWS_DEFAULT_REGION,
+          aws_access_key_id: values.AWS_ACCESS_KEY_ID,
+          aws_secret_access_key: values.AWS_SECRET_ACCESS_KEY,
+          aws_region: values.AWS_DEFAULT_REGION,
         };
       }
       return createProvider({

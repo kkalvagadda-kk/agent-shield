@@ -1031,6 +1031,9 @@ export interface AgentRunItem {
   trigger_type: string | null;
   run_by: string | null;
   team: string | null;
+  input: string | null;
+  output: string | null;
+  error_message: string | null;
   latency_ms: number | null;
   cost_usd: number | null;
   started_at: string;

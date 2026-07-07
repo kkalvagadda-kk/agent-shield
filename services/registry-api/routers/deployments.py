@@ -281,7 +281,8 @@ async def deploy_agent(
             credentials = decrypt_json(provider.credentials_encrypted)
             secret_name = f"agentshield-llm-{provider.id}"
             try:
-                await upsert_secret(secret_name, _PLATFORM_NAMESPACE, credentials)
+                agent_namespace = _derive_k8s_namespace(agent)
+                await upsert_secret(secret_name, agent_namespace, credentials)
                 llm_secret_name = secret_name
                 llm_env_keys = list(credentials.keys())
                 llm_provider_type = provider.provider

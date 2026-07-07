@@ -232,6 +232,10 @@ class DeploymentResponse(BaseModel):
     terminated_at: datetime | None
     deployed_by: str | None
     previous_version_id: uuid.UUID | None
+    llm_secret_name: str | None = None
+    llm_env_keys: list[str] | None = None
+    llm_provider_type: str | None = None
+    llm_provider_model: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1034,6 +1038,8 @@ class AgentRunResponse(BaseModel):
     latency_ms: int | None = None
     status: str
     context: str
+    input: str | None = None
+    output: str | None = None
     started_at: datetime
     completed_at: datetime | None = None
     trigger_type: str | None = None
