@@ -818,7 +818,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.56"
+    tag: "0.1.57"
     pullPolicy: IfNotPresent
 
   service:

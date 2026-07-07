@@ -83,7 +83,7 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
           const event = payload.event as string;
           const ts = new Date().toISOString();
 
-          if (event && event !== "message") {
+          if (event && event !== "message" && event !== "text_delta") {
             const traceContent = payload.content != null ? coerceToString(payload.content) : undefined;
             const traceTool = payload.tool_name != null ? String(payload.tool_name) : undefined;
             const traceResult = payload.result != null ? coerceToString(payload.result) : undefined;
