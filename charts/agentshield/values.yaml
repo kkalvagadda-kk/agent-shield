@@ -117,7 +117,7 @@ envoy-gateway:
 # the release. Enable only where that image is available; otherwise patch the PV
 # reclaim policy manually once (see docs/runbooks/postgres-backup.md).
 pvRetainHook:
-  enabled: false
+  enabled: true
 
 safety-orchestrator:
   enabled: false
@@ -514,7 +514,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.64"
+    tag: "0.2.65"
     pullPolicy: IfNotPresent
 
   service:
@@ -571,12 +571,12 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.8"
+    tag: "0.1.10"
     pullPolicy: IfNotPresent
 
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.7"
+  declarativeRunnerTag: "0.1.9"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -818,7 +818,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.48"
+    tag: "0.1.49"
     pullPolicy: IfNotPresent
 
   service:

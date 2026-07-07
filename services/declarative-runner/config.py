@@ -6,17 +6,11 @@ without external dependencies.
 """
 import os
 
-# --- Workflow definition (REQUIRED) ---
-# Must be a base64-encoded or plain JSON string injected by the deploy controller.
-# Raise at import time so the pod CrashLoops with a clear error instead of
-# accepting requests with no workflow loaded.
+# --- Workflow definition (OPTIONAL) ---
+# If set (base64-encoded or plain JSON), the runner uses this workflow graph.
+# If absent, the runner enters "simple agent" mode: fetches instructions + tools
+# from the Registry API using AGENT_NAME at startup.
 WORKFLOW_JSON: str = os.environ.get("WORKFLOW_JSON", "")
-if not WORKFLOW_JSON:
-    raise ValueError(
-        "WORKFLOW_JSON environment variable is required but not set. "
-        "The deploy controller should inject this as a base64-encoded "
-        "workflow definition JSON string."
-    )
 
 # --- Safety Orchestrator ---
 # If absent, mock_safety is used (local dev / unit tests).

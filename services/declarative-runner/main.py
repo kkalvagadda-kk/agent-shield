@@ -63,12 +63,14 @@ workflow_executor: Any = None  # set during lifespan startup
 async def lifespan(app: FastAPI):
     global workflow_executor
 
-    # Import here so that config.py (which validates WORKFLOW_JSON) is already
-    # loaded when this code runs.  If WORKFLOW_JSON is absent the process will
-    # have already crashed during module import.
     from workflow_executor import WorkflowExecutor  # type: ignore[import]
 
     workflow_executor = WorkflowExecutor()
+
+    if not cfg.WORKFLOW_JSON:
+        # Simple agent mode — fetch config from registry API
+        await workflow_executor.setup_simple_agent_mode()
+
     await workflow_executor.setup()  # replaces MemorySaver with Postgres if configured
     logger.info("WorkflowExecutor ready — declarative runner is up")
 

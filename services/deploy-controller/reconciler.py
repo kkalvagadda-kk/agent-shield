@@ -79,21 +79,22 @@ async def _run_preflight_checks(
                 f"tool grants missing for deployer team {deployer_team}: {missing}"
             )
 
-    # Check 3: eval must not have explicitly failed
-    # (eval_passed=None means eval not yet run — allowed for now; False = hard block)
-    if version.get("eval_passed") is False:
-        return "version eval has not passed"
+    # Check 3: eval gate — PRODUCTION ONLY (Decision 20)
+    # Sandbox/staging deploys are ungated so agents can be evaluated in the
+    # playground before earning eval_passed.
+    environment = deployment.get("environment", "production")
+    if environment == "production":
+        if version.get("eval_passed") is False:
+            return "version eval has not passed"
 
-    # Check 3b: high-risk agents require adversarial eval pass
-    # adversarial_eval_passed defaults to false; operators set it after running their
-    # adversarial test suite. This gate only applies to high-risk agents.
-    agent_risk = agent.get("risk_level", "low")
-    if agent_risk in ("high", "critical") and not version.get("adversarial_eval_passed", False):
-        return (
-            f"agent risk_level={agent_risk} requires adversarial eval: "
-            "set adversarial_eval_passed=true on the version after running "
-            "your adversarial test suite"
-        )
+        # Check 3b: high-risk agents require adversarial eval pass
+        agent_risk = agent.get("risk_level", "low")
+        if agent_risk in ("high", "critical") and not version.get("adversarial_eval_passed", False):
+            return (
+                f"agent risk_level={agent_risk} requires adversarial eval: "
+                "set adversarial_eval_passed=true on the version after running "
+                "your adversarial test suite"
+            )
 
     # Check 4: no critical-risk tool in snapshot
     # Checks both risk_level (registry schema) and risk (older tool snapshot schema)
@@ -113,17 +114,20 @@ async def _run_preflight_checks(
 async def _fetch_workflow(http: httpx.AsyncClient, workflow_id: str) -> dict | None:
     """Fetch the workflow definition from the Registry API.
 
-    Args:
-        http:        httpx.AsyncClient already pointed at registry_api_url.
-        workflow_id: The workflow UUID to fetch.
-
-    Returns:
-        The parsed workflow JSON dict, or None on error.
+    Returns only the graph definition ({nodes, edges}), not the full API
+    envelope, since the declarative-runner expects top-level nodes/edges.
     """
     try:
         resp = await http.get(f"/api/v1/workflows/{workflow_id}")
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        defn = (data.get("current_definition") or {}).get("definition")
+        if not defn:
+            logger.error(
+                "Workflow %s has no current_definition.definition", workflow_id
+            )
+            return None
+        return defn
     except Exception as exc:
         logger.error("Failed to fetch workflow %s: %s", workflow_id, exc)
         return None
@@ -164,52 +168,45 @@ async def reconcile(
 
     try:
         # --- Declarative agent handling ---
-        # If the agent type is "declarative", fetch the workflow definition from
-        # the Registry API, base64-encode it, and inject it as WORKFLOW_JSON.
-        # Also override the image tag with the declarative-runner image.
+        # Override image to the declarative-runner. If the version has a linked
+        # agent_graph, fetch its definition and inject as WORKFLOW_JSON.
+        # If no graph is linked, the runner enters "simple agent" mode and
+        # fetches its config from the registry API at startup.
         if agent.get("agent_type") == "declarative":
-            workflow_id: str | None = version.get("workflow_id")
-            if not workflow_id:
-                error_msg = (
-                    f"Declarative agent {agent_name} version has no workflow_id — "
-                    "cannot deploy without a workflow definition."
-                )
-                logger.error(error_msg)
-                return ("failed", k8s_deployment_name, error_msg)
-
-            async with httpx.AsyncClient(
-                base_url=settings.registry_api_url, timeout=10.0
-            ) as http:
-                workflow = await _fetch_workflow(http, workflow_id)
-
-            if workflow is None:
-                error_msg = (
-                    f"Could not fetch workflow {workflow_id} for agent {agent_name}. "
-                    "See logs for details."
-                )
-                logger.error(error_msg)
-                return ("failed", k8s_deployment_name, error_msg)
-
-            # Base64-encode the workflow definition JSON so it is safe to inject
-            # as a Kubernetes env var (avoids quoting and length issues with raw JSON).
-            workflow_json_b64 = base64.b64encode(
-                json.dumps(workflow).encode()
-            ).decode()
-
-            # Override the image tag with the declarative-runner image.
             version = dict(version)  # shallow copy to avoid mutating the caller's dict
             version["image_tag"] = settings.declarative_runner_image
-
-            # Signal to build_deployment to inject WORKFLOW_JSON env var.
             deployment = dict(deployment)
-            deployment["workflow_json_b64"] = workflow_json_b64
 
-            logger.info(
-                "Declarative agent %s: using declarative-runner image, "
-                "injecting WORKFLOW_JSON for workflow %s",
-                agent_name,
-                workflow_id,
-            )
+            workflow_id: str | None = version.get("agent_graph_id") or version.get("workflow_id")
+            if workflow_id:
+                async with httpx.AsyncClient(
+                    base_url=settings.registry_api_url, timeout=10.0
+                ) as http:
+                    workflow = await _fetch_workflow(http, workflow_id)
+
+                if workflow is None:
+                    error_msg = (
+                        f"Could not fetch workflow {workflow_id} for agent {agent_name}. "
+                        "See logs for details."
+                    )
+                    logger.error(error_msg)
+                    return ("failed", k8s_deployment_name, error_msg)
+
+                workflow_json_b64 = base64.b64encode(
+                    json.dumps(workflow).encode()
+                ).decode()
+                deployment["workflow_json_b64"] = workflow_json_b64
+
+                logger.info(
+                    "Declarative agent %s: injecting WORKFLOW_JSON for graph %s",
+                    agent_name, workflow_id,
+                )
+            else:
+                logger.info(
+                    "Declarative agent %s: no graph linked — simple agent mode "
+                    "(runner will fetch config from registry at startup)",
+                    agent_name,
+                )
 
         # 1. Provision per-agent ServiceAccount (Phase 9.1: machine identity)
         #    ensure_service_account is idempotent; the SA subject is recorded in

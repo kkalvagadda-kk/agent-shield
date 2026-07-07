@@ -74,18 +74,22 @@ class WorkflowExecutor:
     """
 
     def __init__(self) -> None:
-        raw = os.environ["WORKFLOW_JSON"]
-        # Support both plain JSON string and base64-encoded JSON.
-        try:
-            self.definition: dict = json.loads(raw)
-        except json.JSONDecodeError:
+        raw = os.environ.get("WORKFLOW_JSON", "")
+        if raw:
+            # Support both plain JSON string and base64-encoded JSON.
             try:
-                self.definition = json.loads(base64.b64decode(raw).decode())
-            except Exception as exc:
-                raise ValueError(
-                    "WORKFLOW_JSON is neither valid JSON nor valid base64-encoded JSON. "
-                    f"Decoding error: {exc}"
-                ) from exc
+                self.definition: dict | None = json.loads(raw)
+            except json.JSONDecodeError:
+                try:
+                    self.definition = json.loads(base64.b64decode(raw).decode())
+                except Exception as exc:
+                    raise ValueError(
+                        "WORKFLOW_JSON is neither valid JSON nor valid base64-encoded JSON. "
+                        f"Decoding error: {exc}"
+                    ) from exc
+        else:
+            # Simple agent mode — definition built at setup time from registry API.
+            self.definition = None
 
         # Pre-fetched tool executors keyed by agent node id.
         # Populated by setup(); empty until then so the graph can still be
@@ -94,9 +98,78 @@ class WorkflowExecutor:
         self._agent_tool_executors: dict[str, list] = {}
 
         # Build an initial graph with MemorySaver so the object is usable
-        # synchronously.  Callers should await executor.setup() to replace this
-        # with an AsyncPostgresSaver when DIRECT_DATABASE_URL is set.
-        self.graph: Any = self._build_compiled_graph(checkpointer=None)
+        # synchronously (skip if no definition yet — simple agent mode defers to setup).
+        self.graph: Any = (
+            self._build_compiled_graph(checkpointer=None)
+            if self.definition
+            else None
+        )
+
+    async def setup_simple_agent_mode(self) -> None:
+        """Fetch agent config from registry API and build a minimal graph.
+
+        Called at startup when WORKFLOW_JSON is not set. The agent's instructions,
+        model, and bound tools are fetched from the registry using AGENT_NAME.
+        """
+        import httpx
+        from config import AGENT_NAME, REGISTRY_API_URL, LLM_MODEL
+
+        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10) as client:
+            # Fetch agent metadata (instructions live in agent.metadata)
+            resp = await client.get(f"/api/v1/agents/{AGENT_NAME}")
+            resp.raise_for_status()
+            agent = resp.json()
+
+            metadata = agent.get("metadata") or {}
+            instructions = metadata.get("instructions", "You are a helpful assistant.")
+            model = metadata.get("model") or LLM_MODEL
+
+            # Fetch bound tool IDs
+            tool_ids: list[str] = []
+            try:
+                tools_resp = await client.get(
+                    f"/api/v1/agents/{AGENT_NAME}/tools"
+                )
+                if tools_resp.status_code == 200:
+                    for t in tools_resp.json():
+                        tid = t.get("id") or t.get("tool_id")
+                        if tid:
+                            tool_ids.append(str(tid))
+            except Exception:
+                logger.warning("Could not fetch tools for %s", AGENT_NAME)
+
+        # Build minimal single-node definition
+        self.definition = {
+            "nodes": [
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "position": {"x": 100, "y": 200},
+                    "config": {
+                        "name": AGENT_NAME,
+                        "instructions": instructions,
+                        "model": model,
+                        "risk": "low",
+                        "tool_ids": tool_ids,
+                        "skill_ids": [],
+                    },
+                },
+                {
+                    "id": "end",
+                    "type": "end",
+                    "position": {"x": 500, "y": 200},
+                    "config": {"output_mapping": {}},
+                },
+            ],
+            "edges": [
+                {"id": "e1", "source": "agent", "target": "end"},
+            ],
+        }
+
+        logger.info(
+            "Simple agent mode: built graph for '%s' (%d tools)",
+            AGENT_NAME, len(tool_ids),
+        )
 
     # ------------------------------------------------------------------
     # Registry API fetch helpers (new schema)

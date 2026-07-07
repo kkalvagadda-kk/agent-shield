@@ -53,12 +53,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.64"
+REGISTRY_API_TAG="0.2.65"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.8"
-STUDIO_TAG="0.1.48"
+DEPLOY_CONTROLLER_TAG="0.1.10"
+STUDIO_TAG="0.1.49"
 EVAL_RUNNER_TAG="0.1.1"
-DECLARATIVE_RUNNER_TAG="0.1.7"
+DECLARATIVE_RUNNER_TAG="0.1.9"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -68,6 +68,16 @@ cd "$REPO_ROOT"
 
 echo "==> AgentShield CPE2E Deploy — $(date)"
 echo ""
+
+# ── Step 0: Pre-deploy backup (best-effort) ──────────────────────────────────
+# If Postgres is already running, snapshot it before we touch anything.
+PG_POD=$(kubectl get pod -n agentshield-platform -l app.kubernetes.io/name=postgresql \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -n "$PG_POD" ]; then
+  echo "[0/8] Pre-deploy Postgres backup..."
+  bash "${REPO_ROOT}/scripts/backup-postgres.sh" || echo "  ⚠ backup failed (non-fatal)"
+  echo ""
+fi
 
 # ── Step 1: Build images ──────────────────────────────────────────────────────
 echo "[1/8] Building images..."

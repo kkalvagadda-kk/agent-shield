@@ -195,7 +195,7 @@ export const listVersions = async (
   agentName: string
 ): Promise<AgentVersion[]> => {
   const { data } = await http.get<AgentVersion[]>(
-    `/agents/${agentName}/versions/`
+    `/agents/${agentName}/versions`
   );
   return data;
 };
@@ -205,7 +205,7 @@ export const createVersion = async (
   body: { image_tag?: string; eval_passed?: boolean; notes?: string }
 ): Promise<AgentVersion> => {
   const { data } = await http.post<AgentVersion>(
-    `/agents/${agentName}/versions/`,
+    `/agents/${agentName}/versions`,
     body
   );
   return data;
@@ -229,7 +229,7 @@ export const getDeployments = async (
   agentName: string
 ): Promise<Deployment[]> => {
   const { data } = await http.get<Deployment[]>(
-    `/agents/${agentName}/deployments/`
+    `/agents/${agentName}/deployments`
   );
   return data;
 };

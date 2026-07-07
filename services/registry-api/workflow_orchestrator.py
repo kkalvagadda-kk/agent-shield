@@ -49,13 +49,31 @@ def _team_namespace(team: str) -> str:
     return f"agents-{(team or 'platform').lower().replace(' ', '-')}"
 
 
+async def _resolve_agent_environment(agent_name: str) -> str:
+    """Look up the running deployment environment for an agent. Defaults to 'production'."""
+    from models import Agent, Deployment
+    try:
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                select(Deployment.environment)
+                .join(Agent, Agent.id == Deployment.agent_id)
+                .where(Agent.name == agent_name, Deployment.status == "running")
+                .order_by(Deployment.deployed_at.desc())
+                .limit(1)
+            )).scalar_one_or_none()
+            return row or "production"
+    except Exception:
+        return "production"
+
+
 async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | None = None) -> tuple[str, str | None, str | None]:
-    """POST the message to the member agent's production pod. Returns (status, output, error).
+    """POST the message to the member agent's deployed pod. Returns (status, output, error).
 
     Passing `thread_id` lets a member that pauses for approval create its Approval
     row under a thread_id the orchestrator can correlate (see `_run_step`).
     """
-    url = f"http://{agent_name}-production.{_team_namespace(team)}.svc.cluster.local:8080/chat"
+    environment = await _resolve_agent_environment(agent_name)
+    url = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080/chat"
     body: dict = {"message": message}
     if thread_id:
         body["thread_id"] = thread_id
