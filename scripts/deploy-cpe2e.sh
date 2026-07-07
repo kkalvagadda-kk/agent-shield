@@ -91,7 +91,7 @@ echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (pre-flight gate in recon
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
 echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (memory context load/save integration)"
-docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" services/declarative-runner/
+docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" -f services/declarative-runner/Dockerfile .
 
 echo "  → studio:${STUDIO_TAG} (MemoryTab component + memory API functions)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
