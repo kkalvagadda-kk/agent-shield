@@ -79,7 +79,13 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
           }
 
           if (event === "text_delta") {
-            const content = (payload.content as string) ?? "";
+            let rawContent = payload.content;
+            if (Array.isArray(rawContent)) {
+              rawContent = rawContent.map((b: Record<string, unknown>) => (b as { text?: string }).text ?? String(b)).join("");
+            } else if (typeof rawContent === "object" && rawContent !== null) {
+              rawContent = (rawContent as { text?: string }).text ?? JSON.stringify(rawContent);
+            }
+            const content = typeof rawContent === "string" ? rawContent : String(rawContent ?? "");
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];

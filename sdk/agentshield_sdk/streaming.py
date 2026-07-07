@@ -62,6 +62,13 @@ async def stream_events(
             if event_type == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 content = chunk.content if hasattr(chunk, "content") else ""
+                # Anthropic models may return content as a list of blocks
+                # e.g. [{"type": "text", "text": "Hello"}] — extract text.
+                if isinstance(content, list):
+                    content = "".join(
+                        block.get("text", "") if isinstance(block, dict) else str(block)
+                        for block in content
+                    )
                 if content:
                     yield format_sse(
                         "text_delta",
