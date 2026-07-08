@@ -81,27 +81,118 @@ helm upgrade --install agentshield charts/agentshield \
 
 ## Access Studio
 
-Port-forward Studio (nginx proxies `/api` → registry-api and `/realms` → Keycloak, so one forward gives the complete app including login):
+### Via Envoy Gateway (recommended)
+
+All services are routed through a single Envoy Gateway ingress with path-based routing. One port-forward gives you everything:
 
 ```bash
-kubectl port-forward -n agentshield-platform svc/agentshield-studio 8080:80
+# Install Envoy Gateway controller (one-time)
+bash scripts/setup-envoy-gateway.sh
+
+# Deploy the chart (creates Gateway + HTTPRoutes)
+bash scripts/deploy-cpe2e.sh
+
+# Start the gateway proxy (local dev only — forwards localhost:8443 → Gateway HTTPS)
+bash scripts/gateway-proxy.sh
 ```
 
-Then open [http://localhost:8080](http://localhost:8080).
+Open [https://agentshield.127.0.0.1.nip.io:8443](https://agentshield.127.0.0.1.nip.io:8443) — accept the self-signed cert warning once.
+
+All services accessible via the Gateway:
+
+| URL | Service |
+|-----|---------|
+| `https://agentshield.127.0.0.1.nip.io:8443/` | Studio |
+| `https://agentshield.127.0.0.1.nip.io:8443/api/` | Registry API |
+| `https://agentshield.127.0.0.1.nip.io:8443/realms/` | Keycloak |
+| `https://langfuse.127.0.0.1.nip.io:8443/` | Langfuse (subdomain) |
+| `https://agentshield.127.0.0.1.nip.io:8443/minio/` | MinIO Console |
+| `https://agentshield.127.0.0.1.nip.io:8443/webhooks/` | Event Gateway |
+
+Langfuse uses a subdomain (not a path prefix) because Next.js requires `basePath` baked at build time — assets and internal API routes break behind a prefix without it.
 
 Log in as `platform-admin` / `PlatformAdmin2024` (see [Dev Credentials](#dev-credentials)).
 
-Other useful forwards:
+### Via individual port-forwards (fallback)
+
+If you don't need the unified Gateway:
 
 ```bash
-# Registry API (direct)
-kubectl port-forward svc/agentshield-registry-api -n agentshield-platform 8000:8000
-
-# Langfuse UI
-kubectl port-forward svc/agentshield-langfuse-web -n agentshield-platform 4000:3000
+kubectl port-forward -n agentshield-platform svc/agentshield-studio 8080:80
+kubectl port-forward -n agentshield-platform svc/agentshield-registry-api 8000:8000
+kubectl port-forward -n agentshield-platform svc/agentshield-langfuse-web 4000:3000
 ```
 
-The service is a ClusterIP by default. For persistent access without a port-forward, the Helm chart can be configured to use a LoadBalancer or NodePort via `values.yaml` overrides.
+---
+
+## Deploying on EKS
+
+On EKS the Gateway gets a real LoadBalancer address — no port-forward needed. Override these values:
+
+```yaml
+# values-eks.yaml
+global:
+  publicUrl: "https://agentshield.yourcompany.com"
+  langfuseUrl: "https://langfuse.yourcompany.com"
+
+envoy-gateway:
+  gateway:
+    hostname: "agentshield.yourcompany.com"
+    langfuseHostname: "langfuse.yourcompany.com"
+    tls:
+      secretName: gateway-tls  # populated by cert-manager (wildcard or multi-SAN)
+
+# Langfuse subchart is packaged — can't template from global, must set explicitly
+langfuse:
+  langfuse:
+    nextauth:
+      url: "https://langfuse.yourcompany.com"
+```
+
+```bash
+helm upgrade --install agentshield charts/agentshield \
+  -n agentshield-platform --create-namespace \
+  -f charts/agentshield/values-eks.yaml
+```
+
+**What the global values drive:**
+
+| Service | Env var / config | Source |
+|---------|-----------------|--------|
+| Keycloak | `KC_HOSTNAME` | `global.publicUrl` (template) |
+| Registry API | `LANGFUSE_PUBLIC_URL` | `global.langfuseUrl` (template) |
+| Langfuse | `NEXTAUTH_URL` | Must be set manually (packaged subchart) |
+| Gateway | main hostname | `envoy-gateway.gateway.hostname` |
+| Gateway | langfuse listener | `envoy-gateway.gateway.langfuseHostname` |
+
+**What changes from local dev:**
+
+| Concern | Local (kind/Docker Desktop) | EKS |
+|---------|----------------------------|-----|
+| TLS cert | Self-signed (`certs/`) | cert-manager + Let's Encrypt (or ACM) |
+| DNS | nip.io (auto-resolves to 127.0.0.1) | Route53 CNAME → NLB address |
+| Port | `:8443` via port-forward | Standard `:443` (no port in URL) |
+| `global.publicUrl` | `https://agentshield.127.0.0.1.nip.io:8443` | `https://agentshield.yourcompany.com` |
+| `global.langfuseUrl` | `https://langfuse.127.0.0.1.nip.io:8443` | `https://langfuse.yourcompany.com` |
+| `gateway-proxy.sh` | Required | Not needed |
+
+**EKS prerequisites:**
+
+1. Envoy Gateway controller installed: `bash scripts/setup-envoy-gateway.sh`
+2. cert-manager with a ClusterIssuer for Let's Encrypt (or create `gateway-tls` secret manually — must cover both `agentshield.yourcompany.com` and `langfuse.yourcompany.com`)
+3. DNS records pointing both hostnames at the NLB address (`kubectl get gateway -n agentshield-platform -o jsonpath='{.items[0].status.addresses[0].value}'`)
+4. Optional: External-DNS controller to auto-create Route53 records from Gateway hostnames
+
+**Keycloak notes:**
+- `KC_HOSTNAME` is derived from `global.publicUrl` — one override handles both Gateway and Keycloak
+- `KC_HOSTNAME_STRICT=true` and `KC_PROXY_HEADERS=xforwarded` remain set (Envoy terminates TLS, Keycloak sees HTTP internally)
+- No port suffix needed when using standard 443
+
+**Langfuse notes:**
+- Langfuse runs on a **subdomain** (`langfuse.127.0.0.1.nip.io` / `langfuse.yourcompany.com`) — not a path prefix. Next.js requires `basePath` baked at build time; without it, assets and internal API routes break behind a prefix.
+- Trace links in Studio point to `<langfuseUrl>/project/<pid>/traces/<id>`
+- `NEXTAUTH_URL` must be set manually in `langfuse.langfuse.nextauth.url` (packaged subchart can't template from global)
+- TLS cert must cover both hostnames (wildcard `*.yourcompany.com` or multi-SAN)
 
 ---
 

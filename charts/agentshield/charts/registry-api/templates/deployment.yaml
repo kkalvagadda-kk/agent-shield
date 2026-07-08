@@ -148,6 +148,10 @@ spec:
                   key: key
             - name: REDIS_URL
               value: {{ .Values.redisUrl | default (printf "redis://%s-redis-master:6379/0" .Release.Name) | quote }}
+            - name: LANGFUSE_PUBLIC_URL
+              value: {{ ((.Values.global).langfuseUrl) | default "" | quote }}
+            - name: LANGFUSE_PROJECT_ID
+              value: {{ .Values.langfuseProjectId | default "" | quote }}
             {{- /* Failure-alert SMTP (Phase 8). When smtp.host is empty the
                    vars are omitted and alerting.py stays in log-only mode. */}}
             {{- if .Values.smtp.host }}

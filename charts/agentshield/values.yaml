@@ -45,6 +45,13 @@ global:
   # Internal hostname of Langfuse web service for SDK tracing
   langfuseHost: "http://agentshield-langfuse-web:3000"
 
+  # Browser-facing base URL (single source of truth for all public endpoints).
+  publicUrl: "https://agentshield.127.0.0.1.nip.io:8443"
+
+  # Browser-facing Langfuse URL (subdomain — Next.js can't serve behind a path prefix
+  # without basePath baked in at build time). Trace links in Studio point here.
+  langfuseUrl: "https://langfuse.127.0.0.1.nip.io:8443"
+
   # Namespace all platform components run in (ArgoCD / helmfile override)
   namespace: agentshield-platform
 
@@ -110,13 +117,25 @@ event-gateway:
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
-# Uses nip.io wildcard DNS — no /etc/hosts needed (resolves to 127.0.0.1 via public DNS).
+# TLS with self-signed cert: HTTPS = secure context → Web Crypto API works for Keycloak PKCE.
+# Browser shows cert warning once (click through), then all works.
+#
+# publicUrl is now defined under global.publicUrl (single source of truth).
+# All services derive their public endpoints from it:
+#   Keycloak: KC_HOSTNAME = global.publicUrl
+#   Langfuse: NEXTAUTH_URL = global.publicUrl + /langfuse  (set manually below)
+#   Registry-API: LANGFUSE_PUBLIC_URL = global.publicUrl + /langfuse  (computed in template)
+
 envoy-gateway:
   enabled: true
   gateway:
     name: agentshield-gateway
-    hostname: agentshield.127.0.0.1.nip.io
+    hostname: "agentshield.127.0.0.1.nip.io"
+    langfuseHostname: "langfuse.127.0.0.1.nip.io"
     port: 80
+    tls:
+      enabled: true
+      secretName: gateway-tls
   gatewayClass:
     name: agentshield
     controllerName: gateway.envoyproxy.io/gatewayclass-controller
@@ -330,6 +349,8 @@ keycloak:
       value: "false"
     - name: KC_HTTP_ENABLED
       value: "true"
+    - name: KC_PROXY_HEADERS
+      value: "xforwarded"
 
   startupProbe:
     initialDelaySeconds: 120
@@ -376,8 +397,8 @@ langfuse:
         name: langfuse-api-keys
         key: encryption-key
     nextauth:
-      # Update to ingress URL in production; localhost:4000 matches port-forward for CPE2E
-      url: "http://localhost:4000"
+      # Must equal global.langfuseUrl (Langfuse subchart is packaged .tgz, can't template)
+      url: "https://langfuse.127.0.0.1.nip.io:8443"
       secret:
         secretKeyRef:
           name: langfuse-api-keys
@@ -523,10 +544,11 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.74"
+    tag: "0.2.75"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.3"
+  langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   service:
     type: ClusterIP
@@ -550,7 +572,7 @@ registry-api:
           key: agentshield  # Registry API reads DB password from here; full URL built in config.py
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
-    LANGFUSE_PUBLIC_URL: ""
+    # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
     EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.3"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 

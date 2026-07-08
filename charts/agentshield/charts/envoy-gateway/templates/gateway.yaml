@@ -11,9 +11,50 @@ spec:
   listeners:
     - name: http
       protocol: HTTP
-      port: {{ .Values.gateway.port }}
+      port: 80
+      {{- if .Values.gateway.hostname }}
       hostname: {{ .Values.gateway.hostname | quote }}
+      {{- end }}
       allowedRoutes:
         namespaces:
           from: Same
+    {{- if .Values.gateway.tls.enabled }}
+    - name: https
+      protocol: HTTPS
+      port: 443
+      {{- if .Values.gateway.hostname }}
+      hostname: {{ .Values.gateway.hostname | quote }}
+      {{- end }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.gateway.tls.secretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+    {{- if .Values.gateway.langfuseHostname }}
+    - name: langfuse-http
+      protocol: HTTP
+      port: 80
+      hostname: {{ .Values.gateway.langfuseHostname | quote }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- if .Values.gateway.tls.enabled }}
+    - name: langfuse-https
+      protocol: HTTPS
+      port: 443
+      hostname: {{ .Values.gateway.langfuseHostname | quote }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.gateway.tls.secretName }}
+      allowedRoutes:
+        namespaces:
+          from: Same
+    {{- end }}
+    {{- end }}
 {{- end }}

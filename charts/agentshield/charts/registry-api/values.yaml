@@ -21,6 +21,8 @@ smtp:
   userKey: "username"
   passwordKey: "password"
 
+langfuseProjectId: ""
+
 service:
   type: ClusterIP
   port: 8000

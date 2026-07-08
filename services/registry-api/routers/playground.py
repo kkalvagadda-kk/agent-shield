@@ -716,10 +716,16 @@ async def get_playground_run_trace(
         }
 
     lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
     lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
     lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
 
-    trace_url = f"{lf_host}/trace/{run.langfuse_trace_id}"
+    # Full path avoids Langfuse /trace short-link redirect (loses path prefix behind Gateway)
+    if lf_public_url and lf_project_id:
+        trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{run.langfuse_trace_id}"
+    else:
+        trace_url = None
     trace_data: dict[str, Any] = {}
 
     if lf_pk and lf_sk:
@@ -745,6 +751,57 @@ async def get_playground_run_trace(
         "trace_id": run.langfuse_trace_id,
         "trace_url": trace_url,
         "status": run.status,
+        "langfuse": trace_data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/playground/traces/{trace_id}
+# ---------------------------------------------------------------------------
+@router.get(
+    "/traces/{trace_id}",
+    summary="Fetch Langfuse trace data by trace ID",
+)
+async def get_trace_by_id(trace_id: str) -> dict[str, Any]:
+    """Return Langfuse trace data directly by trace_id (used by eval result View Trace)."""
+    import os
+    import urllib.error
+    import urllib.request as urlreq
+
+    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+
+    # Full path avoids Langfuse /trace short-link redirect (loses path prefix behind Gateway)
+    if lf_public_url and lf_project_id:
+        trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{trace_id}"
+    else:
+        trace_url = None
+    trace_data: dict[str, Any] = {}
+
+    if lf_pk and lf_sk:
+        import base64
+        creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
+        try:
+            req = urlreq.Request(
+                f"{lf_host}/api/public/traces/{trace_id}",
+                headers={"Authorization": f"Basic {creds}"},
+            )
+            with urlreq.urlopen(req, timeout=5) as r:
+                trace_data = json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                trace_data = {"warning": "trace not yet ingested by Langfuse"}
+            else:
+                logger.debug("Langfuse trace fetch error %s: %s", exc.code, exc)
+        except Exception as exc:
+            logger.debug("Langfuse trace fetch failed: %s", exc)
+
+    return {
+        "trace_id": trace_id,
+        "trace_url": trace_url,
         "langfuse": trace_data,
     }
 
@@ -793,6 +850,7 @@ async def save_run_to_dataset(
         "source_run_id": run_id,
         "agent_name": run.agent_name,
         "input": run.input_message,
+        "expected_output": run.output_text or "",
         "label": body.label,
         "langfuse_trace_id": run.langfuse_trace_id,
         "added_at": datetime.now(timezone.utc).isoformat(),

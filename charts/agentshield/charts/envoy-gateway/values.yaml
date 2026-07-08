@@ -2,8 +2,12 @@ enabled: true
 
 gateway:
   name: agentshield-gateway
-  hostname: agentshield.127.0.0.1.nip.io
+  hostname: "agentshield.127.0.0.1.nip.io"
+  langfuseHostname: "langfuse.127.0.0.1.nip.io"
   port: 80
+  tls:
+    enabled: true
+    secretName: gateway-tls
 
 gatewayClass:
   name: agentshield
