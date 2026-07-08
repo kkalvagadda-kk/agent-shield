@@ -48,9 +48,9 @@ global:
   # Browser-facing base URL (single source of truth for all public endpoints).
   publicUrl: "https://agentshield.127.0.0.1.nip.io:8443"
 
-  # Browser-facing Langfuse URL (subdomain — Next.js can't serve behind a path prefix
-  # without basePath baked in at build time). Trace links in Studio point here.
-  langfuseUrl: "https://langfuse.127.0.0.1.nip.io:8443"
+  # Browser-facing Langfuse URL (includes /langfuse path prefix for Gateway routing).
+  # Trace links in Studio point here.
+  langfuseUrl: "https://langfuse.127.0.0.1.nip.io:8443/langfuse"
 
   # Namespace all platform components run in (ArgoCD / helmfile override)
   namespace: agentshield-platform
@@ -564,7 +564,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.98"
+    tag: "0.2.99"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.4"
@@ -873,7 +873,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.77"
+    tag: "0.1.78"
     pullPolicy: IfNotPresent
 
   service:

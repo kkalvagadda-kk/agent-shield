@@ -2,6 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Clock, ExternalLink, Loader2, ShieldAlert, X } from "lucide-react";
 import { useState } from "react";
 import { getTraceById } from "../../api/playgroundApi";
+import { getTraceDetail } from "../../api/observabilityApi";
+
+type TraceFetchFn = (id: string) => Promise<{ trace_id: string; trace_url: string | null; langfuse: Record<string, unknown> }>;
 
 interface Observation {
   id: string;
@@ -19,13 +22,16 @@ interface Observation {
 export default function TraceDrawer({
   traceId,
   onClose,
+  fetchFn,
 }: {
   traceId: string;
   onClose: () => void;
+  fetchFn?: TraceFetchFn;
 }) {
+  const fetcher = fetchFn ?? getTraceById;
   const { data, isLoading, error } = useQuery({
-    queryKey: ["trace", traceId],
-    queryFn: () => getTraceById(traceId),
+    queryKey: ["trace", traceId, fetchFn ? "obs" : "pg"],
+    queryFn: () => fetcher(traceId),
     enabled: !!traceId,
   });
 

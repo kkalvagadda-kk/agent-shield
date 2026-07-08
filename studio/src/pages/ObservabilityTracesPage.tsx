@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, ChevronLeft, ChevronRight, Eye, Filter, GitCompare } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listTraces, TracesFilter, TraceSummary } from "../api/observabilityApi";
+import { listTraces, getTraceDetail, TracesFilter, TraceSummary } from "../api/observabilityApi";
 import { listAgents } from "../api/registryApi";
 import TraceDrawer from "../components/playground/TraceDrawer";
 
@@ -210,7 +210,7 @@ export default function ObservabilityTracesPage() {
       )}
 
       {/* Trace drawer */}
-      {traceId && <TraceDrawer traceId={traceId} onClose={() => setTraceId(null)} />}
+      {traceId && <TraceDrawer traceId={traceId} onClose={() => setTraceId(null)} fetchFn={getTraceDetail} />}
     </div>
   );
 }

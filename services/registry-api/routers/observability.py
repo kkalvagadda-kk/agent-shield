@@ -12,9 +12,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select, func, text as sa_text, case, literal_column
+from sqlalchemy import select, func, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
@@ -311,8 +311,8 @@ async def get_dashboard(
         )
         .where(*base_filter)
         .where(AgentRun.latency_ms.isnot(None))
-        .group_by(text("1"))
-        .order_by(text("1"))
+        .group_by(sa_text("1"))
+        .order_by(sa_text("1"))
     )
     lat_rows = (await db.execute(latency_q)).all()
     latency_series = [
@@ -328,8 +328,8 @@ async def get_dashboard(
         )
         .where(*base_filter)
         .where(AgentRun.judge_score.isnot(None))
-        .group_by(text("1"))
-        .order_by(text("1"))
+        .group_by(sa_text("1"))
+        .order_by(sa_text("1"))
     )
     # For now agent_runs might not have judge_score column yet — guard with try
     score_histogram: list[HistogramBucket] = []
@@ -360,8 +360,8 @@ async def get_dashboard(
         )
         .where(*base_filter)
         .where(AgentRun.cost_usd.isnot(None))
-        .group_by(text("1"))
-        .order_by(text("1"))
+        .group_by(sa_text("1"))
+        .order_by(sa_text("1"))
     )
     cost_rows = (await db.execute(cost_q)).all()
     cost_series = [
