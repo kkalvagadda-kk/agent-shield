@@ -75,7 +75,7 @@ export default function PlaygroundPage() {
       {/* Left panel — agent/workflow selector */}
       <div className="w-60 shrink-0 border-r border-slate-200 bg-white p-4 flex flex-col gap-4 overflow-y-auto">
         <div>
-          <h2 className="text-sm font-semibold text-slate-800 mb-3">Evaluate</h2>
+          <h2 className="text-sm font-semibold text-slate-800 mb-3">Eval Runs</h2>
 
           {/* Agent / Workflow toggle */}
           <div className="flex gap-1 p-1 bg-slate-100 rounded-lg mb-3">

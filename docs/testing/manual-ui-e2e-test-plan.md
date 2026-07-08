@@ -78,7 +78,7 @@ These are deferred-by-design per the docs/memory. The plan works around them exp
 ### T0.1 — Login & shell renders `[UI]`
 1. Open `http://localhost:8080`. You should be redirected to Keycloak.
 2. Log in as `platform-admin`.
-3. ✅ Studio loads with the left sidebar: **Agents, Skills, Tools, Agent Graphs, Workflows** / **Evaluate, Datasets** / **Catalog, Approvals, Deployments** / **Administration**.
+3. ✅ Studio loads with the left sidebar: **Build** (Agents, Skills, Tools, Workflows) / **Evaluate** (Eval Runs, Datasets) / **Catalog** (Marketplace, Approvals, Deployments) / **Observe** (Traces, Dashboard) / **Settings** (Models) / **Admin**.
 
 ### T0.2 — Agent list & detail shell `[UI]`
 1. Click **Agents** (`/`).
@@ -91,7 +91,7 @@ This verifies deny-by-default visibility from the execution-models spec §5.
 
 1. On **Agents**, note the list.
 2. ✅ As `platform-admin` you see published agents + your own. You should **not** see other tenants' private agents unless published or created by you.
-3. Open the **Evaluate** (playground) page → agent selector.
+3. Open the **Eval Runs** (playground) page → agent selector.
 4. ✅ The selector list is scoped the same way (no foreign private agents leaking in).
    - _Maps to: execution-models spec §5.2/§5.5; the isolation fix in `list_agents`._
 
@@ -117,8 +117,8 @@ _Maps to: playground doc §4, production doc §4._
 4. ✅ Toast "Sandbox deployment triggered"; Deployment History appears and polls; environment column reads **sandbox**.
    - _Maps to: playground doc §9 / OQ-D (`environment=sandbox`)._
 
-### T1.3 — Evaluate in the playground (chat) `[UI]`
-1. Go to **Evaluate** (`/playground`).
+### T1.3 — Eval Runs in the playground (chat) `[UI]`
+1. Go to **Eval Runs** (`/playground`).
 2. In the left selector, pick `mt-reactive`.
 3. ✅ Center panel is the **ChatPane**; a purple **Sandbox mode** card + `sandbox` + `reactive` badges show.
 4. Type a message → **Send**.
@@ -142,7 +142,7 @@ _Maps to: playground doc §5, production doc §5._
 2. Deploy to sandbox (as T1.2).
 
 ### T2.2 — Launch a durable run in the playground `[UI]`
-1. **Evaluate** → select `mt-durable`.
+1. **Eval Runs** → select `mt-durable`.
 2. ✅ Center panel is now the **RunLauncher** (not chat) — the header shows a `durable` badge.
 3. Enter an input payload → **Launch Run**.
 4. ✅ A **StepTracker** appears and fills in steps (`✓ completed` / `● running` / `○ pending`) streamed over SSE.
@@ -193,7 +193,7 @@ PY
    - _Maps to: production doc §6 wireframe._
 
 ### T3.3 — Run Now (test-fire) in the playground `[UI]`
-1. **Evaluate** → select the scheduled agent.
+1. **Eval Runs** → select the scheduled agent.
 2. ✅ Center panel is the **RunNowPanel** (cron preview + **Run Now** button); a banner explains the schedule doesn't tick in the playground.
 3. Click **Run Now (test-fire)**.
 4. ✅ A run starts immediately (same code path as a real cron fire), StepTracker/history updates, judge scores it.
@@ -236,7 +236,7 @@ PY
    - _Maps to: production doc §7 (manual rotation — PQ-3); threat model T-1/T143._
 
 #### T4.2 — Test Trigger: matched `[UI]`
-1. **Evaluate** → select `mt-reactive`.
+1. **Eval Runs** → select `mt-reactive`.
 2. ✅ Center panel is the **TestTriggerPanel** (filter shown, sample-payload editor, **Send Test Event**).
 3. Payload that matches the filter:
    ```json
@@ -301,7 +301,7 @@ PY
 Then `/agents/mt-reactive` → **Settings**: ✅ **Memory = Enabled**.
 
 ### T5.2 — Generate + inspect session memory `[UI]`
-1. **Evaluate** → chat with `mt-reactive` for a few turns.
+1. **Eval Runs** → chat with `mt-reactive` for a few turns.
 2. `/agents/mt-reactive` → **Memory** tab.
 3. ✅ Session threads appear (thread id, message count); selecting a thread shows its messages.
 4. ✅ **PII is tokenized** in what's shown (no raw personal data) — per §5.8/OQ-3.
@@ -380,7 +380,7 @@ curl -i -X POST "http://localhost:8091/hooks/workflow/mt-workflow/<TOKEN>" \
    - _Maps to: production doc §8.1._
 
 ### T7.3 — Approval authority (production, not sandbox) `[UI]`
-1. **Administration → Approvers** (`/admin/approval-authority`).
+1. **Admin → Approvers** (`/admin/approval-authority`).
 2. ✅ You can view/grant `agent:reviewer` authority for a team. (Production approvals are authority-checked, unlike sandbox self-approve.)
    - _Maps to: production doc §5 ops notes; spec §5.5 roles._
 

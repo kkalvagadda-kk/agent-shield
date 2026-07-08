@@ -72,7 +72,7 @@ Every agent gets the same tabbed shell; the **Overview** tab content varies by m
 
 ```mermaid
 flowchart TD
-    NAV["Top nav: Agents · Approvals(n) · Providers"] --> AD[Agent Detail shell]
+    NAV["Top nav: Agents · Approvals(n) · Models"] --> AD[Agent Detail shell]
     AD --> OV[Overview — per mode]
     AD --> RUNS[Runs — trigger-aware]
     AD --> MEM[Memory — sessions + facts]

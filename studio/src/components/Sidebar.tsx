@@ -1,89 +1,147 @@
-import { ChevronDown, ChevronRight, LogOut } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  ChevronDown,
+  ChevronRight,
+  ClipboardCheck,
+  Cpu,
+  Database,
+  FlaskConical,
+  HandMetal,
+  LayoutDashboard,
+  ListChecks,
+  LogOut,
+  Rocket,
+  ShoppingBag,
+  Sparkles,
+  Store,
+  UserCheck,
+  Users,
+  Workflow,
+  Wrench,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import { listAgents } from "../api/registryApi";
+import type { LucideIcon } from "lucide-react";
 
 // ── Nav item groups ──────────────────────────────────────────────────────────
 
-const PLAYGROUND_BUILD = [
-  { label: "Agents",       to: "/",             end: true  },
-  { label: "Skills",       to: "/skills",       end: false },
-  { label: "Tools",        to: "/tools",        end: false },
-  // "Agent Graphs" hidden from nav — the composite Workflow builder now covers
-  // multi-agent authoring (inline + existing agents). Routes remain for direct-URL access.
-  // { label: "Agent Graphs", to: "/agent-graphs", end: false },
-  { label: "Workflows",    to: "/workflows",    end: false },
+interface NavItem {
+  label: string;
+  to: string;
+  end?: boolean;
+  icon: LucideIcon;
+}
+
+const BUILD_ITEMS: NavItem[] = [
+  { label: "Agents",    to: "/",          end: true,  icon: Bot },
+  { label: "Skills",    to: "/skills",    end: false, icon: Sparkles },
+  { label: "Tools",     to: "/tools",     end: false, icon: Wrench },
+  { label: "Workflows", to: "/workflows", end: false, icon: Workflow },
 ];
 
-const PLAYGROUND_EVAL = [
-  { label: "Evaluate", to: "/playground",          end: true  },
-  { label: "Datasets", to: "/playground/datasets", end: false },
+const EVALUATE_ITEMS: NavItem[] = [
+  { label: "Eval Runs", to: "/playground",          end: true,  icon: FlaskConical },
+  { label: "Datasets",  to: "/playground/datasets", end: false, icon: Database },
 ];
 
-const ORG_ITEMS = [
-  { label: "Catalog",       to: "/catalog"                  },
-  { label: "Traces",        to: "/observability/traces"     },
-  { label: "Dashboard",     to: "/observability/dashboard"  },
-  { label: "Approvals",     to: "/approvals"                },
-  { label: "Deployments",   to: "/deployments"              },
+const CATALOG_ITEMS: NavItem[] = [
+  { label: "Marketplace",  to: "/catalog",     icon: Store },
+  { label: "Approvals",    to: "/approvals",   icon: ClipboardCheck },
+  { label: "Deployments",  to: "/deployments", icon: Rocket },
 ];
 
-const ADMIN_ITEMS = [
-  { label: "All Artifacts",  to: "/admin/artifacts"          },
-  { label: "Publish Queue",  to: "/admin/publish-requests"   },
-  { label: "Access Control", to: "/admin/access"             },
-  { label: "HITL Queue",     to: "/hitl"                     },
-  { label: "Approvers",      to: "/admin/approval-authority" },
+const OBSERVE_ITEMS: NavItem[] = [
+  { label: "Traces",    to: "/observability/traces",    icon: Activity },
+  { label: "Dashboard", to: "/observability/dashboard", icon: LayoutDashboard },
+];
+
+const SETTINGS_ITEMS: NavItem[] = [
+  { label: "Models", to: "/providers", icon: Cpu },
+];
+
+const ADMIN_ITEMS: NavItem[] = [
+  { label: "All Artifacts",  to: "/admin/artifacts",          icon: ShoppingBag },
+  { label: "Publish Queue",  to: "/admin/publish-requests",   icon: ListChecks },
+  { label: "Access Control", to: "/admin/access",             icon: Users },
+  { label: "HITL Queue",     to: "/hitl",                     icon: HandMetal },
+  { label: "Approvers",      to: "/admin/approval-authority", icon: UserCheck },
 ];
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function isPlaygroundRoute(pathname: string) {
-  return (
+type SectionKey = "build" | "evaluate" | "catalog" | "observe" | "settings" | "admin";
+
+function detectSections(pathname: string): SectionKey[] {
+  const active: SectionKey[] = [];
+  if (
     pathname === "/" ||
     pathname.startsWith("/agents") ||
     pathname.startsWith("/skills") ||
     pathname.startsWith("/tools") ||
     pathname.startsWith("/workflows") ||
     pathname.startsWith("/agent-graphs") ||
-    pathname.startsWith("/playground") ||
     pathname.startsWith("/my-agents")
-  );
-}
-
-function isOrgRoute(p: string) {
-  return p.startsWith("/catalog") || p.startsWith("/deployments") || p.startsWith("/observability");
-}
-
-function isAdminRoute(pathname: string) {
-  return pathname.startsWith("/admin") || pathname.startsWith("/hitl");
+  ) active.push("build");
+  if (pathname.startsWith("/playground")) active.push("evaluate");
+  if (
+    pathname.startsWith("/catalog") ||
+    pathname.startsWith("/approvals") ||
+    pathname.startsWith("/deployments")
+  ) active.push("catalog");
+  if (pathname.startsWith("/observability")) active.push("observe");
+  if (pathname.startsWith("/providers")) active.push("settings");
+  if (pathname.startsWith("/admin") || pathname.startsWith("/hitl")) active.push("admin");
+  return active;
 }
 
 // ── Sub-item link ────────────────────────────────────────────────────────────
 
-function SideLink({ to, label, end = false }: { to: string; label: string; end?: boolean }) {
+function SideLink({
+  to,
+  label,
+  end = false,
+  icon: Icon,
+}: {
+  to: string;
+  label: string;
+  end?: boolean;
+  icon?: LucideIcon;
+}) {
   return (
     <NavLink
       to={to}
       end={end}
       className={({ isActive }) =>
-        `block px-3 py-1.5 rounded text-sm transition-colors ${
+        `flex items-center gap-3 px-3 py-2 rounded-md text-[14px] transition-colors ${
           isActive
-            ? "bg-slate-700 text-white font-medium"
-            : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+            ? "bg-blue-500/10 text-blue-400 font-medium"
+            : "text-slate-300 hover:text-white hover:bg-slate-800/60"
         }`
       }
     >
+      {Icon && <Icon size={18} strokeWidth={1.8} className="shrink-0" />}
       {label}
     </NavLink>
   );
 }
 
-// ── Collapsible section ──────────────────────────────────────────────────────
+// ── Section header ───────────────────────────────────────────────────────────
 
-function Section({
+function SectionHeader({ label }: { label: string }) {
+  return (
+    <p className="px-3 pt-5 pb-1 text-[11px] font-semibold uppercase tracking-widest text-slate-500">
+      {label}
+    </p>
+  );
+}
+
+// ── Collapsible section (Admin only) ────────────────────────────────────────
+
+function CollapsibleSection({
   label,
   open,
   onToggle,
@@ -98,10 +156,10 @@ function Section({
     <div>
       <button
         onClick={onToggle}
-        className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-slate-300 transition-colors"
+        className="w-full flex items-center justify-between px-3 pt-5 pb-1 text-[11px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300 transition-colors"
       >
         {label}
-        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
       </button>
       {open && <div className="mt-0.5 space-y-0.5">{children}</div>}
     </div>
@@ -140,21 +198,11 @@ export default function Sidebar() {
       .slice(0, 5);
   }, [sidebarTeams, sidebarAgents, user?.sub]);
 
-  const [open, setOpen] = useState({
-    playground: isPlaygroundRoute(pathname),
-    org: isOrgRoute(pathname),
-    admin: isAdminRoute(pathname),
-  });
+  const [adminOpen, setAdminOpen] = useState(() => detectSections(pathname).includes("admin"));
 
-  // auto-expand the right section when navigating directly to a deep route
   useEffect(() => {
-    if (isPlaygroundRoute(pathname)) setOpen((o) => ({ ...o, playground: true }));
-    if (isOrgRoute(pathname))        setOpen((o) => ({ ...o, org: true }));
-    if (isAdminRoute(pathname))      setOpen((o) => ({ ...o, admin: true }));
+    if (detectSections(pathname).includes("admin")) setAdminOpen(true);
   }, [pathname]);
-
-  const toggle = (section: "playground" | "org" | "admin") =>
-    setOpen((o) => ({ ...o, [section]: !o[section] }));
 
   return (
     <aside className="w-56 shrink-0 bg-slate-900 flex flex-col min-h-screen border-r border-slate-800">
@@ -170,35 +218,38 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-2 py-4 space-y-4 overflow-y-auto">
-        {/* Playground */}
-        <Section label="Playground" open={open.playground} onToggle={() => toggle("playground")}>
-          {PLAYGROUND_BUILD.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />
+      <nav className="flex-1 px-2 py-2 overflow-y-auto">
+        {/* Build */}
+        <SectionHeader label="Build" />
+        <div className="space-y-0.5">
+          {BUILD_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} icon={i.icon} />
           ))}
-          <div className="my-2 border-t border-slate-800" />
-          {PLAYGROUND_EVAL.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} />
-          ))}
-        </Section>
+        </div>
 
-        {/* My Agents */}
-        <div className="mt-2">
-          <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">
-            My Agents
-          </p>
+        {/* Evaluate */}
+        <SectionHeader label="Evaluate" />
+        <div className="space-y-0.5">
+          {EVALUATE_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={i.end} icon={i.icon} />
+          ))}
+        </div>
+
+        {/* Shared With Me */}
+        <SectionHeader label="Shared With Me" />
+        <div className="space-y-0.5">
           {myTeamGrants.length === 0 ? (
-            <p className="px-3 py-1 text-xs text-slate-500 italic">No agents granted yet</p>
+            <p className="px-3 py-2 text-[13px] text-slate-500 italic">Nothing shared yet</p>
           ) : (
             <>
               {myTeamGrants.map((a) => (
-                <SideLink key={a.name} to={`/agents/${a.name}/chat`} label={a.name} end={false} />
+                <SideLink key={a.name} to={`/agents/${a.name}/chat`} label={a.name} end={false} icon={Bot} />
               ))}
               <NavLink
                 to="/my-agents"
                 className={({ isActive }) =>
-                  `block px-3 py-1 text-xs transition-colors ${
-                    isActive ? "text-white" : "text-slate-500 hover:text-slate-300"
+                  `block px-3 py-1.5 text-[13px] transition-colors ${
+                    isActive ? "text-blue-400" : "text-slate-500 hover:text-slate-300"
                   }`
                 }
               >
@@ -208,25 +259,36 @@ export default function Sidebar() {
           )}
         </div>
 
-        {/* Org */}
-        <Section label="Org" open={open.org} onToggle={() => toggle("org")}>
-          {ORG_ITEMS.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={false} />
+        {/* Catalog */}
+        <SectionHeader label="Catalog" />
+        <div className="space-y-0.5">
+          {CATALOG_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
           ))}
-        </Section>
-
-        {/* Config */}
-        <div className="mt-2">
-          <p className="px-3 mb-0.5 text-xs font-semibold uppercase tracking-wider text-slate-500">Config</p>
-          <SideLink to="/providers" label="Providers" end={false} />
         </div>
 
-        {/* Administration */}
-        <Section label="Administration" open={open.admin} onToggle={() => toggle("admin")}>
-          {ADMIN_ITEMS.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={false} />
+        {/* Observe */}
+        <SectionHeader label="Observe" />
+        <div className="space-y-0.5">
+          {OBSERVE_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
           ))}
-        </Section>
+        </div>
+
+        {/* Settings */}
+        <SectionHeader label="Settings" />
+        <div className="space-y-0.5">
+          {SETTINGS_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
+          ))}
+        </div>
+
+        {/* Admin */}
+        <CollapsibleSection label="Admin" open={adminOpen} onToggle={() => setAdminOpen((o) => !o)}>
+          {ADMIN_ITEMS.map((i) => (
+            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
+          ))}
+        </CollapsibleSection>
       </nav>
 
       {/* User footer */}

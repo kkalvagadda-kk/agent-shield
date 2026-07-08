@@ -4,7 +4,7 @@ The playground lets you talk to an agent live, watch its reasoning in a trace pa
 
 ## How to get there
 
-`Sidebar → Playground`
+`Sidebar → Evaluate → Eval Runs`
 
 The route is `/playground`. The URL doesn't change between agents — the agent is selected in the left panel.
 

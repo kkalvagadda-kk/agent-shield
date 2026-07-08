@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
 // playground.spec.ts
-//   Proves the Playground (/playground) and Datasets (/playground/datasets)
+//   Proves the Eval Runs (/playground) and Datasets (/playground/datasets)
 //   pages load and expose their primary UI affordances.
 //
 //   Note: actually RUNNING an agent requires a live pod; these tests prove the
@@ -16,7 +16,7 @@ test.describe("playground page", () => {
 
     // Left panel heading (h2); there's also a sidebar nav link with the same text,
     // so scope to the role=heading to avoid strict-mode violation.
-    await expect(page.getByRole("heading", { name: "Evaluate" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Eval Runs" })).toBeVisible();
 
     // VersionSelector renders a label and a <select>
     await expect(page.getByText(/Select Agent/i)).toBeVisible();
