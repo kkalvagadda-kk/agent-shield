@@ -416,6 +416,7 @@ async def _real_agent_stream(
     agent_svc_url: str,
     input_message: str,
     thread_id: str,
+    trace_id: str | None = None,
 ) -> AsyncIterator[str]:
     """Proxy SSE from the agent pod, converting named events to unnamed events.
 
@@ -437,11 +438,14 @@ async def _real_agent_stream(
 
     try:
         async with httpx.AsyncClient(timeout=_AGENT_STREAM_TIMEOUT) as aclient:
+            req_headers = {"Accept": "text/event-stream"}
+            if trace_id:
+                req_headers["x-agentshield-trace-id"] = trace_id
             async with aclient.stream(
                 "POST",
                 f"{agent_svc_url}/chat/stream",
                 json=body,
-                headers={"Accept": "text/event-stream"},
+                headers=req_headers,
             ) as response:
                 if response.status_code != 200:
                     err_body = await response.aread()
@@ -621,6 +625,7 @@ async def stream_playground_run(
             agent_svc_url=agent_svc_url,
             input_message=input_message,
             thread_id=thread_id,
+            trace_id=run_id,
         ):
             if chunk.startswith("data: "):
                 try:
