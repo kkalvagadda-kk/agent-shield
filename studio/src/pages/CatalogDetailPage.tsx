@@ -15,6 +15,7 @@ import {
   Pause,
   Play,
   Rocket,
+  Eye,
   Square,
 } from "lucide-react";
 import { useState } from "react";
@@ -31,6 +32,7 @@ import {
   CatalogRun,
   CatalogStats,
 } from "../api/catalogApi";
+import TraceDrawer from "../components/playground/TraceDrawer";
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-yellow-100 text-yellow-700",
@@ -550,6 +552,8 @@ const RUN_STATUS_COLORS: Record<string, string> = {
 };
 
 function RunsTab({ runs, isLoading }: { runs: CatalogRun[]; isLoading: boolean }) {
+  const [traceId, setTraceId] = useState<string | null>(null);
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12 text-slate-400">
@@ -568,32 +572,21 @@ function RunsTab({ runs, isLoading }: { runs: CatalogRun[]; isLoading: boolean }
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-[1fr_100px_100px_100px_80px_80px] gap-2 text-xs font-medium text-slate-500 px-3 py-2 border-b border-slate-200">
+      <div className="grid grid-cols-[1fr_100px_100px_100px_80px_80px_60px] gap-2 text-xs font-medium text-slate-500 px-3 py-2 border-b border-slate-200">
         <span>Agent</span>
         <span>Status</span>
         <span>Trigger</span>
         <span>Started</span>
         <span>Latency</span>
         <span>Cost</span>
+        <span>Trace</span>
       </div>
       {runs.map((r) => (
         <div
           key={r.id}
-          className="grid grid-cols-[1fr_100px_100px_100px_80px_80px] gap-2 items-center text-sm px-3 py-2 rounded hover:bg-slate-50"
+          className="grid grid-cols-[1fr_100px_100px_100px_80px_80px_60px] gap-2 items-center text-sm px-3 py-2 rounded hover:bg-slate-50"
         >
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="truncate font-medium text-slate-800">{r.agent_name}</span>
-            {r.trace_url && (
-              <a
-                href={r.trace_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-500 hover:underline shrink-0"
-              >
-                trace
-              </a>
-            )}
-          </div>
+          <span className="truncate font-medium text-slate-800">{r.agent_name}</span>
           <span className={`badge text-xs ${RUN_STATUS_COLORS[r.status] || "bg-slate-100 text-slate-600"}`}>
             {r.status}
           </span>
@@ -612,8 +605,23 @@ function RunsTab({ runs, isLoading }: { runs: CatalogRun[]; isLoading: boolean }
           <span className="text-xs text-slate-500">
             {r.cost_usd != null ? `$${r.cost_usd.toFixed(4)}` : "—"}
           </span>
+          <span>
+            {r.langfuse_trace_id ? (
+              <button
+                onClick={() => setTraceId(r.langfuse_trace_id)}
+                className="text-blue-500 hover:text-blue-700"
+                title="View trace"
+              >
+                <Eye size={14} />
+              </button>
+            ) : (
+              <span className="text-slate-300">—</span>
+            )}
+          </span>
         </div>
       ))}
+
+      {traceId && <TraceDrawer traceId={traceId} onClose={() => setTraceId(null)} />}
     </div>
   );
 }

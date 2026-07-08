@@ -17,6 +17,7 @@ from sqlalchemy import (
     ARRAY,
     Boolean,
     CheckConstraint,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -1385,6 +1386,7 @@ class AgentRun(Base):
     production_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("production_deployments.id", ondelete="SET NULL"), nullable=True
     )
+    judge_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Relationships
     # run_steps.run_id has no DB-level FK (it's a polymorphic reference to either

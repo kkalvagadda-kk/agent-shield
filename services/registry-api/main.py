@@ -86,6 +86,7 @@ from routers.me import router as me_router
 from routers.memory import router as memory_router
 from routers.internal import router as internal_router
 from routers.events import router as events_router
+from routers.observability import router as observability_router
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +219,9 @@ def create_app() -> FastAPI:
 
     # --- Catalog (production artifacts) ---
     app.include_router(catalog_router)
+
+    # --- Observability (traces list + dashboard) ---
+    app.include_router(observability_router)
 
     # --- Current user router ---
     app.include_router(me_router)

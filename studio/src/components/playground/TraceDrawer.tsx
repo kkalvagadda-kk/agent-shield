@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Clock, ExternalLink, Loader2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Clock, ExternalLink, Loader2, ShieldAlert, X } from "lucide-react";
 import { useState } from "react";
 import { getTraceById } from "../../api/playgroundApi";
 
@@ -11,6 +11,7 @@ interface Observation {
   endTime?: string;
   input?: unknown;
   output?: unknown;
+  metadata?: Record<string, unknown>;
   statusMessage?: string;
   level?: string;
 }
@@ -113,6 +114,9 @@ function SpanRow({ observation: obs }: { observation: Observation }) {
         )
       : null;
 
+  const isSafetySpan = obs.name.startsWith("safety_scan") || obs.name.startsWith("safety-scan");
+  const isBlocked = isSafetySpan && (obs.metadata as Record<string, unknown>)?.blocked === true;
+
   const typeColor: Record<string, string> = {
     GENERATION: "bg-purple-100 text-purple-700",
     SPAN: "bg-blue-100 text-blue-700",
@@ -120,7 +124,7 @@ function SpanRow({ observation: obs }: { observation: Observation }) {
   };
 
   return (
-    <div className="border border-slate-100 rounded-md">
+    <div className={`border rounded-md ${isBlocked ? "border-red-200 bg-red-50/30" : "border-slate-100"}`}>
       <button
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-slate-50 transition-colors"
@@ -129,6 +133,9 @@ function SpanRow({ observation: obs }: { observation: Observation }) {
           <ChevronDown size={12} className="text-slate-400 shrink-0" />
         ) : (
           <ChevronRight size={12} className="text-slate-400 shrink-0" />
+        )}
+        {isSafetySpan && (
+          <ShieldAlert size={12} className={`shrink-0 ${isBlocked ? "text-red-500" : "text-orange-400"}`} />
         )}
         <span
           className={`badge text-[10px] px-1.5 py-0.5 ${typeColor[obs.type] ?? "bg-slate-100 text-slate-600"}`}

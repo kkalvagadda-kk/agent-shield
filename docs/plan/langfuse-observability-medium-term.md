@@ -1,6 +1,6 @@
 # Langfuse ↔ Studio Observability: Medium-Term Implementation Plan
 
-**Status:** Draft  
+**Status:** Implemented (2026-07-08) — registry-api:0.2.97, studio:0.1.77  
 **Prerequisite:** Short-term fix (TraceDrawer inline) — already shipped  
 **Scope:** M1–M6 from `docs/design/todo/langfuse-studio-integration.md`
 

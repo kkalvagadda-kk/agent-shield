@@ -1063,6 +1063,7 @@ class AgentRunResponse(BaseModel):
     error_message: str | None = None
     trace_url: str | None = None
     production_deployment_id: uuid.UUID | None = None
+    judge_score: float | None = None
 
 
 class AgentStatsResponse(BaseModel):

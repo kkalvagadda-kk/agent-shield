@@ -3,11 +3,13 @@ import { Eye, ExternalLink, Loader2, Send, ThumbsDown, ThumbsUp } from "lucide-r
 import { getRunTrace, startPlaygroundRun, submitRunFeedback } from "../../api/playgroundApi";
 import { toast } from "sonner";
 import TraceDrawer from "./TraceDrawer";
+import SafetyDetails, { SafetyResult } from "./SafetyDetails";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
   chips?: { type: "tool_start" | "tool_end"; label: string }[];
+  safetyBlock?: SafetyResult;
 }
 
 interface Props {
@@ -141,6 +143,39 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
               (payload.risk_level as string) ?? "high",
               (payload.args as Record<string, unknown>) ?? {}
             );
+          } else if (event === "error" && payload.type === "safety_blocked") {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === "assistant") {
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: last.content || "Message blocked by safety scan.",
+                  safetyBlock: {
+                    reason: (payload.reason as string) || "Input blocked by safety scanner",
+                    type: "safety_blocked",
+                    scanners: payload.scanners as SafetyResult["scanners"],
+                  },
+                };
+              }
+              return updated;
+            });
+            es.close();
+            esRef.current = null;
+            setRunning(false);
+          } else if (event === "error") {
+            const errorMsg = (payload.reason as string) || (payload.message as string) || "Agent error";
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === "assistant") {
+                updated[updated.length - 1] = { ...last, content: errorMsg };
+              }
+              return updated;
+            });
+            es.close();
+            esRef.current = null;
+            setRunning(false);
           } else if (event === "done") {
             es.close();
             esRef.current = null;
@@ -218,6 +253,7 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
               {msg.content || (msg.role === "assistant" && running && i === messages.length - 1 ? (
                 <Loader2 size={14} className="animate-spin text-slate-400" />
               ) : null)}
+              {msg.safetyBlock && <SafetyDetails result={msg.safetyBlock} />}
             </div>
           </div>
         ))}

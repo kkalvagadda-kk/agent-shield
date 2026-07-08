@@ -23,9 +23,11 @@ const PLAYGROUND_EVAL = [
 ];
 
 const ORG_ITEMS = [
-  { label: "Catalog",     to: "/catalog"     },
-  { label: "Approvals",   to: "/approvals"   },
-  { label: "Deployments", to: "/deployments" },
+  { label: "Catalog",       to: "/catalog"                  },
+  { label: "Traces",        to: "/observability/traces"     },
+  { label: "Dashboard",     to: "/observability/dashboard"  },
+  { label: "Approvals",     to: "/approvals"                },
+  { label: "Deployments",   to: "/deployments"              },
 ];
 
 const ADMIN_ITEMS = [
@@ -52,7 +54,7 @@ function isPlaygroundRoute(pathname: string) {
 }
 
 function isOrgRoute(p: string) {
-  return p.startsWith("/catalog") || p.startsWith("/deployments");
+  return p.startsWith("/catalog") || p.startsWith("/deployments") || p.startsWith("/observability");
 }
 
 function isAdminRoute(pathname: string) {

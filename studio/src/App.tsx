@@ -30,6 +30,9 @@ import ApprovalsInboxPage from "./pages/ApprovalsInboxPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import CatalogChatPage from "./pages/CatalogChatPage";
 import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
+import ObservabilityTracesPage from "./pages/ObservabilityTracesPage";
+import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
+import ObservabilityComparePage from "./pages/ObservabilityComparePage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -75,6 +78,9 @@ export default function App() {
               <Route path="/playground" element={<PlaygroundPage />} />
               <Route path="/playground/datasets" element={<DatasetsPage />} />
               <Route path="/playground/eval-runs/:evalRunId" element={<EvalResultsPage />} />
+              <Route path="/observability/traces" element={<ObservabilityTracesPage />} />
+              <Route path="/observability/dashboard" element={<ObservabilityDashboardPage />} />
+              <Route path="/observability/compare" element={<ObservabilityComparePage />} />
             </Routes>
             </ErrorBoundary>
           </main>

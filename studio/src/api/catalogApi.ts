@@ -102,6 +102,7 @@ export interface CatalogRun {
   started_at: string;
   completed_at: string | null;
   trace_url: string | null;
+  langfuse_trace_id: string | null;
   production_deployment_id: string | null;
 }
 
