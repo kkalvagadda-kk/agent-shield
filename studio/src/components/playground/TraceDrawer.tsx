@@ -88,10 +88,40 @@ export default function TraceDrawer({
 
           {data && !isLoading && (
             <>
+              {/* Trace-level metadata */}
+              {data.langfuse && !(data.langfuse as { warning?: string }).warning && (
+                <div className="mb-4 space-y-2 text-xs border border-slate-100 rounded-md p-3 bg-slate-50">
+                  {(data.langfuse as { name?: string }).name && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Name</span>
+                      <span className="font-medium text-slate-700">{(data.langfuse as { name?: string }).name}</span>
+                    </div>
+                  )}
+                  {(data.langfuse as { userId?: string }).userId && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">User</span>
+                      <span className="font-medium text-slate-700">{(data.langfuse as { userId?: string }).userId}</span>
+                    </div>
+                  )}
+                  {(data.langfuse as { timestamp?: string }).timestamp && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Started</span>
+                      <span className="text-slate-700">{new Date((data.langfuse as { timestamp: string }).timestamp).toLocaleString()}</span>
+                    </div>
+                  )}
+                  {(data.langfuse as { tags?: string[] }).tags?.length ? (
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Tags</span>
+                      <span className="text-slate-700">{(data.langfuse as { tags: string[] }).tags.join(", ")}</span>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
               {observations.length === 0 && (
                 <p className="text-sm text-slate-400 text-center py-8">
                   {(data.langfuse as { warning?: string })?.warning ??
-                    "No observations in this trace."}
+                    "No span-level observations recorded. LLM callback handler not wired into agent execution."}
                 </p>
               )}
 

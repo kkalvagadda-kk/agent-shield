@@ -48,9 +48,9 @@ global:
   # Browser-facing base URL (single source of truth for all public endpoints).
   publicUrl: "https://agentshield.127.0.0.1.nip.io:8443"
 
-  # Browser-facing Langfuse URL (includes /langfuse path prefix for Gateway routing).
+  # Browser-facing Langfuse URL (subdomain — no path prefix needed).
   # Trace links in Studio point here.
-  langfuseUrl: "https://langfuse.127.0.0.1.nip.io:8443/langfuse"
+  langfuseUrl: "https://langfuse.127.0.0.1.nip.io:8443"
 
   # Namespace all platform components run in (ArgoCD / helmfile override)
   namespace: agentshield-platform
