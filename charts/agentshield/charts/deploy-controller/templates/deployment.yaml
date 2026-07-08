@@ -59,6 +59,13 @@ spec:
               value: "INFO"
             - name: DECLARATIVE_RUNNER_IMAGE
               value: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+            - name: LANGFUSE_HOST
+              value: "http://{{ .Release.Name }}-langfuse-web:3000"
+            - name: LANGFUSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-api-keys
+                  key: secret-key
           resources:
             requests:
               cpu: 50m

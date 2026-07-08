@@ -1,3 +1,5 @@
+import os
+
 import kubernetes.client as k8s_client
 
 # Namespace where the OPA config ConfigMap lives (shared across all agents)
@@ -207,6 +209,14 @@ def build_deployment(
     env_vars.append(
         k8s_client.V1EnvVar(name="PYTHON_EXECUTOR_URL", value=python_executor_url)
     )
+
+    # --- Langfuse observability (enables LangfuseCallbackHandler in declarative-runner) ---
+    langfuse_host = os.environ.get("LANGFUSE_HOST", "")
+    langfuse_key = os.environ.get("LANGFUSE_KEY", "")
+    if langfuse_host:
+        env_vars.append(k8s_client.V1EnvVar(name="AGENTSHIELD_LANGFUSE_HOST", value=langfuse_host))
+    if langfuse_key:
+        env_vars.append(k8s_client.V1EnvVar(name="AGENTSHIELD_LANGFUSE_KEY", value=langfuse_key))
 
     # --- Agent container ---
     agent_container = k8s_client.V1Container(

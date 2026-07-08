@@ -626,7 +626,7 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.20"
+    tag: "0.1.21"
     pullPolicy: IfNotPresent
 
   # Image tag used for the declarative-runner pods the controller provisions
