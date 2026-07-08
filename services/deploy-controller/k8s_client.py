@@ -20,6 +20,22 @@ class K8sClient:
         self.core_v1 = k8s_client.CoreV1Api()
         self.custom = k8s_client.CustomObjectsApi()
 
+    def ensure_namespace(self, namespace: str) -> None:
+        """Create namespace if it doesn't exist."""
+        try:
+            self.core_v1.read_namespace(name=namespace)
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            ns = k8s_client.V1Namespace(
+                metadata=k8s_client.V1ObjectMeta(
+                    name=namespace,
+                    labels={"agentshield.io/managed-by": "deploy-controller"},
+                )
+            )
+            self.core_v1.create_namespace(body=ns)
+            logger.info("Created namespace %s", namespace)
+
     def get_deployment(self, namespace: str, name: str) -> k8s_client.V1Deployment | None:
         """Return the named Deployment or None if it doesn't exist."""
         try:
@@ -80,6 +96,51 @@ class K8sClient:
             )
             self.core_v1.create_namespaced_config_map(namespace=namespace, body=cm)
             logger.info("Created ConfigMap %s/%s", namespace, name)
+
+    def ensure_secret(self, name: str, namespace: str, data: dict) -> None:
+        """Create or update an Opaque secret with the given string data."""
+        from kubernetes.client import V1Secret, V1ObjectMeta
+        secret = V1Secret(
+            metadata=V1ObjectMeta(name=name, namespace=namespace),
+            string_data=data,
+            type="Opaque",
+        )
+        try:
+            self.core_v1.read_namespaced_secret(name=name, namespace=namespace)
+            self.core_v1.replace_namespaced_secret(name=name, namespace=namespace, body=secret)
+            logger.info("Updated Secret %s/%s", namespace, name)
+        except ApiException as e:
+            if e.status == 404:
+                self.core_v1.create_namespaced_secret(namespace=namespace, body=secret)
+                logger.info("Created Secret %s/%s", namespace, name)
+            else:
+                raise
+
+    def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
+        """Scale a Deployment to the specified replica count."""
+        try:
+            self.apps_v1.patch_namespaced_deployment_scale(
+                name=name,
+                namespace=namespace,
+                body={"spec": {"replicas": replicas}},
+            )
+            logger.info("Scaled Deployment %s/%s to %d replicas", namespace, name, replicas)
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning("Deployment %s/%s not found; skipping scale", namespace, name)
+            else:
+                raise
+
+    def delete_service(self, namespace: str, name: str) -> None:
+        """Delete a Service (ignore if not found)."""
+        try:
+            self.core_v1.delete_namespaced_service(name=name, namespace=namespace)
+            logger.info("Deleted Service %s/%s", namespace, name)
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning("Service %s/%s not found; skipping delete", namespace, name)
+            else:
+                raise
 
     def get_deployment_available_replicas(self, namespace: str, name: str) -> int:
         """Return the number of available replicas for a Deployment (0 if not found)."""
@@ -175,6 +236,44 @@ class K8sClient:
             logger.info("Created ServiceAccount %s/%s", namespace, sa_name)
 
         return f"system:serviceaccount:{namespace}:{sa_name}"
+
+    def ensure_opa_configmap(self, namespace: str) -> None:
+        """Idempotently create the opa-sidecar-config ConfigMap in a namespace."""
+        cm_name = "opa-sidecar-config"
+        try:
+            self.core_v1.read_namespaced_config_map(name=cm_name, namespace=namespace)
+            logger.debug("ConfigMap %s/%s already exists", namespace, cm_name)
+            return
+        except ApiException as e:
+            if e.status != 404:
+                raise
+
+        opa_yaml = (
+            "services:\n"
+            "  - name: bundle-server\n"
+            "    url: http://opa-bundle-server.agentshield-platform\n"
+            "\n"
+            "bundles:\n"
+            "  agentshield:\n"
+            "    service: bundle-server\n"
+            "    resource: /bundles/agentshield\n"
+            "    polling:\n"
+            "      min_delay_seconds: 30\n"
+            "      max_delay_seconds: 60\n"
+            "\n"
+            "decision_logs:\n"
+            "  console: true\n"
+        )
+        cm = k8s_client.V1ConfigMap(
+            metadata=k8s_client.V1ObjectMeta(
+                name=cm_name,
+                namespace=namespace,
+                labels={"agentshield.io/managed-by": "deploy-controller"},
+            ),
+            data={"opa-config.yaml": opa_yaml},
+        )
+        self.core_v1.create_namespaced_config_map(namespace=namespace, body=cm)
+        logger.info("Created ConfigMap %s/%s", namespace, cm_name)
 
     def patch_configmap_data(
         self, namespace: str, name: str, key: str, value: str

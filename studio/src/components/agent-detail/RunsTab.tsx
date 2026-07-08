@@ -1,8 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Eye, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { AgentRunItem, listAgentRuns } from "../../api/registryApi";
-import TraceDrawer from "../playground/TraceDrawer";
 
 const STATUS_BADGE: Record<string, string> = {
   completed: "bg-green-100 text-green-700",
@@ -27,7 +26,6 @@ function truncate(text: string | null | undefined, max: number): string {
 export default function RunsTab({ agentName }: { agentName: string }) {
   const [triggerFilter, setTriggerFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
-  const [traceId, setTraceId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data: runs, isLoading } = useQuery({
@@ -129,18 +127,20 @@ export default function RunsTab({ agentName }: { agentName: string }) {
                           {new Date(run.started_at).toLocaleString()}
                         </div>
                         <div className="px-4 py-2">
-                          {run.langfuse_trace_id && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setTraceId(run.langfuse_trace_id);
-                              }}
+                          {run.trace_url ? (
+                            <a
+                              href={run.trace_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
                               className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
                             >
-                              <Eye size={12} />
-                              View
-                            </button>
-                          )}
+                              <ExternalLink size={12} />
+                              Trace
+                            </a>
+                          ) : run.langfuse_trace_id ? (
+                            <span className="text-xs text-slate-400">{run.langfuse_trace_id.slice(0, 8)}…</span>
+                          ) : null}
                         </div>
                       </div>
                       {isExpanded && (
@@ -185,9 +185,6 @@ export default function RunsTab({ agentName }: { agentName: string }) {
         </div>
       )}
 
-      {traceId && (
-        <TraceDrawer traceId={traceId} onClose={() => setTraceId(null)} />
-      )}
     </div>
   );
 }

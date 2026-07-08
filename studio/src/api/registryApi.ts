@@ -256,7 +256,7 @@ export interface AgentChatStart {
 
 export const startAgentChat = async (
   name: string,
-  body: { message: string; session_id?: string }
+  body: { message: string; session_id?: string; context?: "production" | "playground" }
 ): Promise<AgentChatStart> => {
   const { data } = await http.post<AgentChatStart>(`/agents/${name}/chat`, body);
   return data;
@@ -467,6 +467,15 @@ export const updateCompositeWorkflow = async (
 
 export const deleteCompositeWorkflow = async (id: string): Promise<void> => {
   await http.delete(`/workflows/${id}`);
+};
+
+export const publishWorkflow = async (
+  id: string
+): Promise<{ publish_request_id: string }> => {
+  const { data } = await http.post<{ publish_request_id: string }>(
+    `/workflows/${id}/publish`
+  );
+  return data;
 };
 
 export const addWorkflowMember = async (
@@ -1053,6 +1062,8 @@ export interface AgentRunItem {
   started_at: string;
   completed_at: string | null;
   langfuse_trace_id: string | null;
+  trace_url: string | null;
+  production_deployment_id: string | null;
 }
 
 export const listAgentRuns = async (params?: {

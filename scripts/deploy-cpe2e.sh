@@ -3,6 +3,11 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.84  (Production artifact isolation: catalog API, production_deployments, run isolation via production_deployment_id)
+#   - studio:0.1.66        (CatalogDetailPage: versions/deployments/runs tabs, deploy/upgrade/suspend/resume actions)
+#   - deploy-controller:0.1.13 (Production reconciler: poll catalog internal API, reconcile production pods from config_snapshot)
+#   - registry-api:0.2.82  (Workflow publish endpoint + run_by/langfuse_trace_id for internal runs + trace_url in agent-runs response)
+#   - studio:0.1.64        (Workflow publish button, grant form published-only filter + workflow support, Catalog uses CompositeWorkflows, Runs trace external link)
 #   - registry-api:0.2.80  (Fix publish flow: auto-resolve agent_version_id in eval-run creation + pass AGENT_VERSION_ID to eval Job)
 #   - studio:0.1.62        (Publish flow guard + runs/stats display: expandable rows, input preview, honest cost card)
 #   - registry-api:0.2.75  (Fix Langfuse trace URL: use full /project/{pid}/traces/{tid} path to avoid redirect losing /langfuse/ prefix behind Gateway)
@@ -61,12 +66,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.80"
+REGISTRY_API_TAG="0.2.96"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.12"
-STUDIO_TAG="0.1.62"
+DEPLOY_CONTROLLER_TAG="0.1.20"
+STUDIO_TAG="0.1.76"
 EVAL_RUNNER_TAG="0.1.4"
-DECLARATIVE_RUNNER_TAG="0.1.14"
+DECLARATIVE_RUNNER_TAG="0.1.15"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

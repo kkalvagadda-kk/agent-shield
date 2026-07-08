@@ -6,6 +6,7 @@ import httpx
 
 from config import settings
 from k8s_client import K8sClient
+from production_reconciler import production_poll_loop
 from reconciler import reconcile
 from timeout_worker import timeout_worker
 
@@ -147,6 +148,7 @@ async def _async_main() -> None:
     # Start background workers
     tw_task = asyncio.create_task(timeout_worker(), name="timeout_worker")
     poll_task = asyncio.create_task(poll_loop(), name="poll_loop")
+    prod_task = asyncio.create_task(production_poll_loop(settings), name="production_poll_loop")
 
     # Graceful shutdown on SIGTERM
     stop = asyncio.Event()
@@ -156,7 +158,8 @@ async def _async_main() -> None:
     logger.info("deploy-controller: SIGTERM received — shutting down")
     tw_task.cancel()
     poll_task.cancel()
-    await asyncio.gather(tw_task, poll_task, return_exceptions=True)
+    prod_task.cancel()
+    await asyncio.gather(tw_task, poll_task, prod_task, return_exceptions=True)
     logger.info("deploy-controller: shutdown complete")
 
 

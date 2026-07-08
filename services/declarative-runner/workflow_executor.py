@@ -61,6 +61,27 @@ from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecu
 logger = logging.getLogger(__name__)
 
 
+def _make_langfuse_handler(trace_id: str | None, session_id: str | None = None):
+    """Create a LangfuseCallbackHandler attached to an existing trace, or None."""
+    if not trace_id:
+        return None
+    lf_key = os.getenv("AGENTSHIELD_LANGFUSE_KEY", "")
+    lf_host = os.getenv("AGENTSHIELD_LANGFUSE_HOST", "")
+    if not lf_key or not lf_host:
+        return None
+    try:
+        from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
+        return LangfuseCallbackHandler(
+            trace_id=trace_id,
+            session_id=session_id,
+            public_key=lf_key,
+            secret_key=lf_key,
+            host=lf_host,
+        )
+    except Exception:
+        return None
+
+
 class WorkflowExecutor:
     """Parses WORKFLOW_JSON and builds a compiled LangGraph StateGraph.
 
@@ -688,6 +709,9 @@ class WorkflowExecutor:
             elif m.get("role") == "assistant":
                 history.append(AIMessage(content=m["content"]))
         config = {"configurable": {"thread_id": thread_id}}
+        lf_handler = _make_langfuse_handler(trace_id, thread_id)
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
         state = {"messages": history + [HumanMessage(content=safe_message)]}
         result = await self.graph.ainvoke(state, config)
 
@@ -741,6 +765,9 @@ class WorkflowExecutor:
                     output={"sanitized": scan_result.sanitized_text != message})
 
         config = {"configurable": {"thread_id": thread_id}}
+        lf_handler = _make_langfuse_handler(trace_id, thread_id)
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
         state = {"messages": [HumanMessage(content=safe_message)]}
 
         async for sse_chunk in stream_events(self.graph, state, config):
@@ -748,18 +775,22 @@ class WorkflowExecutor:
 
         tracer.end_trace(trace_ctx, output={"streamed": True})
 
-    async def resume(self, thread_id: str, decision: dict) -> dict:
+    async def resume(self, thread_id: str, decision: dict, trace_id: str | None = None) -> dict:
         """Resume a paused graph thread after a HITL decision.
 
         Args:
             thread_id: The LangGraph checkpoint thread to resume.
             decision:  Reviewer decision dict, e.g. ``{"decision": "approved"}``.
+            trace_id:  Optional Langfuse trace to attach LLM observations to.
 
         Returns:
             dict with ``response`` and ``thread_id``.
         """
         agent_name = os.getenv("AGENT_NAME", "declarative-agent")
         config = {"configurable": {"thread_id": thread_id}}
+        lf_handler = _make_langfuse_handler(trace_id, thread_id)
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
 
         result = await self.graph.ainvoke(
             {"messages": [], "resume": decision}, config

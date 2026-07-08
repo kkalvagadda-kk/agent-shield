@@ -28,7 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bundle_generator import generate_bundle_data
 from db import get_db
-from models import Agent, ApprovalAuthority, AssetGrant, EvalRun, GrantAudit, PublishRequest
+from models import (
+    Agent, ApprovalAuthority, AssetGrant, EvalRun, GrantAudit,
+    PublishRequest, PublishedArtifact, PublishedVersion, Tool,
+)
 from schemas import (
     ApprovalAuthorityCreate,
     ApprovalAuthorityResponse,
@@ -160,7 +163,7 @@ async def list_publish_requests(
                     EvalRun.agent_name.in_(agent_names),
                     EvalRun.status == "completed",
                 )
-                .order_by(EvalRun.completed_at.desc())
+                .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
                 .distinct(EvalRun.agent_name)
             )
             eval_rows = (await db.execute(latest_eval_q)).all()
@@ -214,7 +217,6 @@ async def approve_publish_request(
     pr.reviewed_at = now
 
     # Update the asset's publish_status to 'published'
-    # Currently only 'agent' asset_type maps to the agents table
     if pr.asset_type == "agent":
         agent_result = await db.execute(
             select(Agent).where(Agent.id == pr.asset_id)
@@ -223,6 +225,30 @@ async def approve_publish_request(
         if asset is not None:
             asset.publish_status = "published"
             asset.updated_at = now
+    elif pr.asset_type == "workflow":
+        from models import CompositeWorkflow
+        wf_result = await db.execute(
+            select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
+        )
+        wf = wf_result.scalar_one_or_none()
+        if wf is not None:
+            wf.publish_status = "published"
+            wf.updated_at = now
+    elif pr.asset_type == "tool":
+        tool_result = await db.execute(
+            select(Tool).where(Tool.id == pr.asset_id)
+        )
+        tool = tool_result.scalar_one_or_none()
+        if tool is not None:
+            tool.publish_status = "published"
+    elif pr.asset_type == "skill":
+        from models import Skill
+        skill_result = await db.execute(
+            select(Skill).where(Skill.id == pr.asset_id)
+        )
+        skill = skill_result.scalar_one_or_none()
+        if skill is not None:
+            skill.publish_status = "published"
 
     # Create grants for each team
     grants_created = 0
@@ -247,13 +273,109 @@ async def approve_publish_request(
 
     await db.flush()
 
+    # --- Production artifact promotion ---
+    # Upsert published_artifact and create a new published_version with config snapshot
+    artifact = (await db.execute(
+        select(PublishedArtifact).where(
+            PublishedArtifact.source_id == pr.asset_id,
+            PublishedArtifact.type == pr.asset_type,
+        )
+    )).scalar_one_or_none()
+
+    if artifact is None:
+        # Determine name/description/team from the source asset
+        art_name = ""
+        art_desc = ""
+        art_team = ""
+        if pr.asset_type == "agent" and asset is not None:
+            art_name = asset.name
+            art_desc = asset.description or ""
+            art_team = asset.team
+        elif pr.asset_type == "workflow":
+            wf_local = wf if "wf" in dir() else None
+            if wf_local:
+                art_name = wf_local.name
+                art_desc = wf_local.description or ""
+                art_team = wf_local.team
+        elif pr.asset_type == "tool":
+            tool_local = tool if "tool" in dir() else None
+            if tool_local:
+                art_name = tool_local.name
+                art_desc = tool_local.description or ""
+                art_team = getattr(tool_local, "team", "platform")
+        elif pr.asset_type == "skill":
+            skill_local = skill if "skill" in dir() else None
+            if skill_local:
+                art_name = skill_local.name
+                art_desc = getattr(skill_local, "description", "") or ""
+                art_team = getattr(skill_local, "team", "platform")
+
+        artifact = PublishedArtifact(
+            name=art_name or f"unnamed-{pr.asset_id}",
+            type=pr.asset_type,
+            description=art_desc,
+            source_id=pr.asset_id,
+            team=art_team or "platform",
+        )
+        db.add(artifact)
+        await db.flush()
+
+    # Build config snapshot
+    config_snapshot: dict = {}
+    if pr.asset_type == "agent" and asset is not None:
+        config_snapshot = {
+            "system_prompt": getattr(asset, "metadata_", {}).get("system_prompt", ""),
+            "model": getattr(asset, "metadata_", {}).get("model", ""),
+            "execution_shape": asset.execution_shape,
+            "memory_enabled": asset.memory_enabled,
+            "agent_type": asset.agent_type,
+        }
+    elif pr.asset_type == "workflow" and "wf" in dir() and wf is not None:
+        config_snapshot = {
+            "orchestration": getattr(wf, "orchestration", "sequential"),
+            "execution_shape": getattr(wf, "execution_shape", "reactive"),
+        }
+
+    # Determine next version label
+    from sqlalchemy import func as sa_func
+    ver_count = (await db.execute(
+        select(sa_func.count(PublishedVersion.id))
+        .where(PublishedVersion.artifact_id == artifact.id)
+    )).scalar() or 0
+    version_label = f"v{ver_count + 1}"
+
+    pub_version = PublishedVersion(
+        artifact_id=artifact.id,
+        version_label=version_label,
+        config_snapshot=config_snapshot,
+        source_version_id=None,
+        promoted_by=x_user_sub,
+        notes=pr.review_notes,
+    )
+    db.add(pub_version)
+
+    # Update grants to point at published_artifact.id instead of source asset_id
+    for team_name in body.grantee_teams:
+        catalog_grant = AssetGrant(
+            asset_id=artifact.id,
+            asset_type=pr.asset_type,
+            grantee_team=team_name,
+            granted_by=x_user_sub,
+            expires_at=body.expires_at,
+        )
+        db.add(catalog_grant)
+
+    await db.flush()
+
     logger.info(
-        "approve_publish_request: id=%s approved_by=%s grants_created=%d",
+        "approve_publish_request: id=%s approved_by=%s grants_created=%d artifact=%s version=%s",
         request_id,
         x_user_sub,
         grants_created,
+        artifact.id,
+        version_label,
     )
-    return {"approved": True, "grants_created": grants_created}
+    return {"approved": True, "grants_created": grants_created, "artifact_id": str(artifact.id), "version_label": version_label}
 
 
 # ---------------------------------------------------------------------------

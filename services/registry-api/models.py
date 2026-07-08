@@ -1382,6 +1382,9 @@ class AgentRun(Base):
     # run tree can resume and advance after the approval is decided. Shape:
     # {mode, order[], next_index, team, workflow_id}. NULL when not paused.
     orchestrator_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    production_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("production_deployments.id", ondelete="SET NULL"), nullable=True
+    )
 
     # Relationships
     # run_steps.run_id has no DB-level FK (it's a polymorphic reference to either
@@ -1573,6 +1576,102 @@ class AgentMemory(Base):
 
 
 # ---------------------------------------------------------------------------
+# published_artifacts / published_versions / production_deployments
+# (Decision: Production Artifact Isolation)
+# ---------------------------------------------------------------------------
+class PublishedArtifact(Base):
+    __tablename__ = "published_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('agent','workflow','tool','skill')",
+            name="ck_published_artifacts_type",
+        ),
+        UniqueConstraint("name", "type", name="uq_published_artifacts_name_type"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    team: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    versions: Mapped[list["PublishedVersion"]] = relationship(
+        back_populates="artifact", order_by="PublishedVersion.promoted_at"
+    )
+    deployments: Mapped[list["ProductionDeployment"]] = relationship(
+        back_populates="artifact"
+    )
+
+
+class PublishedVersion(Base):
+    __tablename__ = "published_versions"
+    __table_args__ = (
+        Index("idx_published_versions_artifact", "artifact_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("published_artifacts.id"), nullable=False
+    )
+    version_label: Mapped[str] = mapped_column(Text, nullable=False)
+    config_snapshot: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'")
+    )
+    source_version_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    promoted_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    promoted_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    artifact: Mapped["PublishedArtifact"] = relationship(back_populates="versions")
+
+
+class ProductionDeployment(Base):
+    __tablename__ = "production_deployments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','deploying','running','suspended','failed')",
+            name="ck_production_deployments_status",
+        ),
+        Index("idx_production_deployments_artifact", "artifact_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("published_artifacts.id"), nullable=False
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("published_versions.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pending'")
+    )
+    namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deployed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    suspended_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    artifact: Mapped["PublishedArtifact"] = relationship(back_populates="deployments")
+    version: Mapped["PublishedVersion"] = relationship()
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -1610,4 +1709,7 @@ __all__ = [
     "AgentTrigger",
     "AgentEvent",
     "AgentMemory",
+    "PublishedArtifact",
+    "PublishedVersion",
+    "ProductionDeployment",
 ]

@@ -329,6 +329,19 @@ async def start_workflow_run(
         workflow_id=wf.id,
     )
     db.add(parent)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=str(parent.id),
+        agent_name=wf.name,
+        user_id=body.run_by or "system",
+        context="production",
+        input_message=message[:4000] if message else "",
+    )
+    if trace_id:
+        parent.langfuse_trace_id = trace_id
+
     await db.commit()
     await db.refresh(parent)
 
@@ -350,13 +363,24 @@ async def list_workflow_runs(
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-) -> list[AgentRun]:
+) -> list[AgentRunResponse]:
     await _get_workflow(workflow_id, db)
     q = select(AgentRun).where(AgentRun.workflow_id == workflow_id)
     if status_filter:
         q = q.where(AgentRun.status == status_filter)
     q = q.order_by(AgentRun.started_at.desc()).limit(limit).offset(offset)
-    return list((await db.execute(q)).scalars().all())
+    rows = list((await db.execute(q)).scalars().all())
+
+    import os
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    items: list[AgentRunResponse] = []
+    for r in rows:
+        resp = AgentRunResponse.model_validate(r)
+        if r.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        items.append(resp)
+    return items
 
 
 @router.get("/{workflow_id}/runs/{run_id}/tree", response_model=WorkflowRunTreeResponse)
@@ -369,9 +393,20 @@ async def get_workflow_run_tree(
     children = list((await db.execute(
         select(AgentRun).where(AgentRun.parent_run_id == run_id).order_by(AgentRun.started_at)
     )).scalars().all())
+
+    import os
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+
+    def _with_trace_url(run: AgentRun) -> AgentRunResponse:
+        resp = AgentRunResponse.model_validate(run)
+        if run.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{run.langfuse_trace_id}"
+        return resp
+
     return WorkflowRunTreeResponse(
-        parent=AgentRunResponse.model_validate(parent),
-        children=[AgentRunResponse.model_validate(c) for c in children],
+        parent=_with_trace_url(parent),
+        children=[_with_trace_url(c) for c in children],
     )
 
 
@@ -541,3 +576,49 @@ async def rotate_workflow_trigger_token(
         token=plaintext,
         webhook_url=workflow_webhook_url(wf.name, plaintext),
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /{workflow_id}/publish
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{workflow_id}/publish",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit publish request for a workflow",
+)
+async def publish_workflow(
+    workflow_id: uuid.UUID,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from models import PublishRequest
+
+    caller = (user or {}).get("sub") or x_user_sub or "system"
+
+    result = await db.execute(
+        select(CompositeWorkflow).where(CompositeWorkflow.id == workflow_id)
+    )
+    wf = result.scalar_one_or_none()
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    if wf.publish_status == "pending_review":
+        raise HTTPException(status_code=409, detail="A publish request is already pending review.")
+    if wf.publish_status == "published":
+        raise HTTPException(status_code=409, detail="This workflow is already published.")
+
+    pr = PublishRequest(
+        asset_id=wf.id,
+        asset_type="workflow",
+        submitted_by=caller,
+        highest_risk_level="low",
+        dependency_declaration={},
+    )
+    db.add(pr)
+    wf.publish_status = "pending_review"
+    wf.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    logger.info("publish_workflow: id=%s submitted_by=%s pr_id=%s", workflow_id, caller, pr.id)
+    return {"publish_request_id": str(pr.id)}

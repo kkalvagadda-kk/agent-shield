@@ -53,7 +53,7 @@ export default function AgentDetailPage() {
     queryFn: () => listVersions(name!),
     enabled: !!name,
   });
-  const latestVersion = versions.length > 0 ? versions[versions.length - 1] : null;
+  const latestVersion = versions.length > 0 ? versions[0] : null;
   const evalGatePassed = latestVersion?.eval_passed === true;
 
   const publishMutation = useMutation({

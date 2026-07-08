@@ -80,6 +80,7 @@ logger = logging.getLogger(__name__)
 
 from routers.agent_tools import router as agent_tools_router
 from routers.admin_users import router as admin_users_router, teams_router as admin_teams_router
+from routers.catalog import router as catalog_router
 from routers.chat import router as chat_router
 from routers.me import router as me_router
 from routers.memory import router as memory_router
@@ -214,6 +215,9 @@ def create_app() -> FastAPI:
 
     # --- Agent events router (Phase 9: event gateway webhook log) ---
     app.include_router(events_router)
+
+    # --- Catalog (production artifacts) ---
+    app.include_router(catalog_router)
 
     # --- Current user router ---
     app.include_router(me_router)

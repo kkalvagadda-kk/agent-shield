@@ -85,7 +85,8 @@ async def list_agent_runs(
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-) -> list[AgentRun]:
+) -> list[AgentRunResponse]:
+    import os
     q = select(AgentRun).order_by(AgentRun.started_at.desc()).limit(limit).offset(offset)
     if agent_name:
         q = q.where(AgentRun.agent_name == agent_name)
@@ -100,7 +101,17 @@ async def list_agent_runs(
     if status_filter:
         q = q.where(AgentRun.status == status_filter)
     result = await db.execute(q)
-    return list(result.scalars().all())
+    rows = list(result.scalars().all())
+
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    items: list[AgentRunResponse] = []
+    for r in rows:
+        resp = AgentRunResponse.model_validate(r)
+        if r.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        items.append(resp)
+    return items
 
 
 @router.get("/{run_id}", response_model=AgentRunResponse)

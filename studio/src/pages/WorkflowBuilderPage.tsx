@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ReactFlow,
   Background,
@@ -18,6 +18,7 @@ import {
   Eye,
   Plus,
   Save,
+  Send,
   Play,
   X,
   Loader2,
@@ -42,6 +43,7 @@ import {
   removeWorkflowEdge,
   triggerWorkflowRun,
   getWorkflowRunTree,
+  publishWorkflow,
   type WorkflowRunTree,
   type WorkflowOrchestration,
 } from '../api/registryApi';
@@ -102,6 +104,7 @@ export default function WorkflowBuilderPage() {
   const [saveOrchestration, setSaveOrchestration] = useState<WorkflowOrchestration>('sequential');
   const [saveShape, setSaveShape] = useState<'reactive' | 'durable'>('reactive');
   const [isSaving, setIsSaving] = useState(false);
+  const qc = useQueryClient();
 
   // Run panel state
   const [inputMessage, setInputMessage] = useState('');
@@ -124,6 +127,18 @@ export default function WorkflowBuilderPage() {
     queryKey: ['composite-workflow', id],
     queryFn: () => getCompositeWorkflow(id!),
     enabled: !!id,
+  });
+
+  const publishMutation = useMutation({
+    mutationFn: () => publishWorkflow(compositeWorkflowId!),
+    onSuccess: (result) => {
+      toast.success(`Publish request submitted (${result.publish_request_id.slice(0, 8)}…)`);
+      qc.invalidateQueries({ queryKey: ['composite-workflow', id] });
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(detail || "Failed to submit publish request");
+    },
   });
 
   useEffect(() => {
@@ -460,6 +475,22 @@ export default function WorkflowBuilderPage() {
           >
             <Zap size={13} />
             Triggers
+          </button>
+        )}
+
+        {/* Publish button (only when saved + not already published/pending) */}
+        {compositeWorkflowId && workflow && workflow.publish_status === 'private' && (
+          <button
+            onClick={() => {
+              if (confirm(`Submit workflow "${compositeWorkflowName}" for publish review?`)) {
+                publishMutation.mutate();
+              }
+            }}
+            disabled={publishMutation.isPending}
+            className="btn-primary flex items-center gap-1.5 text-sm bg-green-600 hover:bg-green-700"
+          >
+            {publishMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+            Publish
           </button>
         )}
 

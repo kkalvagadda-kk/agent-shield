@@ -1061,6 +1061,8 @@ class AgentRunResponse(BaseModel):
     workflow_id: uuid.UUID | None = None
     trigger_payload: dict[str, Any] | None = None
     error_message: str | None = None
+    trace_url: str | None = None
+    production_deployment_id: uuid.UUID | None = None
 
 
 class AgentStatsResponse(BaseModel):
@@ -1292,6 +1294,67 @@ class MemorySearchResult(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Catalog (Production Artifact Isolation)
+# ---------------------------------------------------------------------------
+class CatalogVersionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    artifact_id: uuid.UUID
+    version_label: str
+    config_snapshot: dict[str, Any] = {}
+    source_version_id: uuid.UUID | None = None
+    promoted_at: datetime
+    promoted_by: str | None = None
+    notes: str | None = None
+
+
+class CatalogDeploymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    artifact_id: uuid.UUID
+    version_id: uuid.UUID
+    version_label: str | None = None
+    status: str
+    namespace: str | None = None
+    deployed_at: datetime | None = None
+    suspended_at: datetime | None = None
+    updated_at: datetime
+
+
+class CatalogArtifactResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    type: str
+    description: str | None = None
+    source_id: uuid.UUID | None = None
+    team: str
+    created_at: datetime
+    updated_at: datetime
+    latest_version: str | None = None
+    deployment_count: int = 0
+
+
+class CatalogDetailResponse(BaseModel):
+    artifact: CatalogArtifactResponse
+    versions: list[CatalogVersionResponse] = []
+    deployments: list[CatalogDeploymentResponse] = []
+    granted_teams: list[str] = []
+
+
+class CatalogDeployRequest(BaseModel):
+    version_id: uuid.UUID
+
+
+class CatalogDeploymentUpdateRequest(BaseModel):
+    action: str  # "upgrade" | "suspend" | "resume"
+    version_id: uuid.UUID | None = None  # required for upgrade
+
+
+# ---------------------------------------------------------------------------
 # __all__
 # ---------------------------------------------------------------------------
 __all__ = [
@@ -1407,6 +1470,13 @@ __all__ = [
     "MemorySearchRequest",
     "AgentMemoryResponse",
     "MemorySearchResult",
+    # Catalog (production artifacts)
+    "CatalogArtifactResponse",
+    "CatalogVersionResponse",
+    "CatalogDeploymentResponse",
+    "CatalogDetailResponse",
+    "CatalogDeployRequest",
+    "CatalogDeploymentUpdateRequest",
     # Error
     "ErrorResponse",
 ]

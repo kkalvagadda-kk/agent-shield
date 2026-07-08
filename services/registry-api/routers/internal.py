@@ -134,13 +134,26 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         workflow_id=wf.id,
     )
     db.add(run)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=str(run.id),
+        agent_name=wf.name,
+        user_id=body.run_by or "system",
+        context="production",
+        input_message=message[:4000] if message else "",
+    )
+    if trace_id:
+        run.langfuse_trace_id = trace_id
+
     await db.commit()
     await db.refresh(run)
 
     import asyncio
     asyncio.create_task(orchestrate(str(run.id), wf.team, str(wf.id), message, wf.orchestration))
-    logger.info("start_internal_run: WORKFLOW run_id=%s workflow=%s mode=%s members=%d",
-                run.id, wf.name, wf.orchestration, len(member_names))
+    logger.info("start_internal_run: WORKFLOW run_id=%s workflow=%s mode=%s members=%d trace=%s",
+                run.id, wf.name, wf.orchestration, len(member_names), trace_id)
     return run
 
 
@@ -206,6 +219,19 @@ async def start_internal_run(
         team=agent.team,
     )
     db.add(run)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=str(run.id),
+        agent_name=body.agent_name,
+        user_id=body.run_by or "system",
+        context="production",
+        input_message=message[:4000] if message else "",
+    )
+    if trace_id:
+        run.langfuse_trace_id = trace_id
+
     await db.commit()
     await db.refresh(run)
 

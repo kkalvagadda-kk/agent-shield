@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import Sidebar from "./components/Sidebar";
 import AgentDetailPage from "./pages/AgentDetailPage";
 import CatalogPage from "./pages/CatalogPage";
+import CatalogDetailPage from "./pages/CatalogDetailPage";
 import AgentListPage from "./pages/AgentListPage";
 import AdminAccessPage from "./pages/AdminAccessPage";
 import AdminApprovalAuthorityPage from "./pages/AdminApprovalAuthorityPage";
@@ -27,6 +28,7 @@ import SkillsPage from "./pages/SkillsPage";
 import ToolsPage from "./pages/ToolsPage";
 import ApprovalsInboxPage from "./pages/ApprovalsInboxPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
+import CatalogChatPage from "./pages/CatalogChatPage";
 import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
 
 const queryClient = new QueryClient({
@@ -60,6 +62,8 @@ export default function App() {
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/my-agents" element={<MyAgentsPage />} />
               <Route path="/catalog" element={<CatalogPage />} />
+              <Route path="/catalog/:artifactId" element={<CatalogDetailPage />} />
+              <Route path="/catalog/:artifactId/chat" element={<CatalogChatPage />} />
               <Route path="/admin/artifacts" element={<AdminArtifactsPage />} />
               <Route path="/admin/publish-requests" element={<AdminPublishRequestsPage />} />
               <Route path="/admin/access" element={<AdminAccessPage />} />

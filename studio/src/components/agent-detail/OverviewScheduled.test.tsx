@@ -46,6 +46,8 @@ const completedRun: AgentRunItem = {
   started_at: NOW,
   completed_at: NOW,
   langfuse_trace_id: null,
+  trace_url: null,
+  production_deployment_id: null,
 };
 
 describe("OverviewScheduled", () => {

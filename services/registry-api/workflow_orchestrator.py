@@ -209,6 +209,11 @@ async def _mark_parent(parent_run_id: str, status_val: str, output: str | None =
                 parent.output = output[:4000]
             if status_val in ("completed", "failed", "cancelled"):
                 parent.completed_at = datetime.now(timezone.utc)
+                if parent.langfuse_trace_id:
+                    from tracing import fetch_trace_cost
+                    cost = fetch_trace_cost(parent.langfuse_trace_id)
+                    if cost:
+                        parent.cost_usd = cost
             await s.commit()
 
 
@@ -266,6 +271,9 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
     start = time.perf_counter()
     thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
+        parent = (await s.execute(
+            select(AgentRun.run_by).where(AgentRun.id == parent_run_id)
+        )).scalar_one_or_none()
         child = AgentRun(
             agent_name=agent_name,
             input=current_input[:4000] if current_input else None,
@@ -275,6 +283,7 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
             parent_run_id=parent_run_id,
             team=team,
             thread_id=thread_id,
+            run_by=parent,
         )
         s.add(child)
         await s.commit()

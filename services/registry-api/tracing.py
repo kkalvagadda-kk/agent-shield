@@ -175,6 +175,21 @@ def trace_judge_score(
         logger.debug("Langfuse trace_judge_score error: %s", exc)
 
 
+def fetch_trace_cost(trace_id: str) -> float | None:
+    """Fetch total_cost from a Langfuse trace. Returns None if unavailable."""
+    lf = get_langfuse()
+    if not lf:
+        return None
+    try:
+        trace = lf.fetch_trace(trace_id)
+        cost = getattr(trace.data, "total_cost", None) if trace.data else None
+        if cost and cost > 0:
+            return float(cost)
+    except Exception as exc:
+        logger.debug("Langfuse fetch_trace_cost error: %s", exc)
+    return None
+
+
 def trace_platform_action(
     trace_id: str,
     action: str,

@@ -20,6 +20,7 @@ import {
   listTools,
   listAgents,
   listSkills,
+  listCompositeWorkflows,
   revokeGrant,
   type AssetGrant,
 } from "../api/registryApi";
@@ -586,11 +587,13 @@ function GrantsTab() {
   const { data: agentsPage } = useQuery({ queryKey: ["agents"], queryFn: () => listAgents(100, 0, "active") });
   const { data: toolsPage } = useQuery({ queryKey: ["tools"], queryFn: () => listTools() });
   const { data: skillsPage } = useQuery({ queryKey: ["skills"], queryFn: () => listSkills() });
+  const { data: workflows = [] } = useQuery({ queryKey: ["workflows-published"], queryFn: () => listCompositeWorkflows() });
   const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
 
-  const agents = agentsPage?.items ?? [];
-  const tools = toolsPage?.items ?? [];
-  const skills = skillsPage?.items ?? [];
+  const agents = (agentsPage?.items ?? []).filter((a) => a.publish_status === "published");
+  const tools = (toolsPage?.items ?? []).filter((t) => (t as { publish_status?: string }).publish_status === "published");
+  const skills = (skillsPage?.items ?? []).filter((s) => (s as { publish_status?: string }).publish_status === "published");
+  const publishedWorkflows = workflows.filter((w) => w.publish_status === "published");
 
   const assetOptions: { id: string; name: string }[] =
     form.asset_type === "agent"
@@ -599,6 +602,8 @@ function GrantsTab() {
       ? tools.map((t) => ({ id: t.id, name: t.name }))
       : form.asset_type === "skill"
       ? skills.map((s) => ({ id: s.id, name: s.name }))
+      : form.asset_type === "workflow"
+      ? publishedWorkflows.map((w) => ({ id: w.id, name: w.name }))
       : [];
 
   const revokeMutation = useMutation({

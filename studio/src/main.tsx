@@ -6,6 +6,8 @@ import { AuthContext, buildAuthValue } from "./contexts/AuthContext";
 import { initKeycloak, getParsedToken } from "./lib/keycloak";
 import { getMe } from "./api/registryApi";
 
+// @ts-expect-error build version marker
+window.__STUDIO_BUILD = "0.1.76";
 const root = createRoot(document.getElementById("root")!);
 
 initKeycloak()

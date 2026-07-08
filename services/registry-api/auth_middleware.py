@@ -20,7 +20,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 logger = logging.getLogger(__name__)
@@ -91,16 +91,29 @@ async def get_optional_user(
 
 
 async def require_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> dict:
-    """Returns decoded JWT claims; raises 401 if missing or invalid."""
-    if creds is None:
+    """Returns decoded JWT claims; raises 401 if missing or invalid.
+
+    Supports two token sources:
+    1. Authorization: Bearer <token> header (standard)
+    2. ?token=<token> query param (for EventSource/SSE which can't send headers)
+    """
+    raw_token: str | None = None
+    if creds is not None:
+        raw_token = creds.credentials
+    else:
+        # Fall back to ?token= query param (EventSource compatibility)
+        raw_token = request.query_params.get("token")
+
+    if raw_token is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    claims = await _decode_token(creds.credentials)
+    claims = await _decode_token(raw_token)
     if claims is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

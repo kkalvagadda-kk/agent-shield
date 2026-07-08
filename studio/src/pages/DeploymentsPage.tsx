@@ -2,23 +2,26 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Loader2 } from "lucide-react";
-import { listAllDeployments } from "../api/registryApi";
+import { listFleetDeployments } from "../api/catalogApi";
 
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
-  pending:     { label: "Pending",     cls: "bg-amber-100 text-amber-700" },
-  deploying:   { label: "Deploying",   cls: "bg-blue-100 text-blue-700"  },
-  running:     { label: "Running",     cls: "bg-green-100 text-green-700" },
-  failed:      { label: "Failed",      cls: "bg-red-100 text-red-700"    },
-  rolled_back: { label: "Rolled back", cls: "bg-slate-100 text-slate-600" },
-  terminated:  { label: "Terminated",  cls: "bg-slate-100 text-slate-600" },
+  pending:      { label: "Pending",      cls: "bg-amber-100 text-amber-700" },
+  deploying:    { label: "Deploying",    cls: "bg-blue-100 text-blue-700"  },
+  running:      { label: "Running",      cls: "bg-green-100 text-green-700" },
+  suspending:   { label: "Suspending",   cls: "bg-yellow-100 text-yellow-700" },
+  suspended:    { label: "Suspended",    cls: "bg-slate-100 text-slate-600" },
+  terminating:  { label: "Terminating",  cls: "bg-orange-100 text-orange-700" },
+  failed:       { label: "Failed",       cls: "bg-red-100 text-red-700"    },
+  terminated:   { label: "Terminated",   cls: "bg-slate-100 text-slate-600" },
 };
 
 const FILTER_TABS = [
-  { value: "",           label: "All"        },
-  { value: "running",    label: "Running"    },
-  { value: "deploying",  label: "Deploying"  },
-  { value: "failed",     label: "Failed"     },
-  { value: "terminated", label: "Terminated" },
+  { value: "",            label: "All"        },
+  { value: "running",     label: "Running"    },
+  { value: "deploying",   label: "Deploying"  },
+  { value: "suspended",   label: "Suspended"  },
+  { value: "failed",      label: "Failed"     },
+  { value: "terminated",  label: "Terminated" },
 ] as const;
 
 type FilterValue = typeof FILTER_TABS[number]["value"];
@@ -26,21 +29,19 @@ type FilterValue = typeof FILTER_TABS[number]["value"];
 export default function DeploymentsPage() {
   const [statusFilter, setStatusFilter] = useState<FilterValue>("");
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["deployments", statusFilter],
-    queryFn: () => listAllDeployments(statusFilter || undefined),
-    refetchInterval: 30_000,
+  const { data: deployments = [], isLoading } = useQuery({
+    queryKey: ["fleet-deployments", statusFilter],
+    queryFn: () => listFleetDeployments(statusFilter || undefined),
+    refetchInterval: 15_000,
   });
-
-  const deployments = data?.items ?? [];
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">
       {/* Header */}
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Deployments</h1>
+        <h1 className="text-2xl font-bold text-slate-900">Production Deployments</h1>
         <p className="text-sm text-slate-500 mt-0.5">
-          All agent deployments across teams. Auto-refreshes every 30 seconds.
+          Fleet-wide view of all production deployments. Auto-refreshes every 15s.
         </p>
       </div>
 
@@ -74,13 +75,16 @@ export default function DeploymentsPage() {
         <div className="card p-0 overflow-hidden">
           {deployments.length === 0 ? (
             <div className="flex flex-col items-center py-16 text-center">
-              <p className="text-slate-500 font-medium">No deployments found.</p>
+              <p className="text-slate-500 font-medium">No production deployments found.</p>
+              <p className="text-sm text-slate-400 mt-1">
+                Deploy an agent from the Catalog to see it here.
+              </p>
             </div>
           ) : (
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Agent", "Status", "Deployed At", "Error", "Actions"].map((h) => (
+                  {["Agent", "Version", "Status", "Namespace", "Deployed At", "Actions"].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -100,16 +104,17 @@ export default function DeploymentsPage() {
                   >
                     {/* Agent */}
                     <td className="px-4 py-3">
-                      {d.agent_name ? (
-                        <Link
-                          to={`/agents/${d.agent_name}`}
-                          className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
-                        >
-                          {d.agent_name}
-                        </Link>
-                      ) : (
-                        <span className="text-slate-400">—</span>
-                      )}
+                      <Link
+                        to={`/catalog/${d.artifact_id}`}
+                        className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                      >
+                        {d.artifact_name}
+                      </Link>
+                    </td>
+
+                    {/* Version */}
+                    <td className="px-4 py-3 text-slate-600 font-mono text-xs">
+                      {d.version_label || "—"}
                     </td>
 
                     {/* Status */}
@@ -123,6 +128,11 @@ export default function DeploymentsPage() {
                       )}
                     </td>
 
+                    {/* Namespace */}
+                    <td className="px-4 py-3 text-slate-500 font-mono text-xs">
+                      {d.namespace || "—"}
+                    </td>
+
                     {/* Deployed At */}
                     <td className="px-4 py-3 text-slate-500 text-xs">
                       {d.deployed_at
@@ -130,22 +140,11 @@ export default function DeploymentsPage() {
                         : "—"}
                     </td>
 
-                    {/* Error */}
-                    <td className="px-4 py-3 text-xs text-red-600 max-w-xs">
-                      {d.error_message ? (
-                        <span className="line-clamp-2" title={d.error_message}>
-                          {d.error_message}
-                        </span>
-                      ) : (
-                        <span className="text-slate-300">—</span>
-                      )}
-                    </td>
-
                     {/* Actions */}
                     <td className="px-4 py-3">
-                      {d.status === "running" && d.agent_name && (
+                      {d.status === "running" && (
                         <Link
-                          to={`/agents/${d.agent_name}/chat`}
+                          to={`/catalog/${d.artifact_id}/chat`}
                           className="text-xs font-medium text-blue-600 hover:text-blue-800"
                         >
                           Chat →

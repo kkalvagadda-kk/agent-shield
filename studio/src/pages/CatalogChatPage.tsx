@@ -2,7 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Bot, Loader2, Send } from "lucide-react";
-import { getAgent, startAgentChat } from "../api/registryApi";
+import { getCatalogDetail } from "../api/catalogApi";
+import { startAgentChat } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 
 interface Message {
@@ -10,14 +11,20 @@ interface Message {
   content: string;
 }
 
-export default function AgentChatPage() {
-  const { name } = useParams<{ name: string }>();
+export default function CatalogChatPage() {
+  const { artifactId } = useParams<{ artifactId: string }>();
 
-  const { data: agent } = useQuery({
-    queryKey: ["agent", name],
-    queryFn: () => getAgent(name!),
-    enabled: !!name,
+  const { data } = useQuery({
+    queryKey: ["catalog-detail", artifactId],
+    queryFn: () => getCatalogDetail(artifactId!),
+    enabled: !!artifactId,
   });
+
+  const artifact = data?.artifact;
+  const activeDeployment = data?.deployments.find(
+    (d) => d.status === "running"
+  );
+  const agentName = artifact?.name;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -30,16 +37,19 @@ export default function AgentChatPage() {
   }, [messages]);
 
   const sendMessage = async () => {
-    if (!input.trim() || isStreaming || !name) return;
+    if (!input.trim() || isStreaming || !agentName) return;
     const userMsg = input.trim();
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
     setIsStreaming(true);
 
     try {
-      const res = await startAgentChat(name, { message: userMsg, session_id: sessionId, context: "playground" });
+      const res = await startAgentChat(agentName, {
+        message: userMsg,
+        session_id: sessionId,
+        context: "production",
+      });
 
-      // Append empty assistant bubble
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       // Get a fresh token from keycloak — the context snapshot may be stale/expired
@@ -56,15 +66,18 @@ export default function AgentChatPage() {
       const source = new EventSource(streamUrl);
 
       source.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        if (data.type === "token") {
+        const d = JSON.parse(event.data);
+        if (d.type === "token") {
           setMessages((prev) => {
             const copy = [...prev];
             const last = copy[copy.length - 1];
-            copy[copy.length - 1] = { ...last, content: last.content + data.content };
+            copy[copy.length - 1] = {
+              ...last,
+              content: last.content + d.content,
+            };
             return copy;
           });
-        } else if (data.type === "done") {
+        } else if (d.type === "done") {
           source.close();
           setIsStreaming(false);
         }
@@ -80,7 +93,8 @@ export default function AgentChatPage() {
         ...prev,
         {
           role: "assistant",
-          content: "Error: failed to start chat. Check that this agent is deployed.",
+          content:
+            "Error: failed to start chat. Check that this agent has a running production deployment.",
         },
       ]);
     }
@@ -90,21 +104,31 @@ export default function AgentChatPage() {
     <div className="flex flex-col h-screen bg-white">
       {/* Header */}
       <div className="border-b border-slate-200 px-6 py-3 flex items-center gap-3 shrink-0">
-        <Link to="/my-agents" className="text-slate-400 hover:text-slate-600">
+        <Link
+          to={`/catalog/${artifactId}`}
+          className="text-slate-400 hover:text-slate-600"
+        >
           <ArrowLeft size={16} />
         </Link>
         <Bot size={18} className="text-blue-600 shrink-0" />
         <div className="flex-1 min-w-0">
           <h1 className="text-sm font-semibold text-slate-900 truncate">
-            {agent?.name ?? name}
+            {artifact?.name ?? "Loading…"}
           </h1>
-          {agent?.description && (
-            <p className="text-xs text-slate-400 truncate">{agent.description}</p>
+          {artifact?.description && (
+            <p className="text-xs text-slate-400 truncate">
+              {artifact.description}
+            </p>
           )}
         </div>
         <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
-          Live
+          Production
         </span>
+        {activeDeployment?.version_label && (
+          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+            {activeDeployment.version_label}
+          </span>
+        )}
       </div>
 
       {/* Messages */}
@@ -113,8 +137,8 @@ export default function AgentChatPage() {
           <div className="flex flex-col items-center justify-center h-full text-center text-slate-400 gap-2">
             <Bot size={32} className="text-slate-300" />
             <p className="text-sm font-medium">Start a conversation</p>
-            {agent?.description && (
-              <p className="text-xs max-w-xs">{agent.description}</p>
+            {artifact?.description && (
+              <p className="text-xs max-w-xs">{artifact.description}</p>
             )}
           </div>
         )}
@@ -131,9 +155,11 @@ export default function AgentChatPage() {
               }`}
             >
               {m.content}
-              {m.role === "assistant" && isStreaming && i === messages.length - 1 && (
-                <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
-              )}
+              {m.role === "assistant" &&
+                isStreaming &&
+                i === messages.length - 1 && (
+                  <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
+                )}
             </div>
           </div>
         ))}
@@ -153,12 +179,18 @@ export default function AgentChatPage() {
             className="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-50 disabled:text-slate-400"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            disabled={isStreaming}
-            placeholder={isStreaming ? "Waiting for response…" : "Message…"}
+            disabled={isStreaming || !agentName}
+            placeholder={
+              isStreaming
+                ? "Waiting for response…"
+                : !agentName
+                  ? "Loading agent…"
+                  : "Message…"
+            }
           />
           <button
             type="submit"
-            disabled={isStreaming || !input.trim()}
+            disabled={isStreaming || !input.trim() || !agentName}
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
           >
             {isStreaming ? (

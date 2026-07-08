@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 class AgentChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
+    context: Optional[str] = None  # "production" or "playground"; determines deployment lookup
 
 
 # ---------------------------------------------------------------------------
@@ -88,8 +89,27 @@ async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
     return True
 
 
-async def _running_deployment(db: AsyncSession, agent_id: uuid.UUID) -> Optional[Deployment]:
-    """Return the most-recently-deployed 'running' deployment for the agent, or None."""
+async def _running_deployment(
+    db: AsyncSession, agent_id: uuid.UUID, context: str = "playground"
+) -> Optional[Deployment]:
+    """Return the running deployment for the agent in the given context.
+
+    Args:
+        context: "production" searches production_deployments only.
+                 "playground" searches the sandbox Deployment table only.
+
+    Each context is a separate, explicit code path — no fallthrough.
+    """
+    if context == "production":
+        return await _running_production_deployment(db, agent_id)
+    else:
+        return await _running_sandbox_deployment(db, agent_id)
+
+
+async def _running_sandbox_deployment(
+    db: AsyncSession, agent_id: uuid.UUID
+) -> Optional[Deployment]:
+    """Return the most recent running sandbox deployment."""
     result = await db.execute(
         select(Deployment)
         .where(Deployment.agent_id == agent_id, Deployment.status == "running")
@@ -97,6 +117,52 @@ async def _running_deployment(db: AsyncSession, agent_id: uuid.UUID) -> Optional
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def _running_production_deployment(
+    db: AsyncSession, agent_id: uuid.UUID
+) -> Optional[Deployment]:
+    """Return the running production deployment, synthesized as a Deployment object.
+
+    Looks up: Agent → PublishedArtifact (by name) → ProductionDeployment (running).
+    Returns None if any link in the chain is missing.
+    """
+    from models import ProductionDeployment, PublishedArtifact, Agent as AgentModel
+
+    agent_row = await db.execute(select(AgentModel).where(AgentModel.id == agent_id))
+    agent = agent_row.scalar_one_or_none()
+    if not agent:
+        return None
+
+    art_result = await db.execute(
+        select(PublishedArtifact).where(PublishedArtifact.name == agent.name)
+    )
+    artifact = art_result.scalar_one_or_none()
+    if not artifact:
+        return None
+
+    prod_result = await db.execute(
+        select(ProductionDeployment)
+        .where(ProductionDeployment.artifact_id == artifact.id, ProductionDeployment.status == "running")
+        .order_by(ProductionDeployment.deployed_at.desc())
+        .limit(1)
+    )
+    prod_dep = prod_result.scalar_one_or_none()
+    if not prod_dep:
+        return None
+
+    # Synthesize a Deployment-like object so downstream proxy code works
+    dep = Deployment(
+        id=prod_dep.id,
+        agent_id=agent_id,
+        version_id=prod_dep.version_id,
+        environment="production",
+        status="running",
+        k8s_namespace=prod_dep.namespace,
+        k8s_deployment_name=f"{agent.name}-production",
+    )
+    dep.deployed_at = prod_dep.deployed_at
+    return dep
 
 
 async def _complete_chat_run(
@@ -279,12 +345,17 @@ async def start_chat(
                 detail=f"Team '{caller_team}' does not have access to agent '{name}'.",
             )
 
+    # -- Resolve context (production vs playground) ------------------------------
+    chat_context = body.context or "playground"
+    is_production = chat_context == "production"
+
     # -- Require a running deployment -----------------------------------------
-    deployment = await _running_deployment(db, agent.id)
+    deployment = await _running_deployment(db, agent.id, context=chat_context)
     if not deployment:
+        env_label = "production" if is_production else "playground"
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Agent '{name}' has no running deployment. Deploy it first.",
+            detail=f"Agent '{name}' has no running {env_label} deployment.",
         )
 
     session_id = body.session_id or str(uuid.uuid4())
@@ -294,8 +365,8 @@ async def start_chat(
     run = PlaygroundRun(
         user_id=user_sub,
         agent_name=name,
-        context="production",
-        sandbox=False,
+        context=chat_context,
+        sandbox=not is_production,
         input_message=body.message,
         status="running",
         started_at=now,
@@ -304,18 +375,19 @@ async def start_chat(
     await db.flush()
     run_id = str(run.id)
 
-    # Create AgentRun for production tracking
+    # Create AgentRun — production_deployment_id only set for production context
     agent_run = AgentRun(
         agent_name=name,
         session_id=session_id,
         user_id=user_sub,
         input=body.message,
-        context="production",
+        context=chat_context,
         trigger_type="api",
         run_by=user_sub,
         team=agent.team,
         status="running",
         started_at=now,
+        production_deployment_id=deployment.id if is_production else None,
     )
     db.add(agent_run)
     await db.flush()
@@ -401,6 +473,9 @@ async def stream_chat(
         )
 
     # -- Resolve agent + deployment -------------------------------------------
+    # Use the context stored on the run record to search the correct table
+    chat_context = run.context or "playground"
+
     agent_result = await db.execute(
         select(Agent).where(Agent.name == name, Agent.status == "active")
     )
@@ -408,7 +483,7 @@ async def stream_chat(
 
     deployment: Optional[Deployment] = None
     if agent:
-        deployment = await _running_deployment(db, agent.id)
+        deployment = await _running_deployment(db, agent.id, context=chat_context)
 
     if not deployment or not deployment.k8s_deployment_name:
         async def _no_deploy() -> AsyncGenerator[str, None]:

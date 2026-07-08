@@ -55,6 +55,7 @@ class DeploymentStatusUpdate(BaseModel):
 )
 async def list_all_deployments(
     status_filter: Optional[str] = Query(None, alias="status"),
+    environment: str = Query("production", alias="environment"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -64,6 +65,8 @@ async def list_all_deployments(
         .join(Agent, Deployment.agent_id == Agent.id)
         .order_by(Deployment.deployed_at.desc())
     )
+    if environment:
+        q = q.where(Deployment.environment == environment)
     if status_filter:
         q = q.where(Deployment.status == status_filter)
     total_q = q.with_only_columns(Deployment.id)
