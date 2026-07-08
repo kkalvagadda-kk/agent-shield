@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import get_optional_user
 from db import get_db
 from k8s import create_eval_job
-from models import AgentVersion, EvalRun, EvalRunResult, PlaygroundDataset
+from models import Agent, AgentVersion, EvalRun, EvalRunResult, PlaygroundDataset
 from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
 from schemas import (
     EvalRunCreate,
@@ -83,10 +83,28 @@ async def create_eval_run(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    # Auto-resolve latest version so auto-promote has a target
+    version_id = body.agent_version_id
+    if version_id is None and body.workflow_id is None:
+        agent_result = await db.execute(
+            select(Agent.id).where(Agent.name == body.agent_name)
+        )
+        agent_row = agent_result.scalar_one_or_none()
+        if agent_row:
+            ver_result = await db.execute(
+                select(AgentVersion)
+                .where(AgentVersion.agent_id == agent_row)
+                .order_by(AgentVersion.created_at.desc())
+                .limit(1)
+            )
+            latest_ver = ver_result.scalar_one_or_none()
+            if latest_ver:
+                version_id = latest_ver.id
+
     eval_run = EvalRun(
         user_id=caller,
         agent_name=body.agent_name,
-        agent_version_id=body.agent_version_id,
+        agent_version_id=version_id,
         workflow_id=body.workflow_id,
         dataset_id=body.dataset_id,
         status="pending",
@@ -109,6 +127,7 @@ async def create_eval_run(
             agent_name=body.agent_name,
             dataset_id=str(body.dataset_id),
             workflow_id=str(body.workflow_id) if body.workflow_id else None,
+            agent_version_id=str(version_id) if version_id else None,
         )
         eval_run.status = "running"
     except Exception as exc:
@@ -176,13 +195,16 @@ async def create_eval_run_result(
     body: EvalRunResultCreate,
     db: AsyncSession = Depends(get_db),
 ) -> EvalRunResultResponse:
-    await _resolve_eval_run(eval_run_id, db)  # 404 guard
+    run = await _resolve_eval_run(eval_run_id, db)  # 404 guard
     trace_span_id = trace_eval_run_result(
         run_id=str(eval_run_id),
         item_idx=body.dataset_item_idx,
         score=body.judge_score,
         passed=body.passed,
-        agent_name="",
+        agent_name=run.agent_name or "",
+        input_message=body.input_message,
+        response=body.response,
+        judge_reasoning=body.judge_reasoning,
     )
     result_row = EvalRunResult(
         eval_run_id=eval_run_id,
@@ -269,10 +291,19 @@ async def list_eval_run_results(
     eval_run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> list[EvalRunResultResponse]:
+    import os
     await _resolve_eval_run(eval_run_id, db)  # 404 guard
     result = await db.execute(
         select(EvalRunResult)
         .where(EvalRunResult.eval_run_id == eval_run_id)
         .order_by(EvalRunResult.dataset_item_idx)
     )
-    return [EvalRunResultResponse.model_validate(r) for r in result.scalars().all()]
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    results = []
+    for r in result.scalars().all():
+        resp = EvalRunResultResponse.model_validate(r)
+        if resp.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{resp.langfuse_trace_id}"
+        results.append(resp)
+    return results

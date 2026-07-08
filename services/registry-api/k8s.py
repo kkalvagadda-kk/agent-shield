@@ -97,6 +97,7 @@ def _create_eval_job_sync(
     agent_name: str,
     dataset_id: str,
     workflow_id: str | None = None,
+    agent_version_id: str | None = None,
 ) -> None:
     """Create a K8s batch Job that runs the eval-runner container (synchronous)."""
     _init_k8s()
@@ -139,6 +140,7 @@ def _create_eval_job_sync(
                                     client.V1EnvVar(name="DATASET_ID", value=dataset_id),
                                     client.V1EnvVar(name="REGISTRY_API_URL", value=_REGISTRY_API_URL),
                                     client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id) if workflow_id else None,
+                                    client.V1EnvVar(name="AGENT_VERSION_ID", value=agent_version_id) if agent_version_id else None,
                                 ] if e is not None
                             ],
                             resources=client.V1ResourceRequirements(
@@ -167,6 +169,7 @@ async def create_eval_job(
     agent_name: str,
     dataset_id: str,
     workflow_id: str | None = None,
+    agent_version_id: str | None = None,
 ) -> None:
     """Create a K8s eval-runner Job (runs sync k8s client in a thread)."""
-    await asyncio.to_thread(_create_eval_job_sync, eval_run_id, agent_name, dataset_id, workflow_id)
+    await asyncio.to_thread(_create_eval_job_sync, eval_run_id, agent_name, dataset_id, workflow_id, agent_version_id)

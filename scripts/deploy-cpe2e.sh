@@ -3,6 +3,8 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.80  (Fix publish flow: auto-resolve agent_version_id in eval-run creation + pass AGENT_VERSION_ID to eval Job)
+#   - studio:0.1.62        (Publish flow guard + runs/stats display: expandable rows, input preview, honest cost card)
 #   - registry-api:0.2.75  (Fix Langfuse trace URL: use full /project/{pid}/traces/{tid} path to avoid redirect losing /langfuse/ prefix behind Gateway)
 #   - registry-api:0.2.73  (Eval results publish lifecycle: expected_output column, langfuse_trace_id in schema, trace-by-id endpoint, admin publish eval evidence)
 #   - studio:0.1.58        (Eval results UX: expandable rows, failed filter, score colors, action CTAs, TraceDrawer, publish eval gate, admin eval column, datasets eval runs)
@@ -59,10 +61,10 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.78"
+REGISTRY_API_TAG="0.2.80"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.12"
-STUDIO_TAG="0.1.61"
+STUDIO_TAG="0.1.62"
 EVAL_RUNNER_TAG="0.1.4"
 DECLARATIVE_RUNNER_TAG="0.1.14"
 PYTHON_EXECUTOR_TAG="0.1.0"

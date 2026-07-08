@@ -6,6 +6,7 @@ import {
   CheckCircle,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   Eye,
   Filter,
   Loader2,
@@ -91,11 +92,23 @@ export default function EvalResultsPage() {
   });
 
   const publishMutation = useMutation({
-    mutationFn: () => publishAgent(run!.agent_name),
+    mutationFn: async () => {
+      if (run!.agent_version_id) {
+        await patchVersion(run!.agent_name, run!.agent_version_id, {
+          eval_passed: true,
+        });
+      }
+      return publishAgent(run!.agent_name);
+    },
     onSuccess: () => {
       toast.success("Publish request submitted");
+      qc.invalidateQueries({ queryKey: ["eval-run", evalRunId] });
     },
-    onError: () => toast.error("Failed to submit publish request"),
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail;
+      toast.error(detail || "Failed to submit publish request");
+    },
   });
 
   const isLoading = runLoading || resultsLoading;
@@ -214,14 +227,20 @@ export default function EvalResultsPage() {
               >
                 Back to Agent
               </button>
-              <button
-                onClick={() => publishMutation.mutate()}
-                disabled={publishMutation.isPending}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
-              >
-                <Send size={12} />
-                Publish Agent
-              </button>
+              {canMarkPassed && (
+                <button
+                  onClick={() => publishMutation.mutate()}
+                  disabled={publishMutation.isPending}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {publishMutation.isPending ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <Send size={12} />
+                  )}
+                  Publish Agent
+                </button>
+              )}
             </div>
           </>
         )}
@@ -354,7 +373,18 @@ function ResultRow({
           </span>
         </td>
         <td className="px-3 py-3">
-          {r.langfuse_trace_id && (
+          {r.trace_url ? (
+            <a
+              href={r.trace_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+            >
+              <ExternalLink size={12} />
+              Trace
+            </a>
+          ) : r.langfuse_trace_id ? (
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -365,7 +395,7 @@ function ResultRow({
               <Eye size={12} />
               Trace
             </button>
-          )}
+          ) : null}
         </td>
       </tr>
       {expanded && (

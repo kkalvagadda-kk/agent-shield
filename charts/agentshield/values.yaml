@@ -564,7 +564,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.78"
+    tag: "0.2.80"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.4"
@@ -873,7 +873,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.61"
+    tag: "0.1.62"
     pullPolicy: IfNotPresent
 
   service:

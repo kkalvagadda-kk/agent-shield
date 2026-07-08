@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Eye, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Eye, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { AgentRunItem, listAgentRuns } from "../../api/registryApi";
 import TraceDrawer from "../playground/TraceDrawer";
@@ -19,10 +19,16 @@ const TRIGGER_ICONS: Record<string, string> = {
   webhook: "🔗",
 };
 
+function truncate(text: string | null | undefined, max: number): string {
+  if (!text) return "—";
+  return text.length > max ? text.slice(0, max) + "…" : text;
+}
+
 export default function RunsTab({ agentName }: { agentName: string }) {
   const [triggerFilter, setTriggerFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [traceId, setTraceId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data: runs, isLoading } = useQuery({
     queryKey: ["agent-runs", agentName, triggerFilter, statusFilter],
@@ -79,52 +85,101 @@ export default function RunsTab({ agentName }: { agentName: string }) {
           <table className="w-full text-sm">
             <thead className="bg-slate-50 text-left text-xs text-slate-500 uppercase tracking-wider">
               <tr>
+                <th className="px-4 py-2 w-8"></th>
                 <th className="px-4 py-2">Trigger</th>
                 <th className="px-4 py-2">Status</th>
+                <th className="px-4 py-2">Input</th>
                 <th className="px-4 py-2">Duration</th>
-                <th className="px-4 py-2">Cost</th>
-                <th className="px-4 py-2">Run By</th>
                 <th className="px-4 py-2">Started</th>
                 <th className="px-4 py-2">Trace</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {runs.map((run: AgentRunItem) => (
-                <tr key={run.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-2">
-                    {TRIGGER_ICONS[run.trigger_type || ""] || "?"}{" "}
-                    <span className="text-xs text-slate-500">{run.trigger_type || "—"}</span>
-                  </td>
-                  <td className="px-4 py-2">
-                    <span className={`badge text-xs ${STATUS_BADGE[run.status] || "bg-slate-100 text-slate-600"}`}>
-                      {run.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-2 font-mono text-xs">
-                    {run.latency_ms != null ? `${run.latency_ms}ms` : "—"}
-                  </td>
-                  <td className="px-4 py-2 font-mono text-xs">
-                    {run.cost_usd != null ? `$${run.cost_usd.toFixed(4)}` : "—"}
-                  </td>
-                  <td className="px-4 py-2 text-xs text-slate-500">
-                    {run.run_by || "—"}
-                  </td>
-                  <td className="px-4 py-2 text-xs text-slate-500">
-                    {new Date(run.started_at).toLocaleString()}
-                  </td>
-                  <td className="px-4 py-2">
-                    {run.langfuse_trace_id && (
-                      <button
-                        onClick={() => setTraceId(run.langfuse_trace_id)}
-                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+              {runs.map((run: AgentRunItem) => {
+                const isExpanded = expandedId === run.id;
+                return (
+                  <tr key={run.id} className="group">
+                    <td colSpan={7} className="p-0">
+                      <div
+                        className="grid hover:bg-slate-50 cursor-pointer"
+                        style={{ gridTemplateColumns: "2rem 1fr 1fr 2fr 1fr 1fr 1fr" }}
+                        onClick={() => setExpandedId(isExpanded ? null : run.id)}
                       >
-                        <Eye size={12} />
-                        View
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
+                        <div className="px-4 py-2 flex items-center">
+                          {isExpanded
+                            ? <ChevronDown size={12} className="text-slate-400" />
+                            : <ChevronRight size={12} className="text-slate-300" />}
+                        </div>
+                        <div className="px-4 py-2">
+                          {TRIGGER_ICONS[run.trigger_type || ""] || "?"}{" "}
+                          <span className="text-xs text-slate-500">{run.trigger_type || "—"}</span>
+                        </div>
+                        <div className="px-4 py-2">
+                          <span className={`badge text-xs ${STATUS_BADGE[run.status] || "bg-slate-100 text-slate-600"}`}>
+                            {run.status}
+                          </span>
+                        </div>
+                        <div className="px-4 py-2 text-xs text-slate-600 truncate">
+                          {truncate(run.input, 60)}
+                        </div>
+                        <div className="px-4 py-2 font-mono text-xs">
+                          {run.latency_ms != null ? `${run.latency_ms}ms` : "—"}
+                        </div>
+                        <div className="px-4 py-2 text-xs text-slate-500">
+                          {new Date(run.started_at).toLocaleString()}
+                        </div>
+                        <div className="px-4 py-2">
+                          {run.langfuse_trace_id && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setTraceId(run.langfuse_trace_id);
+                              }}
+                              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                              <Eye size={12} />
+                              View
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {isExpanded && (
+                        <div className="px-6 pb-3 pt-1 bg-slate-50/50 border-t border-slate-100">
+                          <div className="grid grid-cols-2 gap-4 text-xs">
+                            <div>
+                              <p className="text-slate-400 uppercase text-[10px] font-semibold mb-1">Input</p>
+                              <p className="text-slate-700 whitespace-pre-wrap font-mono bg-white rounded p-2 border border-slate-100 max-h-32 overflow-auto">
+                                {run.input || "—"}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-slate-400 uppercase text-[10px] font-semibold mb-1">Output</p>
+                              <p className="text-slate-700 whitespace-pre-wrap font-mono bg-white rounded p-2 border border-slate-100 max-h-32 overflow-auto">
+                                {run.output || "—"}
+                              </p>
+                            </div>
+                            {run.error_message && (
+                              <div className="col-span-2">
+                                <p className="text-red-400 uppercase text-[10px] font-semibold mb-1">Error</p>
+                                <p className="text-red-700 whitespace-pre-wrap font-mono bg-red-50 rounded p-2 border border-red-100">
+                                  {run.error_message}
+                                </p>
+                              </div>
+                            )}
+                            <div className="col-span-2 flex gap-6 text-slate-500">
+                              {run.run_by && <span>Run by: <span className="text-slate-700">{run.run_by}</span></span>}
+                              {run.cost_usd != null && run.cost_usd > 0 && (
+                                <span>Cost: <span className="text-slate-700">${run.cost_usd.toFixed(4)}</span></span>
+                              )}
+                              {run.team && <span>Team: <span className="text-slate-700">{run.team}</span></span>}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

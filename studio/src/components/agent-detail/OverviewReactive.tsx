@@ -41,7 +41,7 @@ export default function OverviewReactive({ agentName }: { agentName: string }) {
           <StatCard
             icon={<DollarSign size={16} className="text-green-500" />}
             label="Cost (24h)"
-            value={`$${stats.total_cost_usd.toFixed(4)}`}
+            value={stats.total_cost_usd > 0 ? `$${stats.total_cost_usd.toFixed(4)}` : "—"}
           />
         </div>
       ) : null}
@@ -69,6 +69,7 @@ export default function OverviewReactive({ agentName }: { agentName: string }) {
               <thead className="bg-slate-50 text-left text-xs text-slate-500">
                 <tr>
                   <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2">Input</th>
                   <th className="px-3 py-2">Duration</th>
                   <th className="px-3 py-2">Started</th>
                 </tr>
@@ -87,6 +88,9 @@ export default function OverviewReactive({ agentName }: { agentName: string }) {
                         }`}
                       />
                       <span className="text-xs">{run.status}</span>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-slate-600 max-w-[200px] truncate">
+                      {run.input ? (run.input.length > 50 ? run.input.slice(0, 50) + "…" : run.input) : "—"}
                     </td>
                     <td className="px-3 py-2 font-mono text-xs">
                       {run.latency_ms != null ? `${run.latency_ms}ms` : "—"}

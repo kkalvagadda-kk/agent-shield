@@ -956,6 +956,7 @@ class EvalRunResultResponse(BaseModel):
     judge_reasoning: Optional[str]
     passed: Optional[bool]
     langfuse_trace_id: Optional[str]
+    trace_url: Optional[str] = None
     created_at: datetime
 
 

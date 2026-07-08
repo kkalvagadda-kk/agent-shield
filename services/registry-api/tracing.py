@@ -46,8 +46,8 @@ def trace_eval_run_created(run_id: str, agent_name: str, dataset_id: str, user_i
             id=run_id,
             name="eval-run",
             user_id=user_id,
-            metadata={"agent": agent_name, "dataset_id": dataset_id},
-            tags=["eval"],
+            metadata={"agent_name": agent_name, "dataset_id": dataset_id},
+            tags=["eval", agent_name],
         )
         lf.flush()
     except Exception as exc:
@@ -55,7 +55,10 @@ def trace_eval_run_created(run_id: str, agent_name: str, dataset_id: str, user_i
 
 
 def trace_eval_run_result(run_id: str, item_idx: int, score: float | None,
-                          passed: bool | None, agent_name: str) -> str | None:
+                          passed: bool | None, agent_name: str,
+                          input_message: str | None = None,
+                          response: str | None = None,
+                          judge_reasoning: str | None = None) -> str | None:
     lf = get_langfuse()
     if not lf:
         return None
@@ -63,11 +66,16 @@ def trace_eval_run_result(run_id: str, item_idx: int, score: float | None,
         trace = lf.trace(id=run_id, name="eval-run")
         span = trace.span(
             name=f"eval-item-{item_idx}",
+            input={"message": input_message} if input_message else None,
+            output={"response": response[:2000], "score": score, "passed": passed,
+                    "judge_reasoning": judge_reasoning[:500] if judge_reasoning else None}
+                   if response else None,
             metadata={"agent": agent_name, "item_idx": item_idx,
                       "score": score, "passed": passed},
         )
         span.end()
-        return span.id
+        lf.flush()
+        return run_id
     except Exception as exc:
         logger.debug("Langfuse trace_eval_run_result error: %s", exc)
     return None

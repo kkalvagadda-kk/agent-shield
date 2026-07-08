@@ -85,6 +85,7 @@ export interface EvalRunResult {
   judge_reasoning: string | null;
   passed: boolean | null;
   langfuse_trace_id: string | null;
+  trace_url: string | null;
   created_at: string;
 }
 
