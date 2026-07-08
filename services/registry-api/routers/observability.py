@@ -12,17 +12,31 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
-from sqlalchemy import select, func, text, case, literal_column
+from sqlalchemy import select, func, text as sa_text, case, literal_column
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from db import get_db
 from models import Agent, AgentRun, PlaygroundRun
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
+
+
+async def _resolve_team(claims: dict, db: AsyncSession) -> str:
+    """Resolve team from JWT sub via user_team_assignments."""
+    sub = claims.get("sub", "")
+    row = await db.execute(
+        sa_text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub LIMIT 1"),
+        {"sub": sub},
+    )
+    result = row.scalar_one_or_none()
+    if not result:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No team assignment found")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +113,11 @@ async def list_traces(
     to_date: Optional[datetime] = Query(None),
     limit: int = Query(20, le=100),
     offset: int = Query(0, ge=0),
-    x_user_team: str = Header(default="", alias="X-User-Team"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> TracesListResponse:
     """List traces across playground and agent runs, team-scoped."""
-    if not x_user_team:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-User-Team header required")
+    x_user_team = await _resolve_team(claims, db)
 
     lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
     lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
@@ -207,7 +220,7 @@ async def list_traces(
 @router.get("/traces/{trace_id}")
 async def get_trace_detail(
     trace_id: str,
-    x_user_team: str = Header(default="", alias="X-User-Team"),
+    claims: dict = Depends(require_user),
 ):
     """Fetch full trace (observations/spans) from Langfuse via service creds.
 
@@ -265,12 +278,11 @@ async def get_dashboard(
     period: str = Query("7d", description="7d|30d|custom"),
     from_date: Optional[datetime] = Query(None),
     to_date: Optional[datetime] = Query(None),
-    x_user_team: str = Header(default="", alias="X-User-Team"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardData:
     """Aggregated observability metrics for the team's runs."""
-    if not x_user_team:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="X-User-Team header required")
+    x_user_team = await _resolve_team(claims, db)
 
     # Determine time window
     if period == "7d" and not from_date:
