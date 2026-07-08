@@ -272,6 +272,21 @@ kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeou
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
 
+# Create Keycloak client for Langfuse SSO (idempotent — skips if exists)
+echo "  Creating Keycloak client 'langfuse' for SSO..."
+kubectl exec -n "$NAMESPACE" deploy/agentshield-registry-api -c registry-api -- python3 -c "
+import urllib.request, urllib.parse, json
+data = urllib.parse.urlencode({'grant_type':'password','client_id':'admin-cli','username':'admin','password':'AdminPass2024'}).encode()
+req = urllib.request.Request('http://agentshield-keycloak/realms/master/protocol/openid-connect/token', data=data)
+token = json.loads(urllib.request.urlopen(req).read())['access_token']
+client = json.dumps({'clientId':'langfuse','name':'Langfuse','enabled':True,'protocol':'openid-connect','publicClient':False,'secret':'langfuse-client-secret-2024','redirectUris':['https://langfuse.127.0.0.1.nip.io:8443/*'],'webOrigins':['https://langfuse.127.0.0.1.nip.io:8443'],'standardFlowEnabled':True,'directAccessGrantsEnabled':True}).encode()
+req2 = urllib.request.Request('http://agentshield-keycloak/admin/realms/agentshield/clients', data=client, headers={'Authorization':f'Bearer {token}','Content-Type':'application/json'})
+try:
+    urllib.request.urlopen(req2); print('  Created')
+except urllib.error.HTTPError as e:
+    print('  Already exists (OK)' if e.code==409 else f'  Error: {e.code}')
+" 2>/dev/null || echo "  Warning: could not create Langfuse SSO client"
+
 # Create langfuse-media bucket in the Langfuse MinIO (s3) pod.
 # MinIO starts with no buckets; Langfuse needs this bucket for event blob storage.
 echo "  Creating langfuse-media bucket in MinIO..."
@@ -337,13 +352,13 @@ if [ "$GW_STATUS" = "True" ]; then
   GW_ADDR=$(kubectl get gateway agentshield-gateway -n "$NAMESPACE" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "pending")
   echo "Envoy Gateway:  READY (address: ${GW_ADDR})"
   echo ""
-  echo "Access (via nip.io — no /etc/hosts needed):"
-  echo "  Studio:        http://agentshield.127.0.0.1.nip.io"
-  echo "  Registry API:  http://agentshield.127.0.0.1.nip.io/api/v1/health"
-  echo "  Keycloak:      http://agentshield.127.0.0.1.nip.io/realms/agentshield/.well-known/openid-configuration"
-  echo "  Langfuse:      http://langfuse.127.0.0.1.nip.io"
-  echo "  MinIO Console: http://agentshield.127.0.0.1.nip.io/minio/"
-  echo "  Webhooks:      http://agentshield.127.0.0.1.nip.io/webhooks/"
+  echo "Access (run 'bash scripts/gateway-proxy.sh' for local HTTPS, then):"
+  echo "  Studio:        https://agentshield.127.0.0.1.nip.io:8443"
+  echo "  Registry API:  https://agentshield.127.0.0.1.nip.io:8443/api/v1/health"
+  echo "  Keycloak:      https://agentshield.127.0.0.1.nip.io:8443/realms/agentshield/.well-known/openid-configuration"
+  echo "  Langfuse:      https://langfuse.127.0.0.1.nip.io:8443  (SSO via Keycloak — single login)"
+  echo "  MinIO Console: https://agentshield.127.0.0.1.nip.io:8443/minio/"
+  echo "  Webhooks:      https://agentshield.127.0.0.1.nip.io:8443/webhooks/"
 elif [ -n "$GW_STATUS" ]; then
   echo "Envoy Gateway:  NOT READY (status: ${GW_STATUS})"
   echo "  Check: kubectl get gateway -n $NAMESPACE"
