@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Suite 9: Eval Runner — T-S9-001 through T-S9-010
+# Suite 9: Eval Runner — T-S9-001 through T-S9-015b
 #
 # Covers dataset management and the async eval-run lifecycle.
 # Simulates the eval-runner Job posting results so the lifecycle can be
@@ -17,6 +17,7 @@
 #   POST   /api/v1/playground/eval-runs/{id}/results   (→ 201, not 200)
 #   PATCH  /api/v1/playground/eval-runs/{id}
 #   GET    /api/v1/playground/eval-runs/{id}/results
+#   POST   /api/v1/playground/judge             (eval-mode LLM judge)
 #
 # Known schema note: PlaygroundDatasetResponse has no `item_count` field.
 # Items are stored directly in data['items']; use len(data['items']) to count.
@@ -651,6 +652,68 @@ else:
 else
   check_manual "G5-S9: No eval run ID captured — cannot verify Langfuse trace" \
     "Re-run suite-9 and capture run ID, then: GET /api/public/traces/<run_id>"
+fi
+echo ""
+
+# ── T-S9-015: Eval-mode judge scores correct answer >= 0.7 ─────────────────
+echo "--- T-S9-015: Eval-mode judge — correct answer ---"
+JUDGE_CORRECT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+body = json.dumps({
+    'input_message': 'What is the capital of France?',
+    'response_text': 'The capital of France is **Paris**.',
+    'expected_output': 'Paris',
+}).encode()
+req = urllib.request.Request(
+    'http://localhost:8000/api/v1/playground/judge',
+    data=body,
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'},
+    method='POST',
+)
+try:
+    with urllib.request.urlopen(req, timeout=40) as r:
+        data = json.loads(r.read())
+        print(json.dumps(data))
+except Exception as e:
+    print(json.dumps({'error': str(e)}))
+" 2>/dev/null || echo '{"error":"exec_failed"}')
+echo "  judge response: $JUDGE_CORRECT"
+JUDGE_SCORE=$(echo "$JUDGE_CORRECT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('score',-1))" 2>/dev/null || echo "-1")
+if python3 -c "s=$JUDGE_SCORE; exit(0 if s >= 0.7 else 1)" 2>/dev/null; then
+  pass "T-S9-015: Correct answer scored >= 0.7 (got $JUDGE_SCORE)"
+else
+  fail "T-S9-015: Correct answer scored < 0.7 (got $JUDGE_SCORE) — judge prompt or provider broken"
+fi
+echo ""
+
+# ── T-S9-015b: Eval-mode judge scores wrong answer < 0.5 ──────────────────
+echo "--- T-S9-015b: Eval-mode judge — wrong answer ---"
+JUDGE_WRONG=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import urllib.request, json
+body = json.dumps({
+    'input_message': 'What is the capital of France?',
+    'response_text': 'The capital of France is London.',
+    'expected_output': 'Paris',
+}).encode()
+req = urllib.request.Request(
+    'http://localhost:8000/api/v1/playground/judge',
+    data=body,
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'},
+    method='POST',
+)
+try:
+    with urllib.request.urlopen(req, timeout=40) as r:
+        data = json.loads(r.read())
+        print(json.dumps(data))
+except Exception as e:
+    print(json.dumps({'error': str(e)}))
+" 2>/dev/null || echo '{"error":"exec_failed"}')
+echo "  judge response: $JUDGE_WRONG"
+JUDGE_WRONG_SCORE=$(echo "$JUDGE_WRONG" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('score',1))" 2>/dev/null || echo "1")
+if python3 -c "s=$JUDGE_WRONG_SCORE; exit(0 if s < 0.5 else 1)" 2>/dev/null; then
+  pass "T-S9-015b: Wrong answer scored < 0.5 (got $JUDGE_WRONG_SCORE)"
+else
+  fail "T-S9-015b: Wrong answer scored >= 0.5 (got $JUDGE_WRONG_SCORE) — judge not detecting incorrect answers"
 fi
 echo ""
 

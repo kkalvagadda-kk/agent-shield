@@ -953,6 +953,52 @@ async def submit_run_feedback(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/playground/judge  (eval-mode, synchronous)
+# ---------------------------------------------------------------------------
+class JudgeRequest(BaseModel):
+    input_message: str
+    response_text: str
+    expected_output: str
+    team: str = "platform"
+
+
+class JudgeResponse(BaseModel):
+    score: float
+    reason: str
+
+
+@router.post(
+    "/judge",
+    response_model=JudgeResponse,
+    summary="Score a response against an expected answer (eval-mode LLM judge)",
+)
+async def judge_eval(body: JudgeRequest) -> JudgeResponse:
+    """Synchronous eval-mode judge endpoint.
+
+    Calls the platform LLM (Haiku via Bedrock) with a correctness prompt that
+    includes the expected answer. Returns score + reason in ~5s. Used by the
+    eval-runner instead of polling the background quality judge.
+    """
+    from judge import judge_for_eval
+
+    try:
+        async with asyncio.timeout(35.0):
+            score, reason = await judge_for_eval(
+                input_text=body.input_message,
+                output_text=body.response_text,
+                expected_output=body.expected_output,
+                team=body.team,
+            )
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Judge timed out (35s)")
+    except Exception as exc:
+        logger.warning("judge endpoint error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Judge error: {exc}")
+
+    return JudgeResponse(score=score, reason=reason)
+
+
+# ---------------------------------------------------------------------------
 # POST /api/v1/playground/test-event
 # ---------------------------------------------------------------------------
 class TestEventRequest(BaseModel):

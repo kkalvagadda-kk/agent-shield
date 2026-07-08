@@ -48,6 +48,28 @@ Rate the RESPONSE from 0.0 to 1.0 where:
 Reply with ONLY a JSON object in this exact format (no other text):
 {{"score": <float 0.0-1.0>, "reason": "<one sentence>"}}"""
 
+_EVAL_JUDGE_PROMPT = """You are evaluating whether an AI assistant correctly answered a question.
+
+INPUT (what the user asked):
+{input}
+
+EXPECTED ANSWER:
+{expected}
+
+ACTUAL RESPONSE (what the assistant replied):
+{output}
+
+Score the ACTUAL RESPONSE against the EXPECTED ANSWER from 0.0 to 1.0:
+  1.0 = correct: response contains the expected answer (exact or semantically equivalent)
+  0.5 = partial: response is on topic but incomplete, or includes the answer with significant errors
+  0.0 = incorrect: response does not contain the expected answer, is wrong, or refused
+
+The expected answer may be a short fact (e.g. "Paris"), a phrase, or a longer explanation.
+A response that contains the expected answer as part of a longer reply MUST score 1.0.
+Ignore markdown formatting (bold, italic) when comparing.
+
+Reply with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>"}}"""
+
 
 async def score_run(
     run_id: UUID,
@@ -78,21 +100,38 @@ async def score_run(
         trace_judge_score(trace_id=langfuse_trace_id, score=score, reason=reason)
 
 
+async def judge_for_eval(
+    input_text: str,
+    output_text: str,
+    expected_output: str,
+    team: str = "platform",
+) -> tuple[float, str]:
+    """Synchronous eval-mode judge. Returns (score, reason).
+
+    Uses _EVAL_JUDGE_PROMPT which includes the expected answer so the LLM
+    scores correctness, not general quality.
+    """
+    prompt = _build_eval_prompt(input_text, output_text, expected_output)
+    return await _call_judge(input_text, output_text, team, prompt=prompt)
+
+
 async def _call_judge(
     input_text: str,
     output_text: str,
     team: str,
+    prompt: str | None = None,
 ) -> tuple[float, str]:
     """Call the LLM provider and parse the score. Returns (score, reason)."""
+    resolved_prompt = prompt or _build_prompt(input_text, output_text)
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if api_key:
-        return await _call_judge_anthropic(input_text, output_text, api_key)
+        return await _call_judge_anthropic(resolved_prompt, api_key)
 
     provider_type, model, creds = await _resolve_provider(team)
     if provider_type == "bedrock":
-        return await _call_judge_bedrock(input_text, output_text, model, creds)
+        return await _call_judge_bedrock(resolved_prompt, model, creds)
     elif provider_type == "anthropic":
-        return await _call_judge_anthropic(input_text, output_text, creds["api_key"])
+        return await _call_judge_anthropic(resolved_prompt, creds["api_key"])
     else:
         raise ValueError(f"unsupported provider type: {provider_type}")
 
@@ -100,6 +139,14 @@ async def _call_judge(
 def _build_prompt(input_text: str, output_text: str) -> str:
     return _JUDGE_PROMPT.format(
         input=input_text[:800],
+        output=output_text[:800],
+    )
+
+
+def _build_eval_prompt(input_text: str, output_text: str, expected_output: str) -> str:
+    return _EVAL_JUDGE_PROMPT.format(
+        input=input_text[:800],
+        expected=expected_output[:800],
         output=output_text[:800],
     )
 
@@ -114,12 +161,10 @@ def _parse_score(body: dict) -> tuple[float, str]:
 
 
 async def _call_judge_anthropic(
-    input_text: str,
-    output_text: str,
+    prompt: str,
     api_key: str,
 ) -> tuple[float, str]:
     """Call Anthropic Messages API directly."""
-    prompt = _build_prompt(input_text, output_text)
     payload = json.dumps({
         "model": _JUDGE_MODEL,
         "max_tokens": 128,
@@ -143,16 +188,14 @@ async def _call_judge_anthropic(
 
 
 async def _call_judge_bedrock(
-    input_text: str,
-    output_text: str,
+    prompt: str,
     model: str,
     creds: dict,
 ) -> tuple[float, str]:
     """Call Anthropic model via AWS Bedrock invoke_model."""
     import boto3
 
-    prompt = _build_prompt(input_text, output_text)
-    judge_model = _JUDGE_MODEL if _JUDGE_MODEL != model else model
+    judge_model = model
     body = json.dumps({
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": 128,

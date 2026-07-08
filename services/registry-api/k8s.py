@@ -25,7 +25,7 @@ _REGISTRY_API_URL = os.getenv(
 )
 _EVAL_RUNNER_IMAGE = os.getenv(
     "EVAL_RUNNER_IMAGE",
-    "registry.internal/agentshield/eval-runner:0.1.3",
+    "registry.internal/agentshield/eval-runner:0.1.4",
 )
 
 

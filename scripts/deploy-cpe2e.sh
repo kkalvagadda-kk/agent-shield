@@ -6,6 +6,7 @@
 #   - registry-api:0.2.75  (Fix Langfuse trace URL: use full /project/{pid}/traces/{tid} path to avoid redirect losing /langfuse/ prefix behind Gateway)
 #   - registry-api:0.2.73  (Eval results publish lifecycle: expected_output column, langfuse_trace_id in schema, trace-by-id endpoint, admin publish eval evidence)
 #   - studio:0.1.58        (Eval results UX: expandable rows, failed filter, score colors, action CTAs, TraceDrawer, publish eval gate, admin eval column, datasets eval runs)
+#   - eval-runner:0.1.4    (Eval-mode LLM judge: sync POST /judge + markdown-strip keyword fallback)
 #   - eval-runner:0.1.2    (Include expected_output in result POST)
 #   - registry-api:0.2.72  (Batch eval fixes: judge Bedrock support via boto3, fix decrypt_json import, evalRunnerImage in values.yaml, save_run_to_dataset expected_output)
 #   - registry-api:0.2.64  (Pausable workflow-HITL: migration 0032 agent_runs.orchestrator_state JSONB checkpoint; workflow_orchestrator per-child thread_id + authoritative pending-Approval pause detection (halts all 4 modes at awaiting_approval); resume_orchestration re-entry (sequential auto-advance); decide_approval _resume_and_advance workflow hook)
@@ -58,11 +59,11 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.75"
+REGISTRY_API_TAG="0.2.78"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.12"
-STUDIO_TAG="0.1.60"
-EVAL_RUNNER_TAG="0.1.3"
+STUDIO_TAG="0.1.61"
+EVAL_RUNNER_TAG="0.1.4"
 DECLARATIVE_RUNNER_TAG="0.1.14"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"

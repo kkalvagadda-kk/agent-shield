@@ -72,6 +72,47 @@ async def _run_workflow_item(
     return ""
 
 
+import re
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove common markdown formatting for keyword comparison."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # bold
+    text = re.sub(r'__(.+?)__', r'\1', text)        # bold alt
+    text = re.sub(r'\*(.+?)\*', r'\1', text)         # italic
+    text = re.sub(r'_(.+?)_', r'\1', text)            # italic alt
+    text = re.sub(r'`(.+?)`', r'\1', text)            # inline code
+    return text.strip()
+
+
+async def _call_judge_api(
+    client: httpx.AsyncClient,
+    input_text: str,
+    response_text: str,
+    expected_output: str,
+) -> tuple[float, str] | None:
+    """Call POST /playground/judge synchronously. Returns (score, reason) or None."""
+    try:
+        resp = await client.post(
+            "/api/v1/playground/judge",
+            json={
+                "input_message": input_text,
+                "response_text": response_text,
+                "expected_output": expected_output,
+            },
+            headers={"X-User-Sub": "eval-runner"},
+            timeout=40.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return float(data["score"]), data.get("reason", "")
+        logger.warning("judge API returned %d: %s", resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("judge API call failed: %s", exc)
+    return None
+
+
+# DEPRECATED: _poll_for_judge — kept for reference, replaced by _call_judge_api
 async def _poll_for_judge(client: httpx.AsyncClient, run_id: str) -> float | None:
     """Return the Haiku judge score (0.0-1.0) once judge_status is terminal and a
     score is present; None if the judge errored/timed out or the window elapsed.
@@ -229,33 +270,34 @@ async def run_eval() -> None:
                 if not response_text and error_msg:
                     response_text = f"[ERROR] {error_msg}"
 
-            # 4. Score: prefer the real Haiku judge (read back from the run), else strict fallback
-            judge_score = await _poll_for_judge(client, run_id) if run_id else None
-            if judge_score is not None:
-                score = judge_score
-                passed = judge_score >= _JUDGE_PASS_THRESHOLD
-                reasoning = "llm-judge (haiku)"
-            elif expected:
-                # Strict fallback: normalize whitespace and compare equality.
-                # Substring matching is too permissive (e.g. "rain" in "rainy").
-                norm_expected = " ".join(expected.lower().split())
-                norm_response = " ".join(response_text.lower().split())
-                if norm_expected == norm_response:
-                    passed = True
-                    score = 1.0
-                    reasoning = "exact match (judge unavailable)"
-                elif norm_expected and norm_response and norm_expected in norm_response and len(norm_expected) > 20:
-                    # Only allow substring for long expected strings (full sentences)
-                    passed = True
-                    score = 0.8
-                    reasoning = "substring match on long expected (judge unavailable)"
+            # 4. Score: call eval-mode judge API directly, keyword fallback if unavailable
+            score = 0.0
+            passed = False
+            reasoning = ""
+
+            if expected and response_text:
+                judge_result = await _call_judge_api(client, input_text, response_text, expected)
+                if judge_result is not None:
+                    score, reasoning = judge_result
+                    passed = score >= _JUDGE_PASS_THRESHOLD
+                    reasoning = f"llm-judge (eval-mode): {reasoning}"
                 else:
-                    passed = False
-                    score = 0.0
-                    reasoning = "no match (judge unavailable)"
+                    norm_expected = " ".join(_strip_markdown(expected).lower().split())
+                    norm_response = " ".join(_strip_markdown(response_text).lower().split())
+                    if norm_expected == norm_response:
+                        passed, score = True, 1.0
+                        reasoning = "exact match (judge unavailable)"
+                    elif norm_expected and norm_response and len(norm_expected) >= 3 and norm_expected in norm_response:
+                        passed, score = True, 0.8
+                        reasoning = "substring match (judge unavailable)"
+                    else:
+                        passed, score = False, 0.0
+                        reasoning = "no match (judge unavailable)"
+            elif expected and not response_text:
+                passed, score = False, 0.0
+                reasoning = "no response text"
             else:
-                passed = True
-                score = 1.0
+                passed, score = True, 1.0
                 reasoning = "no expected output — pass by default"
 
             results.append({"passed": passed, "score": score})
