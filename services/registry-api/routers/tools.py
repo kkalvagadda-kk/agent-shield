@@ -18,10 +18,13 @@ import logging
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import select
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import get_optional_user
 from db import get_db
 from models import Agent, AgentTool, Tool
 from schemas import (
@@ -61,8 +64,12 @@ async def _get_tool(tool_id: uuid.UUID, db: AsyncSession) -> Tool:
 )
 async def create_tool(
     body: ToolCreate,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> ToolResponse:
+    caller = (user or {}).get("sub") or x_user_sub
+
     existing = await db.execute(select(Tool).where(Tool.name == body.name))
     if existing.scalar_one_or_none() is not None:
         raise HTTPException(
@@ -71,6 +78,7 @@ async def create_tool(
         )
 
     tool = Tool(**body.model_dump())
+    tool.created_by = caller
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
@@ -92,9 +100,20 @@ async def list_tools(
     owner_team: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ToolResponse]:
+    caller = (user or {}).get("sub") or x_user_sub
+
     q = select(Tool)
+
+    # Visibility: published tools visible to all; private only to creator.
+    if caller:
+        q = q.where(or_(Tool.publish_status == "published", Tool.created_by == caller))
+    else:
+        q = q.where(Tool.publish_status == "published")
+
     if type:
         q = q.where(Tool.type == type)
     if risk_level:

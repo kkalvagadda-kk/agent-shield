@@ -31,10 +31,45 @@ DATASET_ID = os.environ["DATASET_ID"]
 AGENT_NAME = os.environ["AGENT_NAME"]
 EVAL_RUN_ID = os.environ["EVAL_RUN_ID"]
 AGENT_VERSION_ID = os.environ.get("AGENT_VERSION_ID")
+WORKFLOW_ID = os.environ.get("WORKFLOW_ID")
 
 _JUDGE_POLL_TIMEOUT = float(os.environ.get("JUDGE_POLL_TIMEOUT", "45"))
 _JUDGE_POLL_INTERVAL = float(os.environ.get("JUDGE_POLL_INTERVAL", "3"))
 _JUDGE_PASS_THRESHOLD = float(os.environ.get("JUDGE_PASS_THRESHOLD", "0.7"))
+
+
+_WORKFLOW_POLL_TIMEOUT = float(os.environ.get("WORKFLOW_POLL_TIMEOUT", "180"))
+_WORKFLOW_POLL_INTERVAL = float(os.environ.get("WORKFLOW_POLL_INTERVAL", "5"))
+
+
+async def _run_workflow_item(
+    client: httpx.AsyncClient, workflow_id: str, input_text: str
+) -> str:
+    """Trigger a workflow run and poll until completion. Returns output text."""
+    resp = await client.post(
+        f"/api/v1/workflows/{workflow_id}/runs",
+        json={"input_message": input_text, "trigger_type": "api", "run_by": "eval-runner"},
+        headers={"X-User-Sub": "eval-runner"},
+    )
+    resp.raise_for_status()
+    run_id = resp.json()["run_id"]
+
+    deadline = asyncio.get_event_loop().time() + _WORKFLOW_POLL_TIMEOUT
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(_WORKFLOW_POLL_INTERVAL)
+        try:
+            tree_resp = await client.get(
+                f"/api/v1/workflows/{workflow_id}/runs/{run_id}/tree",
+                headers={"X-User-Sub": "eval-runner"},
+            )
+            tree_resp.raise_for_status()
+            tree = tree_resp.json()
+            parent_status = tree.get("parent", {}).get("status", "")
+            if parent_status in ("completed", "failed"):
+                return tree.get("parent", {}).get("output") or ""
+        except Exception as exc:
+            logger.debug("workflow poll error for run %s: %s", run_id, exc)
+    return ""
 
 
 async def _poll_for_judge(client: httpx.AsyncClient, run_id: str) -> float | None:
@@ -79,75 +114,145 @@ async def run_eval() -> None:
             input_text = item.get("input", "")
             expected = item.get("expected_output", "")
 
-            # 2. Start playground run per item
-            run_body: dict[str, Any] = {
-                "agent_name": AGENT_NAME,
-                "input_message": input_text,
-            }
-            if AGENT_VERSION_ID:
-                run_body["agent_version_id"] = AGENT_VERSION_ID
-
-            # 2b. Start playground run per item (isolated — one failure must not kill the Job)
+            # 2. Execute: workflow mode OR agent playground mode
+            response_text = ""
             run_id = None
-            try:
-                run_resp = await client.post(
-                    "/api/v1/playground/runs",
-                    json=run_body,
-                    headers={"X-User-Sub": "eval-runner"},
-                )
-                run_resp.raise_for_status()
-                run_id = run_resp.json().get("run_id")
-                logger.info("item=%d run_id=%s", idx, run_id)
-            except Exception as exc:
-                logger.warning("item=%d run-create failed: %s", idx, exc)
-                results.append({"passed": False, "score": 0.0})
+
+            if WORKFLOW_ID:
+                # Workflow mode: trigger workflow run + poll for output
                 try:
-                    await client.post(
-                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
-                        json={
-                            "dataset_item_idx": idx,
-                            "input_message": input_text,
-                            "response": "",
-                            "judge_score": 0.0,
-                            "judge_reasoning": f"run-create failed: {exc}",
-                            "passed": False,
-                        },
+                    response_text = await _run_workflow_item(client, WORKFLOW_ID, input_text)
+                    logger.info("item=%d workflow_run completed, output_len=%d", idx, len(response_text))
+                except Exception as exc:
+                    logger.warning("item=%d workflow-run failed: %s", idx, exc)
+                    results.append({"passed": False, "score": 0.0})
+                    try:
+                        await client.post(
+                            f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                            json={
+                                "dataset_item_idx": idx,
+                                "input_message": input_text,
+                                "expected_output": expected or None,
+                                "response": "",
+                                "judge_score": 0.0,
+                                "judge_reasoning": f"workflow-run failed: {exc}",
+                                "passed": False,
+                            },
+                            headers={"X-User-Sub": "eval-runner"},
+                        )
+                    except Exception:
+                        pass
+                    continue
+            else:
+                # Agent mode: start playground run + collect SSE stream
+                run_body: dict[str, Any] = {
+                    "agent_name": AGENT_NAME,
+                    "input_message": input_text,
+                }
+                if AGENT_VERSION_ID:
+                    run_body["agent_version_id"] = AGENT_VERSION_ID
+
+                try:
+                    run_resp = await client.post(
+                        "/api/v1/playground/runs",
+                        json=run_body,
                         headers={"X-User-Sub": "eval-runner"},
                     )
-                except Exception:
-                    pass
-                continue
+                    run_resp.raise_for_status()
+                    run_id = run_resp.json().get("run_id")
+                    logger.info("item=%d run_id=%s", idx, run_id)
+                except Exception as exc:
+                    logger.warning("item=%d run-create failed: %s", idx, exc)
+                    results.append({"passed": False, "score": 0.0})
+                    try:
+                        await client.post(
+                            f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                            json={
+                                "dataset_item_idx": idx,
+                                "input_message": input_text,
+                                "expected_output": expected or None,
+                                "response": "",
+                                "judge_score": 0.0,
+                                "judge_reasoning": f"run-create failed: {exc}",
+                                "passed": False,
+                            },
+                            headers={"X-User-Sub": "eval-runner"},
+                        )
+                    except Exception:
+                        pass
+                    continue
 
-            # 3. Collect SSE stream response
-            response_text = ""
-            try:
-                async with client.stream(
-                    "GET",
-                    f"/api/v1/playground/runs/{run_id}/stream",
-                ) as stream:
-                    async for line in stream.aiter_lines():
-                        if line.startswith("data:"):
-                            try:
-                                payload = json.loads(line[5:].strip())
-                                if payload.get("event") == "text_delta":
-                                    response_text += payload.get("content", "")
-                                elif payload.get("event") == "done":
+                # Collect SSE stream response
+                error_msg = ""
+                try:
+                    async with client.stream(
+                        "GET",
+                        f"/api/v1/playground/runs/{run_id}/stream",
+                        headers={"Accept": "text/event-stream"},
+                    ) as stream:
+                        async for line in stream.aiter_lines():
+                            if line.startswith("data:"):
+                                try:
+                                    payload = json.loads(line[5:].strip())
+                                    if payload.get("event") == "text_delta":
+                                        response_text += payload.get("content", "")
+                                    elif payload.get("event") == "error":
+                                        error_msg = payload.get("message", "unknown error")
+                                        logger.warning("item=%d stream error event: %s", idx, error_msg)
+                                    elif payload.get("event") == "done":
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+                except Exception as exc:
+                    logger.warning("item=%d stream error: %s", idx, exc)
+                    error_msg = str(exc)
+
+                # Fallback: if stream yielded no text, poll the run record for output_text.
+                # The server stores output_text via _complete_run after the stream ends.
+                if not response_text and run_id:
+                    for _attempt in range(6):
+                        await asyncio.sleep(3)
+                        try:
+                            poll_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
+                            if poll_resp.status_code == 200:
+                                run_data = poll_resp.json()
+                                if run_data.get("output_text"):
+                                    response_text = run_data["output_text"]
+                                    logger.info("item=%d recovered output_text from run record (len=%d)", idx, len(response_text))
                                     break
-                            except json.JSONDecodeError:
-                                pass
-            except Exception as exc:
-                logger.warning("item=%d stream error: %s", idx, exc)
+                                if run_data.get("status") in ("completed", "failed"):
+                                    break
+                        except Exception:
+                            pass
 
-            # 4. Score: prefer the real Haiku judge (read back from the run), else keyword fallback
-            judge_score = await _poll_for_judge(client, run_id)
+                # If still no text but got an error, use it as the response
+                if not response_text and error_msg:
+                    response_text = f"[ERROR] {error_msg}"
+
+            # 4. Score: prefer the real Haiku judge (read back from the run), else strict fallback
+            judge_score = await _poll_for_judge(client, run_id) if run_id else None
             if judge_score is not None:
                 score = judge_score
                 passed = judge_score >= _JUDGE_PASS_THRESHOLD
                 reasoning = "llm-judge (haiku)"
             elif expected:
-                passed = expected.lower() in response_text.lower()
-                score = 1.0 if passed else 0.0
-                reasoning = "keyword match (judge unavailable)"
+                # Strict fallback: normalize whitespace and compare equality.
+                # Substring matching is too permissive (e.g. "rain" in "rainy").
+                norm_expected = " ".join(expected.lower().split())
+                norm_response = " ".join(response_text.lower().split())
+                if norm_expected == norm_response:
+                    passed = True
+                    score = 1.0
+                    reasoning = "exact match (judge unavailable)"
+                elif norm_expected and norm_response and norm_expected in norm_response and len(norm_expected) > 20:
+                    # Only allow substring for long expected strings (full sentences)
+                    passed = True
+                    score = 0.8
+                    reasoning = "substring match on long expected (judge unavailable)"
+                else:
+                    passed = False
+                    score = 0.0
+                    reasoning = "no match (judge unavailable)"
             else:
                 passed = True
                 score = 1.0
@@ -159,6 +264,7 @@ async def run_eval() -> None:
             result_body = {
                 "dataset_item_idx": idx,
                 "input_message": input_text,
+                "expected_output": expected or None,
                 "response": response_text,
                 "judge_score": score,
                 "judge_reasoning": reasoning,

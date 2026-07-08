@@ -87,6 +87,7 @@ async def create_eval_run(
         user_id=caller,
         agent_name=body.agent_name,
         agent_version_id=body.agent_version_id,
+        workflow_id=body.workflow_id,
         dataset_id=body.dataset_id,
         status="pending",
         started_at=datetime.now(tz=timezone.utc),
@@ -107,6 +108,7 @@ async def create_eval_run(
             eval_run_id=str(eval_run.id),
             agent_name=body.agent_name,
             dataset_id=str(body.dataset_id),
+            workflow_id=str(body.workflow_id) if body.workflow_id else None,
         )
         eval_run.status = "running"
     except Exception as exc:
@@ -186,6 +188,7 @@ async def create_eval_run_result(
         eval_run_id=eval_run_id,
         dataset_item_idx=body.dataset_item_idx,
         input_message=body.input_message,
+        expected_output=body.expected_output,
         response=body.response,
         judge_score=body.judge_score,
         judge_reasoning=body.judge_reasoning,

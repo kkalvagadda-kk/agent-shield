@@ -8,10 +8,12 @@ import {
   createEvalRun,
   deleteDataset,
   listDatasets,
+  listEvalRuns,
   type DatasetItem,
+  type EvalRun,
   type PlaygroundDataset,
 } from "../api/playgroundApi";
-import { listAgents } from "../api/registryApi";
+import { listAgents, listCompositeWorkflows } from "../api/registryApi";
 
 export default function DatasetsPage() {
   const qc = useQueryClient();
@@ -24,16 +26,28 @@ export default function DatasetsPage() {
 
   // Run eval modal state
   const [evalDataset, setEvalDataset] = useState<PlaygroundDataset | null>(null);
+  const [evalTargetType, setEvalTargetType] = useState<"agent" | "workflow">("agent");
   const [evalAgent, setEvalAgent] = useState("");
+  const [evalWorkflow, setEvalWorkflow] = useState("");
 
   const { data: datasets, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["playground-datasets"],
     queryFn: listDatasets,
   });
 
+  const { data: evalRuns } = useQuery({
+    queryKey: ["eval-runs-all"],
+    queryFn: listEvalRuns,
+  });
+
   const { data: agentsData } = useQuery({
     queryKey: ["agents-for-eval"],
     queryFn: () => listAgents(100, 0, "active"),
+  });
+
+  const { data: workflowsData } = useQuery({
+    queryKey: ["workflows-for-eval"],
+    queryFn: () => listCompositeWorkflows(),
   });
 
   const createMutation = useMutation({
@@ -58,12 +72,13 @@ export default function DatasetsPage() {
   });
 
   const evalMutation = useMutation({
-    mutationFn: ({ agent_name, dataset_id }: { agent_name: string; dataset_id: string }) =>
-      createEvalRun({ agent_name, dataset_id }),
+    mutationFn: (body: { agent_name: string; dataset_id: string; workflow_id?: string }) =>
+      createEvalRun(body),
     onSuccess: (run) => {
       toast.success("Eval run started.");
       setEvalDataset(null);
       setEvalAgent("");
+      setEvalWorkflow("");
       navigate(`/playground/eval-runs/${run.id}`);
     },
     onError: () => toast.error("Failed to start eval run."),
@@ -89,12 +104,22 @@ export default function DatasetsPage() {
   };
 
   const handleRunEval = () => {
-    if (!evalAgent) {
+    if (evalTargetType === "agent" && !evalAgent) {
       toast.error("Select an agent.");
       return;
     }
+    if (evalTargetType === "workflow" && !evalWorkflow) {
+      toast.error("Select a workflow.");
+      return;
+    }
     if (!evalDataset) return;
-    evalMutation.mutate({ agent_name: evalAgent, dataset_id: evalDataset.id });
+    const selectedWorkflow = workflowsData?.find(w => w.id === evalWorkflow);
+    const agentName = evalTargetType === "agent" ? evalAgent : (selectedWorkflow?.name ?? evalWorkflow);
+    evalMutation.mutate({
+      agent_name: agentName,
+      dataset_id: evalDataset.id,
+      workflow_id: evalTargetType === "workflow" ? evalWorkflow : undefined,
+    });
   };
 
   return (
@@ -142,7 +167,7 @@ export default function DatasetsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Name", "Items", "Created", "Actions"].map((h) => (
+                  {["Name", "Items", "Eval Runs", "Created", "Actions"].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -159,6 +184,9 @@ export default function DatasetsPage() {
                     <td className="px-4 py-3 text-slate-500">
                       {Array.isArray(ds.items) ? ds.items.length : 0} item
                       {(Array.isArray(ds.items) ? ds.items.length : 0) !== 1 ? "s" : ""}
+                    </td>
+                    <td className="px-4 py-3">
+                      <DatasetEvalRuns runs={(evalRuns ?? []).filter(r => r.dataset_id === ds.id)} navigate={navigate} />
                     </td>
                     <td className="px-4 py-3 text-slate-400 text-xs">
                       {new Date(ds.created_at).toLocaleString()}
@@ -265,28 +293,68 @@ export default function DatasetsPage() {
               Dataset: <span className="font-medium text-slate-700">{evalDataset.name}</span> (
               {Array.isArray(evalDataset.items) ? evalDataset.items.length : 0} items)
             </p>
-            <div>
-              <label className="label text-xs mb-1">Select Agent</label>
-              <select
-                className="input text-sm"
-                value={evalAgent}
-                onChange={(e) => setEvalAgent(e.target.value)}
+
+            {/* Target type toggle */}
+            <div className="flex gap-1 p-1 bg-slate-100 rounded-lg mb-4">
+              <button
+                onClick={() => { setEvalTargetType("agent"); setEvalWorkflow(""); }}
+                className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
+                  evalTargetType === "agent" ? "bg-white shadow text-slate-800" : "text-slate-500"
+                }`}
               >
-                <option value="">-- pick an agent --</option>
-                {agentsData?.items.map((a) => (
-                  <option key={a.id} value={a.name}>
-                    {a.name}
-                  </option>
-                ))}
-              </select>
+                Agent
+              </button>
+              <button
+                onClick={() => { setEvalTargetType("workflow"); setEvalAgent(""); }}
+                className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
+                  evalTargetType === "workflow" ? "bg-white shadow text-slate-800" : "text-slate-500"
+                }`}
+              >
+                Workflow
+              </button>
             </div>
+
+            {evalTargetType === "agent" ? (
+              <div>
+                <label className="label text-xs mb-1">Select Agent</label>
+                <select
+                  className="input text-sm"
+                  value={evalAgent}
+                  onChange={(e) => setEvalAgent(e.target.value)}
+                >
+                  <option value="">-- pick an agent --</option>
+                  {agentsData?.items.map((a) => (
+                    <option key={a.id} value={a.name}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div>
+                <label className="label text-xs mb-1">Select Workflow</label>
+                <select
+                  className="input text-sm"
+                  value={evalWorkflow}
+                  onChange={(e) => setEvalWorkflow(e.target.value)}
+                >
+                  <option value="">-- pick a workflow --</option>
+                  {workflowsData?.filter(w => w.status !== "archived").map((w) => (
+                    <option key={w.id} value={w.id}>
+                      {w.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setEvalDataset(null)} className="btn-secondary text-sm">
                 Cancel
               </button>
               <button
                 onClick={handleRunEval}
-                disabled={evalMutation.isPending || !evalAgent}
+                disabled={evalMutation.isPending || (evalTargetType === "agent" ? !evalAgent : !evalWorkflow)}
                 className="btn-primary text-sm"
               >
                 {evalMutation.isPending ? (
@@ -298,6 +366,42 @@ export default function DatasetsPage() {
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+function DatasetEvalRuns({ runs, navigate }: { runs: EvalRun[]; navigate: (path: string) => void }) {
+  if (runs.length === 0) {
+    return <span className="text-xs text-slate-300">—</span>;
+  }
+  const sorted = [...runs].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  const recent = sorted.slice(0, 3);
+  return (
+    <div className="space-y-1">
+      {recent.map((r) => (
+        <button
+          key={r.id}
+          onClick={() => navigate(`/playground/eval-runs/${r.id}`)}
+          className="flex items-center gap-1.5 text-xs hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 w-full text-left"
+        >
+          <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
+            r.status === "completed" && r.overall_score != null && r.overall_score >= 0.7
+              ? "bg-green-500"
+              : r.status === "completed"
+                ? "bg-amber-500"
+                : r.status === "failed"
+                  ? "bg-red-500"
+                  : "bg-slate-300"
+          }`} />
+          <span className="text-slate-600 truncate">{r.agent_name}</span>
+          {r.overall_score != null && (
+            <span className="text-slate-400 ml-auto shrink-0">{Math.round(r.overall_score * 100)}%</span>
+          )}
+        </button>
+      ))}
+      {sorted.length > 3 && (
+        <span className="text-[10px] text-slate-400">+{sorted.length - 3} more</span>
       )}
     </div>
   );

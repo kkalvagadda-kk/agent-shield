@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Loader2, Send, ThumbsDown, ThumbsUp } from "lucide-react";
+import { Eye, ExternalLink, Loader2, Send, ThumbsDown, ThumbsUp } from "lucide-react";
 import { getRunTrace, startPlaygroundRun, submitRunFeedback } from "../../api/playgroundApi";
 import { toast } from "sonner";
+import TraceDrawer from "./TraceDrawer";
 
 interface Message {
   role: "user" | "assistant";
@@ -38,6 +39,8 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
   const [running, setRunning] = useState(false);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [traceUrl, setTraceUrl] = useState<string | null>(null);
+  const [traceId, setTraceId] = useState<string | null>(null);
+  const [showTraceDrawer, setShowTraceDrawer] = useState(false);
   const [feedbackGiven, setFeedbackGiven] = useState<1 | -1 | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -142,9 +145,10 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
             es.close();
             esRef.current = null;
             setRunning(false);
-            // Fetch trace URL after completion
+            // Fetch trace after completion
             getRunTrace(run_id).then((t) => {
               if (t.trace_url) setTraceUrl(t.trace_url);
+              if (t.trace_id) setTraceId(t.trace_id);
             }).catch(() => {});
           }
         } catch {
@@ -259,6 +263,15 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
               View Trace
             </a>
           )}
+          {!traceUrl && traceId && (
+            <button
+              onClick={() => setShowTraceDrawer(true)}
+              className="flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800"
+            >
+              <Eye size={12} />
+              View Trace
+            </button>
+          )}
         </div>
       )}
 
@@ -280,6 +293,10 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
           {running ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
         </button>
       </div>
+
+      {showTraceDrawer && traceId && (
+        <TraceDrawer traceId={traceId} onClose={() => setShowTraceDrawer(false)} />
+      )}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle, Loader2, RefreshCw, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, RefreshCw, XCircle, FlaskConical } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   approvePublishRequest,
@@ -27,6 +28,7 @@ const RISK_CHIP: Record<string, string> = {
 
 export default function AdminPublishRequestsPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>("pending_review");
   const [approvingId, setApprovingId] = useState<string | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -141,7 +143,7 @@ export default function AdminPublishRequestsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Asset Type", "Asset", "Submitted By", "Submitted At", "Status", "Risk", "Actions"].map(
+                  {["Asset Type", "Asset", "Submitted By", "Submitted At", "Last Eval", "Status", "Risk", "Actions"].map(
                     (h) => (
                       <th
                         key={h}
@@ -178,6 +180,25 @@ export default function AdminPublishRequestsPage() {
                       <td className="px-4 py-3 text-slate-700">{pr.submitted_by}</td>
                       <td className="px-4 py-3 text-slate-400 text-xs">
                         {new Date(pr.submitted_at).toLocaleString()}
+                      </td>
+                      <td className="px-4 py-3">
+                        {pr.last_eval_score != null ? (
+                          <button
+                            onClick={() => pr.last_eval_run_id && navigate(`/playground/eval-runs/${pr.last_eval_run_id}`)}
+                            className={`badge text-xs cursor-pointer ${
+                              pr.last_eval_score >= 0.7
+                                ? "bg-green-100 text-green-700"
+                                : pr.last_eval_score >= 0.4
+                                  ? "bg-amber-100 text-amber-700"
+                                  : "bg-red-100 text-red-700"
+                            }`}
+                          >
+                            <FlaskConical size={10} className="mr-0.5 inline" />
+                            {Math.round(pr.last_eval_score * 100)}%
+                          </button>
+                        ) : (
+                          <span className="badge bg-amber-50 text-amber-600 text-xs">No eval</span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`badge ${STATUS_CHIP[pr.status] ?? "bg-slate-100 text-slate-600"}`}>

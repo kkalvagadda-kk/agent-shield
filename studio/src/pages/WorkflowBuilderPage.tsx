@@ -15,6 +15,7 @@ import '@xyflow/react/dist/style.css';
 import { toast } from 'sonner';
 import {
   ArrowLeft,
+  Eye,
   Plus,
   Save,
   Play,
@@ -27,6 +28,7 @@ import { WorkflowMemberNode, type WorkflowMemberNodeData } from '../nodes/Workfl
 import AddAgentModal, { type AddedAgent } from '../components/AddAgentModal';
 import WorkflowPropertiesPanel from '../components/WorkflowPropertiesPanel';
 import WorkflowTriggersPanel from '../components/workflow/WorkflowTriggersPanel';
+import TraceDrawer from '../components/playground/TraceDrawer';
 import { useWorkflowStore } from '../stores/workflowStore';
 import { useAuth } from '../contexts/AuthContext';
 import {
@@ -106,6 +108,7 @@ export default function WorkflowBuilderPage() {
   const [isTriggering, setIsTriggering] = useState(false);
   const [runTree, setRunTree] = useState<WorkflowRunTree | null>(null);
   const [isPolling, setIsPolling] = useState(false);
+  const [viewTraceId, setViewTraceId] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
   const pollCountRef = useRef(0);
@@ -616,6 +619,15 @@ export default function WorkflowBuilderPage() {
                   {runTree.parent.error_message && (
                     <p className="mt-2 text-xs text-red-600">{runTree.parent.error_message}</p>
                   )}
+                  {runTree.parent.langfuse_trace_id && (
+                    <button
+                      onClick={() => setViewTraceId(runTree.parent.langfuse_trace_id)}
+                      className="inline-flex items-center gap-1 mt-2 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                    >
+                      <Eye size={12} />
+                      View Trace
+                    </button>
+                  )}
                 </div>
 
                 {/* Child runs */}
@@ -655,6 +667,15 @@ export default function WorkflowBuilderPage() {
                           )}
                           {child.error_message && (
                             <p className="mt-1 text-xs text-red-600">{child.error_message}</p>
+                          )}
+                          {child.langfuse_trace_id && (
+                            <button
+                              onClick={() => setViewTraceId(child.langfuse_trace_id)}
+                              className="inline-flex items-center gap-1 mt-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                            >
+                              <Eye size={12} />
+                              View Trace
+                            </button>
                           )}
                         </div>
                       ))}
@@ -808,6 +829,9 @@ export default function WorkflowBuilderPage() {
             </div>
           </div>
         </div>
+      )}
+      {viewTraceId && (
+        <TraceDrawer traceId={viewTraceId} onClose={() => setViewTraceId(null)} />
       )}
     </div>
   );

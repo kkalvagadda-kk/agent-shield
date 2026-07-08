@@ -25,7 +25,7 @@ _REGISTRY_API_URL = os.getenv(
 )
 _EVAL_RUNNER_IMAGE = os.getenv(
     "EVAL_RUNNER_IMAGE",
-    "registry.internal/agentshield/eval-runner:0.1.0",
+    "registry.internal/agentshield/eval-runner:0.1.3",
 )
 
 
@@ -96,6 +96,7 @@ def _create_eval_job_sync(
     eval_run_id: str,
     agent_name: str,
     dataset_id: str,
+    workflow_id: str | None = None,
 ) -> None:
     """Create a K8s batch Job that runs the eval-runner container (synchronous)."""
     _init_k8s()
@@ -132,10 +133,13 @@ def _create_eval_job_sync(
                             name="eval-runner",
                             image=_EVAL_RUNNER_IMAGE,
                             env=[
-                                client.V1EnvVar(name="EVAL_RUN_ID", value=eval_run_id),
-                                client.V1EnvVar(name="AGENT_NAME", value=agent_name),
-                                client.V1EnvVar(name="DATASET_ID", value=dataset_id),
-                                client.V1EnvVar(name="REGISTRY_API_URL", value=_REGISTRY_API_URL),
+                                e for e in [
+                                    client.V1EnvVar(name="EVAL_RUN_ID", value=eval_run_id),
+                                    client.V1EnvVar(name="AGENT_NAME", value=agent_name),
+                                    client.V1EnvVar(name="DATASET_ID", value=dataset_id),
+                                    client.V1EnvVar(name="REGISTRY_API_URL", value=_REGISTRY_API_URL),
+                                    client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id) if workflow_id else None,
+                                ] if e is not None
                             ],
                             resources=client.V1ResourceRequirements(
                                 requests={"cpu": "100m", "memory": "256Mi"},
@@ -162,6 +166,7 @@ async def create_eval_job(
     eval_run_id: str,
     agent_name: str,
     dataset_id: str,
+    workflow_id: str | None = None,
 ) -> None:
     """Create a K8s eval-runner Job (runs sync k8s client in a thread)."""
-    await asyncio.to_thread(_create_eval_job_sync, eval_run_id, agent_name, dataset_id)
+    await asyncio.to_thread(_create_eval_job_sync, eval_run_id, agent_name, dataset_id, workflow_id)

@@ -11,7 +11,7 @@ This document is the high-level overview. Detailed implementation specs live in 
 
 | Spec | Covers | Status |
 |------|--------|--------|
-| [authorization-model-spec.md](design/authorization-model-spec.md) | Agent machine identity (K8s SA tokens + Istio Ambient), OPA policy enforcement, asset lifecycle (private → publish → grant), deploy gate, HITL approval authority (per-agent/tool/skill), Playground authorization | Draft |
+| [authorization-model-spec.md](design/todo/authorization-model-spec.md) | Agent machine identity (K8s SA tokens + Istio Ambient), OPA policy enforcement, asset lifecycle (private → publish → grant), deploy gate, HITL approval authority (per-agent/tool/skill), Playground authorization | Draft |
 | [playground-spec.md](design/playground-spec.md) | Interactive test console, sandbox mode (grant-bypass), per-run trace panel, LLM-as-Judge, dataset curation, eval runner, version comparison, Playground HITL (self-approval), Playground namespace | Draft |
 
 Requirements that drove these specs:
@@ -165,7 +165,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-005 | P0 | Scan all outputs for PII leakage | Output passes through scanners before user sees it |
 | FR-005a | P0 | De-anonymize PII placeholders in tool call args, gated by OPA allow_deanonymize policy per tool | Tool receives real PII value; LLM context retains placeholder; OPA deny blocks substitution |
 | FR-006 | P0 | Evaluate OPA policy before every tool call | Allow/deny within 5ms |
-| FR-007 | P0 | Route high-risk actions to approval queue; approval rights scoped per-agent/tool/skill | Agent pauses, record created, only authorized reviewers notified — see [authorization-model-spec.md](design/authorization-model-spec.md) §7 |
+| FR-007 | P0 | Route high-risk actions to approval queue; approval rights scoped per-agent/tool/skill | Agent pauses, record created, only authorized reviewers notified — see [authorization-model-spec.md](design/todo/authorization-model-spec.md) §7 |
 | FR-008 | P0 | Approve/reject via ops dashboard; Playground HITL self-approved by asset owner | Decision stored, agent resumes within 5s |
 | FR-009 | P0 | Auto-reject on timeout (30min default) | Agent resumes with denial, event logged |
 | FR-010 | P0 | Full trace capture for every request | Trace in Langfuse within 10s of completion |
@@ -178,7 +178,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-017 | P1 | Chunked scanning for inputs >512 tokens | Each chunk scanned independently |
 | FR-018 | P2 | LLM-as-Judge automated scoring | Async evaluator on all traces; score surfaced inline in Playground within 10s of run completion |
 | FR-019 | P2 | Time-based policy constraints | Rego rules reference current time |
-| FR-027 | P2 | Agent machine identity via K8s SA tokens + Istio Ambient mTLS | OPA policy keyed on SA subject, not agent name string — see [authorization-model-spec.md](design/authorization-model-spec.md) |
+| FR-027 | P2 | Agent machine identity via K8s SA tokens + Istio Ambient mTLS | OPA policy keyed on SA subject, not agent name string — see [authorization-model-spec.md](design/todo/authorization-model-spec.md) |
 | FR-028 | P2 | Asset lifecycle: private → pending_review → published with admin approval | Publish gate, risk-tiered approval, explicit team grants |
 | FR-029 | P2 | Deploy gate: team ownership + tool grants + eval passed checks | All 5 pre-flight checks must pass before deployment record is created |
 | FR-030 | P2 | HITL approval authority scoped per-agent/tool/skill | Reviewers see only requests within their granted scope; self-approval prohibited in production |
@@ -224,10 +224,10 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | Agent | A registered AI agent | name, team, description, agent_class (daemon/user_delegated), status (private/pending_review/published) | Has many versions, deployments, approvals; references many tools |
 | AgentVersion | A specific build of an agent | image_tag, tools[], eval_passed, adversarial_eval_passed | Belongs to agent, deployed as deployment |
 | Deployment | An active deployment of a version | status, replicas, canary_percent, agent_identity_id | Links agent to version; machine identity provisioned at first deploy |
-| AgentIdentity | Machine identity for a deployed agent (K8s SA + SPIFFE) | k8s_service_account, sa_subject, issued_at, revoked_at | 1:1 with Deployment; sa_subject is the OPA policy key — see [authorization-model-spec.md](design/authorization-model-spec.md) |
+| AgentIdentity | Machine identity for a deployed agent (K8s SA + SPIFFE) | k8s_service_account, sa_subject, issued_at, revoked_at | 1:1 with Deployment; sa_subject is the OPA policy key — see [authorization-model-spec.md](design/todo/authorization-model-spec.md) |
 | Approval | A human decision on a high-risk action | status, context (production/playground), user_id, reviewer_id, expires_at | Production: routed to authorized reviewers; Playground: self-approved by asset owner |
 | ApprovalAuthority | *(Deprecated — replaced by ArtifactRoleGrant)* Who can approve HITL for a given resource | resource_type, resource_id, approver_user_id, approver_role | Kept for historical records; new HITL routing uses artifact_role_grants |
-| ArtifactRoleGrant | Artifact-scoped RBAC role grant (Decision 25) | artifact_type (agent/workflow), artifact_id, role (agent-admin/approver), grantee_type (user/team), grantee_id | Many-per-user; creator auto-granted agent-admin; see [rbac-design.md](design/rbac-design.md) |
+| ArtifactRoleGrant | Artifact-scoped RBAC role grant (Decision 25) | artifact_type (agent/workflow), artifact_id, role (agent-admin/approver), grantee_type (user/team), grantee_id | Many-per-user; creator auto-granted agent-admin; see [rbac-design.md](design/todo/rbac-design.md) |
 | OPADecision | Audit log for every OPA policy evaluation | agent_identity_id, tool_name, decision, deny_reason, user_id, context (production/playground) | Written on every tool-call authorization |
 | OPAPolicy | Centralized bundle (OPA Bundle Server) | registered_agents (SA-keyed), team_grants | One bundle for all agents; sidecars poll every 30s; replaces per-agent ConfigMaps |
 | PublishRequest | Tracks asset transition from private to shared | asset_id, dependency_declaration, highest_risk_level, status | Created on publish; admin approves/rejects |
@@ -1094,7 +1094,7 @@ Key design choices — see spec for detail and rationale:
 
 ## Authorization Model
 
-> **Full spec**: [`docs/design/authorization-model-spec.md`](design/authorization-model-spec.md)  
+> **Full spec**: [`docs/design/authorization-model-spec.md`](design/todo/authorization-model-spec.md)  
 > **Requirements**: [`docs/authorization-model.md`](authorization-model.md)
 
 Authorization covers three lifecycle stages: authoring (private workspace), control plane (publish + grant + deploy gate), and data plane (runtime enforcement). The current implementation has OPA risk labels but no identity-based enforcement, no publish/grant lifecycle, and no deploy gate. This section describes the target state.
@@ -1111,7 +1111,7 @@ Authorization covers three lifecycle stages: authoring (private workspace), cont
 
 **Platform RBAC (Decision 25)** — two-tier role model for control-plane authorization:
 
-> **Full spec**: [`docs/design/rbac-design.md`](design/rbac-design.md)
+> **Full spec**: [`docs/design/rbac-design.md`](design/todo/rbac-design.md)
 
 - **Global roles** (one per user, stored in `user_team_assignments.role`): `platform-admin` (full access), `contributor` (create/deploy sandbox/submit publish), `viewer` (read-only, no playground)
 - **Artifact-scoped roles** (many per user, stored in `artifact_role_grants`): `agent-admin` (manage production deployments, delegate roles), `approver` (receive and decide HITL requests)

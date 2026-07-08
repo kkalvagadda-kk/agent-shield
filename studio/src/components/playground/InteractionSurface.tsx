@@ -4,14 +4,16 @@ import RunLauncher from "./RunLauncher";
 import RunNowPanel from "./RunNowPanel";
 import StepTracker from "./StepTracker";
 import TestTriggerPanel from "./TestTriggerPanel";
+import WorkflowRunTree from "./WorkflowRunTree";
 
 type TriggerMode = "none" | "schedule" | "webhook";
 
 interface InteractionSurfaceProps {
-  agentName: string;
+  agentName: string | null;
   executionShape: "reactive" | "durable";
   triggerMode?: TriggerMode;
   versionId?: string;
+  workflowId?: string;
 }
 
 export default function InteractionSurface({
@@ -19,6 +21,7 @@ export default function InteractionSurface({
   executionShape,
   triggerMode = "none",
   versionId,
+  workflowId,
 }: InteractionSurfaceProps) {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
@@ -27,6 +30,38 @@ export default function InteractionSurface({
     setActiveRunId(runId);
     setStreamUrl(`/api/v1/playground/runs/${runId}/stream`);
   };
+
+  // Workflow mode: show run launcher targeting the workflow endpoint
+  if (workflowId) {
+    return (
+      <div className="space-y-6 p-4">
+        {agentName ? (
+          <RunLauncher
+            agentName={agentName}
+            versionId={versionId}
+            workflowId={workflowId}
+            onRunStarted={(runId) => setActiveRunId(runId)}
+          />
+        ) : (
+          <p className="text-sm text-slate-400 text-center py-8">Select a workflow to run.</p>
+        )}
+        {activeRunId && (
+          <WorkflowRunTree workflowId={workflowId} runId={activeRunId} />
+        )}
+      </div>
+    );
+  }
+
+  if (!agentName) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-400">
+        <div className="text-center">
+          <p className="font-medium">No agent selected</p>
+          <p className="text-sm mt-1">Pick an agent from the left panel to start chatting.</p>
+        </div>
+      </div>
+    );
+  }
 
   // Scheduled agents: show RunNowPanel
   if (triggerMode === "schedule") {

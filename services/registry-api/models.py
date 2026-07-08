@@ -938,6 +938,10 @@ class Tool(Base):
         nullable=True,
     )
     mcp_tool_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    publish_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'published'")
+    )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1041,6 +1045,9 @@ class Skill(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_ids: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+    publish_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'published'")
+    )
     created_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
     updated_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
     created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
@@ -1256,6 +1263,9 @@ class EvalRun(Base):
     agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, nullable=True
     )
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, nullable=True
+    )
     dataset_id: Mapped[uuid.UUID] = mapped_column(
         _UUID,
         ForeignKey("playground_datasets.id", ondelete="RESTRICT"),
@@ -1293,6 +1303,7 @@ class EvalRunResult(Base):
     response: Mapped[str | None] = mapped_column(Text, nullable=True)
     judge_score: Mapped[float | None] = mapped_column(nullable=True)
     judge_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

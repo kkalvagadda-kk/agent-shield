@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
+import { Eye, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { AgentRunItem, listAgentRuns } from "../../api/registryApi";
+import TraceDrawer from "../playground/TraceDrawer";
 
 const STATUS_BADGE: Record<string, string> = {
   completed: "bg-green-100 text-green-700",
@@ -21,6 +22,7 @@ const TRIGGER_ICONS: Record<string, string> = {
 export default function RunsTab({ agentName }: { agentName: string }) {
   const [triggerFilter, setTriggerFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [traceId, setTraceId] = useState<string | null>(null);
 
   const { data: runs, isLoading } = useQuery({
     queryKey: ["agent-runs", agentName, triggerFilter, statusFilter],
@@ -83,6 +85,7 @@ export default function RunsTab({ agentName }: { agentName: string }) {
                 <th className="px-4 py-2">Cost</th>
                 <th className="px-4 py-2">Run By</th>
                 <th className="px-4 py-2">Started</th>
+                <th className="px-4 py-2">Trace</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -109,11 +112,26 @@ export default function RunsTab({ agentName }: { agentName: string }) {
                   <td className="px-4 py-2 text-xs text-slate-500">
                     {new Date(run.started_at).toLocaleString()}
                   </td>
+                  <td className="px-4 py-2">
+                    {run.langfuse_trace_id && (
+                      <button
+                        onClick={() => setTraceId(run.langfuse_trace_id)}
+                        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                      >
+                        <Eye size={12} />
+                        View
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+      )}
+
+      {traceId && (
+        <TraceDrawer traceId={traceId} onClose={() => setTraceId(null)} />
       )}
     </div>
   );

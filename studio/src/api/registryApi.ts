@@ -211,6 +211,18 @@ export const createVersion = async (
   return data;
 };
 
+export const patchVersion = async (
+  agentName: string,
+  versionId: string,
+  body: { eval_passed?: boolean; notes?: string }
+): Promise<AgentVersion> => {
+  const { data } = await http.patch<AgentVersion>(
+    `/agents/${agentName}/versions/${versionId}`,
+    body
+  );
+  return data;
+};
+
 // ---------------------------------------------------------------------------
 // Deployments
 // ---------------------------------------------------------------------------
@@ -687,6 +699,8 @@ export interface PublishRequest {
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_notes: string | null;
+  last_eval_score: number | null;
+  last_eval_run_id: string | null;
 }
 
 export const publishAgent = async (

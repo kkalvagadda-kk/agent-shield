@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bundle_generator import generate_bundle_data
 from db import get_db
-from models import Agent, ApprovalAuthority, AssetGrant, GrantAudit, PublishRequest
+from models import Agent, ApprovalAuthority, AssetGrant, EvalRun, GrantAudit, PublishRequest
 from schemas import (
     ApprovalAuthorityCreate,
     ApprovalAuthorityResponse,
@@ -137,8 +137,47 @@ async def list_publish_requests(
         await db.execute(q.order_by(PublishRequest.submitted_at.desc()).limit(limit).offset(offset))
     ).scalars().all()
 
+    # Enrich with latest eval score per agent publish request
+    items: list[PublishRequestResponse] = []
+    agent_asset_ids = [r.asset_id for r in rows if r.asset_type == "agent"]
+    eval_map: dict[uuid.UUID, tuple[float | None, uuid.UUID | None]] = {}
+    if agent_asset_ids:
+        from sqlalchemy import func as sa_func
+
+        agent_rows = (
+            await db.execute(select(Agent.id, Agent.name).where(Agent.id.in_(agent_asset_ids)))
+        ).all()
+        name_by_id = {row.id: row.name for row in agent_rows}
+        agent_names = list(name_by_id.values())
+        if agent_names:
+            latest_eval_q = (
+                select(
+                    EvalRun.agent_name,
+                    EvalRun.overall_score,
+                    EvalRun.id,
+                )
+                .where(
+                    EvalRun.agent_name.in_(agent_names),
+                    EvalRun.status == "completed",
+                )
+                .order_by(EvalRun.completed_at.desc())
+                .distinct(EvalRun.agent_name)
+            )
+            eval_rows = (await db.execute(latest_eval_q)).all()
+            name_to_eval = {row.agent_name: (row.overall_score, row.id) for row in eval_rows}
+            for aid, aname in name_by_id.items():
+                if aname in name_to_eval:
+                    eval_map[aid] = name_to_eval[aname]
+
+    for r in rows:
+        resp = PublishRequestResponse.model_validate(r)
+        if r.asset_id in eval_map:
+            resp.last_eval_score = eval_map[r.asset_id][0]
+            resp.last_eval_run_id = eval_map[r.asset_id][1]
+        items.append(resp)
+
     return PaginatedResponse[PublishRequestResponse](
-        items=[PublishRequestResponse.model_validate(r) for r in rows],
+        items=items,
         total=total,
     )
 

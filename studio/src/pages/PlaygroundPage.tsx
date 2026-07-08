@@ -6,12 +6,15 @@ import InteractionSurface from "../components/playground/InteractionSurface";
 import HitlPanel, { type HitlRequest } from "../components/playground/HitlPanel";
 import TracePanel, { type TraceEvent } from "../components/playground/TracePanel";
 import VersionSelector from "../components/playground/VersionSelector";
+import WorkflowSelector from "../components/playground/WorkflowSelector";
 import { Database } from "lucide-react";
 import { getAgent, listTriggers } from "../api/registryApi";
 
 export default function PlaygroundPage() {
   const navigate = useNavigate();
+  const [targetType, setTargetType] = useState<"agent" | "workflow">("agent");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedWorkflow, setSelectedWorkflow] = useState<{ id: string; name: string } | null>(null);
   const [hitlRequest, setHitlRequest] = useState<HitlRequest | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
@@ -69,17 +72,45 @@ export default function PlaygroundPage() {
 
   return (
     <div className="flex h-screen overflow-hidden">
-      {/* Left panel — agent selector */}
+      {/* Left panel — agent/workflow selector */}
       <div className="w-60 shrink-0 border-r border-slate-200 bg-white p-4 flex flex-col gap-4 overflow-y-auto">
         <div>
           <h2 className="text-sm font-semibold text-slate-800 mb-3">Evaluate</h2>
-          <VersionSelector
-            selectedAgent={selectedAgent ?? ""}
-            onSelect={(name) => {
-              setSelectedAgent(name || null);
-              setTraceEvents([]);
-            }}
-          />
+
+          {/* Agent / Workflow toggle */}
+          <div className="flex gap-1 p-1 bg-slate-100 rounded-lg mb-3">
+            <button
+              onClick={() => { setTargetType("agent"); setSelectedWorkflow(null); }}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
+                targetType === "agent" ? "bg-white shadow text-slate-800" : "text-slate-500"
+              }`}
+            >
+              Agent
+            </button>
+            <button
+              onClick={() => { setTargetType("workflow"); setSelectedAgent(null); setTraceEvents([]); }}
+              className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
+                targetType === "workflow" ? "bg-white shadow text-slate-800" : "text-slate-500"
+              }`}
+            >
+              Workflow
+            </button>
+          </div>
+
+          {targetType === "agent" ? (
+            <VersionSelector
+              selectedAgent={selectedAgent ?? ""}
+              onSelect={(name) => {
+                setSelectedAgent(name || null);
+                setTraceEvents([]);
+              }}
+            />
+          ) : (
+            <WorkflowSelector
+              selectedWorkflowId={selectedWorkflow?.id ?? ""}
+              onSelect={(wf) => setSelectedWorkflow(wf)}
+            />
+          )}
         </div>
 
         <div className="pt-2 border-t border-slate-100">
@@ -92,7 +123,7 @@ export default function PlaygroundPage() {
           </button>
         </div>
 
-        {selectedAgent && (
+        {(selectedAgent || selectedWorkflow) && (
           <div className="mt-auto">
             <div className="rounded-md bg-purple-50 border border-purple-200 px-3 py-2">
               <p className="text-xs text-purple-700 font-medium">Sandbox mode</p>
@@ -104,9 +135,9 @@ export default function PlaygroundPage() {
         )}
       </div>
 
-      {/* Center panel — chat */}
+      {/* Center panel — chat / workflow run */}
       <div className="flex-1 flex flex-col min-w-0 bg-white">
-        {selectedAgent && (
+        {selectedAgent && targetType === "agent" && (
           <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
             <span className="text-sm font-medium text-slate-700">{selectedAgent}</span>
             <span className="badge bg-purple-100 text-purple-700 text-xs">sandbox</span>
@@ -115,19 +146,34 @@ export default function PlaygroundPage() {
             </span>
           </div>
         )}
-        {executionShape === "durable" || triggerMode !== "none" ? (
-          <div className="flex-1 overflow-y-auto p-4">
-            <InteractionSurface
-              agentName={selectedAgent!}
-              executionShape={executionShape as "reactive" | "durable"}
-              triggerMode={triggerMode}
-            />
+        {selectedWorkflow && targetType === "workflow" && (
+          <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
+            <span className="text-sm font-medium text-slate-700">{selectedWorkflow.name}</span>
+            <span className="badge bg-indigo-100 text-indigo-700 text-xs">workflow</span>
           </div>
+        )}
+        {targetType === "agent" ? (
+          executionShape === "durable" || triggerMode !== "none" ? (
+            <div className="flex-1 overflow-y-auto p-4">
+              <InteractionSurface
+                agentName={selectedAgent!}
+                executionShape={executionShape as "reactive" | "durable"}
+                triggerMode={triggerMode}
+              />
+            </div>
+          ) : (
+            <ChatPane
+              agentName={selectedAgent}
+              onApprovalRequested={handleApprovalRequested}
+              onTraceEvent={handleTraceEvent}
+            />
+          )
         ) : (
-          <ChatPane
-            agentName={selectedAgent}
-            onApprovalRequested={handleApprovalRequested}
-            onTraceEvent={handleTraceEvent}
+          <InteractionSurface
+            agentName={selectedWorkflow?.name ?? null}
+            executionShape="durable"
+            triggerMode="none"
+            workflowId={selectedWorkflow?.id}
           />
         )}
       </div>

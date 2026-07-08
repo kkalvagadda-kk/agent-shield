@@ -1,13 +1,13 @@
 dependencies:
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.7.11
+  version: 18.7.12
 - name: pgbouncer
   repository: file://charts/pgbouncer
   version: 0.1.0
 - name: redis
   repository: https://charts.bitnami.com/bitnami
-  version: 27.0.13
+  version: 27.0.14
 - name: minio
   repository: https://charts.bitnami.com/bitnami
   version: 17.0.21
@@ -22,7 +22,7 @@ dependencies:
   version: 9.4.4
 - name: appsmith
   repository: https://helm.appsmith.com
-  version: 3.8.1
+  version: 3.9.0
 - name: registry-api
   repository: file://charts/registry-api
   version: 0.2.0
@@ -62,5 +62,5 @@ dependencies:
 - name: event-gateway
   repository: file://charts/event-gateway
   version: 0.1.0
-digest: sha256:d162ea0acefe18f390e26a0bbf0bed046b7665e677c908763caf05b7a475a8c0
-generated: "2026-07-06T17:59:32.498465-05:00"
+digest: sha256:4ce6523b9037027fc9c1243bdbc1ca38ec4cc63a35903eef951e809d6d751055
+generated: "2026-07-07T16:17:59.645271-05:00"

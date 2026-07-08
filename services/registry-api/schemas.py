@@ -573,6 +573,8 @@ class ToolResponse(BaseModel):
     mcp_server_id: uuid.UUID | None
     mcp_tool_name: str | None
     python_code: str | None
+    created_by: str | None = None
+    publish_status: str = "published"
     created_at: datetime
     updated_at: datetime
 
@@ -722,6 +724,7 @@ class SkillResponse(BaseModel):
     description: str | None
     tool_ids: list[str]
     status: str
+    publish_status: str = "published"
     created_at: datetime
     created_by: str | None
     model_config = ConfigDict(from_attributes=True)
@@ -787,6 +790,8 @@ class PublishRequestResponse(BaseModel):
     reviewed_by: Optional[str]
     reviewed_at: Optional[datetime]
     review_notes: Optional[str]
+    last_eval_score: Optional[float] = None
+    last_eval_run_id: Optional[uuid.UUID] = None
 
 
 class PublishRequestApprove(BaseModel):
@@ -924,12 +929,14 @@ class PlaygroundDatasetResponse(BaseModel):
 class EvalRunCreate(BaseModel):
     agent_name: str
     agent_version_id: Optional[uuid.UUID] = None
+    workflow_id: Optional[uuid.UUID] = None
     dataset_id: uuid.UUID
 
 
 class EvalRunResultCreate(BaseModel):
     dataset_item_idx: int
     input_message: Optional[str] = None
+    expected_output: Optional[str] = None
     response: Optional[str] = None
     judge_score: Optional[float] = None
     judge_reasoning: Optional[str] = None
@@ -943,10 +950,12 @@ class EvalRunResultResponse(BaseModel):
     eval_run_id: uuid.UUID
     dataset_item_idx: int
     input_message: Optional[str]
+    expected_output: Optional[str]
     response: Optional[str]
     judge_score: Optional[float]
     judge_reasoning: Optional[str]
     passed: Optional[bool]
+    langfuse_trace_id: Optional[str]
     created_at: datetime
 
 
@@ -965,6 +974,7 @@ class EvalRunResponse(BaseModel):
     user_id: str
     agent_name: str
     agent_version_id: Optional[uuid.UUID]
+    workflow_id: Optional[uuid.UUID]
     dataset_id: uuid.UUID
     status: str
     total_items: Optional[int]

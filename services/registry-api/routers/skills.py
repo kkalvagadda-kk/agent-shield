@@ -17,10 +17,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import get_optional_user
 from db import get_db
 from models import Skill
 from schemas import PaginatedResponse, SkillCreate, SkillResponse, SkillUpdate
@@ -84,11 +85,23 @@ async def list_skills(
     team: Optional[str] = Query(None, description="Filter by team name"),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page"),
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[SkillResponse]:
     """Return a paginated list of skills, optionally filtered by team."""
+    caller = (user or {}).get("sub") or x_user_sub
+
     base_query = select(Skill)
     count_query = select(func.count()).select_from(Skill)
+
+    # Visibility: published skills visible to all; private only to creator.
+    if caller:
+        vis = or_(Skill.publish_status == "published", Skill.created_by == caller)
+    else:
+        vis = Skill.publish_status == "published"
+    base_query = base_query.where(vis)
+    count_query = count_query.where(vis)
 
     if team is not None:
         base_query = base_query.where(Skill.team == team)

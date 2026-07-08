@@ -3,7 +3,7 @@ import { ArrowLeft, Bot, Loader2, Rocket, Send } from "lucide-react";
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { getAgent, publishAgent } from "../api/registryApi";
+import { getAgent, listVersions, publishAgent } from "../api/registryApi";
 import MemoryTab from "../components/agent-detail/MemoryTab";
 import OverviewDurable from "../components/agent-detail/OverviewDurable";
 import OverviewReactive from "../components/agent-detail/OverviewReactive";
@@ -47,6 +47,14 @@ export default function AgentDetailPage() {
   });
   const hasSchedule = triggers.some((t) => t.trigger_type === "schedule");
   const hasWebhook = triggers.some((t) => t.trigger_type === "webhook");
+
+  const { data: versions = [] } = useQuery({
+    queryKey: ["versions", name],
+    queryFn: () => listVersions(name!),
+    enabled: !!name,
+  });
+  const latestVersion = versions.length > 0 ? versions[versions.length - 1] : null;
+  const evalGatePassed = latestVersion?.eval_passed === true;
 
   const publishMutation = useMutation({
     mutationFn: () => publishAgent(name!),
@@ -143,21 +151,31 @@ export default function AgentDetailPage() {
             <Rocket size={12} />
             Deploy
           </button>
-          <button
-            onClick={handlePublish}
-            disabled={
-              publishMutation.isPending ||
-              agent.publish_status === "pending_review" ||
-              agent.publish_status === "published"
-            }
-            className="btn-primary text-xs py-1.5 disabled:opacity-50"
-          >
-            {publishMutation.isPending ? (
-              <><Loader2 size={12} className="animate-spin" /> Submitting…</>
-            ) : (
-              <><Send size={12} /> Publish</>
+          <div className="relative group">
+            <button
+              onClick={handlePublish}
+              disabled={
+                publishMutation.isPending ||
+                agent.publish_status === "pending_review" ||
+                agent.publish_status === "published" ||
+                !evalGatePassed
+              }
+              className="btn-primary text-xs py-1.5 disabled:opacity-50"
+            >
+              {publishMutation.isPending ? (
+                <><Loader2 size={12} className="animate-spin" /> Submitting…</>
+              ) : (
+                <><Send size={12} /> Publish</>
+              )}
+            </button>
+            {!evalGatePassed && agent.publish_status !== "published" && (
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10">
+                <div className="bg-slate-800 text-white text-xs rounded px-2 py-1 whitespace-nowrap">
+                  Run an eval that passes before publishing
+                </div>
+              </div>
             )}
-          </button>
+          </div>
         </div>
       </div>
 

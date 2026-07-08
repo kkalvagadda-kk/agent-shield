@@ -2,20 +2,31 @@ import { Loader2, Play } from "lucide-react";
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { launchDurableRun } from "../../api/playgroundApi";
+import { triggerWorkflowRun } from "../../api/registryApi";
 
 interface RunLauncherProps {
   agentName: string;
   versionId?: string;
+  workflowId?: string;
   onRunStarted: (runId: string) => void;
 }
 
-export default function RunLauncher({ agentName, versionId, onRunStarted }: RunLauncherProps) {
+export default function RunLauncher({ agentName, versionId, workflowId, onRunStarted }: RunLauncherProps) {
   const [payload, setPayload] = useState('{\n  "message": "Hello"\n}');
   const [parseError, setParseError] = useState<string | null>(null);
 
   const mutation = useMutation({
-    mutationFn: (inputPayload: Record<string, unknown>) =>
-      launchDurableRun(agentName, inputPayload, versionId),
+    mutationFn: async (inputPayload: Record<string, unknown>) => {
+      if (workflowId) {
+        const res = await triggerWorkflowRun(workflowId, {
+          input_payload: inputPayload,
+          trigger_type: "manual",
+          run_by: "playground",
+        });
+        return { run_id: res.run_id };
+      }
+      return launchDurableRun(agentName, inputPayload, versionId);
+    },
     onSuccess: (data) => {
       onRunStarted(data.run_id);
     },

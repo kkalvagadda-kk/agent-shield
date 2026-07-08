@@ -30,7 +30,7 @@
 | Phase 10.3 | Playground — eval runner + datasets | Planned |
 
 Design specs (implementation source of truth):
-- [`docs/design/authorization-model-spec.md`](../design/authorization-model-spec.md) — identity, OPA, asset lifecycle, HITL authority
+- [`docs/design/authorization-model-spec.md`](../design/todo/authorization-model-spec.md) — identity, OPA, asset lifecycle, HITL authority
 - [`docs/design/playground-spec.md`](../design/playground-spec.md) — interactive console, sandbox, eval runner, HITL self-approval
 
 ---

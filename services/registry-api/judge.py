@@ -30,6 +30,7 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 _JUDGE_TIMEOUT = 30.0  # seconds; if exceeded, judge_score stays null
+_JUDGE_MODEL = os.getenv("JUDGE_MODEL", "us.anthropic.claude-haiku-4-5-20251001")
 
 _JUDGE_PROMPT = """You are evaluating the quality of an AI assistant's response.
 
@@ -72,7 +73,6 @@ async def score_run(
     await _write_score(run_id, score=score, reason=reason, status="completed")
     logger.info("judge: run %s scored %.2f (%s)", run_id, score, reason[:60])
 
-    # Push score to Langfuse trace
     if langfuse_trace_id:
         from tracing import trace_judge_score
         trace_judge_score(trace_id=langfuse_trace_id, score=score, reason=reason)
@@ -85,18 +85,43 @@ async def _call_judge(
 ) -> tuple[float, str]:
     """Call the LLM provider and parse the score. Returns (score, reason)."""
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        api_key = await _resolve_provider_key(team)
-    if not api_key:
-        raise ValueError("no LLM provider configured — skipping judge")
+    if api_key:
+        return await _call_judge_anthropic(input_text, output_text, api_key)
 
-    prompt = _JUDGE_PROMPT.format(
+    provider_type, model, creds = await _resolve_provider(team)
+    if provider_type == "bedrock":
+        return await _call_judge_bedrock(input_text, output_text, model, creds)
+    elif provider_type == "anthropic":
+        return await _call_judge_anthropic(input_text, output_text, creds["api_key"])
+    else:
+        raise ValueError(f"unsupported provider type: {provider_type}")
+
+
+def _build_prompt(input_text: str, output_text: str) -> str:
+    return _JUDGE_PROMPT.format(
         input=input_text[:800],
         output=output_text[:800],
     )
 
+
+def _parse_score(body: dict) -> tuple[float, str]:
+    text = body["content"][0]["text"].strip()
+    parsed = json.loads(text)
+    score = float(parsed["score"])
+    if not 0.0 <= score <= 1.0:
+        raise ValueError(f"score {score} out of range")
+    return score, str(parsed.get("reason", ""))
+
+
+async def _call_judge_anthropic(
+    input_text: str,
+    output_text: str,
+    api_key: str,
+) -> tuple[float, str]:
+    """Call Anthropic Messages API directly."""
+    prompt = _build_prompt(input_text, output_text)
     payload = json.dumps({
-        "model": os.getenv("JUDGE_MODEL", "claude-haiku-4-5-20251001"),
+        "model": _JUDGE_MODEL,
         "max_tokens": 128,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
@@ -114,14 +139,53 @@ async def _call_judge(
 
     loop = asyncio.get_running_loop()
     raw = await loop.run_in_executor(None, _fetch_sync, req)
-    body = json.loads(raw)
+    return _parse_score(json.loads(raw))
 
-    text = body["content"][0]["text"].strip()
-    parsed = json.loads(text)
-    score = float(parsed["score"])
-    if not 0.0 <= score <= 1.0:
-        raise ValueError(f"score {score} out of range")
-    return score, str(parsed.get("reason", ""))
+
+async def _call_judge_bedrock(
+    input_text: str,
+    output_text: str,
+    model: str,
+    creds: dict,
+) -> tuple[float, str]:
+    """Call Anthropic model via AWS Bedrock invoke_model."""
+    import boto3
+
+    prompt = _build_prompt(input_text, output_text)
+    judge_model = _JUDGE_MODEL if _JUDGE_MODEL != model else model
+    body = json.dumps({
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 128,
+        "messages": [{"role": "user", "content": prompt}],
+    })
+
+    loop = asyncio.get_running_loop()
+    raw = await loop.run_in_executor(
+        None,
+        _invoke_bedrock_sync,
+        creds,
+        judge_model,
+        body,
+    )
+    return _parse_score(json.loads(raw))
+
+
+def _invoke_bedrock_sync(creds: dict, model_id: str, body: str) -> bytes:
+    import boto3
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=creds.get("aws_region", "us-east-1"),
+        aws_access_key_id=creds["aws_access_key_id"],
+        aws_secret_access_key=creds["aws_secret_access_key"],
+    )
+    response = client.invoke_model(
+        modelId=model_id,
+        contentType="application/json",
+        accept="application/json",
+        body=body.encode(),
+    )
+    return response["body"].read()
 
 
 def _fetch_sync(req: urllib.request.Request) -> bytes:
@@ -129,29 +193,24 @@ def _fetch_sync(req: urllib.request.Request) -> bytes:
         return r.read()
 
 
-async def _resolve_provider_key(team: str) -> str:
-    """Look up the first active LLMProvider for the team and decrypt its key."""
-    try:
-        from crypto import decrypt_value
-        from db import AsyncSessionLocal
-        from models import LLMProvider
-        from sqlalchemy import select
+async def _resolve_provider(team: str) -> tuple[str, str, dict]:
+    """Look up the first active LLMProvider for the team and return (type, model, creds)."""
+    from crypto import decrypt_json
+    from db import AsyncSessionLocal
+    from models import LLMProvider
+    from sqlalchemy import select
 
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(LLMProvider)
-                .where(LLMProvider.team == team, LLMProvider.provider == "anthropic")
-                .limit(1)
-            )
-            provider = result.scalar_one_or_none()
-            if not provider:
-                return ""
-            creds_json = decrypt_value(provider.credentials_encrypted)
-            creds = json.loads(creds_json)
-            return creds.get("api_key", "")
-    except Exception as exc:
-        logger.debug("judge: provider key resolution failed: %s", exc)
-        return ""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(LLMProvider)
+            .where(LLMProvider.team == team)
+            .limit(1)
+        )
+        provider = result.scalar_one_or_none()
+        if not provider:
+            raise ValueError(f"no LLM provider configured for team '{team}'")
+        creds = decrypt_json(provider.credentials_encrypted)
+        return provider.provider, provider.default_model, creds
 
 
 async def _write_score(

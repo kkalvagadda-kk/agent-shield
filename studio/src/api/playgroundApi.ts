@@ -62,6 +62,7 @@ export interface EvalRun {
   user_id: string;
   agent_name: string;
   agent_version_id: string | null;
+  workflow_id: string | null;
   dataset_id: string;
   status: string;
   total_items: number | null;
@@ -78,10 +79,12 @@ export interface EvalRunResult {
   eval_run_id: string;
   dataset_item_idx: number;
   input_message: string | null;
+  expected_output: string | null;
   response: string | null;
   judge_score: number | null;
   judge_reasoning: string | null;
   passed: boolean | null;
+  langfuse_trace_id: string | null;
   created_at: string;
 }
 
@@ -134,6 +137,15 @@ export async function submitRunFeedback(
   return data;
 }
 
+export async function getTraceById(traceId: string): Promise<{
+  trace_id: string;
+  trace_url: string;
+  langfuse: Record<string, unknown>;
+}> {
+  const { data } = await http.get(`/playground/traces/${traceId}`);
+  return data;
+}
+
 // ---------------------------------------------------------------------------
 // Playground Approvals
 // ---------------------------------------------------------------------------
@@ -178,6 +190,7 @@ export async function createEvalRun(body: {
   agent_name: string;
   dataset_id: string;
   agent_version_id?: string;
+  workflow_id?: string;
 }): Promise<EvalRun> {
   const { data } = await http.post<EvalRun>("/playground/eval-runs", body);
   return data;
