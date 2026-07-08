@@ -61,7 +61,12 @@ spec:
               value: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
             - name: LANGFUSE_HOST
               value: "http://{{ .Release.Name }}-langfuse-web:3000"
-            - name: LANGFUSE_KEY
+            - name: LANGFUSE_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: langfuse-api-keys
+                  key: public-key
+            - name: LANGFUSE_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: langfuse-api-keys

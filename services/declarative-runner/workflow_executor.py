@@ -65,17 +65,18 @@ def _make_langfuse_handler(trace_id: str | None, session_id: str | None = None):
     """Create a LangfuseCallbackHandler attached to an existing trace, or None."""
     if not trace_id:
         return None
-    lf_key = os.getenv("AGENTSHIELD_LANGFUSE_KEY", "")
-    lf_host = os.getenv("AGENTSHIELD_LANGFUSE_HOST", "")
-    if not lf_key or not lf_host:
+    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+    lf_host = os.getenv("LANGFUSE_HOST", "")
+    if not lf_pk or not lf_sk or not lf_host:
         return None
     try:
         from langfuse.callback import CallbackHandler as LangfuseCallbackHandler
         return LangfuseCallbackHandler(
             trace_id=trace_id,
             session_id=session_id,
-            public_key=lf_key,
-            secret_key=lf_key,
+            public_key=lf_pk,
+            secret_key=lf_sk,
             host=lf_host,
         )
     except Exception:

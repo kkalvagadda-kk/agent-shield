@@ -212,11 +212,14 @@ def build_deployment(
 
     # --- Langfuse observability (enables LangfuseCallbackHandler in declarative-runner) ---
     langfuse_host = os.environ.get("LANGFUSE_HOST", "")
-    langfuse_key = os.environ.get("LANGFUSE_KEY", "")
+    langfuse_pk = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    langfuse_sk = os.environ.get("LANGFUSE_SECRET_KEY", "")
     if langfuse_host:
-        env_vars.append(k8s_client.V1EnvVar(name="AGENTSHIELD_LANGFUSE_HOST", value=langfuse_host))
-    if langfuse_key:
-        env_vars.append(k8s_client.V1EnvVar(name="AGENTSHIELD_LANGFUSE_KEY", value=langfuse_key))
+        env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_HOST", value=langfuse_host))
+    if langfuse_pk:
+        env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_PUBLIC_KEY", value=langfuse_pk))
+    if langfuse_sk:
+        env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_SECRET_KEY", value=langfuse_sk))
 
     # --- Agent container ---
     agent_container = k8s_client.V1Container(
