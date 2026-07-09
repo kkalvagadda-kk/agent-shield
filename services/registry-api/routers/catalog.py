@@ -107,7 +107,7 @@ async def list_all_production_deployments(
 ) -> list[dict]:
     """List all production deployments across all artifacts (fleet view)."""
     q = (
-        select(ProductionDeployment, PublishedArtifact.name.label("artifact_name"))
+        select(ProductionDeployment, PublishedArtifact.name.label("artifact_name"), PublishedArtifact.type.label("artifact_type"))
         .join(PublishedArtifact, ProductionDeployment.artifact_id == PublishedArtifact.id)
         .order_by(ProductionDeployment.updated_at.desc())
     )
@@ -115,7 +115,7 @@ async def list_all_production_deployments(
         q = q.where(ProductionDeployment.status == status_filter)
     rows = (await db.execute(q.limit(limit).offset(offset))).all()
 
-    version_ids = list({dep.version_id for dep, _ in rows})
+    version_ids = list({dep.version_id for dep, _, _ in rows})
     ver_map: dict[uuid.UUID, str] = {}
     if version_ids:
         ver_rows = (await db.execute(
@@ -125,11 +125,12 @@ async def list_all_production_deployments(
         ver_map = {vid: vlabel for vid, vlabel in ver_rows}
 
     items = []
-    for dep, artifact_name in rows:
+    for dep, artifact_name, artifact_type in rows:
         items.append({
             "id": str(dep.id),
             "artifact_id": str(dep.artifact_id),
             "artifact_name": artifact_name,
+            "artifact_type": artifact_type,
             "version_id": str(dep.version_id),
             "version_label": ver_map.get(dep.version_id),
             "status": dep.status,

@@ -116,12 +116,21 @@ export default function DeploymentsPage() {
                   >
                     {/* Deployment */}
                     <td className="px-4 py-3">
-                      <Link
-                        to={`/catalog/${d.artifact_id}`}
-                        className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
-                      >
-                        {d.artifact_name}-{d.id.slice(0, 8)}
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        <Link
+                          to={`/catalog/${d.artifact_id}`}
+                          className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                        >
+                          {d.artifact_name}-{d.id.slice(0, 8)}
+                        </Link>
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                          d.artifact_type === "workflow"
+                            ? "bg-purple-100 text-purple-700"
+                            : "bg-sky-100 text-sky-700"
+                        }`}>
+                          {d.artifact_type === "workflow" ? "Workflow" : "Agent"}
+                        </span>
+                      </div>
                     </td>
 
                     {/* Version */}

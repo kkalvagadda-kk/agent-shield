@@ -120,6 +120,7 @@ export interface FleetDeployment {
   id: string;
   artifact_id: string;
   artifact_name: string;
+  artifact_type: string;
   version_id: string;
   version_label: string | null;
   status: string;
