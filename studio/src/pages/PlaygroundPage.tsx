@@ -1,20 +1,32 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import ChatPane from "../components/playground/ChatPane";
 import InteractionSurface from "../components/playground/InteractionSurface";
 import HitlPanel, { type HitlRequest } from "../components/playground/HitlPanel";
 import TracePanel, { type TraceEvent } from "../components/playground/TracePanel";
 import VersionSelector from "../components/playground/VersionSelector";
+import type { AgentDeploymentSelection } from "../components/playground/VersionSelector";
 import WorkflowSelector from "../components/playground/WorkflowSelector";
-import { Database } from "lucide-react";
-import { getAgent, listTriggers } from "../api/registryApi";
+import type { WorkflowDeploymentSelection } from "../components/playground/WorkflowSelector";
+import { CheckCircle, Database, Loader2, Send } from "lucide-react";
+import {
+  getAgent,
+  listTriggers,
+  patchVersion,
+  patchWorkflowVersion,
+  publishAgent,
+  publishWorkflow,
+} from "../api/registryApi";
 
 export default function PlaygroundPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [targetType, setTargetType] = useState<"agent" | "workflow">("agent");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [selectedWorkflow, setSelectedWorkflow] = useState<{ id: string; name: string } | null>(null);
+  const [agentSelection, setAgentSelection] = useState<AgentDeploymentSelection | null>(null);
+  const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowDeploymentSelection | null>(null);
   const [hitlRequest, setHitlRequest] = useState<HitlRequest | null>(null);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
@@ -70,6 +82,58 @@ export default function PlaygroundPage() {
     setTraceEvents((prev) => [...prev, ev]);
   };
 
+  // Promotion mutations
+  const markAgentPassedMutation = useMutation({
+    mutationFn: () =>
+      patchVersion(agentSelection!.agentName, agentSelection!.versionId!, { eval_passed: true }),
+    onSuccess: () => toast.success("Agent version marked as eval passed"),
+    onError: () => toast.error("Failed to mark version passed"),
+  });
+
+  const publishAgentMutation = useMutation({
+    mutationFn: async () => {
+      if (agentSelection?.versionId) {
+        await patchVersion(agentSelection.agentName, agentSelection.versionId, { eval_passed: true });
+      }
+      return publishAgent(agentSelection!.agentName, { version_id: agentSelection?.versionId ?? undefined });
+    },
+    onSuccess: () => {
+      toast.success("Publish request submitted");
+      qc.invalidateQueries({ queryKey: ["agent", selectedAgent] });
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(detail || "Failed to submit publish request");
+    },
+  });
+
+  const markWorkflowPassedMutation = useMutation({
+    mutationFn: () =>
+      patchWorkflowVersion(selectedWorkflow!.id, selectedWorkflow!.versionId!, { eval_passed: true }),
+    onSuccess: () => toast.success("Workflow version marked as eval passed"),
+    onError: () => toast.error("Failed to mark version passed"),
+  });
+
+  const publishWorkflowMutation = useMutation({
+    mutationFn: async () => {
+      if (selectedWorkflow?.versionId) {
+        await patchWorkflowVersion(selectedWorkflow.id, selectedWorkflow.versionId, { eval_passed: true });
+      }
+      return publishWorkflow(selectedWorkflow!.id, selectedWorkflow?.versionId ?? undefined);
+    },
+    onSuccess: () => {
+      toast.success("Publish request submitted");
+      qc.invalidateQueries({ queryKey: ["workflow", selectedWorkflow?.id] });
+    },
+    onError: (err: unknown) => {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(detail || "Failed to submit publish request");
+    },
+  });
+
+  const canPromoteAgent = targetType === "agent" && agentSelection?.versionId != null;
+  const canPromoteWorkflow = targetType === "workflow" && selectedWorkflow?.versionId != null;
+
   return (
     <div className="flex h-screen overflow-hidden">
       {/* Left panel — agent/workflow selector */}
@@ -88,7 +152,7 @@ export default function PlaygroundPage() {
               Agent
             </button>
             <button
-              onClick={() => { setTargetType("workflow"); setSelectedAgent(null); setTraceEvents([]); }}
+              onClick={() => { setTargetType("workflow"); setSelectedAgent(null); setAgentSelection(null); setTraceEvents([]); }}
               className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
                 targetType === "workflow" ? "bg-white shadow text-slate-800" : "text-slate-500"
               }`}
@@ -100,8 +164,9 @@ export default function PlaygroundPage() {
           {targetType === "agent" ? (
             <VersionSelector
               selectedAgent={selectedAgent ?? ""}
-              onSelect={(name) => {
+              onSelect={(name, selection) => {
                 setSelectedAgent(name || null);
+                setAgentSelection(selection ?? null);
                 setTraceEvents([]);
               }}
             />
@@ -112,6 +177,59 @@ export default function PlaygroundPage() {
             />
           )}
         </div>
+
+        {/* Promotion controls */}
+        {canPromoteAgent && (
+          <div className="flex flex-col gap-2 pt-3 border-t border-slate-100">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Promote</p>
+            <button
+              onClick={() => markAgentPassedMutation.mutate()}
+              disabled={markAgentPassedMutation.isPending || markAgentPassedMutation.isSuccess}
+              className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50 w-full ${
+                markAgentPassedMutation.isSuccess
+                  ? "bg-green-600 text-white"
+                  : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+              }`}
+            >
+              {markAgentPassedMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle size={12} />}
+              {markAgentPassedMutation.isSuccess ? "Version Passed" : "Mark Version Passed"}
+            </button>
+            <button
+              onClick={() => publishAgentMutation.mutate()}
+              disabled={publishAgentMutation.isPending}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 w-full"
+            >
+              {publishAgentMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              Publish Agent
+            </button>
+          </div>
+        )}
+
+        {canPromoteWorkflow && (
+          <div className="flex flex-col gap-2 pt-3 border-t border-slate-100">
+            <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Promote</p>
+            <button
+              onClick={() => markWorkflowPassedMutation.mutate()}
+              disabled={markWorkflowPassedMutation.isPending || markWorkflowPassedMutation.isSuccess}
+              className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50 w-full ${
+                markWorkflowPassedMutation.isSuccess
+                  ? "bg-green-600 text-white"
+                  : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+              }`}
+            >
+              {markWorkflowPassedMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle size={12} />}
+              {markWorkflowPassedMutation.isSuccess ? "Version Passed" : "Mark Version Passed"}
+            </button>
+            <button
+              onClick={() => publishWorkflowMutation.mutate()}
+              disabled={publishWorkflowMutation.isPending}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 w-full"
+            >
+              {publishWorkflowMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+              Publish Workflow
+            </button>
+          </div>
+        )}
 
         <div className="pt-2 border-t border-slate-100">
           <button

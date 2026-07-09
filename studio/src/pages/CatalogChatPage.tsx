@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Bot, Loader2, Send } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
-import { startAgentChat } from "../api/registryApi";
+import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 
 interface Message {
@@ -25,6 +25,7 @@ export default function CatalogChatPage() {
     (d) => d.status === "running"
   );
   const agentName = artifact?.name;
+  const isWorkflow = artifact?.type === "workflow";
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -36,11 +37,70 @@ export default function CatalogChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const sendMessage = async () => {
-    if (!input.trim() || isStreaming || !agentName) return;
-    const userMsg = input.trim();
-    setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+  const pollWorkflowResult = useCallback(async (workflowId: string, runId: string) => {
+    const maxAttempts = 60;
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const tree = await getWorkflowRunTree(workflowId, runId);
+        if (tree.parent.status === "completed") {
+          return tree.parent.output || "Workflow completed successfully.";
+        }
+        if (tree.parent.status === "failed") {
+          return `Workflow failed: ${tree.parent.error_message || "unknown error"}`;
+        }
+      } catch {
+        // keep polling
+      }
+    }
+    return "Workflow is still running. Check the Runs tab for results.";
+  }, []);
+
+  const sendWorkflowMessage = useCallback(async (userMsg: string) => {
+    if (!artifact?.source_id) return;
+    setIsStreaming(true);
+    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+
+    try {
+      const kc = getKeycloak();
+      const userSub = kc?.tokenParsed?.sub || "unknown";
+
+      const result = await triggerWorkflowRun(artifact.source_id, {
+        input_payload: { message: userMsg },
+        trigger_type: "api",
+        run_by: userSub,
+      });
+
+      setMessages((prev) => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: "assistant", content: "Running workflow..." };
+        return copy;
+      });
+
+      const output = await pollWorkflowResult(artifact.source_id, result.run_id);
+
+      setMessages((prev) => {
+        const copy = [...prev];
+        copy[copy.length - 1] = { role: "assistant", content: output };
+        return copy;
+      });
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setMessages((prev) => {
+        const copy = [...prev];
+        copy[copy.length - 1] = {
+          role: "assistant",
+          content: detail || "Error: failed to start workflow run.",
+        };
+        return copy;
+      });
+    } finally {
+      setIsStreaming(false);
+    }
+  }, [artifact?.source_id, pollWorkflowResult]);
+
+  const sendAgentMessage = useCallback(async (userMsg: string) => {
+    if (!agentName) return;
     setIsStreaming(true);
 
     try {
@@ -52,7 +112,6 @@ export default function CatalogChatPage() {
 
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
-      // Get a fresh token from keycloak — the context snapshot may be stale/expired
       const kc = getKeycloak();
       if (kc?.authenticated) {
         await kc.updateToken(10);
@@ -98,6 +157,19 @@ export default function CatalogChatPage() {
         },
       ]);
     }
+  }, [agentName, sessionId]);
+
+  const sendMessage = async () => {
+    if (!input.trim() || isStreaming || !agentName) return;
+    const userMsg = input.trim();
+    setInput("");
+    setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+
+    if (isWorkflow) {
+      await sendWorkflowMessage(userMsg);
+    } else {
+      await sendAgentMessage(userMsg);
+    }
   };
 
   return (
@@ -113,7 +185,7 @@ export default function CatalogChatPage() {
         <Bot size={18} className="text-blue-600 shrink-0" />
         <div className="flex-1 min-w-0">
           <h1 className="text-sm font-semibold text-slate-900 truncate">
-            {artifact?.name ?? "Loading…"}
+            {artifact?.name ?? "Loading..."}
           </h1>
           {artifact?.description && (
             <p className="text-xs text-slate-400 truncate">
@@ -124,6 +196,11 @@ export default function CatalogChatPage() {
         <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
           Production
         </span>
+        {isWorkflow && (
+          <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+            Workflow
+          </span>
+        )}
         {activeDeployment?.version_label && (
           <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
             {activeDeployment.version_label}
@@ -182,10 +259,10 @@ export default function CatalogChatPage() {
             disabled={isStreaming || !agentName}
             placeholder={
               isStreaming
-                ? "Waiting for response…"
+                ? "Waiting for response..."
                 : !agentName
-                  ? "Loading agent…"
-                  : "Message…"
+                  ? "Loading agent..."
+                  : "Message..."
             }
           />
           <button

@@ -336,7 +336,7 @@ function OverviewTab({
                   <Play size={14} />
                 </button>
               )}
-              {(deployment.status === "running" || deployment.status === "suspended") && (
+              {(deployment.status === "running" || deployment.status === "suspended" || deployment.status === "failed") && (
                 <button
                   onClick={() => {
                     if (confirm(`Terminate deployment of "${artifact.name}"? This will delete the K8s pod and service.`)) {

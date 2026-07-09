@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Loader2 } from "lucide-react";
-import { listFleetDeployments } from "../api/catalogApi";
+import { Loader2, MessageCircle, Pause, Play, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import { listFleetDeployments, updateDeployment } from "../api/catalogApi";
 
 const STATUS_LABELS: Record<string, { label: string; cls: string }> = {
   pending:      { label: "Pending",      cls: "bg-amber-100 text-amber-700" },
@@ -28,11 +29,22 @@ type FilterValue = typeof FILTER_TABS[number]["value"];
 
 export default function DeploymentsPage() {
   const [statusFilter, setStatusFilter] = useState<FilterValue>("");
+  const queryClient = useQueryClient();
 
   const { data: deployments = [], isLoading } = useQuery({
     queryKey: ["fleet-deployments", statusFilter],
     queryFn: () => listFleetDeployments(statusFilter || undefined),
     refetchInterval: 15_000,
+  });
+
+  const actionMut = useMutation({
+    mutationFn: ({ artifactId, deploymentId, action }: { artifactId: string; deploymentId: string; action: "suspend" | "resume" | "terminate" }) =>
+      updateDeployment(artifactId, deploymentId, action),
+    onSuccess: (_data, vars) => {
+      toast.success(`Deployment ${vars.action} requested`);
+      queryClient.invalidateQueries({ queryKey: ["fleet-deployments"] });
+    },
+    onError: (err: Error) => toast.error(err.message),
   });
 
   return (
@@ -84,7 +96,7 @@ export default function DeploymentsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Agent", "Version", "Status", "Namespace", "Deployed At", "Actions"].map((h) => (
+                  {["Deployment", "Version", "Status", "Namespace", "Deployed At", "Actions"].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -102,13 +114,13 @@ export default function DeploymentsPage() {
                       d.status === "running" ? "border-l-2 border-l-green-400" : ""
                     }`}
                   >
-                    {/* Agent */}
+                    {/* Deployment */}
                     <td className="px-4 py-3">
                       <Link
                         to={`/catalog/${d.artifact_id}`}
                         className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
                       >
-                        {d.artifact_name}
+                        {d.artifact_name}-{d.id.slice(0, 8)}
                       </Link>
                     </td>
 
@@ -142,14 +154,55 @@ export default function DeploymentsPage() {
 
                     {/* Actions */}
                     <td className="px-4 py-3">
-                      {d.status === "running" && (
-                        <Link
-                          to={`/catalog/${d.artifact_id}/chat`}
-                          className="text-xs font-medium text-blue-600 hover:text-blue-800"
-                        >
-                          Chat →
-                        </Link>
-                      )}
+                      <div className="flex items-center gap-1">
+                        {(d.status === "deploying" || d.status === "suspending" || d.status === "terminating") && (
+                          <Loader2 size={14} className="animate-spin text-slate-400" />
+                        )}
+                        {d.status === "running" && (
+                          <>
+                            <Link
+                              to={`/catalog/${d.artifact_id}/chat`}
+                              className="p-1.5 rounded-md hover:bg-blue-50 transition-colors text-blue-600"
+                              title="Chat"
+                            >
+                              <MessageCircle size={14} />
+                            </Link>
+                            <button
+                              onClick={() => actionMut.mutate({ artifactId: d.artifact_id, deploymentId: d.id, action: "suspend" })}
+                              disabled={actionMut.isPending}
+                              className="p-1.5 rounded-md hover:bg-amber-50 disabled:opacity-40 transition-colors text-amber-600"
+                              title="Suspend"
+                            >
+                              <Pause size={14} />
+                            </button>
+                          </>
+                        )}
+                        {d.status === "suspended" && (
+                          <button
+                            onClick={() => actionMut.mutate({ artifactId: d.artifact_id, deploymentId: d.id, action: "resume" })}
+                            disabled={actionMut.isPending}
+                            className="p-1.5 rounded-md hover:bg-green-50 disabled:opacity-40 transition-colors text-green-600"
+                            title="Resume"
+                          >
+                            <Play size={14} />
+                          </button>
+                        )}
+                        {(d.status === "running" || d.status === "suspended" || d.status === "failed") && (
+                          <button
+                            onClick={() => {
+                              const verb = d.status === "failed" ? "Clean up" : "Terminate";
+                              if (confirm(`${verb} deployment "${d.artifact_name}"? This will delete the K8s namespace and resources.`)) {
+                                actionMut.mutate({ artifactId: d.artifact_id, deploymentId: d.id, action: "terminate" });
+                              }
+                            }}
+                            disabled={actionMut.isPending}
+                            className="p-1.5 rounded-md hover:bg-red-50 disabled:opacity-40 transition-colors text-red-500"
+                            title={d.status === "failed" ? "Clean up failed deployment" : "Terminate"}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

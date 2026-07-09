@@ -658,8 +658,6 @@ async def publish_workflow(
 
     if wf.publish_status == "pending_review":
         raise HTTPException(status_code=409, detail="A publish request is already pending review.")
-    if wf.publish_status == "published":
-        raise HTTPException(status_code=409, detail="This workflow is already published.")
 
     # Eval gate: resolve the target version.
     # If body.version_id is provided (from a deployment context), validate
