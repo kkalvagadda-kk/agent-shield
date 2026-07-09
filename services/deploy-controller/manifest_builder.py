@@ -198,6 +198,18 @@ def build_deployment(
             k8s_client.V1EnvVar(name="WORKFLOW_JSON", value=workflow_json_b64)
         )
 
+    # --- Composite workflow orchestrator mode ---
+    composite_workflow_id = deployment.get("composite_workflow_id")
+    if composite_workflow_id:
+        env_vars.append(
+            k8s_client.V1EnvVar(name="COMPOSITE_WORKFLOW_ID", value=composite_workflow_id)
+        )
+    workflow_config_b64 = deployment.get("workflow_config_b64")
+    if workflow_config_b64:
+        env_vars.append(
+            k8s_client.V1EnvVar(name="WORKFLOW_CONFIG", value=workflow_config_b64)
+        )
+
     env_vars.append(
         k8s_client.V1EnvVar(name="REGISTRY_API_URL", value=registry_api_url)
     )

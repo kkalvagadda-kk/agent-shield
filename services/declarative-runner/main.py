@@ -63,18 +63,33 @@ workflow_executor: Any = None  # set during lifespan startup
 async def lifespan(app: FastAPI):
     global workflow_executor
 
+    if cfg.COMPOSITE_WORKFLOW_ID:
+        import base64 as _b64
+        logger.info(
+            "Composite workflow orchestrator mode — COMPOSITE_WORKFLOW_ID=%s",
+            cfg.COMPOSITE_WORKFLOW_ID,
+        )
+        wf_config = {}
+        if cfg.WORKFLOW_CONFIG:
+            try:
+                wf_config = json.loads(_b64.b64decode(cfg.WORKFLOW_CONFIG))
+            except Exception:
+                logger.warning("Failed to decode WORKFLOW_CONFIG, using empty config")
+        app.state.workflow_config = wf_config
+        yield
+        logger.info("Workflow orchestrator shutting down")
+        return
+
     from workflow_executor import WorkflowExecutor  # type: ignore[import]
 
     workflow_executor = WorkflowExecutor()
 
     if not cfg.WORKFLOW_JSON:
-        # Simple agent mode — fetch config from registry API
         await workflow_executor.setup_simple_agent_mode()
 
-    await workflow_executor.setup()  # replaces MemorySaver with Postgres if configured
+    await workflow_executor.setup()
     logger.info("WorkflowExecutor ready — declarative runner is up")
 
-    # Resume interrupted durable runs from checkpoint
     import asyncio
     asyncio.create_task(_resume_interrupted_runs())
 
@@ -192,21 +207,27 @@ async def health():
 
 
 @app.post("/workflow-run")
-async def workflow_run(req: WorkflowRunRequest):
-    """Composite-workflow orchestration entrypoint (Decision 22, future-state).
+async def workflow_run(req: WorkflowRunRequest, request: Request):
+    """Composite-workflow orchestration entrypoint (Decision 22).
 
-    Active ONLY when this pod is deployed as a workflow orchestrator
-    (COMPOSITE_WORKFLOW_ID set — deferred deploy-controller wiring). On all
-    current single-agent deployments this returns 404. The MVP orchestration
-    path runs inside registry-api instead (research doc Option C)."""
+    Active when this pod is deployed as a workflow orchestrator
+    (COMPOSITE_WORKFLOW_ID set by deploy-controller). On single-agent
+    deployments this returns 404."""
     import asyncio
 
     from orchestrator import WorkflowOrchestrator
 
     if not cfg.COMPOSITE_WORKFLOW_ID:
         raise HTTPException(status_code=404, detail="This pod is not a workflow orchestrator.")
-    orch = WorkflowOrchestrator(cfg.COMPOSITE_WORKFLOW_ID, req.parent_run_id, cfg.REGISTRY_API_URL)
-    asyncio.create_task(orch.run_sequential(req.members, req.input_payload or {}))
+
+    wf_config = getattr(request.app.state, "workflow_config", {})
+    members = req.members or wf_config.get("members", [])
+    team = members[0].get("team", "") if members else ""
+
+    orch = WorkflowOrchestrator(
+        cfg.COMPOSITE_WORKFLOW_ID, req.parent_run_id, cfg.REGISTRY_API_URL, team
+    )
+    asyncio.create_task(orch.run_sequential(members, req.input_payload or {}))
     return {"status": "accepted", "parent_run_id": req.parent_run_id}
 
 

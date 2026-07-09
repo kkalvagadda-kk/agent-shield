@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +31,8 @@ import asyncio
 
 from auth_middleware import get_optional_user
 from db import get_db
-from models import Agent, AgentRun, AgentTrigger, CompositeWorkflow, WorkflowEdge, WorkflowMember
+from rbac import grant_creator_admin
+from models import Agent, AgentRun, AgentTrigger, AgentVersion, CompositeWorkflow, WorkflowEdge, WorkflowMember
 from schemas import (
     AgentRunResponse,
     AgentTriggerCreate,
@@ -50,7 +52,7 @@ from schemas import (
     WorkflowTriggerResponse,
 )
 from trigger_utils import _new_token, workflow_webhook_url
-from workflow_orchestrator import orchestrate, resolve_member_names
+from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +129,8 @@ async def create_workflow(
         memory_enabled=body.memory_enabled, created_by=caller,
     )
     db.add(wf)
+    await db.flush()
+    await grant_creator_admin(db, "workflow", wf.id, caller)
     await db.commit()
     await db.refresh(wf)
     logger.info("created composite workflow '%s' (id=%s) by %s", wf.name, wf.id, caller)
@@ -318,6 +322,14 @@ async def start_workflow_run(
         if undeployed else None
     )
 
+    # Scope to active workflow deployment (if any)
+    active_wf_dep = (await db.execute(
+        select(WorkflowDeployment.id).where(
+            WorkflowDeployment.workflow_id == workflow_id,
+            WorkflowDeployment.status == "running",
+        ).order_by(WorkflowDeployment.deployed_at.desc()).limit(1)
+    )).scalar_one_or_none()
+
     parent = AgentRun(
         agent_name=wf.name,
         input=message[:4000] if message else None,
@@ -327,6 +339,7 @@ async def start_workflow_run(
         run_by=body.run_by,
         team=wf.team,
         workflow_id=wf.id,
+        workflow_deployment_id=active_wf_dep,
     )
     db.add(parent)
     await db.flush()
@@ -345,12 +358,47 @@ async def start_workflow_run(
     await db.commit()
     await db.refresh(parent)
 
-    asyncio.create_task(
-        orchestrate(str(parent.id), wf.team, str(workflow_id), message, wf.orchestration)
-    )
+    # Try dispatching to a production orchestrator pod if one exists
+    from models import PublishedArtifact, ProductionDeployment
+    prod_art = (await db.execute(
+        select(PublishedArtifact).where(
+            PublishedArtifact.source_id == workflow_id,
+            PublishedArtifact.type == "workflow",
+        )
+    )).scalar_one_or_none()
+    has_prod_pod = False
+    if prod_art:
+        prod_dep = (await db.execute(
+            select(ProductionDeployment).where(
+                ProductionDeployment.artifact_id == prod_art.id,
+                ProductionDeployment.status == "running",
+            )
+        )).scalar_one_or_none()
+        if prod_dep:
+            # Resolve member data for the orchestrator pod
+            from models import WorkflowMember
+            wf_members = (await db.execute(
+                select(WorkflowMember, Agent.name)
+                .join(Agent, Agent.id == WorkflowMember.agent_id)
+                .where(WorkflowMember.workflow_id == workflow_id)
+                .order_by(WorkflowMember.position.nulls_last())
+            )).all()
+            members_data = [
+                {"agent_name": aname, "team": wf.team, "position": m.position}
+                for (m, aname) in wf_members
+            ]
+            has_prod_pod = await dispatch_to_orchestrator_pod(
+                wf.name, wf.team, str(parent.id), members_data, {"message": message}
+            )
+
+    if not has_prod_pod:
+        asyncio.create_task(
+            orchestrate(str(parent.id), wf.team, str(workflow_id), message, wf.orchestration)
+        )
+
     logger.info(
-        "started workflow run %s for workflow '%s' (mode=%s, %d members%s)",
-        parent.id, wf.name, wf.orchestration, len(member_names),
+        "started workflow run %s for workflow '%s' (mode=%s, %d members, prod_pod=%s%s)",
+        parent.id, wf.name, wf.orchestration, len(member_names), has_prod_pod,
         f", {len(undeployed)} undeployed" if undeployed else "",
     )
     return WorkflowRunStartResponse(workflow_id=wf.id, run_id=parent.id, status="queued", warning=warning)
@@ -581,6 +629,10 @@ async def rotate_workflow_trigger_token(
 # ---------------------------------------------------------------------------
 # POST /{workflow_id}/publish
 # ---------------------------------------------------------------------------
+class WorkflowPublishBody(BaseModel):
+    version_id: Optional[uuid.UUID] = None
+
+
 @router.post(
     "/{workflow_id}/publish",
     status_code=status.HTTP_202_ACCEPTED,
@@ -588,6 +640,7 @@ async def rotate_workflow_trigger_token(
 )
 async def publish_workflow(
     workflow_id: uuid.UUID,
+    body: WorkflowPublishBody = WorkflowPublishBody(),
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
@@ -608,17 +661,486 @@ async def publish_workflow(
     if wf.publish_status == "published":
         raise HTTPException(status_code=409, detail="This workflow is already published.")
 
+    # Eval gate: resolve the target version.
+    # If body.version_id is provided (from a deployment context), validate
+    # that specific version. Otherwise fall back to the latest version.
+    from models import WorkflowVersion
+    if body.version_id:
+        target_ver = (await db.execute(
+            select(WorkflowVersion)
+            .where(WorkflowVersion.id == body.version_id, WorkflowVersion.workflow_id == workflow_id)
+        )).scalar_one_or_none()
+        if target_ver is None:
+            raise HTTPException(status_code=404, detail="Specified workflow version not found.")
+    else:
+        target_ver = (await db.execute(
+            select(WorkflowVersion)
+            .where(WorkflowVersion.workflow_id == workflow_id)
+            .order_by(WorkflowVersion.version_number.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+    if target_ver is None:
+        raise HTTPException(status_code=409, detail="No version exists. Create a version before publishing.")
+    if not target_ver.eval_passed:
+        raise HTTPException(status_code=403, detail="Workflow version has not passed evaluation.")
+
     pr = PublishRequest(
         asset_id=wf.id,
         asset_type="workflow",
         submitted_by=caller,
         highest_risk_level="low",
         dependency_declaration={},
+        source_version_id=target_ver.id,
     )
     db.add(pr)
     wf.publish_status = "pending_review"
     wf.updated_at = datetime.now(timezone.utc)
     await db.flush()
 
-    logger.info("publish_workflow: id=%s submitted_by=%s pr_id=%s", workflow_id, caller, pr.id)
+    logger.info("publish_workflow: id=%s submitted_by=%s pr_id=%s version=%s", workflow_id, caller, pr.id, target_ver.id)
     return {"publish_request_id": str(pr.id)}
+
+
+# ---------------------------------------------------------------------------
+# Workflow Versions (snapshot composition for deploy + rollback)
+# ---------------------------------------------------------------------------
+from models import WorkflowVersion, WorkflowDeployment
+from schemas import (
+    WorkflowVersionCreate,
+    WorkflowVersionPatch,
+    WorkflowVersionResponse,
+    WorkflowDeploymentCreate,
+    WorkflowDeploymentResponse,
+    WorkflowDeploymentActionRequest,
+)
+
+
+@router.post(
+    "/{workflow_id}/versions",
+    response_model=WorkflowVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Snapshot current workflow composition as a version",
+)
+async def create_workflow_version(
+    workflow_id: uuid.UUID,
+    body: WorkflowVersionCreate,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowVersionResponse:
+    wf = await _get_workflow(workflow_id, db)
+    caller = (user or {}).get("sub") or x_user_sub or "system"
+
+    # Determine next version number
+    max_q = select(func.max(WorkflowVersion.version_number)).where(
+        WorkflowVersion.workflow_id == workflow_id
+    )
+    max_num = (await db.execute(max_q)).scalar() or 0
+
+    # Snapshot members
+    members_q = (
+        select(WorkflowMember, Agent.name)
+        .join(Agent, Agent.id == WorkflowMember.agent_id)
+        .where(WorkflowMember.workflow_id == workflow_id)
+        .order_by(WorkflowMember.position.nulls_last())
+    )
+    member_rows = (await db.execute(members_q)).all()
+    members_snapshot = []
+    for (m, aname) in member_rows:
+        latest_ver_id = (await db.execute(
+            select(AgentVersion.id)
+            .where(AgentVersion.agent_id == m.agent_id)
+            .order_by(AgentVersion.version_number.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        members_snapshot.append({
+            "agent_id": str(m.agent_id),
+            "agent_name": aname,
+            "role": m.role,
+            "position": m.position,
+            "agent_version_id": str(latest_ver_id) if latest_ver_id else None,
+        })
+
+    # Snapshot edges
+    edges_q = (
+        select(WorkflowEdge)
+        .where(WorkflowEdge.workflow_id == workflow_id)
+        .order_by(WorkflowEdge.position.nulls_last())
+    )
+    edge_rows = (await db.execute(edges_q)).scalars().all()
+    edges_snapshot = [
+        {"source_agent_id": str(e.source_agent_id), "target_agent_id": str(e.target_agent_id),
+         "condition": e.condition, "position": e.position}
+        for e in edge_rows
+    ]
+
+    version = WorkflowVersion(
+        workflow_id=workflow_id,
+        version_number=max_num + 1,
+        members=members_snapshot,
+        edges=edges_snapshot,
+        orchestration=wf.orchestration,
+        execution_shape=wf.execution_shape,
+        config={"memory_enabled": wf.memory_enabled},
+        eval_passed=body.eval_passed,
+        created_by=caller,
+    )
+    db.add(version)
+    await db.commit()
+    await db.refresh(version)
+    logger.info("created workflow version v%d for '%s'", version.version_number, wf.name)
+    return WorkflowVersionResponse.model_validate(version)
+
+
+@router.get("/{workflow_id}/versions", response_model=list[WorkflowVersionResponse])
+async def list_workflow_versions(
+    workflow_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkflowVersionResponse]:
+    await _get_workflow(workflow_id, db)
+    q = (
+        select(WorkflowVersion)
+        .where(WorkflowVersion.workflow_id == workflow_id)
+        .order_by(WorkflowVersion.version_number.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(q)).scalars().all()
+    return [WorkflowVersionResponse.model_validate(v) for v in rows]
+
+
+@router.delete(
+    "/{workflow_id}/versions/{version_id}",
+    summary="Delete a workflow version (cascades sandbox deployments)",
+)
+async def delete_workflow_version(
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete a workflow version.
+
+    - Returns 404 if the workflow or version does not exist.
+    - Terminates all non-terminated WorkflowDeployment rows for this version.
+    """
+    await _get_workflow(workflow_id, db)
+
+    ver = (
+        await db.execute(
+            select(WorkflowVersion).where(
+                WorkflowVersion.id == version_id,
+                WorkflowVersion.workflow_id == workflow_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if ver is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version '{version_id}' not found for workflow '{workflow_id}'.",
+        )
+
+    # Terminate all non-terminated deployments for this version.
+    active_deps = (
+        await db.execute(
+            select(WorkflowDeployment).where(
+                WorkflowDeployment.version_id == version_id,
+                WorkflowDeployment.status.notin_(["terminated"]),
+            )
+        )
+    ).scalars().all()
+    now = datetime.now(timezone.utc)
+    for dep in active_deps:
+        dep.status = "terminated"
+        dep.terminated_at = now
+    terminated_count = len(active_deps)
+
+    await db.delete(ver)
+    await db.commit()
+
+    logger.info(
+        "delete_workflow_version: deleted version %s for workflow '%s' (terminated %d deployments)",
+        version_id,
+        workflow_id,
+        terminated_count,
+    )
+    return {"deleted_version_id": str(version_id), "terminated_deployments": terminated_count}
+
+
+@router.patch(
+    "/{workflow_id}/versions/{version_id}",
+    response_model=WorkflowVersionResponse,
+    summary="Patch workflow version eval result",
+)
+async def patch_workflow_version(
+    workflow_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: WorkflowVersionPatch,
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowVersionResponse:
+    await _get_workflow(workflow_id, db)
+
+    ver = (
+        await db.execute(
+            select(WorkflowVersion).where(
+                WorkflowVersion.id == version_id,
+                WorkflowVersion.workflow_id == workflow_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if ver is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version '{version_id}' not found for workflow '{workflow_id}'.",
+        )
+
+    changed = False
+    if body.eval_passed is not None:
+        ver.eval_passed = body.eval_passed
+        changed = True
+    if body.notes is not None:
+        ver.notes = body.notes
+        changed = True
+
+    if changed:
+        await db.flush()
+        await db.refresh(ver)
+
+    logger.info(
+        "patch_workflow_version: workflow=%s version=%s eval_passed=%s",
+        workflow_id, version_id, ver.eval_passed,
+    )
+    return WorkflowVersionResponse.model_validate(ver)
+
+
+# ---------------------------------------------------------------------------
+# Workflow Deployments (logical — no pod, platform is the orchestrator)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{workflow_id}/deploy",
+    response_model=WorkflowDeploymentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Deploy a workflow version (logical deployment)",
+)
+async def deploy_workflow(
+    workflow_id: uuid.UUID,
+    body: WorkflowDeploymentCreate,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowDeploymentResponse:
+    wf = await _get_workflow(workflow_id, db)
+    caller = (user or {}).get("sub") or x_user_sub or "system"
+
+    # Verify version belongs to this workflow
+    ver = (await db.execute(
+        select(WorkflowVersion).where(
+            WorkflowVersion.id == body.version_id,
+            WorkflowVersion.workflow_id == workflow_id,
+        )
+    )).scalar_one_or_none()
+    if ver is None:
+        raise HTTPException(status_code=404, detail="Workflow version not found for this workflow.")
+
+    if body.environment == "production" and not ver.eval_passed:
+        raise HTTPException(
+            status_code=403,
+            detail="Workflow version must pass evaluation before production deployment.",
+        )
+
+    deployment_name = body.name or f"{wf.name}-{uuid.uuid4().hex[:4]}"
+
+    dep = WorkflowDeployment(
+        workflow_id=workflow_id,
+        version_id=body.version_id,
+        name=deployment_name,
+        environment=body.environment,
+        status="running",
+        replicas=body.replicas,
+        ttl_hours=body.ttl_hours,
+        deployed_by=caller,
+    )
+    db.add(dep)
+    await db.commit()
+    await db.refresh(dep)
+    logger.info("deployed workflow '%s' version v%d as '%s'", wf.name, ver.version_number, dep.name)
+    return WorkflowDeploymentResponse.model_validate(dep)
+
+
+@router.get("/{workflow_id}/deployments", response_model=list[WorkflowDeploymentResponse])
+async def list_workflow_deployments(
+    workflow_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkflowDeploymentResponse]:
+    await _get_workflow(workflow_id, db)
+    q = (
+        select(WorkflowDeployment)
+        .where(WorkflowDeployment.workflow_id == workflow_id)
+        .order_by(WorkflowDeployment.deployed_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(q)).scalars().all()
+    return [WorkflowDeploymentResponse.model_validate(d) for d in rows]
+
+
+@router.patch(
+    "/{workflow_id}/deployments/{deployment_id}",
+    response_model=WorkflowDeploymentResponse,
+    summary="Lifecycle action on a workflow deployment",
+)
+async def workflow_deployment_action(
+    workflow_id: uuid.UUID,
+    deployment_id: uuid.UUID,
+    body: WorkflowDeploymentActionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> WorkflowDeploymentResponse:
+    dep = (await db.execute(
+        select(WorkflowDeployment).where(
+            WorkflowDeployment.id == deployment_id,
+            WorkflowDeployment.workflow_id == workflow_id,
+        )
+    )).scalar_one_or_none()
+    if dep is None:
+        raise HTTPException(status_code=404, detail="Workflow deployment not found.")
+
+    now = datetime.now(timezone.utc)
+    if body.action == "suspend":
+        dep.status = "suspended"
+        dep.suspended_at = now
+    elif body.action == "resume":
+        dep.status = "running"
+        dep.suspended_at = None
+    elif body.action == "terminate":
+        dep.status = "terminated"
+        dep.terminated_at = now
+    elif body.action == "upgrade":
+        if body.version_id is None:
+            raise HTTPException(status_code=400, detail="version_id required for upgrade action.")
+        ver = (await db.execute(
+            select(WorkflowVersion).where(
+                WorkflowVersion.id == body.version_id,
+                WorkflowVersion.workflow_id == workflow_id,
+            )
+        )).scalar_one_or_none()
+        if ver is None:
+            raise HTTPException(status_code=404, detail="Version not found for this workflow.")
+        dep.previous_version_id = dep.version_id
+        dep.version_id = body.version_id
+        dep.status = "running"
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action '{body.action}'")
+
+    await db.commit()
+    await db.refresh(dep)
+    logger.info("workflow deployment %s action=%s → status=%s", deployment_id, body.action, dep.status)
+    return WorkflowDeploymentResponse.model_validate(dep)
+
+
+# ---------------------------------------------------------------------------
+# Workflow deployment stats + runs (mirrors agent deployment stats)
+# ---------------------------------------------------------------------------
+@router.get(
+    "/{workflow_id}/deployments/{deployment_id}/stats",
+    summary="Run statistics for a workflow deployment (last 24h)",
+)
+async def get_workflow_deployment_stats(
+    workflow_id: uuid.UUID,
+    deployment_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from datetime import timedelta
+    import math
+    from sqlalchemy import case
+
+    dep = (await db.execute(
+        select(WorkflowDeployment).where(
+            WorkflowDeployment.id == deployment_id,
+            WorkflowDeployment.workflow_id == workflow_id,
+        )
+    )).scalar_one_or_none()
+    if dep is None:
+        raise HTTPException(status_code=404, detail="Workflow deployment not found.")
+
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+    scope = AgentRun.workflow_deployment_id == deployment_id
+
+    stats_q = select(
+        func.count(AgentRun.id).label("run_count"),
+        func.sum(case((AgentRun.status == "failed", 1), else_=0)).label("error_count"),
+        func.sum(AgentRun.cost_usd).label("total_cost"),
+    ).where(scope, AgentRun.started_at >= cutoff)
+    row = (await db.execute(stats_q)).first()
+    run_count = row.run_count or 0
+    error_count = row.error_count or 0
+    total_cost = float(row.total_cost or 0)
+    error_rate = (error_count / run_count) if run_count > 0 else 0.0
+
+    p50 = p95 = None
+    if run_count > 0:
+        latency_q = (
+            select(AgentRun.latency_ms)
+            .where(scope, AgentRun.started_at >= cutoff, AgentRun.latency_ms.isnot(None))
+            .order_by(AgentRun.latency_ms)
+        )
+        latencies = [r[0] for r in (await db.execute(latency_q)).all()]
+        if latencies:
+            p50 = latencies[min(len(latencies) - 1, math.floor(len(latencies) * 0.5))]
+            p95 = latencies[min(len(latencies) - 1, math.floor(len(latencies) * 0.95))]
+
+    return {
+        "run_count": run_count,
+        "p50_latency_ms": p50,
+        "p95_latency_ms": p95,
+        "error_rate": round(error_rate, 4),
+        "total_cost_usd": round(total_cost, 6),
+    }
+
+
+@router.get(
+    "/{workflow_id}/deployments/{deployment_id}/runs",
+    response_model=list[AgentRunResponse],
+    summary="List runs scoped to a workflow deployment",
+)
+async def list_workflow_deployment_runs(
+    workflow_id: uuid.UUID,
+    deployment_id: uuid.UUID,
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentRunResponse]:
+    import os
+
+    dep = (await db.execute(
+        select(WorkflowDeployment).where(
+            WorkflowDeployment.id == deployment_id,
+            WorkflowDeployment.workflow_id == workflow_id,
+        )
+    )).scalar_one_or_none()
+    if dep is None:
+        raise HTTPException(status_code=404, detail="Workflow deployment not found.")
+
+    q = (
+        select(AgentRun)
+        .where(AgentRun.workflow_deployment_id == deployment_id)
+        .order_by(AgentRun.started_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    if status_filter:
+        q = q.where(AgentRun.status == status_filter)
+    rows = list((await db.execute(q)).scalars().all())
+
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    items: list[AgentRunResponse] = []
+    for r in rows:
+        resp = AgentRunResponse.model_validate(r)
+        if r.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        items.append(resp)
+    return items

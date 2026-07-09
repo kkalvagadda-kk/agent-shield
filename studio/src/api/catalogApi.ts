@@ -39,11 +39,21 @@ export interface CatalogDeployment {
   updated_at: string;
 }
 
+export interface MemberTopologyEntry {
+  agent_name: string;
+  agent_id: string;
+  agent_version_id: string | null;
+  role: string | null;
+  position: number | null;
+  has_production_deployment: boolean;
+}
+
 export interface CatalogDetail {
   artifact: CatalogArtifact;
   versions: CatalogVersion[];
   deployments: CatalogDeployment[];
   granted_teams: string[];
+  member_topology: MemberTopologyEntry[];
 }
 
 // ---------------------------------------------------------------------------

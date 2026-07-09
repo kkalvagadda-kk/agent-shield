@@ -32,6 +32,7 @@ from schemas import (
     CatalogDeployRequest,
     CatalogDetailResponse,
     CatalogVersionResponse,
+    MemberTopologyEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,11 +187,42 @@ async def get_catalog_detail(
     art_resp.latest_version = latest_ver
     art_resp.deployment_count = dep_count
 
+    # Resolve member topology for workflow artifacts
+    member_topology: list[MemberTopologyEntry] = []
+    if art.type == "workflow" and versions:
+        members = (versions[0].config_snapshot or {}).get("members", [])
+        for m in members:
+            agent_name = m.get("agent_name", "")
+            member_art = (await db.execute(
+                select(PublishedArtifact).where(
+                    PublishedArtifact.name == agent_name,
+                    PublishedArtifact.type == "agent",
+                )
+            )).scalar_one_or_none()
+            has_dep = False
+            if member_art:
+                dep = (await db.execute(
+                    select(ProductionDeployment).where(
+                        ProductionDeployment.artifact_id == member_art.id,
+                        ProductionDeployment.status == "running",
+                    )
+                )).scalar_one_or_none()
+                has_dep = dep is not None
+            member_topology.append(MemberTopologyEntry(
+                agent_name=agent_name,
+                agent_id=m.get("agent_id", ""),
+                agent_version_id=m.get("agent_version_id"),
+                role=m.get("role"),
+                position=m.get("position"),
+                has_production_deployment=has_dep,
+            ))
+
     return CatalogDetailResponse(
         artifact=art_resp,
         versions=[CatalogVersionResponse.model_validate(v) for v in versions],
         deployments=deployment_items,
         granted_teams=list(set(grants)),
+        member_topology=member_topology,
     )
 
 
@@ -510,3 +542,31 @@ async def patch_production_deployment_status(
 
     await db.commit()
     return {"updated": True, "status": dep.status}
+
+
+@router.post("/internal/verify-members")
+async def verify_member_deployments(
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Check which member agents have active production deployments."""
+    agent_names = body.get("agent_names", [])
+    deployed = set()
+    for name in agent_names:
+        art = (await db.execute(
+            select(PublishedArtifact).where(
+                PublishedArtifact.name == name,
+                PublishedArtifact.type == "agent",
+            )
+        )).scalar_one_or_none()
+        if art:
+            dep = (await db.execute(
+                select(ProductionDeployment).where(
+                    ProductionDeployment.artifact_id == art.id,
+                    ProductionDeployment.status == "running",
+                )
+            )).scalar_one_or_none()
+            if dep:
+                deployed.add(name)
+    missing = [n for n in agent_names if n not in deployed]
+    return {"ok": len(missing) == 0, "missing": missing}

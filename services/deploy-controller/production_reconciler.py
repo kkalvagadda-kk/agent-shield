@@ -230,10 +230,16 @@ async def production_poll_loop(settings: Settings) -> None:
                     # Mark deploying
                     await _patch_status(http, dep_id, "deploying")
 
-                    # Reconcile
-                    new_status, error_msg = await reconcile_production(
-                        dep_info, k8s, settings
-                    )
+                    # Route based on artifact type
+                    artifact_type = dep_info.get("artifact_type", "agent")
+                    if artifact_type == "workflow":
+                        new_status, error_msg = await reconcile_workflow_production(
+                            dep_info, k8s, settings, http
+                        )
+                    else:
+                        new_status, error_msg = await reconcile_production(
+                            dep_info, k8s, settings
+                        )
 
                     if error_msg:
                         logger.warning(
@@ -249,3 +255,111 @@ async def production_poll_loop(settings: Settings) -> None:
                 logger.exception("Production poll loop error: %s", exc)
 
             await asyncio.sleep(settings.poll_interval_seconds)
+
+
+async def _preflight_check_members(
+    dep_info: dict, http: httpx.AsyncClient
+) -> str | None:
+    """Verify all member agents have active production deployments. Returns error string or None."""
+    config = dep_info.get("config_snapshot", {})
+    members = config.get("members", [])
+    if not members:
+        return "Workflow has no members in config_snapshot."
+    agent_names = [m["agent_name"] for m in members]
+    try:
+        resp = await http.post(
+            "/api/v1/catalog/internal/verify-members",
+            json={"agent_names": agent_names},
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            missing = data.get("missing", [])
+            return f"Members without production deployments: {', '.join(missing)}. Deploy them first."
+    except Exception as exc:
+        return f"Pre-flight member check failed: {exc}"
+    return None
+
+
+def _build_workflow_deployment_dict(dep_info: dict) -> dict:
+    """Build a deployment dict for a composite workflow orchestrator pod."""
+    config = dep_info.get("config_snapshot", {})
+    namespace = dep_info.get("namespace") or f"production-{dep_info['artifact_name']}"
+
+    workflow_config = {
+        "members": config.get("members", []),
+        "edges": config.get("edges", []),
+        "orchestration": config.get("orchestration", "sequential"),
+        "execution_shape": config.get("execution_shape", "durable"),
+    }
+
+    return {
+        "id": dep_info["id"],
+        "environment": "production",
+        "k8s_namespace": namespace,
+        "replicas": 1,
+        "composite_workflow_id": dep_info["artifact_id"],
+        "workflow_config_b64": base64.b64encode(
+            json.dumps(workflow_config).encode()
+        ).decode(),
+    }
+
+
+async def reconcile_workflow_production(
+    dep_info: dict, k8s: K8sClient, settings: Settings, http: httpx.AsyncClient
+) -> tuple[str, str | None]:
+    """Reconcile a composite workflow production deployment (orchestrator pod)."""
+    error = await _preflight_check_members(dep_info, http)
+    if error:
+        return ("failed", error)
+
+    agent_dict = _build_agent_dict(dep_info)
+    version_dict = _build_version_dict(dep_info, settings)
+    deployment_dict = _build_workflow_deployment_dict(dep_info)
+
+    agent_name = agent_dict["name"]
+    namespace = deployment_dict["k8s_namespace"]
+    k8s_deployment_name = f"{agent_name}-production"
+
+    loop = asyncio.get_event_loop()
+
+    try:
+        await loop.run_in_executor(None, lambda: k8s.ensure_namespace(namespace))
+        await loop.run_in_executor(None, lambda: k8s.ensure_service_account(agent_name, namespace))
+        await loop.run_in_executor(None, lambda: k8s.ensure_opa_configmap(namespace))
+
+        manifest = build_deployment(
+            deployment_dict, agent_dict, version_dict,
+            settings.opa_image, settings.registry_api_url
+        )
+        restart_ts = datetime.now(timezone.utc).isoformat()
+        tmpl_meta = manifest.spec.template.metadata
+        if tmpl_meta.annotations is None:
+            tmpl_meta.annotations = {}
+        tmpl_meta.annotations["kubectl.kubernetes.io/restartedAt"] = restart_ts
+        await loop.run_in_executor(None, lambda: k8s.create_or_update_deployment(namespace, manifest))
+
+        labels = {
+            "app.kubernetes.io/name": agent_name,
+            "agentshield.io/team": agent_dict["team"],
+            "agentshield.io/environment": "production",
+        }
+        svc_manifest = build_service(agent_name, "production", namespace, labels)
+        await loop.run_in_executor(None, lambda: k8s.create_or_update_service(namespace, svc_manifest))
+
+        deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            available = await loop.run_in_executor(
+                None,
+                lambda: k8s.get_deployment_available_replicas(namespace, k8s_deployment_name),
+            )
+            if available >= 1:
+                logger.info("Workflow orchestrator %s/%s running", namespace, k8s_deployment_name)
+                return ("running", None)
+            await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+
+        return ("failed", f"Timed out waiting for workflow orchestrator {namespace}/{k8s_deployment_name}")
+
+    except Exception as exc:
+        error_msg = f"Workflow production reconcile error for {agent_name}: {exc}"
+        logger.exception(error_msg)
+        return ("failed", error_msg)

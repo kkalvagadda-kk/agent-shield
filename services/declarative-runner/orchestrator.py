@@ -1,17 +1,10 @@
 """
-WorkflowOrchestrator — target-state composite-workflow orchestration (Decision 22).
+WorkflowOrchestrator — composite-workflow orchestration (Decision 22).
 
-This module is the FUTURE home of workflow orchestration (research doc Option A:
-a declarative-runner pod per composite workflow, activated via
-COMPOSITE_WORKFLOW_ID). It is written here so the logic exists once and can be
-promoted without a rewrite when supervisor/handoff modes and the deploy-controller
-workflow-pod wiring land.
-
-⚠ MVP NOTE: for Phase W3 the ACTIVE sequential dispatch runs as a background task
-INSIDE registry-api (services/registry-api/workflow_orchestrator.py, research doc
-Option C). This class is not on the MVP execution path — the /workflow-run
-endpoint returns 404 unless COMPOSITE_WORKFLOW_ID is set, which the platform does
-not set until the deferred deploy-controller extension exists.
+Runs as a dedicated pod per composite workflow, activated via
+COMPOSITE_WORKFLOW_ID env var set by the deploy-controller.
+Dispatches to member agent production pods and manages parent/child
+run lifecycle via registry-api internal endpoints.
 """
 from __future__ import annotations
 
@@ -24,13 +17,28 @@ logger = logging.getLogger("declarative-runner.orchestrator")
 
 
 class WorkflowOrchestrator:
-    def __init__(self, workflow_id: str, parent_run_id: str, registry_url: str) -> None:
+    def __init__(
+        self, workflow_id: str, parent_run_id: str, registry_url: str, team: str = ""
+    ) -> None:
         self.workflow_id = workflow_id
         self.parent_run_id = parent_run_id
         self.registry_url = registry_url.rstrip("/")
+        self.team = team
+
+    async def _mark_parent_status(self, status: str, output: str | None = None) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                body: dict = {"status": status}
+                if output is not None:
+                    body["output"] = output
+                await c.patch(
+                    f"{self.registry_url}/api/v1/agent-runs/{self.parent_run_id}",
+                    json=body,
+                )
+        except Exception as exc:
+            logger.error("failed to update parent run %s status: %s", self.parent_run_id, exc)
 
     async def _create_child_run(self, agent_name: str, team: str, input_msg: str) -> str | None:
-        """Create a child AgentRun (parent_run_id → this workflow run) via registry-api."""
         try:
             async with httpx.AsyncClient(timeout=15.0) as c:
                 r = await c.post(
@@ -48,7 +56,7 @@ class WorkflowOrchestrator:
             return None
 
     async def _dispatch_agent(self, agent_name: str, team: str, input_msg: str) -> tuple[str, str | None]:
-        ns = f"agents-{(team or 'platform').lower().replace(' ', '-')}"
+        ns = f"agents-{(team or self.team or 'platform').lower().replace(' ', '-')}"
         url = f"http://{agent_name}-production.{ns}.svc.cluster.local:8080/chat"
         try:
             async with httpx.AsyncClient(timeout=120.0) as c:
@@ -56,18 +64,31 @@ class WorkflowOrchestrator:
             if r.status_code == 200:
                 data = r.json()
                 return "completed", (data.get("output") or data.get("response") or json.dumps(data))
-            return "failed", None
+            return "failed", f"HTTP {r.status_code}"
         except Exception as exc:
             logger.error("dispatch %s failed: %s", agent_name, exc)
-            return "failed", None
+            return "failed", str(exc)
 
     async def run_sequential(self, members: list[dict], input_payload: dict) -> None:
-        """Iterate members (each {'agent_name','team','position'}) in order, threading output→input."""
+        """Iterate members in order, threading output to input. Reports parent run status."""
+        await self._mark_parent_status("running")
+
         current = input_payload.get("message", "") if isinstance(input_payload, dict) else str(input_payload)
-        for member in sorted(members, key=lambda m: (m.get("position") is None, m.get("position") or 0)):
-            status, output = await self._dispatch_agent(member["agent_name"], member.get("team", ""), current)
+        sorted_members = sorted(members, key=lambda m: (m.get("position") is None, m.get("position") or 0))
+
+        for member in sorted_members:
+            agent_name = member["agent_name"]
+            team = member.get("team", self.team or "")
+
+            await self._create_child_run(agent_name, team, current)
+            status, output = await self._dispatch_agent(agent_name, team, current)
+
             if status == "failed":
-                logger.warning("workflow %s: member %s failed (fail-fast)", self.workflow_id, member["agent_name"])
+                logger.warning("workflow %s: member %s failed (fail-fast)", self.workflow_id, agent_name)
+                await self._mark_parent_status("failed", f"Member {agent_name} failed: {output}")
                 return
+
             current = output or ""
+
         logger.info("workflow %s sequential run complete", self.workflow_id)
+        await self._mark_parent_status("completed", current)

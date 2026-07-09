@@ -637,3 +637,35 @@ async def orchestrate_sequential(parent_run_id: str, team: str, member_agent_nam
     await _mark_parent(parent_run_id, "failed" if failed else "completed",
                        None if failed else current_input)
     logger.info("workflow run %s finished: status=%s", parent_run_id, "failed" if failed else "completed")
+
+
+# ---------------------------------------------------------------------------
+# Production orchestrator pod dispatch
+# ---------------------------------------------------------------------------
+
+
+async def dispatch_to_orchestrator_pod(
+    workflow_name: str,
+    team: str,
+    parent_run_id: str,
+    members: list[dict],
+    input_payload: dict,
+) -> bool:
+    """POST to the production orchestrator pod's /workflow-run. Returns True if accepted."""
+    ns = f"production-{workflow_name}"
+    url = f"http://{workflow_name}-production.{ns}.svc.cluster.local:8080/workflow-run"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, json={
+                "parent_run_id": parent_run_id,
+                "members": members,
+                "input_payload": input_payload,
+            })
+            if resp.status_code == 200:
+                logger.info("dispatched workflow run %s to orchestrator pod at %s", parent_run_id, url)
+                return True
+            logger.warning("orchestrator pod returned %d for run %s", resp.status_code, parent_run_id)
+            return False
+    except Exception as exc:
+        logger.debug("orchestrator pod dispatch failed for %s: %s (falling back to in-process)", parent_run_id, exc)
+        return False

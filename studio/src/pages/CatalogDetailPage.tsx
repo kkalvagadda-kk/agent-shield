@@ -16,7 +16,9 @@ import {
   Play,
   Rocket,
   Eye,
-  Square,
+  Trash2,
+  Users,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -31,6 +33,7 @@ import {
   CatalogDeployment,
   CatalogRun,
   CatalogStats,
+  MemberTopologyEntry,
 } from "../api/catalogApi";
 import TraceDrawer from "../components/playground/TraceDrawer";
 
@@ -109,7 +112,7 @@ export default function CatalogDetailPage() {
     );
   }
 
-  const { artifact, versions, deployments, granted_teams } = data;
+  const { artifact, versions, deployments, granted_teams, member_topology } = data;
   const activeDeployment = deployments.find(
     (d) => d.status === "running" || d.status === "deploying" || d.status === "suspended" || d.status === "suspending" || d.status === "pending"
   );
@@ -165,6 +168,7 @@ export default function CatalogDetailPage() {
           allDeployments={deployments}
           versions={versions}
           stats={stats || null}
+          memberTopology={member_topology || []}
           onAction={(deploymentId, action, versionId) =>
             updateMutation.mutate({ deploymentId, action, versionId })
           }
@@ -180,6 +184,7 @@ export default function CatalogDetailPage() {
           versions={versions}
           onDeploy={(vId) => deployMutation.mutate(vId)}
           isDeploying={deployMutation.isPending}
+          membersReady={!data.member_topology?.length || data.member_topology.every((m) => m.has_production_deployment)}
         />
       )}
       {activeTab === "settings" && (
@@ -203,6 +208,7 @@ function OverviewTab({
   allDeployments,
   versions,
   stats,
+  memberTopology,
   onAction,
   onDeploy,
   isActing,
@@ -212,12 +218,16 @@ function OverviewTab({
   allDeployments: CatalogDeployment[];
   versions: CatalogVersion[];
   stats: CatalogStats | null;
+  memberTopology: MemberTopologyEntry[];
   onAction: (id: string, action: "suspend" | "resume" | "terminate" | "upgrade", vId?: string) => void;
   onDeploy: (versionId: string) => void;
   isActing: boolean;
 }) {
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [selectedVersion, setSelectedVersion] = useState("");
+
+  const isWorkflow = artifact.type === "workflow";
+  const membersReady = !isWorkflow || memberTopology.every((m) => m.has_production_deployment);
 
   // Derive execution_shape from the active version's config_snapshot
   const activeVersion = versions.find((v) => v.id === deployment?.version_id) || versions[0];
@@ -309,9 +319,10 @@ function OverviewTab({
                   <button
                     onClick={() => onAction(deployment.id, "suspend")}
                     disabled={isActing}
-                    className="btn-secondary text-xs flex items-center gap-1 text-amber-700"
+                    className="p-1.5 rounded-md hover:bg-slate-100 disabled:opacity-40 transition-colors text-amber-600"
+                    title="Suspend"
                   >
-                    <Pause size={12} /> Suspend
+                    <Pause size={14} />
                   </button>
                 </>
               )}
@@ -319,9 +330,10 @@ function OverviewTab({
                 <button
                   onClick={() => onAction(deployment.id, "resume")}
                   disabled={isActing}
-                  className="btn-secondary text-xs flex items-center gap-1 text-green-700"
+                  className="p-1.5 rounded-md hover:bg-slate-100 disabled:opacity-40 transition-colors text-green-600"
+                  title="Resume"
                 >
-                  <Play size={12} /> Resume
+                  <Play size={14} />
                 </button>
               )}
               {(deployment.status === "running" || deployment.status === "suspended") && (
@@ -332,46 +344,63 @@ function OverviewTab({
                     }
                   }}
                   disabled={isActing}
-                  className="btn-secondary text-xs flex items-center gap-1 text-red-600 hover:bg-red-50"
+                  className="p-1.5 rounded-md hover:bg-red-50 disabled:opacity-40 transition-colors text-red-500"
+                  title="Terminate"
                 >
-                  <Square size={12} /> Terminate
+                  <Trash2 size={14} />
                 </button>
               )}
             </div>
           </div>
 
-          {/* Upgrade picker */}
+          {/* Upgrade modal */}
           {upgradeOpen && (
-            <div className="pt-3 border-t border-slate-100 flex items-center gap-3">
-              <select
-                value={selectedVersion}
-                onChange={(e) => setSelectedVersion(e.target.value)}
-                className="text-xs border border-slate-200 rounded px-2 py-1.5"
-              >
-                <option value="">Select version…</option>
-                {versions
-                  .filter((v) => v.id !== deployment.version_id)
-                  .map((v) => (
-                    <option key={v.id} value={v.id}>
-                      {v.version_label} — promoted {new Date(v.promoted_at).toLocaleDateString()}
-                    </option>
-                  ))}
-              </select>
-              <button
-                onClick={() => {
-                  if (selectedVersion) {
-                    onAction(deployment.id, "upgrade", selectedVersion);
-                    setUpgradeOpen(false);
-                  }
-                }}
-                disabled={!selectedVersion || isActing}
-                className="btn-primary text-xs"
-              >
-                Confirm
-              </button>
-              <button onClick={() => setUpgradeOpen(false)} className="text-xs text-slate-500">
-                Cancel
-              </button>
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setUpgradeOpen(false)}>
+              <div className="card w-full max-w-sm p-6 bg-white" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-base font-semibold text-slate-900">Upgrade Production Deployment</h3>
+                  <button onClick={() => setUpgradeOpen(false)} className="text-slate-400 hover:text-slate-600">
+                    <X size={16} />
+                  </button>
+                </div>
+                <p className="text-xs text-slate-500 mb-3">
+                  {artifact.name} · currently {deployment.version_label || "unknown"}
+                </p>
+                <label className="block text-sm text-slate-600 mb-1">Target version</label>
+                <select
+                  value={selectedVersion}
+                  onChange={(e) => setSelectedVersion(e.target.value)}
+                  className="input w-full text-sm mb-4"
+                >
+                  <option value="">Select version…</option>
+                  {versions
+                    .filter((v) => v.id !== deployment.version_id)
+                    .map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.version_label} — promoted {new Date(v.promoted_at).toLocaleDateString()}
+                      </option>
+                    ))}
+                </select>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setUpgradeOpen(false)} className="btn-secondary text-sm">Cancel</button>
+                  <button
+                    onClick={() => {
+                      if (selectedVersion) {
+                        onAction(deployment.id, "upgrade", selectedVersion);
+                        setUpgradeOpen(false);
+                      }
+                    }}
+                    disabled={!selectedVersion || isActing}
+                    className="btn-primary text-sm"
+                  >
+                    {isActing ? (
+                      <><Loader2 size={13} className="animate-spin" /> Upgrading…</>
+                    ) : (
+                      <><ArrowUpCircle size={13} /> Upgrade</>
+                    )}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -385,15 +414,26 @@ function OverviewTab({
         <div className="card p-5 text-center">
           <p className="text-sm text-slate-500 mb-3">No active deployment.</p>
           {versions.length > 0 && (
-            <button
-              onClick={() => onDeploy(versions[0].id)}
-              disabled={isActing}
-              className="btn-primary text-xs inline-flex items-center gap-1"
-            >
-              <Rocket size={12} /> Deploy Latest ({versions[0].version_label})
-            </button>
+            <div className="inline-flex flex-col items-center gap-2">
+              <button
+                onClick={() => onDeploy(versions[0].id)}
+                disabled={isActing || !membersReady}
+                className="btn-primary text-xs inline-flex items-center gap-1"
+                title={!membersReady ? "All member agents must have active production deployments before deploying this workflow." : undefined}
+              >
+                <Rocket size={12} /> Deploy Latest ({versions[0].version_label})
+              </button>
+              {!membersReady && (
+                <p className="text-xs text-red-500">Deploy all member agents first</p>
+              )}
+            </div>
           )}
         </div>
+      )}
+
+      {/* Member Topology Card — workflows only */}
+      {isWorkflow && memberTopology.length > 0 && (
+        <MemberTopologyCard members={memberTopology} />
       )}
 
       {/* Production Chat Card — reactive agents only */}
@@ -478,6 +518,60 @@ function OverviewTab({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function MemberTopologyCard({ members }: { members: MemberTopologyEntry[] }) {
+  const deployedCount = members.filter((m) => m.has_production_deployment).length;
+  const allDeployed = deployedCount === members.length;
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+          <Users size={14} className="text-indigo-500" />
+          Member Topology
+          <span className="badge bg-slate-100 text-slate-500 text-xs ml-1">{members.length}</span>
+        </h3>
+      </div>
+      <div className="space-y-2">
+        {members
+          .sort((a, b) => (a.position ?? 999) - (b.position ?? 999))
+          .map((m) => (
+          <div key={m.agent_id} className="flex items-center justify-between text-sm py-1.5 px-2 rounded hover:bg-slate-50">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-800 font-medium">{m.agent_name}</span>
+              {m.role && (
+                <span className="badge bg-slate-100 text-slate-500 text-xs">{m.role}</span>
+              )}
+              {m.position != null && (
+                <span className="text-xs text-slate-400">#{m.position + 1}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  m.has_production_deployment ? "bg-green-500" : "bg-red-500"
+                }`}
+              />
+              <span className={`text-xs font-medium ${
+                m.has_production_deployment ? "text-green-600" : "text-red-600"
+              }`}>
+                {m.has_production_deployment ? "Deployed" : "Not deployed"}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className={`mt-3 pt-3 border-t border-slate-100 text-xs font-medium ${
+        allDeployed ? "text-green-600" : "text-red-600"
+      }`}>
+        {allDeployed
+          ? `${deployedCount}/${members.length} members deployed`
+          : `${deployedCount}/${members.length} members deployed — deploy missing members before deploying this workflow`
+        }
+      </div>
     </div>
   );
 }
@@ -633,10 +727,12 @@ function VersionsTab({
   versions,
   onDeploy,
   isDeploying,
+  membersReady = true,
 }: {
   versions: CatalogVersion[];
   onDeploy: (versionId: string) => void;
   isDeploying: boolean;
+  membersReady?: boolean;
 }) {
   if (versions.length === 0) {
     return <p className="text-sm text-slate-400 py-8 text-center">No versions promoted yet.</p>;
@@ -663,8 +759,9 @@ function VersionsTab({
           </div>
           <button
             onClick={() => onDeploy(v.id)}
-            disabled={isDeploying}
+            disabled={isDeploying || !membersReady}
             className="btn-primary text-xs flex items-center gap-1"
+            title={!membersReady ? "All member agents must have active production deployments first." : undefined}
           >
             <Rocket size={12} /> Deploy
           </button>

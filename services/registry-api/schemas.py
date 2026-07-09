@@ -105,6 +105,8 @@ class AgentResponse(BaseModel):
     updated_at: datetime
     created_by: str
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Computed in list_agents / get_agent — not an ORM column.
+    latest_version_number: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -191,6 +193,7 @@ class AgentVersionResponse(BaseModel):
     image_tag: str | None
     agent_graph_id: uuid.UUID | None
     tools: list[ToolDefinition]
+    config: dict | None = None
     eval_passed: bool
     adversarial_eval_passed: bool
     git_sha: str | None
@@ -207,9 +210,19 @@ class AgentVersionResponse(BaseModel):
 # Deployment
 # ---------------------------------------------------------------------------
 class DeploymentCreate(BaseModel):
-    version_id: uuid.UUID
+    version_id: uuid.UUID | None = None
     replicas: int = Field(1, ge=1, le=10)
     environment: str = Field("production", pattern="^(production|staging|sandbox)$")
+    # Optional custom deployment name; auto-generated ("{agent}-{suffix}") if omitted.
+    name: str | None = Field(None, max_length=256)
+    # Optional auto-terminate window in hours (sandbox cleanup); NULL = never.
+    ttl_hours: int | None = Field(None, ge=1, le=8760)
+
+
+class DeploymentActionRequest(BaseModel):
+    """Lifecycle action on a running deployment (mirror of the catalog action)."""
+    action: Literal["suspend", "resume", "terminate", "upgrade"]
+    version_id: uuid.UUID | None = None  # required for upgrade
 
 
 class RollbackRequest(BaseModel):
@@ -230,12 +243,15 @@ class DeploymentResponse(BaseModel):
     error_message: str | None
     deployed_at: datetime
     terminated_at: datetime | None
+    suspended_at: datetime | None = None
     deployed_by: str | None
     previous_version_id: uuid.UUID | None
     llm_secret_name: str | None = None
     llm_env_keys: list[str] | None = None
     llm_provider_type: str | None = None
     llm_provider_model: str | None = None
+    name: str | None = None
+    ttl_hours: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -500,6 +516,71 @@ class WorkflowRunStartResponse(BaseModel):
 class WorkflowRunTreeResponse(BaseModel):
     parent: "AgentRunResponse"
     children: list["AgentRunResponse"] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Workflow Versions
+# ---------------------------------------------------------------------------
+class WorkflowVersionCreate(BaseModel):
+    eval_passed: bool = False
+    notes: str | None = None
+
+
+class WorkflowVersionPatch(BaseModel):
+    eval_passed: bool | None = None
+    notes: str | None = None
+
+
+class WorkflowVersionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    version_number: int
+    members: list[Any] = Field(default_factory=list)
+    edges: list[Any] = Field(default_factory=list)
+    orchestration: str
+    execution_shape: str
+    config: dict[str, Any] = Field(default_factory=dict)
+    eval_passed: bool
+    created_at: datetime
+    created_by: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Workflow Deployments
+# ---------------------------------------------------------------------------
+class WorkflowDeploymentCreate(BaseModel):
+    version_id: uuid.UUID
+    environment: str = Field("sandbox", pattern="^(production|staging|canary|sandbox)$")
+    replicas: int = Field(1, ge=1, le=10)
+    ttl_hours: int | None = None
+    name: str | None = None
+
+
+class WorkflowDeploymentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    version_id: uuid.UUID
+    name: str | None = None
+    workflow_name: str | None = None
+    environment: str
+    status: str
+    replicas: int
+    ttl_hours: int | None = None
+    deployed_at: datetime
+    suspended_at: datetime | None = None
+    terminated_at: datetime | None = None
+    error_message: str | None = None
+    deployed_by: str | None = None
+    previous_version_id: uuid.UUID | None = None
+
+
+class WorkflowDeploymentActionRequest(BaseModel):
+    action: Literal["suspend", "resume", "terminate", "upgrade"]
+    version_id: uuid.UUID | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -790,8 +871,11 @@ class PublishRequestResponse(BaseModel):
     reviewed_by: Optional[str]
     reviewed_at: Optional[datetime]
     review_notes: Optional[str]
+    source_version_id: Optional[uuid.UUID] = None
     last_eval_score: Optional[float] = None
     last_eval_run_id: Optional[uuid.UUID] = None
+    asset_name: Optional[str] = None
+    asset_team: Optional[str] = None
 
 
 class PublishRequestApprove(BaseModel):
@@ -862,6 +946,7 @@ class ApprovalAuthorityResponse(BaseModel):
 # ---------------------------------------------------------------------------
 class AgentPublishRequest(BaseModel):
     dependency_declaration: dict = {}
+    version_id: Optional[uuid.UUID] = None
 
 
 # ---------------------------------------------------------------------------
@@ -927,10 +1012,13 @@ class PlaygroundDatasetResponse(BaseModel):
 # Eval Run  (Phase 10.3)
 # ---------------------------------------------------------------------------
 class EvalRunCreate(BaseModel):
-    agent_name: str
+    agent_name: Optional[str] = None
     agent_version_id: Optional[uuid.UUID] = None
     workflow_id: Optional[uuid.UUID] = None
+    workflow_version_id: Optional[uuid.UUID] = None
     dataset_id: uuid.UUID
+    sandbox_deployment_id: Optional[uuid.UUID] = None
+    workflow_deployment_id: Optional[uuid.UUID] = None
 
 
 class EvalRunResultCreate(BaseModel):
@@ -985,6 +1073,9 @@ class EvalRunResponse(BaseModel):
     started_at: Optional[datetime]
     completed_at: Optional[datetime]
     created_at: datetime
+    sandbox_deployment_id: Optional[uuid.UUID] = None
+    workflow_deployment_id: Optional[uuid.UUID] = None
+    workflow_version_id: Optional[uuid.UUID] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1093,10 @@ class AgentRunCreate(BaseModel):
     run_by: str | None = None
     team: str | None = None
     thread_id: str | None = None
+    # Run-isolation columns — scope a run to the deployment that produced it.
+    production_deployment_id: uuid.UUID | None = None
+    sandbox_deployment_id: uuid.UUID | None = None
+    workflow_deployment_id: uuid.UUID | None = None
 
 
 class InternalRunStartRequest(BaseModel):
@@ -1063,6 +1158,8 @@ class AgentRunResponse(BaseModel):
     error_message: str | None = None
     trace_url: str | None = None
     production_deployment_id: uuid.UUID | None = None
+    sandbox_deployment_id: uuid.UUID | None = None
+    workflow_deployment_id: uuid.UUID | None = None
     judge_score: float | None = None
 
 
@@ -1266,11 +1363,13 @@ class MemorySaveTurnRequest(BaseModel):
     messages: list[MemoryMessage]
     session_id: str | None = None
     user_id: str | None = None
+    deployment_id: str | None = None
 
 
 class MemorySearchRequest(BaseModel):
     query: str
     top_k: int = Field(5, ge=1, le=50)
+    deployment_id: str | None = None
 
 
 class AgentMemoryResponse(BaseModel):
@@ -1284,6 +1383,7 @@ class AgentMemoryResponse(BaseModel):
     created_at: datetime
     user_id: str | None = None
     session_id: str | None = None
+    deployment_id: uuid.UUID | None = None
 
 
 class MemorySearchResult(BaseModel):
@@ -1339,11 +1439,21 @@ class CatalogArtifactResponse(BaseModel):
     deployment_count: int = 0
 
 
+class MemberTopologyEntry(BaseModel):
+    agent_name: str
+    agent_id: str
+    agent_version_id: str | None = None
+    role: str | None = None
+    position: int | None = None
+    has_production_deployment: bool = False
+
+
 class CatalogDetailResponse(BaseModel):
     artifact: CatalogArtifactResponse
     versions: list[CatalogVersionResponse] = []
     deployments: list[CatalogDeploymentResponse] = []
     granted_teams: list[str] = []
+    member_topology: list[MemberTopologyEntry] = []
 
 
 class CatalogDeployRequest(BaseModel):
@@ -1399,6 +1509,13 @@ __all__ = [
     "WorkflowRunCreate",
     "WorkflowRunStartResponse",
     "WorkflowRunTreeResponse",
+    # WorkflowVersion
+    "WorkflowVersionCreate",
+    "WorkflowVersionResponse",
+    # WorkflowDeployment
+    "WorkflowDeploymentCreate",
+    "WorkflowDeploymentResponse",
+    "WorkflowDeploymentActionRequest",
     # Tool
     "ToolCreate",
     "ToolUpdate",
@@ -1476,6 +1593,7 @@ __all__ = [
     "CatalogVersionResponse",
     "CatalogDeploymentResponse",
     "CatalogDetailResponse",
+    "MemberTopologyEntry",
     "CatalogDeployRequest",
     "CatalogDeploymentUpdateRequest",
     # Error

@@ -3,6 +3,17 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.105 (Slice 4: RBAC foundation — rbac.py module, migration 0044 artifact_role_grants, creator auto-grant, /me enrichment, role normalization)
+#   - studio:0.1.85        (Slice 4: RequireRole guard, isAtLeast() in AuthContext, admin sidebar gated, route-level platform-admin guards)
+#   - registry-api:0.2.104 (Slices 2+3: delete-version cascade (409 on published), workflow artifact page endpoints, WorkflowMiniGraph topology data)
+#   - studio:0.1.84        (Slices 2+3: agent versions table with deploy/delete, WorkflowDetailPage, WorkflowMiniGraph SVG, workflow deployment overview topology)
+#   - registry-api:0.2.103 (Slice 1b: workflow_versions + workflow_deployments tables (migrations 0042/0043); workflow version snapshot + deploy + lifecycle + stats/runs endpoints; agent_runs.workflow_deployment_id FK)
+#   - studio:0.1.83        (Slice 1b: WorkflowDeploymentOverviewPage + /workflows/:id/d/:depId route; workflow version/deployment API client functions)
+#   - registry-api:0.2.102 (Slice 1a: sandbox deployment lifecycle — migration 0041 (status enum +suspending/suspended/terminating, +suspended_at, +ttl_hours); PATCH /agents/{name}/deployments/{id} suspend/resume/terminate/upgrade; AgentResponse.latest_version_number)
+#   - studio:0.1.82        (Slice 1a: DeploymentActions (state-based lifecycle) on Overview + Deployments tab; DeployModal (replicas+TTL); agent list name-link + version col + deploy modal)
+#   - deploy-controller:0.1.23 (Slice 1a: sandbox suspend→scale0→suspended / terminate→delete→terminated handling in poll loop)
+#   - registry-api:0.2.101 (Slice 1 deployment overview: deployments.name + agent_runs.sandbox_deployment_id (0040); GET /deployments/{id}/stats+/runs; AgentRunCreate accepts *_deployment_id)
+#   - studio:0.1.81        (Slice 1: DeploymentOverviewPage + /agents/:name/d/:depId; artifact page = deployments/versions/settings; Overview*/RunsTab deployment-scoped)
 #   - registry-api:0.2.84  (Production artifact isolation: catalog API, production_deployments, run isolation via production_deployment_id)
 #   - studio:0.1.66        (CatalogDetailPage: versions/deployments/runs tabs, deploy/upgrade/suspend/resume actions)
 #   - deploy-controller:0.1.13 (Production reconciler: poll catalog internal API, reconcile production pods from config_snapshot)
@@ -66,12 +77,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.100"
+REGISTRY_API_TAG="0.2.116"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.22"
-STUDIO_TAG="0.1.80"
+DEPLOY_CONTROLLER_TAG="0.1.26"
+STUDIO_TAG="0.1.98"
 EVAL_RUNNER_TAG="0.1.4"
-DECLARATIVE_RUNNER_TAG="0.1.16"
+DECLARATIVE_RUNNER_TAG="0.1.17"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

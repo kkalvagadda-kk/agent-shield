@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db import AsyncSessionLocal
 from models import Agent, AgentRun, AgentTrigger, CompositeWorkflow, Deployment
 from schemas import AgentRunResponse, InternalRunStartRequest
-from workflow_orchestrator import orchestrate, resolve_member_names
+from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
 
 logger = logging.getLogger(__name__)
 
@@ -151,9 +151,42 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
     await db.refresh(run)
 
     import asyncio
-    asyncio.create_task(orchestrate(str(run.id), wf.team, str(wf.id), message, wf.orchestration))
-    logger.info("start_internal_run: WORKFLOW run_id=%s workflow=%s mode=%s members=%d trace=%s",
-                run.id, wf.name, wf.orchestration, len(member_names), trace_id)
+    from models import PublishedArtifact, ProductionDeployment, WorkflowMember
+
+    prod_art = (await db.execute(
+        select(PublishedArtifact).where(
+            PublishedArtifact.source_id == wf.id,
+            PublishedArtifact.type == "workflow",
+        )
+    )).scalar_one_or_none()
+    dispatched = False
+    if prod_art:
+        prod_dep = (await db.execute(
+            select(ProductionDeployment).where(
+                ProductionDeployment.artifact_id == prod_art.id,
+                ProductionDeployment.status == "running",
+            )
+        )).scalar_one_or_none()
+        if prod_dep:
+            wf_members = (await db.execute(
+                select(WorkflowMember, Agent.name)
+                .join(Agent, Agent.id == WorkflowMember.agent_id)
+                .where(WorkflowMember.workflow_id == wf.id)
+                .order_by(WorkflowMember.position.nulls_last())
+            )).all()
+            members_data = [
+                {"agent_name": aname, "team": wf.team, "position": m.position}
+                for (m, aname) in wf_members
+            ]
+            dispatched = await dispatch_to_orchestrator_pod(
+                wf.name, wf.team, str(run.id), members_data, {"message": message}
+            )
+
+    if not dispatched:
+        asyncio.create_task(orchestrate(str(run.id), wf.team, str(wf.id), message, wf.orchestration))
+
+    logger.info("start_internal_run: WORKFLOW run_id=%s workflow=%s mode=%s members=%d prod_pod=%s trace=%s",
+                run.id, wf.name, wf.orchestration, len(member_names), dispatched, trace_id)
     return run
 
 
