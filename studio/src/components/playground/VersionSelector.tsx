@@ -1,61 +1,62 @@
 import { useQuery } from "@tanstack/react-query";
-import { listAgents } from "../../api/registryApi";
-import type { Agent } from "../../api/registryApi";
+import { listAllDeployments } from "../../api/registryApi";
+import type { Deployment } from "../../api/registryApi";
+
+export interface AgentDeploymentSelection {
+  agentName: string;
+  versionId: string | null;
+  deploymentId: string;
+}
 
 interface Props {
   selectedAgent: string;
-  onSelect: (agentName: string) => void;
+  onSelect: (agentName: string, selection?: AgentDeploymentSelection) => void;
 }
-
-const CLASS_CHIP: Record<string, string> = {
-  daemon:         "bg-blue-100 text-blue-700",
-  user_delegated: "bg-purple-100 text-purple-700",
-};
 
 export default function VersionSelector({ selectedAgent, onSelect }: Props) {
   const { data, isLoading } = useQuery({
-    queryKey: ["agents-for-playground"],
-    queryFn: () => listAgents(100, 0, "active"),
+    queryKey: ["sandbox-deployments-for-playground"],
+    queryFn: () => listAllDeployments("running", 100, "sandbox"),
   });
 
-  const agents: Agent[] = data?.items ?? [];
+  const deployments: Deployment[] = data?.items ?? [];
 
   return (
     <div className="flex flex-col gap-3">
       <label className="label text-xs font-semibold text-slate-500 uppercase tracking-wider">
-        Select Agent
+        Select Deployment
       </label>
       {isLoading ? (
-        <p className="text-sm text-slate-400">Loading agents…</p>
+        <p className="text-sm text-slate-400">Loading deployments…</p>
+      ) : deployments.length === 0 ? (
+        <p className="text-sm text-amber-600">No running sandbox deployments. Deploy an agent first.</p>
       ) : (
         <select
           className="input text-sm"
           value={selectedAgent}
-          onChange={(e) => onSelect(e.target.value)}
+          onChange={(e) => {
+            const name = e.target.value;
+            if (!name) { onSelect(""); return; }
+            const dep = deployments.find((d) => d.agent_name === name);
+            onSelect(name, dep ? { agentName: name, versionId: dep.version_id ?? null, deploymentId: dep.id } : undefined);
+          }}
         >
-          <option value="">-- pick an agent --</option>
-          {agents.map((a) => (
-            <option key={a.id} value={a.name}>
-              {a.name}
+          <option value="">-- pick a deployment --</option>
+          {deployments.map((d) => (
+            <option key={d.id} value={d.agent_name ?? ""}>
+              {d.name ?? d.agent_name ?? d.id.slice(0, 8)} ({d.agent_name})
             </option>
           ))}
         </select>
       )}
 
       {selectedAgent && (() => {
-        const agent = agents.find((a) => a.name === selectedAgent);
-        if (!agent) return null;
-        const agentClass = (agent as Agent & { agent_class?: string }).agent_class;
+        const dep = deployments.find((d) => d.agent_name === selectedAgent);
+        if (!dep) return null;
         return (
-          <div className="flex items-center gap-2">
-            {agentClass && (
-              <span className={`badge text-xs ${CLASS_CHIP[agentClass] ?? "bg-slate-100 text-slate-600"}`}>
-                {agentClass}
-              </span>
-            )}
-            {agent.team && (
-              <span className="text-xs text-slate-400">Team: {agent.team}</span>
-            )}
+          <div className="flex items-center gap-2 text-xs text-slate-400">
+            <span className="badge bg-green-100 text-green-700 text-xs">running</span>
+            <span>Deployment: {dep.name ?? dep.id.slice(0, 8)}</span>
           </div>
         );
       })()}

@@ -429,6 +429,76 @@ class WorkflowEdge(Base):
 
 
 # ---------------------------------------------------------------------------
+# workflow_versions (snapshot of a workflow's composition — Decision 22b)
+# ---------------------------------------------------------------------------
+class WorkflowVersion(Base):
+    __tablename__ = "workflow_versions"
+    __table_args__ = (
+        UniqueConstraint("workflow_id", "version_number", name="uq_workflow_versions"),
+        Index("idx_workflow_versions_workflow_id", "workflow_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(_UUID, primary_key=True, server_default=_GEN_UUID)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    members: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
+    edges: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
+    orchestration: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'sequential'"))
+    execution_shape: Mapped[str] = mapped_column(String(16), nullable=False, server_default=text("'durable'"))
+    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=text("'{}'"))
+    eval_passed: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+
+    workflow: Mapped[CompositeWorkflow] = relationship("CompositeWorkflow", backref="versions")
+
+
+# ---------------------------------------------------------------------------
+# workflow_deployments (logical deployment of a workflow version)
+# ---------------------------------------------------------------------------
+class WorkflowDeployment(Base):
+    __tablename__ = "workflow_deployments"
+    __table_args__ = (
+        CheckConstraint(
+            "environment IN ('production','staging','canary','sandbox')",
+            name="ck_workflow_deployments_env",
+        ),
+        CheckConstraint(
+            "status IN ('pending','deploying','running','failed','rolled_back','terminated','gate_failed','suspending','suspended','terminating')",
+            name="ck_workflow_deployments_status",
+        ),
+        Index("idx_workflow_deployments_workflow_id", "workflow_id"),
+        Index("idx_workflow_deployments_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(_UUID, primary_key=True, server_default=_GEN_UUID)
+    workflow_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("workflows.id", ondelete="CASCADE"), nullable=False
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("workflow_versions.id"), nullable=False
+    )
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    environment: Mapped[str] = mapped_column(String(64), nullable=False, server_default=text("'sandbox'"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'pending'"))
+    replicas: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    ttl_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deployed_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
+    suspended_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    terminated_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    deployed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    previous_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflow_versions.id"), nullable=True
+    )
+
+    workflow: Mapped[CompositeWorkflow] = relationship("CompositeWorkflow")
+    version: Mapped[WorkflowVersion] = relationship("WorkflowVersion", foreign_keys=[version_id])
+
+
+# ---------------------------------------------------------------------------
 # agent_versions
 # ---------------------------------------------------------------------------
 class AgentVersion(Base):
@@ -479,6 +549,9 @@ class AgentVersion(Base):
     git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     git_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, server_default=None
+    )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default=text("'pending'")
     )
@@ -515,7 +588,7 @@ class Deployment(Base):
             name="ck_deployments_env",
         ),
         CheckConstraint(
-            "status IN ('pending','deploying','running','failed','rolled_back','terminated','gate_failed')",
+            "status IN ('pending','deploying','running','failed','rolled_back','terminated','gate_failed','suspending','suspended','terminating')",
             name="ck_deployments_status",
         ),
         CheckConstraint(
@@ -563,11 +636,17 @@ class Deployment(Base):
     canary_percent: Mapped[int | None] = mapped_column(Integer, nullable=True)
     k8s_namespace: Mapped[str] = mapped_column(String(128), nullable=False)
     k8s_deployment_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Human-facing deployment name (e.g. "simple-qa-bd28") — the primary
+    # identifier in the deployment-overview UX. Nullable for legacy rows.
+    name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     deployed_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
     terminated_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    suspended_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    # Optional auto-terminate window (hours since deployed_at); NULL = never.
+    ttl_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     deployed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
     llm_secret_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     llm_env_keys: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
@@ -1094,6 +1173,7 @@ class PublishRequest(Base):
     reviewed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_version_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1284,6 +1364,15 @@ class EvalRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
+    sandbox_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("deployments.id", ondelete="SET NULL"), nullable=True
+    )
+    workflow_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflow_deployments.id", ondelete="SET NULL"), nullable=True
+    )
+    workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflow_versions.id", ondelete="SET NULL"), nullable=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1385,6 +1474,14 @@ class AgentRun(Base):
     orchestrator_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     production_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("production_deployments.id", ondelete="SET NULL"), nullable=True
+    )
+    # Scopes a playground run to the sandbox deployment that produced it
+    # (mirror of production_deployment_id for the sandbox context).
+    sandbox_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("deployments.id"), nullable=True
+    )
+    workflow_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID, ForeignKey("workflow_deployments.id"), nullable=True
     )
     judge_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
@@ -1571,6 +1668,7 @@ class AgentMemory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     message_index: Mapped[int] = mapped_column(Integer, nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1644,8 +1742,8 @@ class ProductionDeployment(Base):
     __tablename__ = "production_deployments"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','deploying','running','suspended','failed')",
-            name="ck_production_deployments_status",
+            "status IN ('pending','deploying','running','suspended','failed','terminating','terminated','rolled_back','gate_failed')",
+            name="production_deployments_status_check",
         ),
         Index("idx_production_deployments_artifact", "artifact_id"),
     )

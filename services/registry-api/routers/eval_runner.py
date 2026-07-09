@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import get_optional_user
 from db import get_db
 from k8s import create_eval_job
-from models import Agent, AgentVersion, EvalRun, EvalRunResult, PlaygroundDataset
+from models import Agent, AgentVersion, CompositeWorkflow, Deployment as DeploymentModel, EvalRun, EvalRunResult, PlaygroundDataset, WorkflowDeployment, WorkflowVersion
 from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
 from schemas import (
     EvalRunCreate,
@@ -83,11 +83,45 @@ async def create_eval_run(
     if not dataset:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    # Auto-resolve latest version so auto-promote has a target
+    agent_name = body.agent_name
     version_id = body.agent_version_id
-    if version_id is None and body.workflow_id is None:
+    workflow_id = body.workflow_id
+    wf_version_id = body.workflow_version_id
+
+    # Resolve from sandbox deployment (agent)
+    if body.sandbox_deployment_id:
+        dep_result = await db.execute(
+            select(DeploymentModel, Agent.name)
+            .join(Agent, DeploymentModel.agent_id == Agent.id)
+            .where(DeploymentModel.id == body.sandbox_deployment_id)
+        )
+        row = dep_result.one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Sandbox deployment not found")
+        dep, resolved_name = row
+        agent_name = agent_name or resolved_name
+        version_id = version_id or dep.version_id
+
+    # Resolve from workflow deployment
+    if body.workflow_deployment_id:
+        wdep_result = await db.execute(
+            select(WorkflowDeployment).where(WorkflowDeployment.id == body.workflow_deployment_id)
+        )
+        wdep = wdep_result.scalar_one_or_none()
+        if not wdep:
+            raise HTTPException(status_code=404, detail="Workflow deployment not found")
+        workflow_id = workflow_id or wdep.workflow_id
+        wf_version_id = wf_version_id or wdep.version_id
+        wf_result = await db.execute(
+            select(CompositeWorkflow.name).where(CompositeWorkflow.id == wdep.workflow_id)
+        )
+        wf_name = wf_result.scalar_one_or_none()
+        agent_name = agent_name or wf_name
+
+    # Fallback: resolve version from agent name if no deployment was provided
+    if version_id is None and workflow_id is None and agent_name:
         agent_result = await db.execute(
-            select(Agent.id).where(Agent.name == body.agent_name)
+            select(Agent.id).where(Agent.name == agent_name)
         )
         agent_row = agent_result.scalar_one_or_none()
         if agent_row:
@@ -101,12 +135,18 @@ async def create_eval_run(
             if latest_ver:
                 version_id = latest_ver.id
 
+    if not agent_name:
+        raise HTTPException(status_code=422, detail="Cannot resolve agent_name — provide agent_name, sandbox_deployment_id, or workflow_deployment_id")
+
     eval_run = EvalRun(
         user_id=caller,
-        agent_name=body.agent_name,
+        agent_name=agent_name,
         agent_version_id=version_id,
-        workflow_id=body.workflow_id,
+        workflow_id=workflow_id,
+        workflow_version_id=wf_version_id,
         dataset_id=body.dataset_id,
+        sandbox_deployment_id=body.sandbox_deployment_id,
+        workflow_deployment_id=body.workflow_deployment_id,
         status="pending",
         started_at=datetime.now(tz=timezone.utc),
     )
@@ -115,7 +155,7 @@ async def create_eval_run(
 
     trace_eval_run_created(
         run_id=str(eval_run.id),
-        agent_name=body.agent_name,
+        agent_name=agent_name,
         dataset_id=str(body.dataset_id),
         user_id=caller,
     )
@@ -124,9 +164,9 @@ async def create_eval_run(
     try:
         await create_eval_job(
             eval_run_id=str(eval_run.id),
-            agent_name=body.agent_name,
+            agent_name=agent_name,
             dataset_id=str(body.dataset_id),
-            workflow_id=str(body.workflow_id) if body.workflow_id else None,
+            workflow_id=str(workflow_id) if workflow_id else None,
             agent_version_id=str(version_id) if version_id else None,
         )
         eval_run.status = "running"
@@ -270,6 +310,23 @@ async def update_eval_run(
             logger.info(
                 "auto-set eval_passed=True for version %s (score=%.2f >= %.2f)",
                 version.id, run.overall_score, EVAL_PASS_THRESHOLD,
+            )
+    # Auto-promote workflow version
+    if (
+        body.status == "completed"
+        and run.overall_score is not None
+        and run.overall_score >= EVAL_PASS_THRESHOLD
+        and run.workflow_version_id is not None
+    ):
+        wv_result = await db.execute(
+            select(WorkflowVersion).where(WorkflowVersion.id == run.workflow_version_id)
+        )
+        wf_version = wv_result.scalar_one_or_none()
+        if wf_version is not None:
+            wf_version.eval_passed = True
+            logger.info(
+                "auto-set eval_passed=True for workflow version %s (score=%.2f >= %.2f)",
+                wf_version.id, run.overall_score, EVAL_PASS_THRESHOLD,
             )
     await db.flush()
     logger.info(

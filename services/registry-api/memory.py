@@ -45,8 +45,9 @@ def _get_redis():
         return None
 
 
-def _redis_key(agent_name: str, thread_id: str) -> str:
-    return f"memory:{agent_name}:{thread_id}"
+def _redis_key(agent_name: str, thread_id: str, deployment_id: str | None = None) -> str:
+    suffix = deployment_id or "global"
+    return f"memory:{agent_name}:{thread_id}:{suffix}"
 
 
 async def save_turn(
@@ -57,6 +58,7 @@ async def save_turn(
     messages: list[dict[str, str]],
     user_id: str | None = None,
     session_id: str | None = None,
+    deployment_id: str | None = None,
 ) -> list[AgentMemory]:
     """Persist a turn of conversation messages."""
     # Determine the next message_index
@@ -67,6 +69,9 @@ async def save_turn(
         )
     )
     max_idx = max_idx_result.scalar() or 0
+
+    import uuid as _uuid
+    dep_uuid = _uuid.UUID(deployment_id) if deployment_id else None
 
     rows = []
     for i, msg in enumerate(messages):
@@ -79,6 +84,7 @@ async def save_turn(
             content=msg["content"],
             message_index=max_idx + i + 1,
             session_id=session_id,
+            deployment_id=dep_uuid,
         )
         db.add(row)
         rows.append(row)
@@ -89,11 +95,10 @@ async def save_turn(
     redis = _get_redis()
     if redis:
         try:
-            key = _redis_key(agent_name, thread_id)
+            key = _redis_key(agent_name, thread_id, deployment_id)
             cached = await redis.get(key)
             existing = json.loads(cached) if cached else []
             existing.extend([{"role": m["role"], "content": m["content"]} for m in messages])
-            # Keep only last CONTEXT_WINDOW messages in cache
             existing = existing[-_CONTEXT_WINDOW_DEFAULT:]
             await redis.setex(key, _MEMORY_TTL_SECONDS, json.dumps(existing))
         except Exception as exc:
@@ -107,13 +112,14 @@ async def load_context(
     agent_name: str,
     thread_id: str,
     window: int = _CONTEXT_WINDOW_DEFAULT,
+    deployment_id: str | None = None,
 ) -> list[dict[str, str]]:
     """Load recent conversation context. Redis first, Postgres fallback."""
     # Try Redis cache
     redis = _get_redis()
     if redis:
         try:
-            key = _redis_key(agent_name, thread_id)
+            key = _redis_key(agent_name, thread_id, deployment_id)
             cached = await redis.get(key)
             if cached:
                 messages = json.loads(cached)
@@ -122,14 +128,18 @@ async def load_context(
             logger.warning("Redis cache read failed: %s", exc)
 
     # Fallback to Postgres
+    import uuid as _uuid
+    q = select(AgentMemory).where(
+        AgentMemory.agent_name == agent_name,
+        AgentMemory.thread_id == thread_id,
+    )
+    if deployment_id:
+        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
+    else:
+        q = q.where(AgentMemory.deployment_id.is_(None))
+
     result = await db.execute(
-        select(AgentMemory)
-        .where(
-            AgentMemory.agent_name == agent_name,
-            AgentMemory.thread_id == thread_id,
-        )
-        .order_by(AgentMemory.message_index.desc())
-        .limit(window)
+        q.order_by(AgentMemory.message_index.desc()).limit(window)
     )
     rows = list(reversed(result.scalars().all()))
 
@@ -138,7 +148,7 @@ async def load_context(
     # Warm cache
     if redis and messages:
         try:
-            key = _redis_key(agent_name, thread_id)
+            key = _redis_key(agent_name, thread_id, deployment_id)
             await redis.setex(key, _MEMORY_TTL_SECONDS, json.dumps(messages))
         except Exception:
             pass
@@ -151,6 +161,7 @@ async def search_memory(
     agent_name: str,
     query_embedding: list[float],
     top_k: int = 5,
+    deployment_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search via pgvector cosine similarity.
 
@@ -159,24 +170,29 @@ async def search_memory(
     migration 0022).
     """
     embedding_str = "[" + ",".join(str(f) for f in query_embedding) + "]"
-    stmt = text("""
+    dep_filter = ""
+    params: dict[str, Any] = {
+        "embedding": embedding_str,
+        "agent_name": agent_name,
+        "top_k": top_k,
+    }
+    if deployment_id:
+        dep_filter = " AND deployment_id = :dep_id"
+        params["dep_id"] = deployment_id
+    stmt = text(f"""
         SELECT id, content, role, thread_id, created_at,
                1 - (content_embedding <=> :embedding::vector) as similarity
         FROM agent_memory
         WHERE agent_name = :agent_name
           AND content_embedding IS NOT NULL
+          {dep_filter}
         ORDER BY content_embedding <=> :embedding::vector
         LIMIT :top_k
     """)
     try:
-        result = await db.execute(stmt, {
-            "embedding": embedding_str,
-            "agent_name": agent_name,
-            "top_k": top_k,
-        })
+        result = await db.execute(stmt, params)
         rows = result.fetchall()
     except Exception as exc:
-        # UndefinedColumn / UndefinedObject (vector type) — semantic search disabled.
         logger.warning("Semantic search unavailable for %s: %s", agent_name, exc)
         await db.rollback()
         return []
@@ -196,19 +212,22 @@ async def delete_thread(
     db: AsyncSession,
     agent_name: str,
     thread_id: str,
+    deployment_id: str | None = None,
 ) -> int:
-    """GDPR delete — remove all memory for a thread."""
-    result = await db.execute(
-        delete(AgentMemory).where(
-            AgentMemory.agent_name == agent_name,
-            AgentMemory.thread_id == thread_id,
-        )
+    """GDPR delete — remove all memory for a thread (optionally scoped to a deployment)."""
+    import uuid as _uuid
+    q = delete(AgentMemory).where(
+        AgentMemory.agent_name == agent_name,
+        AgentMemory.thread_id == thread_id,
     )
+    if deployment_id:
+        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
+    result = await db.execute(q)
     # Clear Redis cache
     redis = _get_redis()
     if redis:
         try:
-            await redis.delete(_redis_key(agent_name, thread_id))
+            await redis.delete(_redis_key(agent_name, thread_id, deployment_id))
         except Exception:
             pass
     return result.rowcount
@@ -217,9 +236,12 @@ async def delete_thread(
 async def clear_agent_memory(
     db: AsyncSession,
     agent_name: str,
+    deployment_id: str | None = None,
 ) -> int:
-    """Wipe all memory for an agent."""
-    result = await db.execute(
-        delete(AgentMemory).where(AgentMemory.agent_name == agent_name)
-    )
+    """Wipe all memory for an agent (optionally scoped to a deployment)."""
+    import uuid as _uuid
+    q = delete(AgentMemory).where(AgentMemory.agent_name == agent_name)
+    if deployment_id:
+        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
+    result = await db.execute(q)
     return result.rowcount

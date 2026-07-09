@@ -45,6 +45,8 @@ async def create_agent_run(
         run_by=body.run_by,
         team=body.team,
         thread_id=body.thread_id,
+        production_deployment_id=body.production_deployment_id,
+        sandbox_deployment_id=body.sandbox_deployment_id,
     )
     db.add(run)
     await db.commit()

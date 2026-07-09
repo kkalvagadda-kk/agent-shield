@@ -13,7 +13,7 @@ import {
   type EvalRun,
   type PlaygroundDataset,
 } from "../api/playgroundApi";
-import { listAgents, listCompositeWorkflows } from "../api/registryApi";
+import { listAllDeployments, listAllWorkflowDeployments } from "../api/registryApi";
 
 export default function DatasetsPage() {
   const qc = useQueryClient();
@@ -27,8 +27,8 @@ export default function DatasetsPage() {
   // Run eval modal state
   const [evalDataset, setEvalDataset] = useState<PlaygroundDataset | null>(null);
   const [evalTargetType, setEvalTargetType] = useState<"agent" | "workflow">("agent");
-  const [evalAgent, setEvalAgent] = useState("");
-  const [evalWorkflow, setEvalWorkflow] = useState("");
+  const [evalDeploymentId, setEvalDeploymentId] = useState("");
+  const [evalWorkflowDepId, setEvalWorkflowDepId] = useState("");
 
   const { data: datasets, isLoading, refetch, isFetching } = useQuery({
     queryKey: ["playground-datasets"],
@@ -40,14 +40,14 @@ export default function DatasetsPage() {
     queryFn: listEvalRuns,
   });
 
-  const { data: agentsData } = useQuery({
-    queryKey: ["agents-for-eval"],
-    queryFn: () => listAgents(100, 0, "active"),
+  const { data: agentDeployments } = useQuery({
+    queryKey: ["agent-deployments-for-eval"],
+    queryFn: () => listAllDeployments("running", 100, "sandbox"),
   });
 
-  const { data: workflowsData } = useQuery({
-    queryKey: ["workflows-for-eval"],
-    queryFn: () => listCompositeWorkflows(),
+  const { data: workflowDeployments } = useQuery({
+    queryKey: ["workflow-deployments-for-eval"],
+    queryFn: () => listAllWorkflowDeployments("running", "sandbox"),
   });
 
   const createMutation = useMutation({
@@ -72,13 +72,13 @@ export default function DatasetsPage() {
   });
 
   const evalMutation = useMutation({
-    mutationFn: (body: { agent_name: string; dataset_id: string; workflow_id?: string }) =>
+    mutationFn: (body: { dataset_id: string; sandbox_deployment_id?: string; workflow_deployment_id?: string }) =>
       createEvalRun(body),
     onSuccess: (run) => {
       toast.success("Eval run started.");
       setEvalDataset(null);
-      setEvalAgent("");
-      setEvalWorkflow("");
+      setEvalDeploymentId("");
+      setEvalWorkflowDepId("");
       navigate(`/playground/eval-runs/${run.id}`);
     },
     onError: () => toast.error("Failed to start eval run."),
@@ -104,21 +104,19 @@ export default function DatasetsPage() {
   };
 
   const handleRunEval = () => {
-    if (evalTargetType === "agent" && !evalAgent) {
-      toast.error("Select an agent.");
+    if (evalTargetType === "agent" && !evalDeploymentId) {
+      toast.error("Select a deployment.");
       return;
     }
-    if (evalTargetType === "workflow" && !evalWorkflow) {
-      toast.error("Select a workflow.");
+    if (evalTargetType === "workflow" && !evalWorkflowDepId) {
+      toast.error("Select a workflow deployment.");
       return;
     }
     if (!evalDataset) return;
-    const selectedWorkflow = workflowsData?.find(w => w.id === evalWorkflow);
-    const agentName = evalTargetType === "agent" ? evalAgent : (selectedWorkflow?.name ?? evalWorkflow);
     evalMutation.mutate({
-      agent_name: agentName,
       dataset_id: evalDataset.id,
-      workflow_id: evalTargetType === "workflow" ? evalWorkflow : undefined,
+      sandbox_deployment_id: evalTargetType === "agent" ? evalDeploymentId : undefined,
+      workflow_deployment_id: evalTargetType === "workflow" ? evalWorkflowDepId : undefined,
     });
   };
 
@@ -196,7 +194,8 @@ export default function DatasetsPage() {
                         <button
                           onClick={() => {
                             setEvalDataset(ds);
-                            setEvalAgent("");
+                            setEvalDeploymentId("");
+                            setEvalWorkflowDepId("");
                           }}
                           className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
                         >
@@ -297,54 +296,60 @@ export default function DatasetsPage() {
             {/* Target type toggle */}
             <div className="flex gap-1 p-1 bg-slate-100 rounded-lg mb-4">
               <button
-                onClick={() => { setEvalTargetType("agent"); setEvalWorkflow(""); }}
+                onClick={() => { setEvalTargetType("agent"); setEvalWorkflowDepId(""); }}
                 className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
                   evalTargetType === "agent" ? "bg-white shadow text-slate-800" : "text-slate-500"
                 }`}
               >
-                Agent
+                Agent Deployment
               </button>
               <button
-                onClick={() => { setEvalTargetType("workflow"); setEvalAgent(""); }}
+                onClick={() => { setEvalTargetType("workflow"); setEvalDeploymentId(""); }}
                 className={`flex-1 text-xs font-medium py-1.5 rounded-md transition-colors ${
                   evalTargetType === "workflow" ? "bg-white shadow text-slate-800" : "text-slate-500"
                 }`}
               >
-                Workflow
+                Workflow Deployment
               </button>
             </div>
 
             {evalTargetType === "agent" ? (
               <div>
-                <label className="label text-xs mb-1">Select Agent</label>
+                <label className="label text-xs mb-1">Select Deployment</label>
                 <select
                   className="input text-sm"
-                  value={evalAgent}
-                  onChange={(e) => setEvalAgent(e.target.value)}
+                  value={evalDeploymentId}
+                  onChange={(e) => setEvalDeploymentId(e.target.value)}
                 >
-                  <option value="">-- pick an agent --</option>
-                  {agentsData?.items.map((a) => (
-                    <option key={a.id} value={a.name}>
-                      {a.name}
+                  <option value="">-- pick a running deployment --</option>
+                  {agentDeployments?.items.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name ?? d.agent_name ?? d.id.slice(0, 8)} ({d.agent_name})
                     </option>
                   ))}
                 </select>
+                {agentDeployments?.items.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No running sandbox deployments found. Deploy an agent first.</p>
+                )}
               </div>
             ) : (
               <div>
-                <label className="label text-xs mb-1">Select Workflow</label>
+                <label className="label text-xs mb-1">Select Workflow Deployment</label>
                 <select
                   className="input text-sm"
-                  value={evalWorkflow}
-                  onChange={(e) => setEvalWorkflow(e.target.value)}
+                  value={evalWorkflowDepId}
+                  onChange={(e) => setEvalWorkflowDepId(e.target.value)}
                 >
-                  <option value="">-- pick a workflow --</option>
-                  {workflowsData?.filter(w => w.status !== "archived").map((w) => (
-                    <option key={w.id} value={w.id}>
-                      {w.name}
+                  <option value="">-- pick a running workflow deployment --</option>
+                  {workflowDeployments?.map((wd) => (
+                    <option key={wd.id} value={wd.id}>
+                      {wd.name ?? wd.workflow_name ?? wd.id.slice(0, 8)} ({wd.workflow_name})
                     </option>
                   ))}
                 </select>
+                {workflowDeployments?.length === 0 && (
+                  <p className="text-xs text-amber-600 mt-1">No running sandbox workflow deployments found.</p>
+                )}
               </div>
             )}
 
@@ -354,7 +359,7 @@ export default function DatasetsPage() {
               </button>
               <button
                 onClick={handleRunEval}
-                disabled={evalMutation.isPending || (evalTargetType === "agent" ? !evalAgent : !evalWorkflow)}
+                disabled={evalMutation.isPending || (evalTargetType === "agent" ? !evalDeploymentId : !evalWorkflowDepId)}
                 className="btn-primary text-sm"
               >
                 {evalMutation.isPending ? (

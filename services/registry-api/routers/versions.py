@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Agent, AgentVersion
+from models import Agent, AgentRun, AgentVersion, Deployment, ProductionDeployment, PublishedVersion
 from schemas import AgentVersionCreate, AgentVersionPatch, AgentVersionResponse
 
 logger = logging.getLogger(__name__)
@@ -80,12 +81,20 @@ async def create_version(
     max_version = max_result.scalar_one_or_none()
     next_version = (max_version or 0) + 1
 
+    metadata = agent.metadata_ or {}
+    config_snapshot = {
+        "instructions": metadata.get("instructions"),
+        "tools": metadata.get("tools", []),
+        "llm_provider_id": metadata.get("llm_provider_id"),
+    }
+
     version = AgentVersion(
         agent_id=agent.id,
         version_number=next_version,
         image_tag=body.image_tag,
         agent_graph_id=body.agent_graph_id,
         tools=[t.model_dump() for t in body.tools],
+        config=config_snapshot,
         eval_passed=body.eval_passed,
         adversarial_eval_passed=body.adversarial_eval_passed,
         git_sha=body.git_sha,
@@ -192,6 +201,105 @@ async def patch_version(
         name,
     )
     return AgentVersionResponse.model_validate(version)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /{name}/versions/{version_id}
+# ---------------------------------------------------------------------------
+@router.delete(
+    "/{name}/versions/{version_id}",
+    summary="Delete an agent version (cascades sandbox deployments)",
+)
+async def delete_version(
+    name: str,
+    version_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Delete an agent version.
+
+    - Returns 404 if the agent or version does not exist.
+    - Returns 409 if the version is referenced by an active production deployment.
+    - Terminates all non-terminated sandbox Deployment rows for this version.
+    """
+    agent = await _resolve_agent(name, db)
+
+    result = await db.execute(
+        select(AgentVersion).where(
+            AgentVersion.id == version_id,
+            AgentVersion.agent_id == agent.id,
+        )
+    )
+    version = result.scalar_one_or_none()
+    if version is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version '{version_id}' not found for agent '{name}'.",
+        )
+
+    # Check for active production deployments via the PublishedVersion chain.
+    pub_ver_ids = (
+        await db.execute(
+            select(PublishedVersion.id).where(
+                PublishedVersion.source_version_id == version_id
+            )
+        )
+    ).scalars().all()
+    if pub_ver_ids:
+        prod_dep = (
+            await db.execute(
+                select(ProductionDeployment).where(
+                    ProductionDeployment.version_id.in_(pub_ver_ids)
+                )
+            )
+        ).scalar_one_or_none()
+        if prod_dep is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot delete version with active production deployments. Terminate them first.",
+            )
+
+    # Delete all sandbox deployments for this version. The Deployment.version_id FK
+    # is NOT NULL, so we must remove the rows before deleting the version.
+    # AgentRun.sandbox_deployment_id references deployments — SET NULL first.
+    from sqlalchemy import update
+    all_deps = (
+        await db.execute(
+            select(Deployment).where(Deployment.version_id == version_id)
+        )
+    ).scalars().all()
+    terminated_count = 0
+    dep_ids = []
+    for dep in all_deps:
+        dep_ids.append(dep.id)
+        if dep.status not in ("terminated",):
+            terminated_count += 1
+
+    if dep_ids:
+        await db.execute(
+            update(AgentRun)
+            .where(AgentRun.sandbox_deployment_id.in_(dep_ids))
+            .values(sandbox_deployment_id=None)
+        )
+        for dep in all_deps:
+            await db.delete(dep)
+
+    # Clear previous_version_id references from deployments that upgraded FROM this version
+    await db.execute(
+        update(Deployment)
+        .where(Deployment.previous_version_id == version_id)
+        .values(previous_version_id=None)
+    )
+
+    await db.delete(version)
+    await db.commit()
+
+    logger.info(
+        "delete_version: deleted version %s for agent '%s' (terminated %d deployments)",
+        version_id,
+        name,
+        terminated_count,
+    )
+    return {"deleted_version_id": str(version_id), "terminated_deployments": terminated_count}
 
 
 # ---------------------------------------------------------------------------

@@ -170,7 +170,7 @@ function CollapsibleSection({
 
 export default function Sidebar() {
   const { pathname } = useLocation();
-  const { user, logout } = useAuth();
+  const { user, logout, isAtLeast } = useAuth();
 
   const { data: sidebarTeams } = useQuery({
     queryKey: ["sidebar-teams"],
@@ -283,12 +283,14 @@ export default function Sidebar() {
           ))}
         </div>
 
-        {/* Admin */}
-        <CollapsibleSection label="Admin" open={adminOpen} onToggle={() => setAdminOpen((o) => !o)}>
-          {ADMIN_ITEMS.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
-          ))}
-        </CollapsibleSection>
+        {/* Admin — visible to platform-admin only */}
+        {isAtLeast("platform-admin") && (
+          <CollapsibleSection label="Admin" open={adminOpen} onToggle={() => setAdminOpen((o) => !o)}>
+            {ADMIN_ITEMS.map((i) => (
+              <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
+            ))}
+          </CollapsibleSection>
+        )}
       </nav>
 
       {/* User footer */}

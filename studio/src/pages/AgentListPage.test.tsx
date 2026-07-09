@@ -9,6 +9,10 @@ vi.mock("../api/registryApi", () => ({
   listAgents: vi.fn(),
   deleteAgent: vi.fn(),
   updateAgent: vi.fn(),
+  listProviders: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  listTools: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  listVersions: vi.fn().mockResolvedValue([]),
+  getAgentHealth: vi.fn().mockResolvedValue({}),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -32,6 +36,7 @@ function makeAgent(overrides: Partial<Agent> = {}): Agent {
     updated_at: NOW,
     created_by: "user1",
     metadata: {},
+    latest_version_number: 1,
     ...overrides,
   };
 }

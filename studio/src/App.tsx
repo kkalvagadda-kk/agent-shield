@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
+import RequireRole from "./components/RequireRole";
 import Sidebar from "./components/Sidebar";
 import AgentDetailPage from "./pages/AgentDetailPage";
 import CatalogPage from "./pages/CatalogPage";
@@ -19,7 +20,7 @@ import AgentGraphsPage from "./pages/AgentGraphsPage";
 import CanvasPage from "./pages/CanvasPage";
 import CreateAgentPage from "./pages/CreateAgentPage";
 import DatasetsPage from "./pages/DatasetsPage";
-import DeployAgentPage from "./pages/DeployAgentPage";
+import DeploymentOverviewPage from "./pages/DeploymentOverviewPage";
 import EvalResultsPage from "./pages/EvalResultsPage";
 import HITLDashboardPage from "./pages/HITLDashboardPage";
 import PlaygroundPage from "./pages/PlaygroundPage";
@@ -27,6 +28,8 @@ import ProvidersPage from "./pages/ProvidersPage";
 import SkillsPage from "./pages/SkillsPage";
 import ToolsPage from "./pages/ToolsPage";
 import ApprovalsInboxPage from "./pages/ApprovalsInboxPage";
+import WorkflowDeploymentOverviewPage from "./pages/WorkflowDeploymentOverviewPage";
+import WorkflowDetailPage from "./pages/WorkflowDetailPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import CatalogChatPage from "./pages/CatalogChatPage";
 import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
@@ -52,7 +55,9 @@ export default function App() {
               <Route path="/" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
               <Route path="/agents/:name/chat" element={<AgentChatPage />} />
-              <Route path="/agents/:name/deploy" element={<DeployAgentPage />} />
+              {/* /agents/:name/deploy removed — deploy is now a modal on AgentDetailPage */}
+              <Route path="/agents/:name/d/:depId/chat" element={<AgentChatPage />} />
+              <Route path="/agents/:name/d/:depId" element={<DeploymentOverviewPage />} />
               <Route path="/agents/:name" element={<AgentDetailPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
               <Route path="/agent-graphs" element={<AgentGraphsPage />} />
@@ -60,18 +65,20 @@ export default function App() {
               <Route path="/agent-graphs/:id" element={<CanvasPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/workflows/new" element={<WorkflowBuilderPage />} />
+              <Route path="/workflows/:id/d/:depId" element={<WorkflowDeploymentOverviewPage />} />
               <Route path="/workflows/:id/builder" element={<WorkflowBuilderPage />} />
+              <Route path="/workflows/:id" element={<WorkflowDetailPage />} />
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/my-agents" element={<MyAgentsPage />} />
               <Route path="/catalog" element={<CatalogPage />} />
               <Route path="/catalog/:artifactId" element={<CatalogDetailPage />} />
               <Route path="/catalog/:artifactId/chat" element={<CatalogChatPage />} />
-              <Route path="/admin/artifacts" element={<AdminArtifactsPage />} />
-              <Route path="/admin/publish-requests" element={<AdminPublishRequestsPage />} />
-              <Route path="/admin/access" element={<AdminAccessPage />} />
-              <Route path="/admin/grants" element={<AdminGrantsPage />} />
-              <Route path="/admin/approval-authority" element={<AdminApprovalAuthorityPage />} />
+              <Route path="/admin/artifacts" element={<RequireRole minRole="platform-admin"><AdminArtifactsPage /></RequireRole>} />
+              <Route path="/admin/publish-requests" element={<RequireRole minRole="platform-admin"><AdminPublishRequestsPage /></RequireRole>} />
+              <Route path="/admin/access" element={<RequireRole minRole="platform-admin"><AdminAccessPage /></RequireRole>} />
+              <Route path="/admin/grants" element={<RequireRole minRole="platform-admin"><AdminGrantsPage /></RequireRole>} />
+              <Route path="/admin/approval-authority" element={<RequireRole minRole="platform-admin"><AdminApprovalAuthorityPage /></RequireRole>} />
               <Route path="/deployments" element={<DeploymentsPage />} />
               <Route path="/approvals" element={<ApprovalsInboxPage />} />
               <Route path="/hitl" element={<HITLDashboardPage />} />

@@ -1,15 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, Loader2, RefreshCw, XCircle, FlaskConical } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   approvePublishRequest,
-  listAgents,
   listPublishRequests,
-  listSkills,
-  listTools,
-  listAgentGraphs,
   rejectPublishRequest,
   type PublishRequest,
 } from "../api/registryApi";
@@ -39,19 +35,6 @@ export default function AdminPublishRequestsPage() {
     queryFn: () => listPublishRequests({ status: statusFilter || undefined, limit: 100 }),
   });
 
-  const { data: agentsPage }    = useQuery({ queryKey: ["pq-agents"],    queryFn: () => listAgents(200, 0, "active") });
-  const { data: toolsPage }     = useQuery({ queryKey: ["pq-tools"],     queryFn: () => listTools(200, 0) });
-  const { data: skillsPage }    = useQuery({ queryKey: ["pq-skills"],    queryFn: () => listSkills(200, 0) });
-  const { data: workflowsList } = useQuery({ queryKey: ["pq-agent-graphs"], queryFn: () => listAgentGraphs() });
-
-  const assetNameMap = useMemo(() => {
-    const m: Record<string, { name: string; description?: string | null; team?: string | null }> = {};
-    for (const a of agentsPage?.items ?? [])  m[String(a.id ?? a.name)] = { name: a.name, description: a.description, team: a.team };
-    for (const t of toolsPage?.items ?? [])   m[String(t.id)]           = { name: t.name, description: t.description, team: t.owner_team };
-    for (const s of skillsPage?.items ?? [])  m[String(s.id)]           = { name: s.name, description: s.description, team: s.team };
-    for (const w of workflowsList ?? [])      m[String(w.id)]           = { name: w.name, description: w.description, team: w.team };
-    return m;
-  }, [agentsPage, toolsPage, skillsPage, workflowsList]);
 
   const approveMutation = useMutation({
     mutationFn: ({ id }: { id: string }) =>
@@ -164,16 +147,11 @@ export default function AdminPublishRequestsPage() {
                       </td>
                       <td className="px-4 py-3">
                         <p className="text-sm font-medium text-slate-800">
-                          {assetNameMap[pr.asset_id]?.name ?? `${pr.asset_id.slice(0, 8)}…`}
+                          {pr.asset_name ?? `${pr.asset_id.slice(0, 8)}…`}
                         </p>
-                        {assetNameMap[pr.asset_id]?.description && (
-                          <p className="text-xs text-slate-400 line-clamp-1 mt-0.5">
-                            {assetNameMap[pr.asset_id]!.description}
-                          </p>
-                        )}
-                        {assetNameMap[pr.asset_id]?.team && (
+                        {pr.asset_team && (
                           <p className="text-xs text-slate-400">
-                            Team: <span className="font-medium">{assetNameMap[pr.asset_id]!.team}</span>
+                            Team: <span className="font-medium">{pr.asset_team}</span>
                           </p>
                         )}
                       </td>

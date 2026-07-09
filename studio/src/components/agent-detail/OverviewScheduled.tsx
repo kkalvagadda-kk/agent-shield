@@ -4,11 +4,14 @@ import {
   listTriggers,
   enableTrigger,
   disableTrigger,
-  listAgentRuns,
+  listDeploymentRuns,
+  DeploymentContext,
 } from "../../api/registryApi";
 
 interface Props {
   agentName: string;
+  deploymentId: string;
+  context: DeploymentContext;
 }
 
 // Lightweight human hint for the common cron shapes (no external dep).
@@ -25,7 +28,7 @@ function describeCron(expr: string | null): string {
   return expr;
 }
 
-export default function OverviewScheduled({ agentName }: Props) {
+export default function OverviewScheduled({ agentName, deploymentId, context }: Props) {
   const qc = useQueryClient();
 
   const { data: triggers = [] } = useQuery({
@@ -33,8 +36,8 @@ export default function OverviewScheduled({ agentName }: Props) {
     queryFn: () => listTriggers(agentName),
   });
   const { data: runs = [] } = useQuery({
-    queryKey: ["agentRuns", agentName, "scheduled"],
-    queryFn: () => listAgentRuns({ agent_name: agentName, limit: 10 }),
+    queryKey: ["deployment-runs-scheduled", deploymentId, context],
+    queryFn: () => listDeploymentRuns(deploymentId, { context, limit: 10 }),
   });
 
   const toggle = useMutation({

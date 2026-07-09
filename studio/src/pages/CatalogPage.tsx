@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, RefreshCw, Rocket, ShieldOff } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -10,10 +11,25 @@ const TYPE_COLORS: Record<string, string> = {
   workflow: "bg-indigo-50 text-indigo-700 border border-indigo-200",
 };
 
+const ACTIVE_TYPE_COLORS: Record<string, string> = {
+  agent:    "bg-blue-600 text-white border border-blue-600",
+  tool:     "bg-purple-600 text-white border border-purple-600",
+  skill:    "bg-teal-600 text-white border border-teal-600",
+  workflow: "bg-indigo-600 text-white border border-indigo-600",
+};
+
 const ASSET_TYPES = ["agent", "tool", "skill", "workflow"] as const;
+type AssetType = (typeof ASSET_TYPES)[number];
 
 export default function CatalogPage() {
+  const [typeFilter, setTypeFilter] = useState<AssetType | null>(null);
+
   const { data: artifacts = [], isLoading, refetch, isFetching } = useQuery({
+    queryKey: ["catalog", typeFilter],
+    queryFn: () => listCatalog(typeFilter ? { type: typeFilter } : undefined),
+  });
+
+  const { data: allArtifacts = [] } = useQuery({
     queryKey: ["catalog"],
     queryFn: () => listCatalog(),
   });
@@ -38,7 +54,7 @@ export default function CatalogPage() {
         </div>
       )}
 
-      {!isLoading && artifacts.length === 0 && (
+      {!isLoading && allArtifacts.length === 0 && (
         <div className="card flex flex-col items-center py-16 text-center">
           <ShieldOff size={36} className="text-slate-300 mb-3" />
           <p className="text-slate-500 font-medium">No published artifacts yet</p>
@@ -48,9 +64,13 @@ export default function CatalogPage() {
         </div>
       )}
 
-      {!isLoading && artifacts.length > 0 && (
+      {!isLoading && allArtifacts.length > 0 && (
         <div className="space-y-3">
-          <TypeFilters artifacts={artifacts} />
+          <TypeFilters
+            artifacts={allArtifacts}
+            activeType={typeFilter}
+            onToggle={(t) => setTypeFilter(typeFilter === t ? null : t)}
+          />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {artifacts.map((a) => (
               <CatalogCard key={a.id} artifact={a} />
@@ -62,7 +82,15 @@ export default function CatalogPage() {
   );
 }
 
-function TypeFilters({ artifacts }: { artifacts: CatalogArtifact[] }) {
+function TypeFilters({
+  artifacts,
+  activeType,
+  onToggle,
+}: {
+  artifacts: CatalogArtifact[];
+  activeType: AssetType | null;
+  onToggle: (t: AssetType) => void;
+}) {
   const counts = artifacts.reduce<Record<string, number>>((acc, a) => {
     acc[a.type] = (acc[a.type] ?? 0) + 1;
     return acc;
@@ -71,10 +99,24 @@ function TypeFilters({ artifacts }: { artifacts: CatalogArtifact[] }) {
   return (
     <div className="flex gap-2 flex-wrap mb-2">
       {ASSET_TYPES.filter((t) => counts[t]).map((t) => (
-        <span key={t} className={`badge ${TYPE_COLORS[t]}`}>
+        <button
+          key={t}
+          onClick={() => onToggle(t)}
+          className={`badge cursor-pointer transition-colors ${
+            activeType === t ? ACTIVE_TYPE_COLORS[t] : TYPE_COLORS[t]
+          }`}
+        >
           {t}s <span className="ml-1 font-normal opacity-70">{counts[t]}</span>
-        </span>
+        </button>
       ))}
+      {activeType && (
+        <button
+          onClick={() => onToggle(activeType)}
+          className="text-xs text-slate-400 hover:text-slate-600 underline"
+        >
+          Clear filter
+        </button>
+      )}
     </div>
   );
 }

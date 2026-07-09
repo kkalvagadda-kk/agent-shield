@@ -54,7 +54,7 @@ describe("OverviewEventDriven", () => {
   });
 
   it("shows 'no webhook trigger' copy when there are no webhook triggers", async () => {
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
     await waitFor(() =>
       expect(
         screen.getByText(/no webhook trigger configured/i)
@@ -64,7 +64,7 @@ describe("OverviewEventDriven", () => {
 
   it("renders webhook endpoint card with masked URL", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     // The masked placeholder should be visible before rotation
     expect(await screen.findByText(/token hidden/i)).toBeInTheDocument();
@@ -72,14 +72,14 @@ describe("OverviewEventDriven", () => {
 
   it("renders Rotate Token button for webhook trigger", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     expect(await screen.findByRole("button", { name: /rotate token/i })).toBeInTheDocument();
   });
 
   it("reveals webhook URL after Rotate Token is clicked", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     await userEvent.click(await screen.findByRole("button", { name: /rotate token/i }));
 
@@ -92,7 +92,7 @@ describe("OverviewEventDriven", () => {
 
   it("shows '—' match rate when there are no events", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     await waitFor(() => {
       const heading = screen.getByText(/activity \(last 0 events\)/i);
@@ -112,7 +112,7 @@ describe("OverviewEventDriven", () => {
       makeEvent("e3", "filtered"),
       makeEvent("e4", "rejected"),
     ]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     // 2 matched out of 4 = 50%
     expect(await screen.findByText("50%")).toBeInTheDocument();
@@ -125,7 +125,7 @@ describe("OverviewEventDriven", () => {
       makeEvent("e2", "filtered"),
       makeEvent("e3", "rejected"),
     ]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
 
     await waitFor(() => {
       expect(screen.getByText("matched")).toBeInTheDocument();
@@ -139,7 +139,7 @@ describe("OverviewEventDriven", () => {
 
   it("shows enabled badge for an enabled trigger", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
     expect(await screen.findByText("enabled")).toBeInTheDocument();
   });
 
@@ -147,7 +147,7 @@ describe("OverviewEventDriven", () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
       { ...webhookTrigger, enabled: false },
     ]);
-    renderWithProviders(<OverviewEventDriven agentName="my-agent" />);
+    renderWithProviders(<OverviewEventDriven agentName="my-agent" deploymentId="d1" context="playground" />);
     expect(await screen.findByText("disabled")).toBeInTheDocument();
   });
 });

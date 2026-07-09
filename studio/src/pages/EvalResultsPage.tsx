@@ -22,7 +22,12 @@ import {
   getEvalRunResults,
   EvalRunResult,
 } from "../api/playgroundApi";
-import { patchVersion, publishAgent } from "../api/registryApi";
+import {
+  patchVersion,
+  patchWorkflowVersion,
+  publishAgent,
+  publishWorkflow,
+} from "../api/registryApi";
 import TraceDrawer from "../components/playground/TraceDrawer";
 
 const STATUS_CHIP: Record<string, string> = {
@@ -65,12 +70,17 @@ export default function EvalResultsPage() {
     enabled: !!evalRunId && run?.status === "completed",
   });
 
+  const isWorkflowEval = run?.workflow_id != null;
+
   const rerunMutation = useMutation({
     mutationFn: () =>
       createEvalRun({
-        agent_name: run!.agent_name,
         dataset_id: run!.dataset_id,
-        agent_version_id: run!.agent_version_id ?? undefined,
+        ...(run!.sandbox_deployment_id
+          ? { sandbox_deployment_id: run!.sandbox_deployment_id }
+          : run!.workflow_deployment_id
+            ? { workflow_deployment_id: run!.workflow_deployment_id }
+            : { agent_name: run!.agent_name, agent_version_id: run!.agent_version_id ?? undefined }),
       }),
     onSuccess: (newRun) => {
       toast.success("Eval re-run started");
@@ -79,11 +89,11 @@ export default function EvalResultsPage() {
     onError: () => toast.error("Failed to start eval re-run"),
   });
 
-  const markPassedMutation = useMutation({
+  const markPassedMutation = useMutation<unknown, Error, void>({
     mutationFn: () =>
-      patchVersion(run!.agent_name, run!.agent_version_id!, {
-        eval_passed: true,
-      }),
+      isWorkflowEval
+        ? patchWorkflowVersion(run!.workflow_id!, run!.workflow_version_id!, { eval_passed: true })
+        : patchVersion(run!.agent_name, run!.agent_version_id!, { eval_passed: true }),
     onSuccess: () => {
       toast.success("Version marked as eval passed");
       qc.invalidateQueries({ queryKey: ["eval-run", evalRunId] });
@@ -93,12 +103,16 @@ export default function EvalResultsPage() {
 
   const publishMutation = useMutation({
     mutationFn: async () => {
-      if (run!.agent_version_id) {
-        await patchVersion(run!.agent_name, run!.agent_version_id, {
-          eval_passed: true,
-        });
+      if (isWorkflowEval) {
+        if (run!.workflow_version_id) {
+          await patchWorkflowVersion(run!.workflow_id!, run!.workflow_version_id, { eval_passed: true });
+        }
+        return publishWorkflow(run!.workflow_id!, run!.workflow_version_id ?? undefined);
       }
-      return publishAgent(run!.agent_name);
+      if (run!.agent_version_id) {
+        await patchVersion(run!.agent_name, run!.agent_version_id, { eval_passed: true });
+      }
+      return publishAgent(run!.agent_name, { version_id: run!.agent_version_id ?? undefined });
     },
     onSuccess: () => {
       toast.success("Publish request submitted");
@@ -136,7 +150,7 @@ export default function EvalResultsPage() {
     run.status === "completed" &&
     run.overall_score != null &&
     run.overall_score >= 0.7 &&
-    run.agent_version_id != null;
+    (isWorkflowEval ? run.workflow_version_id != null : run.agent_version_id != null);
 
   const filteredResults = showFailedOnly
     ? (results ?? []).filter((r) => r.passed === false)
@@ -222,10 +236,16 @@ export default function EvalResultsPage() {
                 Re-run Eval
               </button>
               <button
-                onClick={() => navigate(`/agents/${run.agent_name}`)}
+                onClick={() =>
+                  navigate(
+                    isWorkflowEval
+                      ? `/workflows/${run.workflow_id}`
+                      : `/agents/${run.agent_name}`
+                  )
+                }
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50"
               >
-                Back to Agent
+                {isWorkflowEval ? "Back to Workflow" : "Back to Agent"}
               </button>
               {canMarkPassed && (
                 <button
@@ -238,7 +258,7 @@ export default function EvalResultsPage() {
                   ) : (
                     <Send size={12} />
                   )}
-                  Publish Agent
+                  {isWorkflowEval ? "Publish Workflow" : "Publish Agent"}
                 </button>
               )}
             </div>

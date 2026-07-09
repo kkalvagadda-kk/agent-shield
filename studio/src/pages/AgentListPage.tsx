@@ -13,7 +13,6 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
-  ExternalLink,
   Loader2,
   Pencil,
   Plus,
@@ -24,15 +23,18 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   deleteAgent,
   getAgentHealth,
   listAgents,
+  listProviders,
+  listTools,
   updateAgent,
   type Agent,
 } from "../api/registryApi";
+import DeployModal from "../components/DeployModal";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   active:      { label: "Active",      cls: "bg-green-100 text-green-700" },
@@ -74,6 +76,7 @@ export default function AgentListPage() {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState("");
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
+  const [deployTarget, setDeployTarget] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["agents"],
@@ -104,7 +107,12 @@ export default function AgentListPage() {
             <Bot size={13} className="text-blue-600" />
           </div>
           <div>
-            <p className="font-semibold text-slate-900">{info.getValue()}</p>
+            <Link
+              to={`/agents/${info.getValue()}`}
+              className="font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              {info.getValue()}
+            </Link>
             {info.row.original.description && (
               <p className="text-xs text-slate-400 truncate max-w-xs">
                 {info.row.original.description}
@@ -122,6 +130,14 @@ export default function AgentListPage() {
       header: "Type",
       cell: (info) => (
         <span className="badge bg-slate-100 text-slate-600">{info.getValue()}</span>
+      ),
+    }),
+    col.accessor("latest_version_number", {
+      header: "Version",
+      cell: (info) => (
+        <span className="font-mono text-xs text-slate-500">
+          {info.getValue() != null ? `v${info.getValue()}` : "—"}
+        </span>
       ),
     }),
     col.accessor("status", {
@@ -147,14 +163,7 @@ export default function AgentListPage() {
         return (
           <div className="flex items-center justify-end gap-3">
             <button
-              onClick={() => navigate(`/agents/${agent.name}`)}
-              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors"
-            >
-              <ExternalLink size={12} />
-              Details
-            </button>
-            <button
-              onClick={() => navigate(`/agents/${agent.name}/deploy`)}
+              onClick={() => setDeployTarget(agent.name)}
               className="btn-primary py-1.5 text-xs"
             >
               <Rocket size={12} />
@@ -236,6 +245,14 @@ export default function AgentListPage() {
             setEditingAgent(null);
             qc.invalidateQueries({ queryKey: ["agents"] });
           }}
+        />
+      )}
+
+      {deployTarget && (
+        <DeployModal
+          agentName={deployTarget}
+          onClose={() => setDeployTarget(null)}
+          onDeployed={() => qc.invalidateQueries({ queryKey: ["agents"] })}
         />
       )}
 
@@ -349,15 +366,37 @@ function AgentEditForm({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const meta = (agent as Agent & { metadata?: Record<string, unknown> }).metadata ?? {};
   const [description, setDescription] = useState(agent.description ?? "");
   const [agentStatus, setAgentStatus] = useState(agent.status);
+  const [instructions, setInstructions] = useState((meta.instructions as string) ?? "");
+  const [selectedProvider, setSelectedProvider] = useState((meta.llm_provider_id as string) ?? "");
+  const [selectedTools, setSelectedTools] = useState<string[]>((meta.tools as string[]) ?? []);
+
+  const { data: providers } = useQuery({
+    queryKey: ["providers"],
+    queryFn: () => listProviders(),
+  });
+  const { data: tools } = useQuery({
+    queryKey: ["tools"],
+    queryFn: () => listTools(200),
+  });
+
+  const toggleTool = (toolName: string) => {
+    setSelectedTools((prev) =>
+      prev.includes(toolName) ? prev.filter((t) => t !== toolName) : [...prev, toolName]
+    );
+  };
 
   const mutation = useMutation({
-    mutationFn: () =>
-      updateAgent(agent.name, {
+    mutationFn: () => {
+      const newMeta = { ...meta, instructions, tools: selectedTools, llm_provider_id: selectedProvider || undefined };
+      return updateAgent(agent.name, {
         description: description || undefined,
         status: agentStatus,
-      }),
+        metadata: newMeta,
+      });
+    },
     onSuccess: () => {
       toast.success("Agent updated.");
       onSaved();
@@ -419,6 +458,57 @@ function AgentEditForm({
             onChange={(e) => setDescription(e.target.value)}
             placeholder="What does this agent do?"
           />
+        </div>
+
+        {/* Instructions */}
+        <div className="space-y-1">
+          <label className="label">Instructions (System Prompt)</label>
+          <textarea
+            className="input resize-y font-mono text-sm"
+            rows={6}
+            value={instructions}
+            onChange={(e) => setInstructions(e.target.value)}
+            placeholder="You are a helpful agent that..."
+          />
+        </div>
+
+        {/* Model (LLM Provider) */}
+        <div className="space-y-1">
+          <label className="label">Model (LLM Provider)</label>
+          <select
+            className="input"
+            value={selectedProvider}
+            onChange={(e) => setSelectedProvider(e.target.value)}
+          >
+            <option value="">— None —</option>
+            {providers?.items.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.default_model})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Tools */}
+        <div className="space-y-1">
+          <label className="label">Tools</label>
+          <div className="border border-slate-200 rounded p-3 max-h-40 overflow-y-auto space-y-1">
+            {tools?.items.length === 0 && (
+              <p className="text-xs text-slate-400">No tools registered.</p>
+            )}
+            {tools?.items.map((t) => (
+              <label key={t.name} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-slate-50 px-1 py-0.5 rounded">
+                <input
+                  type="checkbox"
+                  checked={selectedTools.includes(t.name)}
+                  onChange={() => toggleTool(t.name)}
+                  className="rounded"
+                />
+                <span className="font-mono text-xs">{t.name}</span>
+                {t.description && <span className="text-xs text-slate-400 truncate">— {t.description}</span>}
+              </label>
+            ))}
+          </div>
         </div>
 
         {/* Status */}

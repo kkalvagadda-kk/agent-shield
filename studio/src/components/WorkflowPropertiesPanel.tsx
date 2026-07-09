@@ -105,7 +105,7 @@ function InlineAgentPanel({ nodeId, data }: { nodeId: string; data: WorkflowMemb
         <p className="text-xs text-amber-700">
           This agent was created inline and isn&apos;t deployed. It must be deployed before the
           workflow can run it —{" "}
-          <a href={`/agents/${agentName}/deploy`} className="underline hover:text-amber-900">
+          <a href={`/agents/${agentName}`} className="underline hover:text-amber-900">
             deploy it
           </a>
           .

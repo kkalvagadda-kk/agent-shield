@@ -84,6 +84,13 @@ run_suite "Suite 34: Workflow Triggers"           "suite-34-workflow-triggers.sh
 run_suite "Suite 35: Approval Resume"             "suite-35-approval-resume.sh"
 run_suite "Suite 36: Workflow HITL Pause-Resume"  "suite-36-workflow-hitl-pause-resume.sh"
 run_suite "Suite 37: Workflow HITL OPA (gated)"   "suite-37-workflow-hitl-opa.sh"
+run_suite "Suite 38: Deployment Overview"          "suite-38-deployment-overview.sh"
+run_suite "Suite 39: Deployment Lifecycle"         "suite-39-deployment-lifecycle.sh"
+run_suite "Suite 40: Workflow Deploy"              "suite-40-workflow-deploy.sh"
+run_suite "Suite 41: Version Delete Cascade"       "suite-41-version-delete.sh"
+run_suite "Suite 42: RBAC Foundations"              "suite-42-rbac.sh"
+run_suite "Suite 43: Memory Isolation + TTL"        "suite-43-memory-isolation-ttl.sh"
+run_suite "Suite 44: Version Management"              "suite-44-version-management.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

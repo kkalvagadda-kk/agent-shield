@@ -112,7 +112,7 @@ export default function WorkflowsPage() {
                     <tr key={wf.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3">
                         <Link
-                          to={`/workflows/${wf.id}/builder`}
+                          to={`/workflows/${wf.id}`}
                           className="font-semibold text-blue-600 hover:text-blue-800 hover:underline"
                         >
                           {wf.name}

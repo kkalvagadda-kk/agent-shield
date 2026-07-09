@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Bot, Loader2, Send } from "lucide-react";
-import { getAgent, startAgentChat } from "../api/registryApi";
+import { getAgent, startAgentChat, startDeploymentChat } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 
 interface Message {
@@ -11,7 +11,7 @@ interface Message {
 }
 
 export default function AgentChatPage() {
-  const { name } = useParams<{ name: string }>();
+  const { name, depId } = useParams<{ name: string; depId?: string }>();
 
   const { data: agent } = useQuery({
     queryKey: ["agent", name],
@@ -37,7 +37,9 @@ export default function AgentChatPage() {
     setIsStreaming(true);
 
     try {
-      const res = await startAgentChat(name, { message: userMsg, session_id: sessionId, context: "playground" });
+      const res = depId
+        ? await startDeploymentChat(name, depId, { message: userMsg, session_id: sessionId })
+        : await startAgentChat(name, { message: userMsg, session_id: sessionId, context: "playground" });
 
       // Append empty assistant bubble
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
@@ -90,7 +92,7 @@ export default function AgentChatPage() {
     <div className="flex flex-col h-screen bg-white">
       {/* Header */}
       <div className="border-b border-slate-200 px-6 py-3 flex items-center gap-3 shrink-0">
-        <Link to="/my-agents" className="text-slate-400 hover:text-slate-600">
+        <Link to={depId ? `/agents/${name}/d/${depId}` : "/my-agents"} className="text-slate-400 hover:text-slate-600">
           <ArrowLeft size={16} />
         </Link>
         <Bot size={18} className="text-blue-600 shrink-0" />

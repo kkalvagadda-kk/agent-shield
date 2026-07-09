@@ -40,6 +40,8 @@ from auth_middleware import require_user
 from db import get_db
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
 
+deployment_chat_router = APIRouter(prefix="/api/v1/agents", tags=["deployment-chat"])
+
 router = APIRouter(prefix="/api/v1/agents", tags=["consumer-chat"])
 logger = logging.getLogger(__name__)
 
@@ -388,6 +390,7 @@ async def start_chat(
         status="running",
         started_at=now,
         production_deployment_id=deployment.id if is_production else None,
+        sandbox_deployment_id=deployment.id if not is_production else None,
     )
     db.add(agent_run)
     await db.flush()
@@ -541,4 +544,170 @@ async def stream_chat(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/agents/{name}/deployments/{dep_id}/chat
+# Deployment-pinned chat: routes directly to the specified deployment's pod
+# rather than re-resolving "most recent running" deployment.
+# ---------------------------------------------------------------------------
+
+class DeploymentChatRequest(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+
+@deployment_chat_router.post(
+    "/{name}/deployments/{dep_id}/chat",
+    summary="Start a chat session pinned to a specific deployment",
+)
+async def start_deployment_chat(
+    name: str,
+    dep_id: str,
+    body: DeploymentChatRequest,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Start a chat run pinned to an exact deployment — no ambiguous re-resolution."""
+    try:
+        parsed_dep_id = uuid.UUID(dep_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid deployment ID.")
+
+    result = await db.execute(
+        select(Agent).where(Agent.name == name, Agent.status == "active")
+    )
+    agent = result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found.")
+
+    dep_result = await db.execute(
+        select(Deployment).where(Deployment.id == parsed_dep_id, Deployment.agent_id == agent.id)
+    )
+    deployment = dep_result.scalar_one_or_none()
+    if not deployment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found for this agent.")
+    if deployment.status != "running":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Deployment is not running (status: {deployment.status}).",
+        )
+
+    user_sub = caller.get("sub", "")
+    session_id = body.session_id or str(uuid.uuid4())
+    now = datetime.now(tz=timezone.utc)
+
+    run = PlaygroundRun(
+        user_id=user_sub,
+        agent_name=name,
+        context="playground",
+        sandbox=True,
+        input_message=body.message,
+        status="running",
+        started_at=now,
+    )
+    db.add(run)
+    await db.flush()
+    run_id = str(run.id)
+
+    agent_run = AgentRun(
+        agent_name=name,
+        session_id=session_id,
+        user_id=user_sub,
+        input=body.message,
+        context="playground",
+        trigger_type="api",
+        run_by=user_sub,
+        team=agent.team,
+        status="running",
+        started_at=now,
+        sandbox_deployment_id=deployment.id,
+    )
+    db.add(agent_run)
+    await db.flush()
+    agent_run_id = str(agent_run.id)
+    await db.commit()
+
+    return {
+        "run_id": run_id,
+        "agent_run_id": agent_run_id,
+        "session_id": session_id,
+        "stream_url": f"/api/v1/agents/{name}/deployments/{dep_id}/chat/{run_id}/stream",
+        "agent_name": name,
+        "deployment_id": dep_id,
+    }
+
+
+@deployment_chat_router.get(
+    "/{name}/deployments/{dep_id}/chat/{run_id}/stream",
+    summary="SSE stream pinned to a specific deployment",
+    response_class=StreamingResponse,
+)
+async def stream_deployment_chat(
+    name: str,
+    dep_id: str,
+    run_id: str,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """Stream pinned to the exact deployment — never re-resolves."""
+    try:
+        parsed_id = uuid.UUID(run_id)
+        parsed_dep_id = uuid.UUID(dep_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid ID format.")
+
+    result = await db.execute(select(PlaygroundRun).where(PlaygroundRun.id == parsed_id))
+    run = result.scalar_one_or_none()
+    if not run or run.agent_name != name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat run not found.")
+    if run.user_id != caller.get("sub", ""):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your chat run.")
+
+    dep_result = await db.execute(select(Deployment).where(Deployment.id == parsed_dep_id))
+    deployment = dep_result.scalar_one_or_none()
+
+    if not deployment or not deployment.k8s_deployment_name:
+        async def _no_deploy() -> AsyncGenerator[str, None]:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Deployment not reachable.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'run_id': run_id})}\n\n"
+
+        return StreamingResponse(
+            _no_deploy(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    service_url = f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
+
+    ar_result = await db.execute(
+        select(AgentRun).where(
+            AgentRun.agent_name == name,
+            AgentRun.sandbox_deployment_id == parsed_dep_id,
+            AgentRun.user_id == caller.get("sub", ""),
+        ).order_by(AgentRun.started_at.desc()).limit(1)
+    )
+    ar = ar_result.scalar_one_or_none()
+    agent_run_id = str(ar.id) if ar else None
+
+    async def _stream_and_complete() -> AsyncGenerator[str, None]:
+        output_parts: list[str] = []
+        async for chunk in _proxy_agent_stream(service_url, run.input_message or "", run_id):
+            if chunk.startswith("data: "):
+                try:
+                    ev = json.loads(chunk[6:].strip())
+                    if ev.get("type") == "token":
+                        output_parts.append(ev.get("content", ""))
+                except Exception:
+                    pass
+            yield chunk
+        asyncio.get_event_loop().create_task(
+            _complete_chat_run(run_id, "".join(output_parts), None, agent_run_id)
+        )
+
+    return StreamingResponse(
+        _stream_and_complete(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

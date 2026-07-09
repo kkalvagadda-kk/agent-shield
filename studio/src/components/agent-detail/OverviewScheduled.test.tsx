@@ -7,12 +7,12 @@ import type { AgentTrigger, AgentRunItem } from "../../api/registryApi";
 
 vi.mock("../../api/registryApi", () => ({
   listTriggers: vi.fn(),
-  listAgentRuns: vi.fn(),
+  listDeploymentRuns: vi.fn(),
   enableTrigger: vi.fn(),
   disableTrigger: vi.fn(),
 }));
 
-import { listTriggers, listAgentRuns, enableTrigger, disableTrigger } from "../../api/registryApi";
+import { listTriggers, listDeploymentRuns, enableTrigger, disableTrigger } from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
 
@@ -48,12 +48,14 @@ const completedRun: AgentRunItem = {
   langfuse_trace_id: null,
   trace_url: null,
   production_deployment_id: null,
+  sandbox_deployment_id: null,
+  workflow_deployment_id: null,
 };
 
 describe("OverviewScheduled", () => {
   beforeEach(() => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (listAgentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (listDeploymentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     (enableTrigger as ReturnType<typeof vi.fn>).mockResolvedValue(scheduleTrigger);
     (disableTrigger as ReturnType<typeof vi.fn>).mockResolvedValue({
       ...scheduleTrigger,
@@ -62,7 +64,7 @@ describe("OverviewScheduled", () => {
   });
 
   it("shows empty schedule message when no triggers", async () => {
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
     await waitFor(() =>
       expect(
         screen.getByText(/no schedule configured/i)
@@ -71,7 +73,7 @@ describe("OverviewScheduled", () => {
   });
 
   it("shows 'No runs yet' when there are no runs", async () => {
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
     await waitFor(() =>
       expect(screen.getByText(/no runs yet/i)).toBeInTheDocument()
     );
@@ -79,7 +81,7 @@ describe("OverviewScheduled", () => {
 
   it("renders schedule card with cron expression and timezone", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
     expect(await screen.findByText("0 9 * * *")).toBeInTheDocument();
     expect(screen.getByText(/daily at 09:00 · UTC/i)).toBeInTheDocument();
@@ -87,7 +89,7 @@ describe("OverviewScheduled", () => {
 
   it("shows enabled button when trigger is enabled", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
     expect(await screen.findByRole("button", { name: /enabled/i })).toBeInTheDocument();
   });
 
@@ -95,13 +97,13 @@ describe("OverviewScheduled", () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
       { ...scheduleTrigger, enabled: false },
     ]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
     expect(await screen.findByRole("button", { name: /disabled/i })).toBeInTheDocument();
   });
 
   it("calls disableTrigger when Enabled button is clicked", async () => {
     (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
     await userEvent.click(await screen.findByRole("button", { name: /enabled/i }));
 
@@ -111,8 +113,8 @@ describe("OverviewScheduled", () => {
   });
 
   it("shows last-run status badge when runs exist", async () => {
-    (listAgentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([completedRun]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    (listDeploymentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([completedRun]);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
     // "completed" may appear in both the Last Run badge and the Recent Runs list
     await waitFor(() => {
@@ -128,8 +130,8 @@ describe("OverviewScheduled", () => {
       id: "run2",
       status: "failed",
     };
-    (listAgentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([completedRun, failedRun]);
-    renderWithProviders(<OverviewScheduled agentName="my-agent" />);
+    (listDeploymentRuns as ReturnType<typeof vi.fn>).mockResolvedValue([completedRun, failedRun]);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
     await waitFor(() => {
       const completed = screen.getAllByText("completed");

@@ -7,10 +7,15 @@ import {
   listAgentEvents,
   rotateToken,
   type AgentEvent,
+  type DeploymentContext,
 } from "../../api/registryApi";
 
 interface Props {
   agentName: string;
+  // Accepted for a uniform overview interface; event activity is agent-level
+  // (a webhook trigger belongs to the agent, not a single deployment).
+  deploymentId?: string;
+  context?: DeploymentContext;
 }
 
 const STATUS_META: Record<

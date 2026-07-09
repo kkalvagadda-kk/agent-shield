@@ -25,9 +25,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from crypto import decrypt_json
 from db import get_db
 from k8s import upsert_secret
-from models import Agent, AgentTool, AgentVersion, AssetGrant, Deployment, LLMProvider, Tool
+from models import (
+    Agent,
+    AgentRun,
+    AgentTool,
+    AgentVersion,
+    AssetGrant,
+    CompositeWorkflow,
+    Deployment,
+    LLMProvider,
+    ProductionDeployment,
+    Tool,
+    WorkflowDeployment,
+)
 from policy_generator import generate_and_store
-from schemas import DeploymentCreate, DeploymentResponse, PaginatedResponse, RollbackRequest
+from schemas import (
+    AgentRunResponse,
+    AgentStatsResponse,
+    DeploymentActionRequest,
+    DeploymentCreate,
+    DeploymentResponse,
+    PaginatedResponse,
+    RollbackRequest,
+    WorkflowDeploymentResponse,
+)
 
 # Namespace where LLM credential secrets are stored
 _PLATFORM_NAMESPACE = "agentshield-platform"
@@ -106,6 +127,157 @@ async def update_deployment_status(
     return DeploymentResponse.model_validate(deployment)
 
 
+@global_deployments_router.get(
+    "/workflows",
+    response_model=list[WorkflowDeploymentResponse],
+    summary="List workflow deployments (filterable by status/environment)",
+)
+async def list_all_workflow_deployments(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    environment: Optional[str] = Query(None, alias="environment"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> list[WorkflowDeploymentResponse]:
+    q = (
+        select(WorkflowDeployment, CompositeWorkflow.name.label("wf_name"))
+        .join(CompositeWorkflow, WorkflowDeployment.workflow_id == CompositeWorkflow.id)
+        .order_by(WorkflowDeployment.deployed_at.desc())
+    )
+    if status_filter:
+        q = q.where(WorkflowDeployment.status == status_filter)
+    if environment:
+        q = q.where(WorkflowDeployment.environment == environment)
+    rows = (await db.execute(q.limit(limit))).all()
+    items = []
+    for wdep, wf_name in rows:
+        d = WorkflowDeploymentResponse.model_validate(wdep)
+        d.workflow_name = wf_name
+        items.append(d)
+    return items
+
+
+# ---------------------------------------------------------------------------
+# Deployment-scoped stats + runs
+#
+# A deployment's metrics belong to the deployment, not the artifact. The
+# `context` param selects the run-isolation column explicitly — no fallthrough:
+#   playground  → agent_runs.sandbox_deployment_id
+#   production  → agent_runs.production_deployment_id
+# ---------------------------------------------------------------------------
+async def _validate_deployment(deployment_id: uuid.UUID, context: str, db: AsyncSession):
+    """Verify the deployment exists in the table implied by `context`."""
+    if context == "playground":
+        model = Deployment
+    elif context == "production":
+        model = ProductionDeployment
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="context must be 'playground' or 'production'",
+        )
+    row = (await db.execute(select(model).where(model.id == deployment_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found.")
+
+
+def _run_scope(deployment_id: uuid.UUID, context: str):
+    """Return the AgentRun filter column value for the given context."""
+    if context == "playground":
+        return AgentRun.sandbox_deployment_id == deployment_id
+    return AgentRun.production_deployment_id == deployment_id
+
+
+@global_deployments_router.get(
+    "/{deployment_id}/stats",
+    response_model=AgentStatsResponse,
+    summary="Get run statistics for a single deployment (last 24h)",
+)
+async def get_deployment_stats(
+    deployment_id: uuid.UUID,
+    context: str = Query("playground"),
+    db: AsyncSession = Depends(get_db),
+) -> AgentStatsResponse:
+    from datetime import timedelta
+    import math
+    from sqlalchemy import case, func
+
+    await _validate_deployment(deployment_id, context, db)
+    scope = _run_scope(deployment_id, context)
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=24)
+
+    stats_q = select(
+        func.count(AgentRun.id).label("run_count"),
+        func.sum(case((AgentRun.status == "failed", 1), else_=0)).label("error_count"),
+        func.sum(AgentRun.cost_usd).label("total_cost"),
+    ).where(scope, AgentRun.started_at >= cutoff)
+    row = (await db.execute(stats_q)).first()
+    run_count = row.run_count or 0
+    error_count = row.error_count or 0
+    total_cost = float(row.total_cost or 0)
+    error_rate = (error_count / run_count) if run_count > 0 else 0.0
+
+    p50 = p95 = None
+    if run_count > 0:
+        latency_q = (
+            select(AgentRun.latency_ms)
+            .where(scope, AgentRun.started_at >= cutoff, AgentRun.latency_ms.isnot(None))
+            .order_by(AgentRun.latency_ms)
+        )
+        latencies = [r[0] for r in (await db.execute(latency_q)).all()]
+        if latencies:
+            p50 = latencies[min(len(latencies) - 1, math.floor(len(latencies) * 0.5))]
+            p95 = latencies[min(len(latencies) - 1, math.floor(len(latencies) * 0.95))]
+
+    return AgentStatsResponse(
+        run_count=run_count,
+        p50_latency_ms=p50,
+        p95_latency_ms=p95,
+        error_rate=round(error_rate, 4),
+        total_cost_usd=round(total_cost, 6),
+    )
+
+
+@global_deployments_router.get(
+    "/{deployment_id}/runs",
+    response_model=list[AgentRunResponse],
+    summary="List runs for a single deployment",
+)
+async def list_deployment_runs(
+    deployment_id: uuid.UUID,
+    context: str = Query("playground"),
+    trigger_type: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentRunResponse]:
+    import os
+
+    await _validate_deployment(deployment_id, context, db)
+    q = (
+        select(AgentRun)
+        .where(_run_scope(deployment_id, context))
+        .order_by(AgentRun.started_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    if trigger_type:
+        q = q.where(AgentRun.trigger_type == trigger_type)
+    if status_filter:
+        q = q.where(AgentRun.status == status_filter)
+    rows = list((await db.execute(q)).scalars().all())
+
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    items: list[AgentRunResponse] = []
+    for r in rows:
+        resp = AgentRunResponse.model_validate(r)
+        if r.langfuse_trace_id and lf_public_url and lf_project_id:
+            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        items.append(resp)
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Shared helper
 # ---------------------------------------------------------------------------
@@ -156,20 +328,52 @@ async def deploy_agent(
     """
     agent = await _resolve_agent(name, db)
 
-    # Verify the version exists and belongs to this agent
-    version_result = await db.execute(
-        select(AgentVersion).where(
-            AgentVersion.id == body.version_id,
-            AgentVersion.agent_id == agent.id,
+    if body.version_id is not None:
+        # Explicit version — verify it exists and belongs to this agent
+        version_result = await db.execute(
+            select(AgentVersion).where(
+                AgentVersion.id == body.version_id,
+                AgentVersion.agent_id == agent.id,
+            )
         )
-    )
-    version = version_result.scalar_one_or_none()
-    if version is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"Version '{body.version_id}' not found for agent '{name}'."
-            ),
+        version = version_result.scalar_one_or_none()
+        if version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    f"Version '{body.version_id}' not found for agent '{name}'."
+                ),
+            )
+    else:
+        # Auto-create a new version that snapshots current agent metadata
+        max_result = await db.execute(
+            select(AgentVersion.version_number)
+            .where(AgentVersion.agent_id == agent.id)
+            .order_by(AgentVersion.version_number.desc())
+            .limit(1)
+        )
+        max_version = max_result.scalar_one_or_none()
+        next_version = (max_version or 0) + 1
+
+        metadata = agent.metadata_ or {}
+        config_snapshot = {
+            "instructions": metadata.get("instructions"),
+            "tools": metadata.get("tools", []),
+            "llm_provider_id": metadata.get("llm_provider_id"),
+        }
+
+        version = AgentVersion(
+            agent_id=agent.id,
+            version_number=next_version,
+            image_tag=None,
+            config=config_snapshot,
+        )
+        db.add(version)
+        await db.flush()
+        await db.refresh(version)
+        logger.info(
+            "deploy_agent: auto-created version %d for agent '%s' with config snapshot",
+            version.version_number, name,
         )
 
     # ── Pre-flight gate 1: deployer team check ────────────────────────────────
@@ -177,11 +381,11 @@ async def deploy_agent(
     if deployer_team != agent.team:
         # Check for an active cross-team grant on the agent
         grant_result = await db.execute(
-            select(AssetGrant).where(
+            select(AssetGrant.id).where(
                 AssetGrant.asset_id == agent.id,
                 AssetGrant.grantee_team == deployer_team,
                 AssetGrant.revoked_at.is_(None),
-            )
+            ).limit(1)
         )
         cross_grant = grant_result.scalar_one_or_none()
         if cross_grant is None:
@@ -215,15 +419,18 @@ async def deploy_agent(
             },
         )
 
-    # Gate 2: verify active grants for all tools
+    # Gate 2: verify active grants for cross-team tools (own-team tools are
+    # implicitly granted — only foreign tools need an explicit AssetGrant).
     missing_grants: list[str] = []
     for tool in agent_tools:
+        if tool.owner_team == deployer_team or tool.owner_team is None:
+            continue
         grant_result = await db.execute(
-            select(AssetGrant).where(
+            select(AssetGrant.id).where(
                 AssetGrant.asset_id == tool.id,
                 AssetGrant.grantee_team == deployer_team,
                 AssetGrant.revoked_at.is_(None),
-            )
+            ).limit(1)
         )
         if grant_result.scalar_one_or_none() is None:
             missing_grants.append(tool.name)
@@ -306,6 +513,10 @@ async def deploy_agent(
                     detail=f"Failed to write LLM credentials secret: {exc}",
                 )
 
+    # Deployment name is the primary identifier in the overview UX. Use the
+    # caller-provided name or generate "{agent}-{suffix}".
+    deployment_name = body.name or f"{name}-{uuid.uuid4().hex[:4]}"
+
     deployment = Deployment(
         agent_id=agent.id,
         version_id=version.id,
@@ -314,6 +525,8 @@ async def deploy_agent(
         replicas=body.replicas,
         canary_percent=None,
         k8s_namespace=_derive_k8s_namespace(agent),
+        name=deployment_name,
+        ttl_hours=body.ttl_hours,
         llm_secret_name=llm_secret_name,
         llm_env_keys=llm_env_keys,
         llm_provider_type=llm_provider_type,
@@ -466,6 +679,7 @@ async def rollback_agent(
         replicas=live_deployment.replicas,
         canary_percent=None,
         k8s_namespace=_derive_k8s_namespace(agent),
+        llm_secret_name=live_deployment.llm_secret_name,
         previous_version_id=live_deployment.version_id,
     )
     db.add(rollback_deployment)
@@ -511,3 +725,69 @@ async def list_deployments(
         name,
     )
     return [DeploymentResponse.model_validate(d) for d in deployments]
+
+
+# ---------------------------------------------------------------------------
+# PATCH /{name}/deployments/{deployment_id} — lifecycle action
+#
+# Mirror of the catalog action (routers/catalog.py update_deployment). Sets a
+# transitional status the deploy-controller reconciler acts on. "Change a
+# deployment's settings" is an UPGRADE to another version — never in-place
+# mutation (a deployment's config is frozen to its version).
+# ---------------------------------------------------------------------------
+@router.patch(
+    "/{name}/deployments/{deployment_id}",
+    response_model=DeploymentResponse,
+    summary="Suspend / Resume / Terminate / Upgrade a sandbox deployment",
+)
+async def update_sandbox_deployment(
+    name: str,
+    deployment_id: uuid.UUID,
+    body: DeploymentActionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> DeploymentResponse:
+    agent = await _resolve_agent(name, db)
+    dep = (await db.execute(
+        select(Deployment).where(
+            Deployment.id == deployment_id,
+            Deployment.agent_id == agent.id,
+        )
+    )).scalar_one_or_none()
+    if dep is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found.")
+
+    now = datetime.now(tz=timezone.utc)
+
+    if body.action == "suspend":
+        dep.status = "suspending"
+        dep.suspended_at = now
+    elif body.action == "resume":
+        # Back to 'pending' so the controller's reconcile re-applies the manifest
+        # (replicas restored → scaled back up). Sandbox pending IS reconciled.
+        dep.status = "pending"
+        dep.suspended_at = None
+    elif body.action == "terminate":
+        dep.status = "terminating"
+    elif body.action == "upgrade":
+        if not body.version_id:
+            raise HTTPException(status_code=400, detail="version_id required for upgrade.")
+        target = (await db.execute(
+            select(AgentVersion).where(
+                AgentVersion.id == body.version_id,
+                AgentVersion.agent_id == agent.id,
+            )
+        )).scalar_one_or_none()
+        if target is None:
+            raise HTTPException(status_code=404, detail="Target version not found for this agent.")
+        dep.previous_version_id = dep.version_id
+        dep.version_id = body.version_id
+        # 'pending' so the controller re-reconciles against the new version.
+        dep.status = "pending"
+    else:  # pragma: no cover — schema Literal guards this
+        raise HTTPException(status_code=400, detail=f"Unknown action: {body.action}")
+
+    await db.flush()
+    await db.refresh(dep)
+    logger.info("update_sandbox_deployment: agent=%s dep=%s action=%s -> %s",
+                name, deployment_id, body.action, dep.status)
+    return DeploymentResponse.model_validate(dep)

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
 from db import get_db
+from rbac import get_user_artifact_roles, _normalize_role
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -30,10 +31,17 @@ async def get_me(
         {"sub": sub},
     )
     assignment = row.mappings().first()
+    team = assignment["team_name"] if assignment else None
+    raw_role = assignment["role"] if assignment else None
+    normalized_role = _normalize_role(raw_role)
+
+    artifact_roles = await get_user_artifact_roles(db, sub, team)
+
     return {
         "sub": sub,
         "email": claims.get("email"),
         "preferred_username": claims.get("preferred_username"),
-        "team": assignment["team_name"] if assignment else None,
-        "role": assignment["role"] if assignment else None,
+        "team": team,
+        "role": normalized_role,
+        "artifact_roles": artifact_roles,
     }

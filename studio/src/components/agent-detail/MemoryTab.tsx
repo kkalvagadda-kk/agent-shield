@@ -4,17 +4,19 @@ import { useState } from "react";
 
 interface Props {
   agentName: string;
+  deploymentId?: string;
 }
 
-export default function MemoryTab({ agentName }: Props) {
+export default function MemoryTab({ agentName, deploymentId }: Props) {
   const queryClient = useQueryClient();
   const [selectedThread, setSelectedThread] = useState<string | null>(null);
 
   const { data: messages = [], isLoading } = useQuery({
-    queryKey: ["memory", agentName, selectedThread],
+    queryKey: ["memory", agentName, selectedThread, deploymentId],
     queryFn: () =>
       listMemory(agentName, {
         thread_id: selectedThread ?? undefined,
+        deployment_id: deploymentId,
         limit: 100,
       }),
   });

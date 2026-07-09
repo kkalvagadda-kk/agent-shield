@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, ExternalLink, Loader2 } from "lucide-react";
 import { useState } from "react";
-import { AgentRunItem, listAgentRuns } from "../../api/registryApi";
+import { AgentRunItem, DeploymentContext, listDeploymentRuns } from "../../api/registryApi";
 
 const STATUS_BADGE: Record<string, string> = {
   completed: "bg-green-100 text-green-700",
@@ -23,16 +23,22 @@ function truncate(text: string | null | undefined, max: number): string {
   return text.length > max ? text.slice(0, max) + "…" : text;
 }
 
-export default function RunsTab({ agentName }: { agentName: string }) {
+export default function RunsTab({
+  deploymentId,
+  context,
+}: {
+  deploymentId: string;
+  context: DeploymentContext;
+}) {
   const [triggerFilter, setTriggerFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const { data: runs, isLoading } = useQuery({
-    queryKey: ["agent-runs", agentName, triggerFilter, statusFilter],
+    queryKey: ["deployment-runs", deploymentId, context, triggerFilter, statusFilter],
     queryFn: () =>
-      listAgentRuns({
-        agent_name: agentName,
+      listDeploymentRuns(deploymentId, {
+        context,
         trigger_type: triggerFilter || undefined,
         status: statusFilter || undefined,
         limit: 50,

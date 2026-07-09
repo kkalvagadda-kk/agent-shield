@@ -1,19 +1,30 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, Clock, Loader2, Play } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { AgentRunItem, getAgentStats, listAgentRuns } from "../../api/registryApi";
+import {
+  AgentRunItem,
+  DeploymentContext,
+  getDeploymentStats,
+  listDeploymentRuns,
+} from "../../api/registryApi";
 
-export default function OverviewDurable({ agentName }: { agentName: string }) {
+interface OverviewProps {
+  agentName: string;
+  deploymentId: string;
+  context: DeploymentContext;
+}
+
+export default function OverviewDurable({ agentName, deploymentId, context }: OverviewProps) {
   const navigate = useNavigate();
 
   const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["agent-stats", agentName],
-    queryFn: () => getAgentStats(agentName),
+    queryKey: ["deployment-stats", deploymentId, context],
+    queryFn: () => getDeploymentStats(deploymentId, context),
   });
 
   const { data: runs } = useQuery({
-    queryKey: ["agent-runs-active", agentName],
-    queryFn: () => listAgentRuns({ agent_name: agentName, limit: 10 }),
+    queryKey: ["deployment-runs-active", deploymentId, context],
+    queryFn: () => listDeploymentRuns(deploymentId, { context, limit: 10 }),
   });
 
   const activeRuns = runs?.filter((r: AgentRunItem) => r.status === "running" || r.status === "awaiting_approval") || [];

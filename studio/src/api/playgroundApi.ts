@@ -63,6 +63,7 @@ export interface EvalRun {
   agent_name: string;
   agent_version_id: string | null;
   workflow_id: string | null;
+  workflow_version_id: string | null;
   dataset_id: string;
   status: string;
   total_items: number | null;
@@ -72,6 +73,8 @@ export interface EvalRun {
   started_at: string | null;
   completed_at: string | null;
   created_at: string;
+  sandbox_deployment_id: string | null;
+  workflow_deployment_id: string | null;
 }
 
 export interface EvalRunResult {
@@ -188,10 +191,12 @@ export async function deleteDataset(id: string): Promise<void> {
 // Eval Runs
 // ---------------------------------------------------------------------------
 export async function createEvalRun(body: {
-  agent_name: string;
+  agent_name?: string;
   dataset_id: string;
   agent_version_id?: string;
   workflow_id?: string;
+  sandbox_deployment_id?: string;
+  workflow_deployment_id?: string;
 }): Promise<EvalRun> {
   const { data } = await http.post<EvalRun>("/playground/eval-runs", body);
   return data;

@@ -4,7 +4,6 @@ import {
   ArrowLeft,
   CheckCircle2,
   ChevronRight,
-  GitBranch,
   Loader2,
   Rocket,
   XCircle,
@@ -12,7 +11,6 @@ import {
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  createVersion,
   deployAgent,
   getAgent,
   getDeployments,
@@ -34,7 +32,6 @@ const TERMINAL = new Set(["running", "failed", "rolled_back", "terminated"]);
 export default function DeployAgentPage() {
   const { name } = useParams<{ name: string }>();
   const navigate = useNavigate();
-  const [imageTag, setImageTag] = useState("");
   const [polling, setPolling] = useState(false);
   const pollerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -74,33 +71,16 @@ export default function DeployAgentPage() {
     return () => { if (pollerRef.current) clearInterval(pollerRef.current); };
   }, [polling, refetchDeployments]);
 
-  const createVersionMutation = useMutation({
-    mutationFn: () =>
-      createVersion(name!, { image_tag: imageTag || undefined }),
-    onSuccess: () => {
-      toast.success("Version created.");
-      refetchVersions();
-    },
-    onError: (e: unknown) =>
-      toast.error(e instanceof Error ? e.message : "Failed to create version."),
-  });
-
   const deployMutation = useMutation({
     mutationFn: async () => {
-      let versionId: string;
-      const existing = versions ?? [];
-      if (existing.length > 0) {
-        versionId = existing[0].id;            // listVersions is newest-first
-      } else {
-        const v = await createVersion(name!, { image_tag: imageTag || undefined });
-        versionId = v.id;
-        await refetchVersions();
-      }
-      return deployAgent(name!, { version_id: versionId, environment: "sandbox" });
+      // Deploy without version_id — backend auto-creates a new version
+      // that snapshots current agent metadata (instructions, tools, model)
+      return deployAgent(name!, { environment: "sandbox" });
     },
     onSuccess: () => {
       toast.info("Sandbox deployment triggered — polling for status…");
       setPolling(true);
+      refetchVersions();
       refetchDeployments();
     },
     onError: (e: unknown) =>
@@ -133,72 +113,17 @@ export default function DeployAgentPage() {
       </div>
 
       <div className="space-y-4">
-        {/* Step 1 — Create version */}
+        {/* Deploy */}
         <div className="card">
           <div className="flex items-center gap-2 mb-4">
             <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">
               1
             </div>
-            <h2 className="font-semibold text-slate-900">Create Version</h2>
-          </div>
-
-          <div className="flex gap-2">
-            <input
-              className="input flex-1"
-              placeholder="Image tag (e.g. registry.internal/my-agent:v1.2)"
-              value={imageTag}
-              onChange={(e) => setImageTag(e.target.value)}
-            />
-            <button
-              onClick={() => createVersionMutation.mutate()}
-              disabled={createVersionMutation.isPending}
-              className="btn-secondary shrink-0"
-            >
-              {createVersionMutation.isPending ? (
-                <><Loader2 size={13} className="animate-spin" /> Creating…</>
-              ) : (
-                <><GitBranch size={13} /> Create Version</>
-              )}
-            </button>
-          </div>
-
-          {versions && versions.length > 0 && (
-            <div className="mt-4 divide-y divide-slate-100 rounded-lg border border-slate-100 overflow-hidden">
-              {versions.slice(0, 6).map((v) => (
-                <div
-                  key={v.id}
-                  className="flex items-center gap-3 px-3 py-2 text-sm bg-slate-50"
-                >
-                  <span className="font-mono text-slate-700 text-xs shrink-0">
-                    v{v.version_number}
-                  </span>
-                  <span className="text-slate-400 text-xs truncate flex-1">
-                    {v.image_tag ?? "no image"}
-                  </span>
-                  <span
-                    className={`badge shrink-0 ${
-                      v.eval_passed ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
-                    }`}
-                  >
-                    {v.eval_passed ? "eval passed" : "eval pending"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Step 2 — Deploy */}
-        <div className="card">
-          <div className="flex items-center gap-2 mb-4">
-            <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs font-bold flex items-center justify-center">
-              2
-            </div>
             <h2 className="font-semibold text-slate-900">Deploy to Sandbox</h2>
           </div>
 
           <p className="text-xs text-slate-500 mb-3">
-            Ungated test deploy — evaluate here before publishing.
+            Creates a new version snapshot of current agent config and deploys it.
           </p>
 
           <button
@@ -221,7 +146,36 @@ export default function DeployAgentPage() {
           )}
         </div>
 
-        {/* Status history */}
+        {/* Version history */}
+        {versions && versions.length > 0 && (
+          <div className="card">
+            <h2 className="font-semibold text-slate-900 mb-4">Versions</h2>
+            <div className="divide-y divide-slate-100 rounded-lg border border-slate-100 overflow-hidden">
+              {versions.slice(0, 6).map((v) => (
+                <div
+                  key={v.id}
+                  className="flex items-center gap-3 px-3 py-2 text-sm bg-slate-50"
+                >
+                  <span className="font-mono text-slate-700 text-xs shrink-0">
+                    v{v.version_number}
+                  </span>
+                  <span className="text-slate-400 text-xs truncate flex-1">
+                    {v.image_tag ?? "config snapshot"}
+                  </span>
+                  <span
+                    className={`badge shrink-0 ${
+                      v.eval_passed ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
+                    }`}
+                  >
+                    {v.eval_passed ? "eval passed" : "eval pending"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Deployment history */}
         {deployments && deployments.length > 0 && (
           <div className="card">
             <h2 className="font-semibold text-slate-900 mb-4">Deployment History</h2>

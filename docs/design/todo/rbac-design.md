@@ -1,11 +1,12 @@
 # AgentShield RBAC — Design Spec
 
-**Status**: Draft  
-**Date**: 2026-07-06  
+**Status**: Partially Implemented (foundation shipped, enforcement pending)  
+**Date**: 2026-07-06 (updated 2026-07-09)  
 **Author**: Karthik + Claude  
-**Version**: 1.0.0  
+**Version**: 1.1.0  
 **Decision**: `docs/decisions.md` §Decision 25  
-**Related**: `docs/design/authorization-model-spec.md` (data-plane auth — agent machine identity, OPA, Istio)
+**Related**: `docs/design/authorization-model-spec.md` (data-plane auth — agent machine identity, OPA, Istio)  
+**Implementation**: `services/registry-api/rbac.py`, migration 0044, suite-42
 
 ---
 
@@ -496,7 +497,43 @@ New suite: `scripts/e2e/suite-32-rbac.sh`
 
 ---
 
-## 13. Future Improvements (Deferred)
+## 13. Implementation Status (as of 2026-07-09)
+
+### 13.1 DONE (Slice 4 foundation — permit-all stubs, wired but not enforcing)
+
+| Component | What shipped | Notes |
+|-----------|-------------|-------|
+| **`rbac.py` module** (§5) | All 5 policy functions + `require_global_role` factory + `_normalize_role` + `grant_creator_admin` | `ENFORCE = False` → logs warning but never 403s. Flip to True when ready to enforce. |
+| **Migration 0044** (§4.2, §10.1) | `artifact_role_grants` table, all indexes, unique partial constraint, role value normalization (`admin→platform-admin`, `operator→contributor`) | Spec said 0030 — landed as 0044 (later sequence). Schema matches spec exactly. |
+| **Creator auto-grant** (§3.2) | `grant_creator_admin` called in `routers/agents.py` (agent create) and `routers/composite_workflows.py` (workflow create) | `granted_by = 'system:auto-grant'`, ON CONFLICT DO NOTHING for idempotency |
+| **`/me` enrichment** (§8.5) | Returns `role` (normalized) + `artifact_roles` array | In `routers/me.py`; imports `get_user_artifact_roles`, `_normalize_role` from `rbac.py` |
+| **Frontend `isAtLeast`** (§8.1) | `AuthContext.tsx`: `ROLE_LEVEL` map + `isAtLeast(minRole)` method | Hierarchy: viewer(0) < contributor(1) < platform-admin(2) |
+| **`RequireRole` guard** (§8.2) | `components/RequireRole.tsx` wraps admin routes in `App.tsx` | Redirects to `/` if below threshold |
+| **Sidebar admin filter** (§8.3) | Admin section gated by `isAtLeast("platform-admin")` | `Sidebar.tsx` |
+| **E2E suite-42** (§12) | 6 tests: table exists, agent auto-grant, workflow auto-grant, /me auth guard, normalization, idempotency | Maps to spec's T-S32-001 through T-S32-006 equivalents |
+
+### 13.2 TODO (enforcement + remaining UI)
+
+| Spec Section | What remains | Priority |
+|-------------|-------------|----------|
+| §5.3 `require_global_role` | Flip `ENFORCE = True` — all admin routes start 403-ing non-admins | HIGH — flip once all teams are on normalized roles |
+| §6.1–6.5 endpoint matrix | Wire `require_global_role("platform-admin")` into actual admin routers; wire `can_create_agent` into agent/workflow POST; wire `can_deploy_to_production` into production deploy path | HIGH |
+| §6.6 artifact-roles CRUD | New router: `POST/GET/DELETE /api/v1/artifact-roles` | MEDIUM — admin can grant via DB until this ships |
+| §7 HITL routing rewrite | Replace `approval_authority`-based routing with `artifact_role_grants` query; filter production approvals by `approver` scoped role | MEDIUM |
+| §8.4 role dropdown | `AdminAccessPage.tsx` — change `["admin","operator","viewer"]` → `["platform-admin","contributor","viewer"]` | LOW (cosmetic, normalization handles old values) |
+| §9 Keycloak realm roles | `realm-init-job.yaml` create new roles; `keycloak_client.py` map old→new | LOW (backend normalization makes this non-blocking) |
+| §10.2 approval authority deprecation | Deprecation banner + gradual migration | DEFERRED |
+
+### 13.3 Key Implementation Decisions
+
+1. **Permit-all stub approach**: `require_global_role` exists but ENFORCE=False — every endpoint is structurally ready to gate, but nobody gets 403 until the flag flips. This lets us wire guards incrementally without breaking existing users.
+2. **Migration 0044 not 0030**: The spec said 0030 but migrations 0030-0043 were taken by other features. The table + indexes + constraints match the spec exactly.
+3. **Normalization is transparent**: `_normalize_role("admin") → "platform-admin"` happens at read time. No Keycloak migration needed to start enforcing — old DB values work unchanged.
+4. **No ORM model for `artifact_role_grants`**: Raw SQL via `text()` — matches the pattern used by `user_team_assignments` (also raw-SQL-only).
+
+---
+
+## 14. Future Improvements (Deferred)
 
 | Item | Description | Why deferred |
 |------|-------------|-------------|
@@ -504,5 +541,5 @@ New suite: `scripts/e2e/suite-32-rbac.sh`
 | **Mandatory deploy gate** | Block production deploy until at least one agent-admin (beyond the creator) is assigned | Advisory is simpler; creator auto-grant handles the common case |
 | **Revocation cascading** | Option to cascade-revoke all grants made by a revoked agent-admin | Orphan-keep is safer for now; cascade risks unintended access loss |
 | **Role audit log** | Full history of grant/revoke events with timestamps and actors | `granted_by` + `granted_at` + `revoked_at` covers basics; append-only audit is future |
-| **UI for artifact roles** | Dedicated Studio page to manage artifact-scoped grants per agent | Can be built after the API is stable; platform-admin can use API directly for now |
+| **UI for artifact roles** | Dedicated Studio page to manage artifact-scoped grants per agent | §6.6 API must ship first; platform-admin can use DB directly for now |
 | **Approval authority deprecation** | Drop the `approval_authority` table after full migration | Needs data migration tooling and admin communication |

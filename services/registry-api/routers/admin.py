@@ -29,8 +29,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bundle_generator import generate_bundle_data
 from db import get_db
 from models import (
-    Agent, ApprovalAuthority, AssetGrant, EvalRun, GrantAudit,
-    PublishRequest, PublishedArtifact, PublishedVersion, Tool,
+    Agent, AgentVersion, ApprovalAuthority, AssetGrant, CompositeWorkflow,
+    EvalRun, GrantAudit, PublishRequest, PublishedArtifact, PublishedVersion,
+    Skill, Tool, WorkflowVersion,
 )
 from schemas import (
     ApprovalAuthorityCreate,
@@ -140,40 +141,55 @@ async def list_publish_requests(
         await db.execute(q.order_by(PublishRequest.submitted_at.desc()).limit(limit).offset(offset))
     ).scalars().all()
 
+    # Resolve asset names + teams for all asset types
+    asset_name_map: dict[uuid.UUID, tuple[str, str | None]] = {}
+    ids_by_type: dict[str, list[uuid.UUID]] = {}
+    for r in rows:
+        ids_by_type.setdefault(r.asset_type, []).append(r.asset_id)
+
+    if ids_by_type.get("agent"):
+        for row in (await db.execute(select(Agent.id, Agent.name, Agent.team).where(Agent.id.in_(ids_by_type["agent"])))).all():
+            asset_name_map[row.id] = (row.name, row.team)
+    if ids_by_type.get("workflow"):
+        for row in (await db.execute(select(CompositeWorkflow.id, CompositeWorkflow.name, CompositeWorkflow.team).where(CompositeWorkflow.id.in_(ids_by_type["workflow"])))).all():
+            asset_name_map[row.id] = (row.name, row.team)
+    if ids_by_type.get("tool"):
+        for row in (await db.execute(select(Tool.id, Tool.name, Tool.owner_team).where(Tool.id.in_(ids_by_type["tool"])))).all():
+            asset_name_map[row.id] = (row.name, row.owner_team)
+    if ids_by_type.get("skill"):
+        for row in (await db.execute(select(Skill.id, Skill.name, Skill.team).where(Skill.id.in_(ids_by_type["skill"])))).all():
+            asset_name_map[row.id] = (row.name, row.team)
+
     # Enrich with latest eval score per agent publish request
-    items: list[PublishRequestResponse] = []
-    agent_asset_ids = [r.asset_id for r in rows if r.asset_type == "agent"]
     eval_map: dict[uuid.UUID, tuple[float | None, uuid.UUID | None]] = {}
-    if agent_asset_ids:
-        from sqlalchemy import func as sa_func
-
-        agent_rows = (
-            await db.execute(select(Agent.id, Agent.name).where(Agent.id.in_(agent_asset_ids)))
-        ).all()
-        name_by_id = {row.id: row.name for row in agent_rows}
-        agent_names = list(name_by_id.values())
-        if agent_names:
-            latest_eval_q = (
-                select(
-                    EvalRun.agent_name,
-                    EvalRun.overall_score,
-                    EvalRun.id,
-                )
-                .where(
-                    EvalRun.agent_name.in_(agent_names),
-                    EvalRun.status == "completed",
-                )
-                .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
-                .distinct(EvalRun.agent_name)
+    agent_names = [name for aid, (name, _) in asset_name_map.items() if aid in (ids_by_type.get("agent") or [])]
+    if agent_names:
+        latest_eval_q = (
+            select(
+                EvalRun.agent_name,
+                EvalRun.overall_score,
+                EvalRun.id,
             )
-            eval_rows = (await db.execute(latest_eval_q)).all()
-            name_to_eval = {row.agent_name: (row.overall_score, row.id) for row in eval_rows}
-            for aid, aname in name_by_id.items():
-                if aname in name_to_eval:
-                    eval_map[aid] = name_to_eval[aname]
+            .where(
+                EvalRun.agent_name.in_(agent_names),
+                EvalRun.status == "completed",
+            )
+            .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
+            .distinct(EvalRun.agent_name)
+        )
+        eval_rows = (await db.execute(latest_eval_q)).all()
+        name_to_eval = {row.agent_name: (row.overall_score, row.id) for row in eval_rows}
+        for aid in ids_by_type.get("agent", []):
+            aname = asset_name_map.get(aid, (None, None))[0]
+            if aname and aname in name_to_eval:
+                eval_map[aid] = name_to_eval[aname]
 
+    items: list[PublishRequestResponse] = []
     for r in rows:
         resp = PublishRequestResponse.model_validate(r)
+        if r.asset_id in asset_name_map:
+            resp.asset_name = asset_name_map[r.asset_id][0]
+            resp.asset_team = asset_name_map[r.asset_id][1]
         if r.asset_id in eval_map:
             resp.last_eval_score = eval_map[r.asset_id][0]
             resp.last_eval_run_id = eval_map[r.asset_id][1]
@@ -216,39 +232,38 @@ async def approve_publish_request(
     pr.reviewed_by = x_user_sub
     pr.reviewed_at = now
 
-    # Update the asset's publish_status to 'published'
+    # Resolve the source asset and update its publish_status
+    source_agent = None
+    source_wf = None
+    source_tool = None
+    source_skill = None
+
     if pr.asset_type == "agent":
-        agent_result = await db.execute(
+        source_agent = (await db.execute(
             select(Agent).where(Agent.id == pr.asset_id)
-        )
-        asset = agent_result.scalar_one_or_none()
-        if asset is not None:
-            asset.publish_status = "published"
-            asset.updated_at = now
+        )).scalar_one_or_none()
+        if source_agent is not None:
+            source_agent.publish_status = "published"
+            source_agent.updated_at = now
     elif pr.asset_type == "workflow":
-        from models import CompositeWorkflow
-        wf_result = await db.execute(
+        source_wf = (await db.execute(
             select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
-        )
-        wf = wf_result.scalar_one_or_none()
-        if wf is not None:
-            wf.publish_status = "published"
-            wf.updated_at = now
+        )).scalar_one_or_none()
+        if source_wf is not None:
+            source_wf.publish_status = "published"
+            source_wf.updated_at = now
     elif pr.asset_type == "tool":
-        tool_result = await db.execute(
+        source_tool = (await db.execute(
             select(Tool).where(Tool.id == pr.asset_id)
-        )
-        tool = tool_result.scalar_one_or_none()
-        if tool is not None:
-            tool.publish_status = "published"
+        )).scalar_one_or_none()
+        if source_tool is not None:
+            source_tool.publish_status = "published"
     elif pr.asset_type == "skill":
-        from models import Skill
-        skill_result = await db.execute(
+        source_skill = (await db.execute(
             select(Skill).where(Skill.id == pr.asset_id)
-        )
-        skill = skill_result.scalar_one_or_none()
-        if skill is not None:
-            skill.publish_status = "published"
+        )).scalar_one_or_none()
+        if source_skill is not None:
+            source_skill.publish_status = "published"
 
     # Create grants for each team
     grants_created = 0
@@ -274,6 +289,19 @@ async def approve_publish_request(
     await db.flush()
 
     # --- Production artifact promotion ---
+    # Resolve the pinned version (if set) for accurate config snapshot
+    pinned_agent_ver = None
+    pinned_wf_ver = None
+    if pr.source_version_id is not None:
+        if pr.asset_type == "agent":
+            pinned_agent_ver = (await db.execute(
+                select(AgentVersion).where(AgentVersion.id == pr.source_version_id)
+            )).scalar_one_or_none()
+        elif pr.asset_type == "workflow":
+            pinned_wf_ver = (await db.execute(
+                select(WorkflowVersion).where(WorkflowVersion.id == pr.source_version_id)
+            )).scalar_one_or_none()
+
     # Upsert published_artifact and create a new published_version with config snapshot
     artifact = (await db.execute(
         select(PublishedArtifact).where(
@@ -283,32 +311,25 @@ async def approve_publish_request(
     )).scalar_one_or_none()
 
     if artifact is None:
-        # Determine name/description/team from the source asset
         art_name = ""
         art_desc = ""
         art_team = ""
-        if pr.asset_type == "agent" and asset is not None:
-            art_name = asset.name
-            art_desc = asset.description or ""
-            art_team = asset.team
-        elif pr.asset_type == "workflow":
-            wf_local = wf if "wf" in dir() else None
-            if wf_local:
-                art_name = wf_local.name
-                art_desc = wf_local.description or ""
-                art_team = wf_local.team
-        elif pr.asset_type == "tool":
-            tool_local = tool if "tool" in dir() else None
-            if tool_local:
-                art_name = tool_local.name
-                art_desc = tool_local.description or ""
-                art_team = getattr(tool_local, "team", "platform")
-        elif pr.asset_type == "skill":
-            skill_local = skill if "skill" in dir() else None
-            if skill_local:
-                art_name = skill_local.name
-                art_desc = getattr(skill_local, "description", "") or ""
-                art_team = getattr(skill_local, "team", "platform")
+        if pr.asset_type == "agent" and source_agent is not None:
+            art_name = source_agent.name
+            art_desc = source_agent.description or ""
+            art_team = source_agent.team
+        elif pr.asset_type == "workflow" and source_wf is not None:
+            art_name = source_wf.name
+            art_desc = source_wf.description or ""
+            art_team = source_wf.team
+        elif pr.asset_type == "tool" and source_tool is not None:
+            art_name = source_tool.name
+            art_desc = source_tool.description or ""
+            art_team = getattr(source_tool, "team", "platform")
+        elif pr.asset_type == "skill" and source_skill is not None:
+            art_name = source_skill.name
+            art_desc = getattr(source_skill, "description", "") or ""
+            art_team = getattr(source_skill, "team", "platform")
 
         artifact = PublishedArtifact(
             name=art_name or f"unnamed-{pr.asset_id}",
@@ -320,21 +341,39 @@ async def approve_publish_request(
         db.add(artifact)
         await db.flush()
 
-    # Build config snapshot
+    # Build config snapshot from the pinned version when available
     config_snapshot: dict = {}
-    if pr.asset_type == "agent" and asset is not None:
-        config_snapshot = {
-            "system_prompt": getattr(asset, "metadata_", {}).get("system_prompt", ""),
-            "model": getattr(asset, "metadata_", {}).get("model", ""),
-            "execution_shape": asset.execution_shape,
-            "memory_enabled": asset.memory_enabled,
-            "agent_type": asset.agent_type,
-        }
-    elif pr.asset_type == "workflow" and "wf" in dir() and wf is not None:
-        config_snapshot = {
-            "orchestration": getattr(wf, "orchestration", "sequential"),
-            "execution_shape": getattr(wf, "execution_shape", "reactive"),
-        }
+    if pr.asset_type == "agent":
+        if pinned_agent_ver is not None:
+            config_snapshot = {
+                "version_number": pinned_agent_ver.version_number,
+                "tools": pinned_agent_ver.tools or [],
+                "config": pinned_agent_ver.config or {},
+                "image_tag": pinned_agent_ver.image_tag,
+            }
+        elif source_agent is not None:
+            config_snapshot = {
+                "system_prompt": getattr(source_agent, "metadata_", {}).get("system_prompt", ""),
+                "model": getattr(source_agent, "metadata_", {}).get("model", ""),
+                "execution_shape": source_agent.execution_shape,
+                "memory_enabled": source_agent.memory_enabled,
+                "agent_type": source_agent.agent_type,
+            }
+    elif pr.asset_type == "workflow":
+        if pinned_wf_ver is not None:
+            config_snapshot = {
+                "version_number": pinned_wf_ver.version_number,
+                "members": pinned_wf_ver.members or [],
+                "edges": pinned_wf_ver.edges or [],
+                "orchestration": pinned_wf_ver.orchestration,
+                "execution_shape": pinned_wf_ver.execution_shape,
+                "config": pinned_wf_ver.config or {},
+            }
+        elif source_wf is not None:
+            config_snapshot = {
+                "orchestration": getattr(source_wf, "orchestration", "sequential"),
+                "execution_shape": getattr(source_wf, "execution_shape", "reactive"),
+            }
 
     # Determine next version label
     from sqlalchemy import func as sa_func
@@ -348,13 +387,13 @@ async def approve_publish_request(
         artifact_id=artifact.id,
         version_label=version_label,
         config_snapshot=config_snapshot,
-        source_version_id=None,
+        source_version_id=pr.source_version_id,
         promoted_by=x_user_sub,
         notes=pr.review_notes,
     )
     db.add(pub_version)
 
-    # Update grants to point at published_artifact.id instead of source asset_id
+    # Create catalog-level grants
     for team_name in body.grantee_teams:
         catalog_grant = AssetGrant(
             asset_id=artifact.id,
@@ -368,12 +407,13 @@ async def approve_publish_request(
     await db.flush()
 
     logger.info(
-        "approve_publish_request: id=%s approved_by=%s grants_created=%d artifact=%s version=%s",
+        "approve_publish_request: id=%s approved_by=%s grants=%d artifact=%s version=%s pinned_version=%s",
         request_id,
         x_user_sub,
         grants_created,
         artifact.id,
         version_label,
+        pr.source_version_id,
     )
     return {"approved": True, "grants_created": grants_created, "artifact_id": str(artifact.id), "version_label": version_label}
 
@@ -414,6 +454,14 @@ async def reject_publish_request(
         if asset is not None:
             asset.publish_status = "private"
             asset.updated_at = now
+    elif pr.asset_type == "workflow":
+        wf_result = await db.execute(
+            select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
+        )
+        wf = wf_result.scalar_one_or_none()
+        if wf is not None:
+            wf.publish_status = "private"
+            wf.updated_at = now
 
     await db.flush()
 

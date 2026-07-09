@@ -9,6 +9,7 @@ from k8s_client import K8sClient
 from production_reconciler import production_poll_loop
 from reconciler import reconcile
 from timeout_worker import timeout_worker
+from ttl_worker import ttl_worker
 
 logging.basicConfig(
     level=settings.log_level,
@@ -57,6 +58,54 @@ async def _patch_deployment_status(
         logger.error("Failed to patch deployment %s: %s", deployment_id, exc)
 
 
+async def _handle_lifecycle_transitions(http: httpx.AsyncClient, k8s: K8sClient) -> None:
+    """Act on deployments the API has moved to a transitional lifecycle state:
+    'suspending' → scale to 0 → 'suspended'; 'terminating' → delete → 'terminated'.
+    (Resume/Upgrade go back to 'pending' and flow through the normal reconcile.)
+    empty environment = all environments."""
+    loop = asyncio.get_event_loop()
+    for st in ("suspending", "terminating"):
+        try:
+            resp = await http.get(
+                "/api/v1/deployments/",
+                params={"status": st, "environment": "", "limit": 50},
+            )
+            resp.raise_for_status()
+            items = resp.json().get("items", [])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("lifecycle fetch (%s) failed: %s", st, exc)
+            continue
+
+        for dep in items:
+            dep_id = dep["id"]
+            agent_name = dep.get("agent_name") or "unknown"
+            environment = dep.get("environment", "sandbox")
+            namespace = dep.get("k8s_namespace")
+            k8s_name = dep.get("k8s_deployment_name") or f"{agent_name}-{environment}"
+
+            if st == "suspending":
+                try:
+                    await loop.run_in_executor(
+                        None, lambda ns=namespace, kn=k8s_name: k8s.scale_deployment(ns, kn, 0)
+                    )
+                    await _patch_deployment_status(http, dep_id, "suspended")
+                    logger.info("Suspended %s/%s (scaled to 0)", namespace, k8s_name)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Suspend failed for %s: %s", dep_id, exc)
+            else:  # terminating
+                try:
+                    await loop.run_in_executor(
+                        None, lambda ns=namespace, kn=k8s_name: k8s.delete_deployment(ns, kn)
+                    )
+                    await loop.run_in_executor(
+                        None, lambda ns=namespace, kn=k8s_name: k8s.delete_service(ns, kn)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Terminate cleanup for %s: %s", dep_id, exc)
+                await _patch_deployment_status(http, dep_id, "terminated")
+                logger.info("Terminated %s/%s (resources deleted)", namespace, k8s_name)
+
+
 async def poll_loop() -> None:
     """Main reconciliation loop. Polls every POLL_INTERVAL_SECONDS."""
     k8s = K8sClient()
@@ -72,10 +121,10 @@ async def poll_loop() -> None:
     ) as http:
         while True:
             try:
-                # 1. Fetch pending deployments
+                # 1. Fetch pending deployments (environment="" = all environments)
                 resp = await http.get(
                     "/api/v1/deployments/",
-                    params={"status": "pending", "limit": 50},
+                    params={"status": "pending", "environment": "", "limit": 50},
                 )
                 resp.raise_for_status()
                 payload = resp.json()
@@ -133,6 +182,9 @@ async def poll_loop() -> None:
                         error_message=error_msg,
                     )
 
+                # 6. Handle suspend/terminate transitions (sandbox lifecycle)
+                await _handle_lifecycle_transitions(http, k8s)
+
             except httpx.RequestError as exc:
                 logger.error("Registry API unreachable: %s — will retry next cycle", exc)
             except Exception as exc:  # noqa: BLE001
@@ -142,11 +194,12 @@ async def poll_loop() -> None:
 
 
 async def _async_main() -> None:
-    """Async entry point: runs poll_loop and timeout_worker concurrently."""
+    """Async entry point: runs poll_loop, timeout_worker, and ttl_worker concurrently."""
     loop = asyncio.get_event_loop()
 
     # Start background workers
     tw_task = asyncio.create_task(timeout_worker(), name="timeout_worker")
+    ttl_task = asyncio.create_task(ttl_worker(), name="ttl_worker")
     poll_task = asyncio.create_task(poll_loop(), name="poll_loop")
     prod_task = asyncio.create_task(production_poll_loop(settings), name="production_poll_loop")
 
@@ -157,9 +210,10 @@ async def _async_main() -> None:
     await stop.wait()
     logger.info("deploy-controller: SIGTERM received — shutting down")
     tw_task.cancel()
+    ttl_task.cancel()
     poll_task.cancel()
     prod_task.cancel()
-    await asyncio.gather(tw_task, poll_task, prod_task, return_exceptions=True)
+    await asyncio.gather(tw_task, ttl_task, poll_task, prod_task, return_exceptions=True)
     logger.info("deploy-controller: shutdown complete")
 
 

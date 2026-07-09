@@ -1,26 +1,35 @@
 import { useQuery } from "@tanstack/react-query";
-import { listCompositeWorkflows } from "../../api/registryApi";
+import { listAllWorkflowDeployments } from "../../api/registryApi";
+
+export interface WorkflowDeploymentSelection {
+  id: string;
+  name: string;
+  versionId: string | null;
+  deploymentId: string;
+}
 
 interface Props {
   selectedWorkflowId: string;
-  onSelect: (wf: { id: string; name: string } | null) => void;
+  onSelect: (wf: WorkflowDeploymentSelection | null) => void;
 }
 
 export default function WorkflowSelector({ selectedWorkflowId, onSelect }: Props) {
-  const { data: workflows, isLoading } = useQuery({
-    queryKey: ["workflows-for-playground"],
-    queryFn: () => listCompositeWorkflows(),
+  const { data: deployments, isLoading } = useQuery({
+    queryKey: ["sandbox-workflow-deployments-for-playground"],
+    queryFn: () => listAllWorkflowDeployments("running", "sandbox"),
   });
 
-  const active = workflows?.filter((w) => w.status !== "archived") ?? [];
+  const items = deployments ?? [];
 
   return (
     <div className="flex flex-col gap-3">
       <label className="label text-xs font-semibold text-slate-500 uppercase tracking-wider">
-        Select Workflow
+        Select Workflow Deployment
       </label>
       {isLoading ? (
-        <p className="text-sm text-slate-400">Loading workflows…</p>
+        <p className="text-sm text-slate-400">Loading workflow deployments…</p>
+      ) : items.length === 0 ? (
+        <p className="text-sm text-amber-600">No running sandbox workflow deployments.</p>
       ) : (
         <select
           className="input text-sm"
@@ -31,14 +40,14 @@ export default function WorkflowSelector({ selectedWorkflowId, onSelect }: Props
               onSelect(null);
               return;
             }
-            const wf = active.find((w) => w.id === id);
-            onSelect(wf ? { id: wf.id, name: wf.name } : null);
+            const dep = items.find((d) => d.workflow_id === id);
+            onSelect(dep ? { id: dep.workflow_id, name: dep.workflow_name ?? dep.name ?? id.slice(0, 8), versionId: dep.version_id ?? null, deploymentId: dep.id } : null);
           }}
         >
-          <option value="">-- pick a workflow --</option>
-          {active.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
+          <option value="">-- pick a workflow deployment --</option>
+          {items.map((d) => (
+            <option key={d.id} value={d.workflow_id}>
+              {d.name ?? d.workflow_name ?? d.id.slice(0, 8)} ({d.workflow_name})
             </option>
           ))}
         </select>

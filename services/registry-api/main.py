@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 from routers.agent_tools import router as agent_tools_router
 from routers.admin_users import router as admin_users_router, teams_router as admin_teams_router
 from routers.catalog import router as catalog_router
-from routers.chat import router as chat_router
+from routers.chat import router as chat_router, deployment_chat_router
 from routers.me import router as me_router
 from routers.memory import router as memory_router
 from routers.internal import router as internal_router
@@ -207,6 +207,7 @@ def create_app() -> FastAPI:
     # Mounts POST /api/v1/agents/{name}/chat and GET /api/v1/agents/{name}/chat/{run_id}/stream
     # Must come after agents_router to avoid route-ordering conflicts.
     app.include_router(chat_router)
+    app.include_router(deployment_chat_router)
 
     # --- Memory router (Phase 6) ---
     app.include_router(memory_router)

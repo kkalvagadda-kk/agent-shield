@@ -1,7 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Loader2, MessageSquare, Rocket, Eye } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { listAgents, listAllDeployments } from "../api/registryApi";
+import DeployModal from "../components/DeployModal";
 import { useAuth } from "../contexts/AuthContext";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -31,6 +33,8 @@ async function fetchTeamsSummary(): Promise<TeamSummary[]> {
 
 export default function MyAgentsPage() {
   const { user } = useAuth();
+  const qc = useQueryClient();
+  const [deployingAgent, setDeployingAgent] = useState<string | null>(null);
 
   const { data: teams = [], isLoading: loadingTeams } = useQuery({
     queryKey: ["my-agents-teams"],
@@ -158,12 +162,12 @@ export default function MyAgentsPage() {
                   </>
                 ) : (
                   <>
-                    <Link
-                      to={`/agents/${a.name}/deploy`}
+                    <button
+                      onClick={() => setDeployingAgent(a.name)}
                       className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded transition-colors"
                     >
                       <Rocket size={11} /> Deploy
-                    </Link>
+                    </button>
                     <Link
                       to={`/agents/${a.name}`}
                       className="flex items-center gap-1 text-xs font-medium text-slate-600 hover:text-slate-800 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded transition-colors"
@@ -176,6 +180,17 @@ export default function MyAgentsPage() {
             </div>
           ))}
         </div>
+      )}
+
+      {deployingAgent && (
+        <DeployModal
+          agentName={deployingAgent}
+          onClose={() => setDeployingAgent(null)}
+          onDeployed={() => {
+            qc.invalidateQueries({ queryKey: ["deployments"] });
+            qc.invalidateQueries({ queryKey: ["agents"] });
+          }}
+        />
       )}
     </div>
   );

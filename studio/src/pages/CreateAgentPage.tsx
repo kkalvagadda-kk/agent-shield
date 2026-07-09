@@ -536,7 +536,7 @@ function NoCodeForm({ team }: { team: string | null }) {
       if (url) {
         setWebhookUrl(url); // show banner; navigate on "Done"
       } else {
-        setTimeout(() => navigate(`/agents/${name}`), 800);
+        setTimeout(() => navigate("/agents"), 800);
       }
     },
     onError: (err: unknown) => {
@@ -554,7 +554,7 @@ function NoCodeForm({ team }: { team: string | null }) {
   };
 
   if (webhookUrl && createdName) {
-    return <div className="card"><WebhookBanner url={webhookUrl} onDone={() => navigate(`/agents/${createdName}`)} /></div>;
+    return <div className="card"><WebhookBanner url={webhookUrl} onDone={() => navigate("/agents")} /></div>;
   }
 
   return (
@@ -752,7 +752,7 @@ function CodeForm({ team }: { team: string | null }) {
       toast.success(`Agent "${name}" created.`);
       setCreatedName(name);
       if (url) setWebhookUrl(url);
-      else setTimeout(() => navigate(`/agents/${name}`), 800);
+      else setTimeout(() => navigate("/agents"), 800);
     },
     onError: (err: unknown) => {
       toast.error(err instanceof Error ? err.message : "Failed to create agent.");
@@ -760,7 +760,7 @@ function CodeForm({ team }: { team: string | null }) {
   });
 
   if (webhookUrl && createdName) {
-    return <div className="card"><WebhookBanner url={webhookUrl} onDone={() => navigate(`/agents/${createdName}`)} /></div>;
+    return <div className="card"><WebhookBanner url={webhookUrl} onDone={() => navigate("/agents")} /></div>;
   }
 
   return (

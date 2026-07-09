@@ -22,11 +22,12 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import case, exists, func, select
+from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
+from rbac import grant_creator_admin
 from models import (
     Agent,
     AgentIdentity,
@@ -112,6 +113,8 @@ async def create_agent(
             else:
                 logger.warning("create_agent: tool '%s' not found, skipping binding", tool_name)
         await db.flush()
+
+    await grant_creator_admin(db, "agent", agent.id, caller)
 
     logger.info(
         "create_agent: registered agent '%s' (id=%s, created_by=%s, tools=%s)",
@@ -210,10 +213,24 @@ async def list_agents(
         status_filter,
     )
 
-    return PaginatedResponse[AgentResponse](
-        items=[AgentResponse.model_validate(a) for a in agents],
-        total=total,
-    )
+    # Latest version number per agent (single grouped query — no N+1).
+    ver_map = {}
+    if agents:
+        from models import AgentVersion
+        ver_rows = await db.execute(
+            select(AgentVersion.agent_id, func.max(AgentVersion.version_number))
+            .where(AgentVersion.agent_id.in_([a.id for a in agents]))
+            .group_by(AgentVersion.agent_id)
+        )
+        ver_map = {aid: vn for aid, vn in ver_rows.all()}
+
+    items = []
+    for a in agents:
+        resp = AgentResponse.model_validate(a)
+        resp.latest_version_number = ver_map.get(a.id)
+        items.append(resp)
+
+    return PaginatedResponse[AgentResponse](items=items, total=total)
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +293,18 @@ async def update_agent(
         agent.metadata_ = body.metadata
         agent.llm_provider_id = body.metadata.get("llm_provider_id")
         changed = True
+
+        new_tool_names = body.metadata.get("tools", [])
+        if isinstance(new_tool_names, list):
+            await db.execute(
+                delete(AgentTool).where(AgentTool.agent_id == agent.id)
+            )
+            for tool_name in new_tool_names:
+                tool_row = (await db.execute(
+                    select(Tool).where(Tool.name == tool_name)
+                )).scalar_one_or_none()
+                if tool_row:
+                    db.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id, added_by="system"))
     if body.execution_shape is not None:
         agent.execution_shape = body.execution_shape
         changed = True
@@ -316,6 +345,16 @@ async def delete_agent(
         )
 
     agent.status = "deprecated"
+    # Cascade: terminate active sandbox deployments
+    from models import Deployment
+    await db.execute(
+        update(Deployment)
+        .where(
+            Deployment.agent_id == agent.id,
+            Deployment.status.in_(["pending", "deploying", "running", "suspended", "suspending"]),
+        )
+        .values(status="terminated")
+    )
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
@@ -440,33 +479,45 @@ async def publish_agent(
             detail={"error": "critical_risk_not_publishable"},
         )
 
-    # Eval gate (Decision 20) — the agent's latest version must have passed
-    # evaluation before it can be published to the catalog. (Moved here from deploy.)
-    latest_version = (await db.execute(
-        select(AgentVersion)
-        .where(AgentVersion.agent_id == agent.id)
-        .order_by(AgentVersion.version_number.desc())
-        .limit(1)
-    )).scalar_one_or_none()
-    if latest_version is None:
+    # Eval gate (Decision 20) — resolve the target version.
+    # If body.version_id is provided (from a deployment context), validate
+    # that specific version. Otherwise fall back to the latest version.
+    if body.version_id:
+        target_version = (await db.execute(
+            select(AgentVersion)
+            .where(AgentVersion.id == body.version_id, AgentVersion.agent_id == agent.id)
+        )).scalar_one_or_none()
+        if target_version is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "version_not_found", "version_id": str(body.version_id)},
+            )
+    else:
+        target_version = (await db.execute(
+            select(AgentVersion)
+            .where(AgentVersion.agent_id == agent.id)
+            .order_by(AgentVersion.version_number.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+    if target_version is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "no_version_to_publish"},
         )
-    if not latest_version.eval_passed:
+    if not target_version.eval_passed:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"error": "eval_not_passed", "version_number": latest_version.version_number},
+            detail={"error": "eval_not_passed", "version_number": target_version.version_number},
         )
-    version_tools = latest_version.tools or []
+    version_tools = target_version.tools or []
     has_risky = any(
         isinstance(t, dict) and t.get("risk", "low") in ("high", "critical")
         for t in version_tools
     ) or any(t.risk_level in ("high", "critical") for t in tools)
-    if has_risky and not latest_version.adversarial_eval_passed:
+    if has_risky and not target_version.adversarial_eval_passed:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"error": "adversarial_eval_not_passed", "version_number": latest_version.version_number},
+            detail={"error": "adversarial_eval_not_passed", "version_number": target_version.version_number},
         )
 
     # Determine highest risk level across assigned tools
@@ -476,13 +527,14 @@ async def publish_agent(
         if risk_order.get(t.risk_level, 0) > risk_order.get(highest, 0):
             highest = t.risk_level
 
-    # Create the publish request record
+    # Create the publish request record, pinning the evaluated version
     pr = PublishRequest(
         asset_id=agent.id,
         asset_type="agent",
         submitted_by=x_user_sub,
         highest_risk_level=highest,
         dependency_declaration=body.dependency_declaration,
+        source_version_id=target_version.id,
     )
     db.add(pr)
 

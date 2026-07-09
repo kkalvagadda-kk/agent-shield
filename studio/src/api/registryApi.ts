@@ -36,6 +36,7 @@ export interface Agent {
   updated_at: string;
   created_by: string;
   metadata: Record<string, unknown>;
+  latest_version_number: number | null;
 }
 
 export interface AgentVersion {
@@ -70,7 +71,12 @@ export interface Deployment {
   terminated_at: string | null;
   deployed_by: string | null;
   previous_version_id: string | null;
+  name: string | null;
+  suspended_at: string | null;
+  ttl_hours: number | null;
 }
+
+export type DeploymentAction = "suspend" | "resume" | "terminate" | "upgrade";
 
 export interface LLMProvider {
   id: string;
@@ -223,16 +229,48 @@ export const patchVersion = async (
   return data;
 };
 
+export const deleteAgentVersion = async (
+  agentName: string,
+  versionId: string
+): Promise<{ deleted_version_id: string; terminated_deployments: number }> => {
+  const { data } = await http.delete(`/agents/${agentName}/versions/${versionId}`);
+  return data;
+};
+
 // ---------------------------------------------------------------------------
 // Deployments
 // ---------------------------------------------------------------------------
 export const deployAgent = async (
   agentName: string,
-  body: { version_id: string; replicas?: number; environment?: string }
+  body: { version_id?: string; replicas?: number; environment?: string; name?: string; ttl_hours?: number }
 ): Promise<Deployment> => {
   const { data } = await http.post<Deployment>(
     `/agents/${agentName}/deploy`,
     body
+  );
+  return data;
+};
+
+// Lifecycle action on a sandbox deployment (suspend/resume/terminate/upgrade).
+// "Upgrade" is how a deployment's settings change — point it at a new version.
+export const updateSandboxDeployment = async (
+  agentName: string,
+  deploymentId: string,
+  action: DeploymentAction,
+  versionId?: string
+): Promise<Deployment> => {
+  const { data } = await http.patch<Deployment>(
+    `/agents/${agentName}/deployments/${deploymentId}`,
+    { action, version_id: versionId }
+  );
+  return data;
+};
+
+export const rollbackAgent = async (
+  agentName: string
+): Promise<Deployment> => {
+  const { data } = await http.post<Deployment>(
+    `/agents/${agentName}/rollback`
   );
   return data;
 };
@@ -242,6 +280,40 @@ export const getDeployments = async (
 ): Promise<Deployment[]> => {
   const { data } = await http.get<Deployment[]>(
     `/agents/${agentName}/deployments`
+  );
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// Deployment-scoped stats + runs (metrics belong to a deployment, not the
+// artifact). `context` selects the run-isolation column on the backend.
+// ---------------------------------------------------------------------------
+export type DeploymentContext = "playground" | "production";
+
+export const getDeploymentStats = async (
+  deploymentId: string,
+  context: DeploymentContext
+): Promise<AgentStats> => {
+  const { data } = await http.get<AgentStats>(
+    `/deployments/${deploymentId}/stats`,
+    { params: { context } }
+  );
+  return data;
+};
+
+export const listDeploymentRuns = async (
+  deploymentId: string,
+  params: {
+    context: DeploymentContext;
+    trigger_type?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }
+): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>(
+    `/deployments/${deploymentId}/runs`,
+    { params }
   );
   return data;
 };
@@ -262,12 +334,36 @@ export const startAgentChat = async (
   return data;
 };
 
+export const startDeploymentChat = async (
+  name: string,
+  depId: string,
+  body: { message: string; session_id?: string }
+): Promise<AgentChatStart> => {
+  const { data } = await http.post<AgentChatStart>(
+    `/agents/${name}/deployments/${depId}/chat`,
+    body
+  );
+  return data;
+};
+
 export const listAllDeployments = async (
   status?: string,
-  limit = 100
+  limit = 100,
+  environment?: string
 ): Promise<Paginated<Deployment>> => {
   const { data } = await http.get<Paginated<Deployment>>("/deployments/", {
-    params: { limit, ...(status ? { status } : {}) },
+    params: { limit, ...(status ? { status } : {}), ...(environment ? { environment } : {}) },
+  });
+  return data;
+};
+
+export const listAllWorkflowDeployments = async (
+  status?: string,
+  environment?: string,
+  limit = 100
+): Promise<WorkflowDeployment[]> => {
+  const { data } = await http.get<WorkflowDeployment[]>("/deployments/workflows", {
+    params: { limit, ...(status ? { status } : {}), ...(environment ? { environment } : {}) },
   });
   return data;
 };
@@ -470,10 +566,12 @@ export const deleteCompositeWorkflow = async (id: string): Promise<void> => {
 };
 
 export const publishWorkflow = async (
-  id: string
+  id: string,
+  versionId?: string
 ): Promise<{ publish_request_id: string }> => {
   const { data } = await http.post<{ publish_request_id: string }>(
-    `/workflows/${id}/publish`
+    `/workflows/${id}/publish`,
+    versionId ? { version_id: versionId } : {}
   );
   return data;
 };
@@ -599,6 +697,122 @@ export const listWorkflowRuns = async (
 };
 
 // ---------------------------------------------------------------------------
+// Workflow Versions + Deployments (Slice 1b)
+// ---------------------------------------------------------------------------
+export interface WorkflowVersion {
+  id: string;
+  workflow_id: string;
+  version_number: number;
+  members: unknown[];
+  edges: unknown[];
+  orchestration: string;
+  execution_shape: string;
+  config: Record<string, unknown>;
+  eval_passed: boolean;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface WorkflowDeployment {
+  id: string;
+  workflow_id: string;
+  version_id: string;
+  name: string | null;
+  workflow_name: string | null;
+  environment: string;
+  status: string;
+  replicas: number;
+  ttl_hours: number | null;
+  deployed_at: string;
+  suspended_at: string | null;
+  terminated_at: string | null;
+  error_message: string | null;
+  deployed_by: string | null;
+  previous_version_id: string | null;
+}
+
+export const createWorkflowVersion = async (
+  workflowId: string,
+  body: { eval_passed?: boolean }
+): Promise<WorkflowVersion> => {
+  const { data } = await http.post<WorkflowVersion>(`/workflows/${workflowId}/versions`, body);
+  return data;
+};
+
+export const listWorkflowVersions = async (workflowId: string): Promise<WorkflowVersion[]> => {
+  const { data } = await http.get<WorkflowVersion[]>(`/workflows/${workflowId}/versions`);
+  return data;
+};
+
+export const deleteWorkflowVersion = async (
+  workflowId: string,
+  versionId: string
+): Promise<{ deleted_version_id: string; terminated_deployments: number }> => {
+  const { data } = await http.delete(`/workflows/${workflowId}/versions/${versionId}`);
+  return data;
+};
+
+export const patchWorkflowVersion = async (
+  workflowId: string,
+  versionId: string,
+  body: { eval_passed?: boolean; notes?: string }
+): Promise<WorkflowVersion> => {
+  const { data } = await http.patch<WorkflowVersion>(
+    `/workflows/${workflowId}/versions/${versionId}`,
+    body
+  );
+  return data;
+};
+
+export const deployWorkflow = async (
+  workflowId: string,
+  body: { version_id: string; replicas?: number; environment?: string; name?: string; ttl_hours?: number }
+): Promise<WorkflowDeployment> => {
+  const { data } = await http.post<WorkflowDeployment>(`/workflows/${workflowId}/deploy`, body);
+  return data;
+};
+
+export const listWorkflowDeployments = async (workflowId: string): Promise<WorkflowDeployment[]> => {
+  const { data } = await http.get<WorkflowDeployment[]>(`/workflows/${workflowId}/deployments`);
+  return data;
+};
+
+export const updateWorkflowDeployment = async (
+  workflowId: string,
+  deploymentId: string,
+  action: DeploymentAction,
+  versionId?: string
+): Promise<WorkflowDeployment> => {
+  const { data } = await http.patch<WorkflowDeployment>(
+    `/workflows/${workflowId}/deployments/${deploymentId}`,
+    { action, version_id: versionId }
+  );
+  return data;
+};
+
+export const getWorkflowDeploymentStats = async (
+  workflowId: string,
+  deploymentId: string
+): Promise<AgentStats> => {
+  const { data } = await http.get<AgentStats>(
+    `/workflows/${workflowId}/deployments/${deploymentId}/stats`
+  );
+  return data;
+};
+
+export const listWorkflowDeploymentRuns = async (
+  workflowId: string,
+  deploymentId: string,
+  params?: { status?: string; limit?: number; offset?: number }
+): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>(
+    `/workflows/${workflowId}/deployments/${deploymentId}/runs`,
+    { params }
+  );
+  return data;
+};
+
+// ---------------------------------------------------------------------------
 // Auth Configs (T156)
 // ---------------------------------------------------------------------------
 export interface AuthConfig {
@@ -708,17 +922,23 @@ export interface PublishRequest {
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_notes: string | null;
+  source_version_id: string | null;
   last_eval_score: number | null;
   last_eval_run_id: string | null;
+  asset_name: string | null;
+  asset_team: string | null;
 }
 
 export const publishAgent = async (
   name: string,
-  dependency_declaration?: Record<string, unknown>
+  opts?: { dependency_declaration?: Record<string, unknown>; version_id?: string }
 ): Promise<{ publish_request_id: string }> => {
   const { data } = await http.post<{ publish_request_id: string }>(
     `/agents/${name}/publish`,
-    { dependency_declaration: dependency_declaration ?? {} }
+    {
+      dependency_declaration: opts?.dependency_declaration ?? {},
+      ...(opts?.version_id ? { version_id: opts.version_id } : {}),
+    }
   );
   return data;
 };
@@ -1064,6 +1284,8 @@ export interface AgentRunItem {
   langfuse_trace_id: string | null;
   trace_url: string | null;
   production_deployment_id: string | null;
+  sandbox_deployment_id: string | null;
+  workflow_deployment_id: string | null;
 }
 
 export const listAgentRuns = async (params?: {
@@ -1133,7 +1355,7 @@ export interface MemoryMessage {
 
 export const listMemory = async (
   agentName: string,
-  params?: { thread_id?: string; limit?: number; offset?: number }
+  params?: { thread_id?: string; deployment_id?: string; limit?: number; offset?: number }
 ): Promise<MemoryMessage[]> => {
   const resp = await http.get(`/agents/${agentName}/memory`, { params });
   return resp.data;

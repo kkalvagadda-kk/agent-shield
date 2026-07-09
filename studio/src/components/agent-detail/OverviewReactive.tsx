@@ -1,16 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import { Activity, AlertTriangle, Clock, DollarSign, Loader2 } from "lucide-react";
-import { AgentRunItem, getAgentStats, listAgentRuns } from "../../api/registryApi";
+import {
+  AgentRunItem,
+  DeploymentContext,
+  getDeploymentStats,
+  listDeploymentRuns,
+} from "../../api/registryApi";
 
-export default function OverviewReactive({ agentName }: { agentName: string }) {
+interface OverviewProps {
+  agentName: string;
+  deploymentId: string;
+  context: DeploymentContext;
+}
+
+export default function OverviewReactive({ agentName, deploymentId, context }: OverviewProps) {
   const { data: stats, isLoading: statsLoading } = useQuery({
-    queryKey: ["agent-stats", agentName],
-    queryFn: () => getAgentStats(agentName),
+    queryKey: ["deployment-stats", deploymentId, context],
+    queryFn: () => getDeploymentStats(deploymentId, context),
   });
 
   const { data: recentRuns } = useQuery({
-    queryKey: ["agent-runs-recent", agentName],
-    queryFn: () => listAgentRuns({ agent_name: agentName, limit: 5 }),
+    queryKey: ["deployment-runs-recent", deploymentId, context],
+    queryFn: () => listDeploymentRuns(deploymentId, { context, limit: 5 }),
   });
 
   return (

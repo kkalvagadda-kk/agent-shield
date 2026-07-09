@@ -68,6 +68,7 @@ async def save_turn(
         messages=messages,
         user_id=body.user_id,
         session_id=body.session_id,
+        deployment_id=body.deployment_id,
     )
     await db.commit()
     return [AgentMemoryResponse.model_validate(r) for r in rows]
@@ -81,6 +82,7 @@ async def save_turn(
 async def list_memory(
     name: str,
     thread_id: Optional[str] = Query(None),
+    deployment_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -89,6 +91,9 @@ async def list_memory(
     q = select(AgentMemory).where(AgentMemory.agent_name == name)
     if thread_id:
         q = q.where(AgentMemory.thread_id == thread_id)
+    if deployment_id:
+        import uuid as _uuid
+        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
     q = q.order_by(AgentMemory.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(q)
     return [AgentMemoryResponse.model_validate(r) for r in result.scalars().all()]
@@ -106,14 +111,13 @@ async def search_memory(
 ) -> list[MemorySearchResult]:
     await _get_agent_or_404(name, db)
 
-    # Generate embedding for query (placeholder — in production would call an embedding model)
-    # For now, return empty results if no embeddings exist
     query_embedding = [0.0] * 1536  # placeholder
     results = await memory_service.search_memory(
         db=db,
         agent_name=name,
         query_embedding=query_embedding,
         top_k=body.top_k,
+        deployment_id=body.deployment_id,
     )
     return [MemorySearchResult(**r) for r in results]
 
@@ -129,10 +133,11 @@ async def search_memory(
 )
 async def clear_memory(
     name: str,
+    deployment_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await _get_agent_or_404(name, db)
-    await memory_service.clear_agent_memory(db, name)
+    await memory_service.clear_agent_memory(db, name, deployment_id=deployment_id)
     await db.commit()
 
 
