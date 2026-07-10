@@ -116,6 +116,32 @@ class K8sClient:
             else:
                 raise
 
+    def copy_secret(self, name: str, src_namespace: str, dst_namespace: str) -> None:
+        """Copy a Secret from src_namespace to dst_namespace (create or update)."""
+        from kubernetes.client import V1Secret, V1ObjectMeta
+        try:
+            src = self.core_v1.read_namespaced_secret(name=name, namespace=src_namespace)
+        except ApiException as e:
+            if e.status == 404:
+                logger.warning("Secret %s/%s not found, skipping copy", src_namespace, name)
+                return
+            raise
+        secret = V1Secret(
+            metadata=V1ObjectMeta(name=name, namespace=dst_namespace),
+            data=src.data,
+            type=src.type or "Opaque",
+        )
+        try:
+            self.core_v1.read_namespaced_secret(name=name, namespace=dst_namespace)
+            self.core_v1.replace_namespaced_secret(name=name, namespace=dst_namespace, body=secret)
+            logger.info("Updated Secret copy %s/%s (from %s)", dst_namespace, name, src_namespace)
+        except ApiException as e:
+            if e.status == 404:
+                self.core_v1.create_namespaced_secret(namespace=dst_namespace, body=secret)
+                logger.info("Copied Secret %s/%s -> %s", src_namespace, name, dst_namespace)
+            else:
+                raise
+
     def scale_deployment(self, namespace: str, name: str, replicas: int) -> None:
         """Scale a Deployment to the specified replica count."""
         try:

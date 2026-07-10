@@ -75,9 +75,14 @@ class HttpToolExecutor:
                 else None
             )
 
+            resolved_headers = {
+                k: executor._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
+                for k, v in executor.headers.items()
+            }
+
             timeout = executor.timeout_ms / 1000.0
             async with httpx.AsyncClient(timeout=timeout) as client:
-                req_kwargs: dict[str, Any] = {"headers": executor.headers}
+                req_kwargs: dict[str, Any] = {"headers": resolved_headers}
                 if body:
                     try:
                         req_kwargs["json"] = json.loads(body)

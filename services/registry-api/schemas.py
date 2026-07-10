@@ -682,6 +682,7 @@ class ToolTestResponse(BaseModel):
 class AuthConfigCreate(BaseModel):
     name: str = Field(..., max_length=256)
     type: str = Field(..., pattern="^(api_key|oauth2|bearer|mtls)$")
+    credentials: dict[str, str] | None = Field(None, description="Key-value credential pairs; stored as K8s Secret, never in DB")
     k8s_secret_ref: str | None = None
     owner_team: str | None = None
 
@@ -689,6 +690,7 @@ class AuthConfigCreate(BaseModel):
 class AuthConfigUpdate(BaseModel):
     name: str | None = None
     type: str | None = Field(None, pattern="^(api_key|oauth2|bearer|mtls)$")
+    credentials: dict[str, str] | None = Field(None, description="Key-value credential pairs; updates existing K8s Secret")
     k8s_secret_ref: str | None = None
     owner_team: str | None = None
 

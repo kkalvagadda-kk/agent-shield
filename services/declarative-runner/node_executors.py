@@ -12,6 +12,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -35,6 +36,7 @@ class HttpToolNodeExecutor:
     def __init__(self, node_config: dict) -> None:
         self.node_config = node_config
         self.name: str = node_config.get("name", "http_tool")
+        self.description: str | None = node_config.get("description")
         self.endpoint: str = node_config.get("endpoint", "")
         self.method: str = node_config.get("method", "GET").upper()
         self.headers: dict = node_config.get("headers", {})
@@ -70,8 +72,13 @@ class HttpToolNodeExecutor:
         endpoint = self._substitute_vars(self.endpoint, variables)
         body = self._substitute_vars(self.body_template, variables) if self.body_template else None
 
+        resolved_headers = {
+            k: self._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
+            for k, v in self.headers.items()
+        }
+
         async with httpx.AsyncClient(timeout=10.0) as client:
-            request_kwargs: dict[str, Any] = {"headers": self.headers}
+            request_kwargs: dict[str, Any] = {"headers": resolved_headers}
             if body:
                 try:
                     request_kwargs["json"] = json.loads(body)
@@ -121,8 +128,13 @@ class HttpToolNodeExecutor:
             url = executor._substitute_vars(executor.endpoint, kwargs)
             body = executor._substitute_vars(executor.body_template, kwargs) if executor.body_template else None
 
+            resolved_headers = {
+                k: executor._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
+                for k, v in executor.headers.items()
+            }
+
             async with httpx.AsyncClient(timeout=10.0) as client:
-                req_kwargs: dict[str, Any] = {"headers": executor.headers}
+                req_kwargs: dict[str, Any] = {"headers": resolved_headers}
                 if body:
                     try:
                         req_kwargs["json"] = json.loads(body)
@@ -140,7 +152,7 @@ class HttpToolNodeExecutor:
 
         # Set identity metadata so Agent.__post_init__ validation passes.
         http_tool_fn.__name__ = self.name
-        http_tool_fn.__doc__ = (
+        http_tool_fn.__doc__ = self.description or (
             f"Make a {self.method} request to {self.endpoint}. "
             "Pass the required parameters as keyword arguments."
         )
@@ -187,6 +199,7 @@ class PythonToolNodeExecutor:
     def __init__(self, node_config: dict, executor_url: str = "http://python-executor:8080") -> None:
         self.node_config = node_config
         self.name: str = node_config.get("name", "python_tool")
+        self.description: str | None = node_config.get("description")
         self.python_code: str = node_config.get("python_code", "")
         self.risk: str = node_config.get("risk", "low")
         self.executor_url: str = executor_url
@@ -213,7 +226,7 @@ class PythonToolNodeExecutor:
             return data.get("result", "")
 
         python_tool_fn.__name__ = self.name
-        python_tool_fn.__doc__ = f"Run Python tool '{self.name}'. Pass required arguments as keyword args."
+        python_tool_fn.__doc__ = self.description or f"Run Python tool '{self.name}'. Pass required arguments as keyword args."
         python_tool_fn.risk = self.risk
         python_tool_fn.tool_name = self.name
 

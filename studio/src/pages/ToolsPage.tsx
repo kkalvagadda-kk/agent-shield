@@ -8,6 +8,7 @@ import { z } from 'zod';
 import {
   createTool,
   deleteTool,
+  listAuthConfigs,
   listTools,
   updateTool,
   type CreateToolPayload,
@@ -277,6 +278,13 @@ function ToolForm({
   onSaved: () => void;
 }) {
   const isEdit = tool !== null;
+  const [authConfigId, setAuthConfigId] = useState<string>(tool?.auth_config_id ?? '');
+
+  const { data: authConfigsData } = useQuery({
+    queryKey: ['auth-configs'],
+    queryFn: () => listAuthConfigs(),
+  });
+  const authConfigs = authConfigsData?.items ?? [];
 
   const {
     register,
@@ -315,6 +323,7 @@ function ToolForm({
           description: values.description,
           risk_level: values.risk_level,
           owner_team: values.owner_team,
+          auth_config_id: authConfigId || null,
           ...(values.tool_type === 'http'
             ? { http_method: values.http_method ?? 'GET', http_url: values.http_url }
             : { python_code: values.python_code }),
@@ -325,6 +334,7 @@ function ToolForm({
         name: values.name,
         type: values.tool_type,
         risk_level: values.risk_level,
+        auth_config_id: authConfigId || null,
         ...(values.display_name ? { display_name: values.display_name } : {}),
         ...(values.description ? { description: values.description } : {}),
         ...(values.owner_team ? { owner_team: values.owner_team } : {}),
@@ -443,6 +453,22 @@ function ToolForm({
             />
           </Field>
         </div>
+
+        <Field label="Credential">
+          <select
+            value={authConfigId}
+            onChange={(e) => setAuthConfigId(e.target.value)}
+            className="input"
+          >
+            <option value="">None</option>
+            {authConfigs.map((ac) => (
+              <option key={ac.id} value={ac.id}>{ac.name} ({ac.type})</option>
+            ))}
+          </select>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Link a credential for tools that need API keys or tokens
+          </p>
+        </Field>
 
         {/* HTTP-specific fields */}
         {toolType === 'http' && (

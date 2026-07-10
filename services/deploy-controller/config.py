@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     agent_namespace_prefix: str = "agents"
     # Image used for declarative workflow runners (agent_type="declarative")
     declarative_runner_image: str = "registry.agentshield.internal/declarative-runner:latest"
+    # Namespace where platform services (registry-api, etc.) and credential secrets live
+    platform_namespace: str = "agentshield-platform"
 
 
 settings = Settings()

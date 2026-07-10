@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
-from models import Agent, AgentTool, Tool
+from models import Agent, AgentTool, AuthConfig, Tool
 from schemas import (
     AgentResponse,
     PaginatedResponse,
@@ -76,6 +76,11 @@ async def create_tool(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Tool '{body.name}' already exists.",
         )
+
+    if body.auth_config_id:
+        ac = (await db.execute(select(AuthConfig).where(AuthConfig.id == body.auth_config_id))).scalar_one_or_none()
+        if ac is None:
+            raise HTTPException(status_code=422, detail=f"AuthConfig '{body.auth_config_id}' not found.")
 
     tool = Tool(**body.model_dump())
     tool.created_by = caller
@@ -163,7 +168,13 @@ async def update_tool(
 ) -> ToolResponse:
     tool = await _get_tool(tool_id, db)
 
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    if "auth_config_id" in updates and updates["auth_config_id"] is not None:
+        ac = (await db.execute(select(AuthConfig).where(AuthConfig.id == updates["auth_config_id"]))).scalar_one_or_none()
+        if ac is None:
+            raise HTTPException(status_code=422, detail=f"AuthConfig '{updates['auth_config_id']}' not found.")
+
+    for field, value in updates.items():
         setattr(tool, field, value)
 
     await db.commit()

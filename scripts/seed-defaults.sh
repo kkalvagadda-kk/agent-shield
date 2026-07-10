@@ -15,7 +15,9 @@ skip(){ echo "  [--] $*"; }
 warn(){ echo "  [!!] $*"; }
 
 # ---------------------------------------------------------------------------
-# Helper: POST with 409-safe response; echoes created record JSON or empty.
+# Helper: POST with 409-safe response; echoes record JSON (created or existing).
+# On 409 (already exists), queries the list endpoint to find the existing record
+# by name so callers always get the ID for linking.
 # ---------------------------------------------------------------------------
 post_idempotent() {
   local path="$1"
@@ -34,7 +36,17 @@ post_idempotent() {
     echo "$body_out"
   elif [ "$http_code" = "409" ]; then
     skip "$label (already exists)"
-    echo ""
+    local existing
+    existing=$(curl -s "${REGISTRY_URL}${path}" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+items = data.get('items', data) if isinstance(data, dict) else data
+for item in items:
+    if item.get('name') == '$label':
+        print(json.dumps(item))
+        break
+" 2>/dev/null || echo "")
+    echo "$existing"
   else
     warn "$label — unexpected HTTP $http_code: $body_out"
     echo ""
@@ -107,6 +119,29 @@ CALC=$(post_idempotent "/api/v1/tools/" \
   "{\"name\":\"calculator\",\"display_name\":\"Calculator\",\"description\":\"Evaluate math expressions safely using Python AST. No eval(), no imports.\",\"type\":\"python\",\"risk_level\":\"low\",\"owner_team\":\"${TEAM}\",\"python_code\":${CALC_CODE_JSON}}" \
   "calculator")
 CALC_ID=$(echo "$CALC" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+
+echo ""
+
+# ===========================================================================
+# AUTH CONFIGS (tool credentials)
+# ===========================================================================
+echo "--- Auth Configs ---"
+
+SERPER_KEY="${SERPER_API_KEY:-demo-key-replace-me}"
+SERPER_AC=$(post_idempotent "/api/v1/auth-configs/" \
+  "{\"name\":\"serper-dev\",\"type\":\"api_key\",\"credentials\":{\"serper_api_key\":\"${SERPER_KEY}\"},\"owner_team\":\"${TEAM}\"}" \
+  "serper-dev")
+SERPER_AC_ID=$(echo "$SERPER_AC" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+
+# Link auth config to web_search tool (idempotent — runs every deploy)
+if [ -n "$WEB_SEARCH_ID" ] && [ -n "$SERPER_AC_ID" ]; then
+  curl -s -X PUT "${REGISTRY_URL}/api/v1/tools/${WEB_SEARCH_ID}" \
+    -H "Content-Type: application/json" \
+    -d "{\"auth_config_id\":\"${SERPER_AC_ID}\"}" > /dev/null 2>&1
+  ok "web_search linked to serper-dev auth config"
+else
+  warn "web_search/serper-dev link skipped (WEB_SEARCH_ID='${WEB_SEARCH_ID}' SERPER_AC_ID='${SERPER_AC_ID}')"
+fi
 
 echo ""
 

@@ -101,6 +101,7 @@ def build_deployment(
     version: dict,
     opa_image: str,
     registry_api_url: str = "http://agentshield-registry-api.agentshield-platform:8000",
+    tool_secret_refs: list[str] | None = None,
 ) -> k8s_client.V1Deployment:
     """
     Build a V1Deployment manifest for the given agent deployment record.
@@ -233,11 +234,21 @@ def build_deployment(
     if langfuse_sk:
         env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_SECRET_KEY", value=langfuse_sk))
 
+    # --- Tool credential secrets (envFrom) ---
+    env_from_sources = []
+    for secret_ref in (tool_secret_refs or []):
+        env_from_sources.append(
+            k8s_client.V1EnvFromSource(
+                secret_ref=k8s_client.V1SecretEnvSource(name=secret_ref, optional=True)
+            )
+        )
+
     # --- Agent container ---
     agent_container = k8s_client.V1Container(
         name=agent_name,
         image=image_tag,
         env=env_vars,
+        env_from=env_from_sources or None,
         volume_mounts=[
             # Phase 9.1: mount projected SA token for OPA identity check
             k8s_client.V1VolumeMount(

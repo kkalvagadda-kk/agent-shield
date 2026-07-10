@@ -120,6 +120,7 @@ export interface RegistryTool {
   risk_level?: 'low' | 'medium' | 'high';
   owner_team?: string;
   status?: string;
+  auth_config_id?: string | null;
   // HTTP tool fields (top-level in ToolResponse)
   http_method?: string;
   http_url?: string;
@@ -819,11 +820,38 @@ export interface AuthConfig {
   id: string;
   name: string;
   type: string;
+  owner_team: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateAuthConfigPayload {
+  name: string;
+  type: 'api_key' | 'oauth2' | 'bearer' | 'mtls';
+  credentials?: Record<string, string>;
+  owner_team?: string;
 }
 
 export const listAuthConfigs = async (): Promise<Paginated<AuthConfig>> => {
   const { data } = await http.get<Paginated<AuthConfig>>("/auth-configs/");
   return data;
+};
+
+export const createAuthConfig = async (payload: CreateAuthConfigPayload): Promise<AuthConfig> => {
+  const { data } = await http.post<AuthConfig>('/auth-configs/', payload);
+  return data;
+};
+
+export const updateAuthConfig = async (
+  id: string,
+  payload: Partial<CreateAuthConfigPayload>
+): Promise<AuthConfig> => {
+  const { data } = await http.put<AuthConfig>(`/auth-configs/${id}`, payload);
+  return data;
+};
+
+export const deleteAuthConfig = async (id: string): Promise<void> => {
+  await http.delete(`/auth-configs/${id}`);
 };
 
 // ---------------------------------------------------------------------------
@@ -847,6 +875,7 @@ export interface CreateToolPayload {
   type: 'http' | 'python';
   risk_level: 'low' | 'medium' | 'high';
   owner_team?: string;
+  auth_config_id?: string | null;
   // HTTP-specific
   http_method?: string;
   http_url?: string;

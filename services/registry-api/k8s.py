@@ -69,6 +69,24 @@ async def upsert_secret(name: str, namespace: str, data: dict[str, str]) -> None
     await asyncio.to_thread(_upsert_secret_sync, name, namespace, data)
 
 
+def _delete_secret_sync(name: str, namespace: str) -> None:
+    _init_k8s()
+    v1 = client.CoreV1Api()
+    try:
+        v1.delete_namespaced_secret(name, namespace)
+        logger.info("k8s: deleted secret %s/%s", namespace, name)
+    except ApiException as exc:
+        if exc.status == 404:
+            logger.warning("k8s: secret %s/%s already gone", namespace, name)
+        else:
+            raise
+
+
+async def delete_secret(name: str, namespace: str) -> None:
+    """Delete a K8s Secret (runs sync k8s client in a thread)."""
+    await asyncio.to_thread(_delete_secret_sync, name, namespace)
+
+
 def apply_configmap(namespace: str, name: str, data: dict[str, str]) -> None:
     """Create or replace a K8s ConfigMap (synchronous — call from asyncio.to_thread if needed)."""
     _init_k8s()

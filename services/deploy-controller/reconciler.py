@@ -240,18 +240,52 @@ async def reconcile(
                 exc,
             )
 
-        # 2. Build the K8s manifest
+        # 2. Resolve tool credential secrets for envFrom injection
+        tool_secret_refs: list[str] = []
+        try:
+            async with httpx.AsyncClient(
+                base_url=settings.registry_api_url, timeout=10.0
+            ) as http:
+                tools_resp = await http.get(f"/api/v1/agents/{agent_name}/tools")
+                if tools_resp.status_code == 200:
+                    tools_data = tools_resp.json().get("items", [])
+                    seen_config_ids: set[str] = set()
+                    for tool in tools_data:
+                        ac_id = tool.get("auth_config_id")
+                        if not ac_id or ac_id in seen_config_ids:
+                            continue
+                        seen_config_ids.add(ac_id)
+                        ref_resp = await http.get(f"/api/v1/auth-configs/{ac_id}/secret-ref")
+                        if ref_resp.status_code == 200:
+                            secret_ref = ref_resp.json().get("k8s_secret_ref")
+                            if secret_ref:
+                                tool_secret_refs.append(secret_ref)
+        except Exception as exc:
+            logger.warning("Failed to fetch tool auth configs for %s: %s", agent_name, exc)
+
+        # 2b. Copy credential secrets from platform namespace to agent namespace
+        for secret_ref in tool_secret_refs:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda ref=secret_ref: k8s.copy_secret(ref, settings.platform_namespace, namespace),
+                )
+            except Exception as exc:
+                logger.warning("Failed to copy secret %s to %s: %s", secret_ref, namespace, exc)
+
+        # 3. Build the K8s manifest
         manifest = build_deployment(
-            deployment, agent, version, settings.opa_image, settings.registry_api_url
+            deployment, agent, version, settings.opa_image, settings.registry_api_url,
+            tool_secret_refs=tool_secret_refs,
         )
 
-        # 3. Apply (create or update) the Deployment
+        # 4. Apply (create or update) the Deployment
         await loop.run_in_executor(
             None,
             lambda: k8s.create_or_update_deployment(namespace, manifest),
         )
 
-        # 4. Ensure a ClusterIP Service exists so Envoy can route to the agent pod
+        # 5. Ensure a ClusterIP Service exists so Envoy can route to the agent pod
         team = agent.get("team", "platform")
         labels = {
             "app.kubernetes.io/name": agent_name,

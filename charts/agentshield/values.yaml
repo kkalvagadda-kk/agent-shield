@@ -182,6 +182,14 @@ postgresql:
     username: postgres
 
   primary:
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
     persistence:
       enabled: true
       size: 5Gi
@@ -502,6 +510,19 @@ langfuse:
       size: 5Gi
     zookeeper:
       enabled: false
+    # Disable ClickHouse's own internal query-profiling system tables (trace_log,
+    # text_log, metric_log, asynchronous_metric_log). Nothing in AgentShield or
+    # Langfuse reads them — confirmed by repo-wide grep — and they were the actual
+    # driver of repeated MEMORY_LIMIT_EXCEEDED OOMs during merges (trace_log alone
+    # grew to 865MiB/58.9M rows while Langfuse's own traces table stayed ~50KB).
+    # See docs/bugs/langfuse-clickhouse-oom.md.
+    extraOverrides: |
+      <yandex>
+        <trace_log remove="1"/>
+        <text_log remove="1"/>
+        <metric_log remove="1"/>
+        <asynchronous_metric_log remove="1"/>
+      </yandex>
 
   # S3/MinIO — lightweight media/export storage companion for Langfuse
   s3:
@@ -564,7 +585,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.120"
+    tag: "0.2.121"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.4"
@@ -626,12 +647,12 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.26"
+    tag: "0.1.28"
     pullPolicy: IfNotPresent
 
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.17"
+  declarativeRunnerTag: "0.1.19"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -873,7 +894,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.102"
+    tag: "0.1.103"
     pullPolicy: IfNotPresent
 
   service:

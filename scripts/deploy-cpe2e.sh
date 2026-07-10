@@ -77,12 +77,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.120"
+REGISTRY_API_TAG="0.2.121"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.26"
-STUDIO_TAG="0.1.102"
+DEPLOY_CONTROLLER_TAG="0.1.28"
+STUDIO_TAG="0.1.103"
 EVAL_RUNNER_TAG="0.1.4"
-DECLARATIVE_RUNNER_TAG="0.1.17"
+DECLARATIVE_RUNNER_TAG="0.1.19"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -114,19 +114,19 @@ fi
 #     -n agentshield-platform
 
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (Phase 7 — internal run-start endpoint for scheduler/events)"
+echo "  → registry-api:${REGISTRY_API_TAG} (auth config K8s Secret auto-create, delete guard, tool FK check)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
 docker build -t "registry.internal/agentshield/safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG}" services/safety-orchestrator/
 
-echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (pre-flight gate in reconciler)"
+echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (mount tool credential secrets via envFrom)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
-echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (memory context load/save integration)"
+echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (resolve header {{vars}} from env for tool credentials)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" -f services/declarative-runner/Dockerfile .
 
-echo "  → studio:${STUDIO_TAG} (MemoryTab component + memory API functions)"
+echo "  → studio:${STUDIO_TAG} (Credentials page + tool credential dropdown)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
 echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"

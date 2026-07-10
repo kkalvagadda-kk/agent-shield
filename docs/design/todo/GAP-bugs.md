@@ -19,6 +19,7 @@ Items marked FIXED/DONE/RESOLVED in source docs are excluded. Duplicates across 
 | P1-06 | Cost | Medium | Agent pods bypass Portkey proxy — `manifest_builder.py` must inject `OPENAI_BASE_URL` so LLM traffic routes through Portkey | cost Gap 2 |
 | P1-07 | Cost | Medium | No cost writeback — on run completion, cost/token data never written to `agent_runs` (columns exist, always NULL) | cost Gap 4 |
 | P1-08 | Cost | Small | Portkey disabled in Helm — needs `portkey.enabled: true` + virtual key config | cost Gap 1 |
+| ~~P1-09~~ | ~~Tools~~ | ~~Medium~~ | ~~RESOLVED 2026-07-09: Full credential management — K8s Secret auto-create, deploy-controller envFrom mount, header `{{var}}` substitution from env, Studio Credentials page + tool dropdown. registry-api:0.2.121, deploy-controller:0.1.27, declarative-runner:0.1.19, studio:0.1.103~~ | ~~bug-investigation~~ |
 
 ---
 
@@ -139,7 +140,7 @@ Items marked FIXED/DONE/RESOLVED in source docs are excluded. Duplicates across 
 
 | Priority | Count | Theme |
 |----------|-------|-------|
-| P1 — Blocks core journeys | 8 | Workflow eval, RBAC, alerting, cost plumbing |
+| P1 — Blocks core journeys | 9 | Workflow eval, RBAC, alerting, cost plumbing, tool auth |
 | P2 — Workflow/deploy parity | 11 | Workflow memory, upgrade, health, production modes |
 | P3 — UX improvements | 9 | Version viewer, diff, approvals badge, fork-from-catalog |
 | P4 — Cost tracking | 5 | Portkey integration, cost UI, Langfuse injection |
@@ -147,4 +148,4 @@ Items marked FIXED/DONE/RESOLVED in source docs are excluded. Duplicates across 
 | P6 — Security & safety | 16 | Handoff safety, RBAC, red-team, PII audit, incident runbook |
 | P7 — Infra & platform | 10 | Staging, Harbor, onboarding, Redis cache, trace stitching |
 | F — Future | 6 | Canary, event log, blue-green, alerting channels |
-| **Total** | **72** | |
+| **Total** | **73** | |

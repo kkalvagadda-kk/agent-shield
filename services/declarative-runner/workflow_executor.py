@@ -247,6 +247,7 @@ class WorkflowExecutor:
         if tool_type == "python":
             config = {
                 "name": tool.get("name", "python_tool"),
+                "description": tool.get("description"),
                 "python_code": tool.get("python_code", ""),
                 "risk": tool.get("risk_level", "low"),
                 "timeout_ms": tool.get("http_timeout_ms") or 10_000,
@@ -273,6 +274,8 @@ class WorkflowExecutor:
             )
         if "auth_config_id" not in config:
             config["auth_config_id"] = tool.get("auth_config_id")
+        if "description" not in config:
+            config["description"] = tool.get("description")
         return HttpToolNodeExecutor(config)
 
     async def _prefetch_agent_tools(self) -> None:

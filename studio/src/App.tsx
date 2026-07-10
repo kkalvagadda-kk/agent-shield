@@ -36,6 +36,7 @@ import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
 import ObservabilityTracesPage from "./pages/ObservabilityTracesPage";
 import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
 import ObservabilityComparePage from "./pages/ObservabilityComparePage";
+import CredentialsPage from "./pages/CredentialsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -60,6 +61,7 @@ export default function App() {
               <Route path="/agents/:name/d/:depId" element={<DeploymentOverviewPage />} />
               <Route path="/agents/:name" element={<AgentDetailPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
+              <Route path="/credentials" element={<CredentialsPage />} />
               <Route path="/agent-graphs" element={<AgentGraphsPage />} />
               <Route path="/agent-graphs/new" element={<CanvasPage />} />
               <Route path="/agent-graphs/:id" element={<CanvasPage />} />
