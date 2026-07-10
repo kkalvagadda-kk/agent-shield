@@ -13,6 +13,7 @@ This document is the high-level overview. Detailed implementation specs live in 
 |------|--------|--------|
 | [authorization-model-spec.md](design/todo/authorization-model-spec.md) | Agent machine identity (K8s SA tokens + Istio Ambient), OPA policy enforcement, asset lifecycle (private → publish → grant), deploy gate, HITL approval authority (per-agent/tool/skill), Playground authorization | Draft |
 | [playground-spec.md](design/playground-spec.md) | Interactive test console, sandbox mode (grant-bypass), per-run trace panel, LLM-as-Judge, dataset curation, eval runner, version comparison, Playground HITL (self-approval), Playground namespace | Draft |
+| [observability-architecture.md](design/observability-architecture.md) | Canonical trace/span/score data model, the standard integration pattern every new run-creating/agent-executing code path must follow (trace creation → propagation → completion → span emission), env var contract, frontend contract, component responsibility map, implementation status matrix, anti-patterns from real bugs | Living reference |
 
 Requirements that drove these specs:
 - `docs/authorization-model.md` — authorization requirements (REQ-AUTH, REQ-PUB, REQ-DEPLOY, REQ-RT, REQ-AUDIT)
