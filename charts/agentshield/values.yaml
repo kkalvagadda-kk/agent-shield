@@ -650,9 +650,11 @@ deploy-controller:
     tag: "0.1.34"
     pullPolicy: IfNotPresent
 
+  # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
+  # changes — existing agent pods keep their old tag until re-deployed.
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.33"
+  declarativeRunnerTag: "0.1.35"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

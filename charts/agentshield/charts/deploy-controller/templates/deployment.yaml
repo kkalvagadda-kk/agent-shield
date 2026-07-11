@@ -59,8 +59,12 @@ spec:
               value: "INFO"
             - name: DECLARATIVE_RUNNER_IMAGE
               value: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+            # Namespace-qualified: the controller injects this host into agent
+            # pods that run in OTHER namespaces (agents-*), where a bare service
+            # name does not resolve. The langchain callback handler + SDK tracer
+            # in those pods POST spans here, so it must be cross-namespace-reachable.
             - name: LANGFUSE_HOST
-              value: "http://{{ .Release.Name }}-langfuse-web:3000"
+              value: "http://{{ .Release.Name }}-langfuse-web.{{ .Release.Namespace }}:3000"
             - name: LANGFUSE_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:

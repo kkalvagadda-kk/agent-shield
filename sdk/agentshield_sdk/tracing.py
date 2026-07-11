@@ -1,7 +1,7 @@
 """
 Langfuse tracing wrapper.
 
-No-ops gracefully when AGENTSHIELD_LANGFUSE_KEY is not set.  This means
+No-ops gracefully when LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY are not set.  This means
 importing and calling the tracer is always safe — it simply does nothing in
 local dev without a Langfuse deployment.
 
@@ -39,19 +39,24 @@ class Tracer:
         self._enabled = False
         self._client: Any = None
 
-        if not config.AGENTSHIELD_LANGFUSE_KEY:
+        # Both keys are required — Langfuse rejects a client with only a secret
+        # key. Previously only a single (wrongly-named) key was passed and
+        # public_key was omitted entirely, so the client was misconfigured even
+        # when a key was present.
+        if not config.LANGFUSE_PUBLIC_KEY or not config.LANGFUSE_SECRET_KEY:
             return
 
         try:
             from langfuse import Langfuse  # type: ignore[import]
 
             self._client = Langfuse(
-                secret_key=config.AGENTSHIELD_LANGFUSE_KEY,
-                host=config.AGENTSHIELD_LANGFUSE_HOST,
+                public_key=config.LANGFUSE_PUBLIC_KEY,
+                secret_key=config.LANGFUSE_SECRET_KEY,
+                host=config.LANGFUSE_HOST,
             )
             self._enabled = True
             logger.info(
-                "Langfuse tracing enabled (host=%s)", config.AGENTSHIELD_LANGFUSE_HOST
+                "Langfuse tracing enabled (host=%s)", config.LANGFUSE_HOST
             )
         except Exception as exc:  # pragma: no cover
             logger.warning("Langfuse initialisation failed — tracing disabled: %s", exc)

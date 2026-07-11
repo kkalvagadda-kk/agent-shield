@@ -9,10 +9,14 @@ import os
 AGENTSHIELD_SAFETY_URL: str = os.getenv("AGENTSHIELD_SAFETY_URL", "")
 
 # --- Langfuse tracing ---
-# If absent, tracer no-ops silently.
-AGENTSHIELD_LANGFUSE_KEY: str = os.getenv("AGENTSHIELD_LANGFUSE_KEY", "")
-AGENTSHIELD_LANGFUSE_HOST: str = os.getenv(
-    "AGENTSHIELD_LANGFUSE_HOST", "http://langfuse.agentshield-platform:3000"
+# Standard Langfuse env vars — the SAME names registry-api, safety-orchestrator,
+# and deploy-controller (into agent pods) all use. Previously the SDK read
+# AGENTSHIELD_LANGFUSE_KEY/HOST, which nothing set — so the tracer silently
+# no-op'd on every agent pod. If the keys are absent the tracer no-ops.
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv(
+    "LANGFUSE_HOST", "http://langfuse.agentshield-platform:3000"
 )
 
 # --- OPA sidecar ---
