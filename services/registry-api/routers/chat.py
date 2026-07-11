@@ -395,6 +395,90 @@ async def _proxy_agent_stream(
         yield _emit({"type": "done", "run_id": run_id})
 
 
+async def _create_traced_chat_run(
+    db: AsyncSession,
+    *,
+    agent: Agent,
+    deployment: Deployment,
+    user_sub: str,
+    preferred_username: str | None,
+    caller_team: str | None,
+    message: str,
+    session_id: str,
+    context: str,
+    is_production: bool,
+) -> tuple[PlaygroundRun, AgentRun, str | None]:
+    """Create the PlaygroundRun + AgentRun rows for one chat turn and open a
+    Langfuse root trace, wiring the trace_id onto both rows.
+
+    Single source of truth for chat-run creation + tracing. Both ``start_chat``
+    and ``start_deployment_chat`` call this so the two paths can never drift —
+    they did: ``start_deployment_chat`` created runs with no trace at all, which
+    is why deployment-pinned chats showed an empty Trace column.
+
+    The Langfuse trace's ``user_id`` is the human-readable ``preferred_username``
+    (falling back to the sub); the ``PlaygroundRun``/``AgentRun`` ``user_id`` FK
+    columns keep the raw sub. Deployment id + environment are tagged on the trace
+    so instances of the same agent are distinguishable.
+    """
+    now = datetime.now(tz=timezone.utc)
+
+    run = PlaygroundRun(
+        user_id=user_sub,
+        agent_name=agent.name,
+        context=context,
+        sandbox=not is_production,
+        # FK column must match the table the id belongs to: production ids live
+        # in `production_deployments`, sandbox in `deployments` — never cross them.
+        deployment_id=deployment.id if not is_production else None,
+        production_deployment_id=deployment.id if is_production else None,
+        session_id=session_id,
+        requested_by_username=preferred_username,
+        requested_by_team=caller_team,
+        input_message=message,
+        status="running",
+        started_at=now,
+    )
+    db.add(run)
+    await db.flush()
+    run_id = str(run.id)
+
+    agent_run = AgentRun(
+        agent_name=agent.name,
+        session_id=session_id,
+        user_id=user_sub,
+        input=message,
+        context=context,
+        trigger_type="api",
+        run_by=user_sub,
+        team=agent.team,
+        status="running",
+        started_at=now,
+        production_deployment_id=deployment.id if is_production else None,
+        sandbox_deployment_id=deployment.id if not is_production else None,
+    )
+    db.add(agent_run)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=run_id,
+        agent_name=agent.name,
+        user_id=preferred_username or user_sub,
+        context=context,
+        input_message=message,
+        deployment_id=str(deployment.id),
+        environment=deployment.environment,
+    )
+    if trace_id:
+        run.langfuse_trace_id = trace_id
+        agent_run.langfuse_trace_id = trace_id
+        await db.flush()
+
+    await db.commit()
+    return run, agent_run, trace_id
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/agents/{name}/chat
 # ---------------------------------------------------------------------------
@@ -473,63 +557,21 @@ async def start_chat(
 
     session_id = body.session_id or str(uuid.uuid4())
 
-    # -- Record the run -------------------------------------------------------
-    now = datetime.now(tz=timezone.utc)
-    run = PlaygroundRun(
-        user_id=user_sub,
-        agent_name=name,
-        context=chat_context,
-        sandbox=not is_production,
-        # Write the FK column whose table the id actually belongs to: production
-        # deployments live in `production_deployments`, sandbox in `deployments`.
-        # Mixing them violates the FK (production id in a sandbox-FK column → 500).
-        deployment_id=deployment.id if not is_production else None,
-        production_deployment_id=deployment.id if is_production else None,
+    # -- Record the run + open the Langfuse trace (shared with deployment chat) --
+    run, agent_run, trace_id = await _create_traced_chat_run(
+        db,
+        agent=agent,
+        deployment=deployment,
+        user_sub=user_sub,
+        preferred_username=caller.get("preferred_username"),
+        caller_team=caller_team,
+        message=body.message,
         session_id=session_id,
-        requested_by_username=caller.get("preferred_username"),
-        requested_by_team=caller_team,
-        input_message=body.message,
-        status="running",
-        started_at=now,
+        context=chat_context,
+        is_production=is_production,
     )
-    db.add(run)
-    await db.flush()
     run_id = str(run.id)
-
-    # Create AgentRun — production_deployment_id only set for production context
-    agent_run = AgentRun(
-        agent_name=name,
-        session_id=session_id,
-        user_id=user_sub,
-        input=body.message,
-        context=chat_context,
-        trigger_type="api",
-        run_by=user_sub,
-        team=agent.team,
-        status="running",
-        started_at=now,
-        production_deployment_id=deployment.id if is_production else None,
-        sandbox_deployment_id=deployment.id if not is_production else None,
-    )
-    db.add(agent_run)
-    await db.flush()
     agent_run_id = str(agent_run.id)
-
-    # Create Langfuse root trace for this consumer chat run
-    from tracing import trace_create_run
-    trace_id = trace_create_run(
-        run_id=run_id,
-        agent_name=name,
-        user_id=user_sub,
-        context="production",
-        input_message=body.message,
-    )
-    if trace_id:
-        run.langfuse_trace_id = trace_id
-        agent_run.langfuse_trace_id = trace_id
-        await db.flush()
-
-    await db.commit()
 
     logger.info(
         "chat: run_id=%s agent_run_id=%s agent=%s user=%s team=%s deployment=%s trace=%s",
@@ -708,42 +750,29 @@ async def start_deployment_chat(
     user_sub = caller.get("sub", "")
     caller_team = await _caller_team(db, user_sub)
     session_id = body.session_id or str(uuid.uuid4())
-    now = datetime.now(tz=timezone.utc)
 
-    run = PlaygroundRun(
-        user_id=user_sub,
-        agent_name=name,
-        context="playground",
-        sandbox=True,
-        deployment_id=deployment.id,
+    # Deployment-pinned chat is sandbox-only today. Use the shared helper so this
+    # path gets the same Langfuse trace as start_chat — it previously created runs
+    # with no trace, which is why deployment-pinned chats had an empty Trace column.
+    run, agent_run, trace_id = await _create_traced_chat_run(
+        db,
+        agent=agent,
+        deployment=deployment,
+        user_sub=user_sub,
+        preferred_username=caller.get("preferred_username"),
+        caller_team=caller_team,
+        message=body.message,
         session_id=session_id,
-        requested_by_username=caller.get("preferred_username"),
-        requested_by_team=caller_team,
-        input_message=body.message,
-        status="running",
-        started_at=now,
+        context="playground",
+        is_production=False,
     )
-    db.add(run)
-    await db.flush()
     run_id = str(run.id)
-
-    agent_run = AgentRun(
-        agent_name=name,
-        session_id=session_id,
-        user_id=user_sub,
-        input=body.message,
-        context="playground",
-        trigger_type="api",
-        run_by=user_sub,
-        team=agent.team,
-        status="running",
-        started_at=now,
-        sandbox_deployment_id=deployment.id,
-    )
-    db.add(agent_run)
-    await db.flush()
     agent_run_id = str(agent_run.id)
-    await db.commit()
+
+    logger.info(
+        "deployment_chat: run_id=%s agent_run_id=%s agent=%s deployment=%s trace=%s",
+        run_id, agent_run_id, name, deployment.id, trace_id,
+    )
 
     return {
         "run_id": run_id,
@@ -814,9 +843,17 @@ async def stream_deployment_chat(
     ar = ar_result.scalar_one_or_none()
     agent_run_id = str(ar.id) if ar else None
 
+    # Propagate the trace id to the agent pod (X-AgentShield-Trace-ID header, set
+    # inside _proxy_agent_stream) so its spans attach to this run's root trace,
+    # and into _complete_chat_run so the trace is closed out — both were missing
+    # here, so deployment-pinned runs produced no trace at all.
+    trace_id = run.langfuse_trace_id
+
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
-        async for chunk in _proxy_agent_stream(service_url, run.input_message or "", run_id):
+        async for chunk in _proxy_agent_stream(
+            service_url, run.input_message or "", run_id, trace_id=trace_id
+        ):
             if chunk.startswith("data: "):
                 try:
                     ev = json.loads(chunk[6:].strip())
@@ -826,7 +863,7 @@ async def stream_deployment_chat(
                     pass
             yield chunk
         asyncio.get_event_loop().create_task(
-            _complete_chat_run(run_id, "".join(output_parts), None, agent_run_id)
+            _complete_chat_run(run_id, "".join(output_parts), trace_id, agent_run_id)
         )
 
     return StreamingResponse(
@@ -908,12 +945,18 @@ async def resume_stream_chat(
     service_url = f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
     decision_str = approval.status
     reviewer = approval.reviewer_id or "unknown"
+    # Resume spans (the post-approval continuation) must attach to the same root
+    # trace and close it out — otherwise a HITL run's second half is untraced.
+    trace_id = run.langfuse_trace_id
 
     def _emit(payload: dict) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
     async def _proxy_resume() -> AsyncGenerator[str, None]:
         timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+        resume_headers = {"Accept": "text/event-stream"}
+        if trace_id:
+            resume_headers["X-AgentShield-Trace-ID"] = trace_id
         try:
             async with httpx.AsyncClient() as client:
                 async with client.stream(
@@ -924,7 +967,7 @@ async def resume_stream_chat(
                         "reviewer_id": reviewer,
                         "reason": approval.reviewer_notes,
                     },
-                    headers={"Accept": "text/event-stream"},
+                    headers=resume_headers,
                     timeout=timeout,
                 ) as response:
                     if response.status_code != 200:
@@ -972,7 +1015,7 @@ async def resume_stream_chat(
                             current_data = None
 
                     asyncio.get_event_loop().create_task(
-                        _complete_chat_run(run_id, "".join(output_parts), None, None)
+                        _complete_chat_run(run_id, "".join(output_parts), trace_id, None)
                     )
 
         except httpx.ConnectError:

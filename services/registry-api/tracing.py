@@ -103,8 +103,18 @@ def trace_create_run(
     user_id: str,
     context: str = "playground",
     input_message: str | None = None,
+    deployment_id: str | None = None,
+    environment: str | None = None,
 ) -> str | None:
     """Create a root Langfuse trace when a playground or consumer chat run starts.
+
+    ``user_id`` is a DISPLAY identifier for Langfuse — pass a human-readable name
+    (e.g. the JWT ``preferred_username``), not the raw ``sub`` UUID; the platform's
+    own ``PlaygroundRun.user_id`` FK stays the UUID.
+
+    ``deployment_id``/``environment`` identify which agent instance produced the
+    trace — an agent can have several running deployments, so without these,
+    traces from different instances are indistinguishable in Langfuse.
 
     Returns the trace_id (same as run_id for simplicity) or None if tracing is disabled.
     """
@@ -112,13 +122,21 @@ def trace_create_run(
     if not lf:
         return None
     try:
+        metadata: dict[str, Any] = {"agent_name": agent_name, "context": context}
+        tags = [agent_name, context]
+        if deployment_id:
+            metadata["deployment_id"] = deployment_id
+            tags.append(f"deployment:{deployment_id}")
+        if environment:
+            metadata["environment"] = environment
+            tags.append(f"env:{environment}")
         lf.trace(
             id=run_id,
             name=f"agent-run.{context}",
             user_id=user_id,
             input={"message": input_message} if input_message else None,
-            metadata={"agent_name": agent_name, "context": context},
-            tags=[agent_name, context],
+            metadata=metadata,
+            tags=tags,
         )
         lf.flush()
         return run_id
