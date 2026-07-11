@@ -41,7 +41,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName={null}
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -53,7 +55,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -65,7 +69,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -78,7 +84,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -90,7 +98,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -102,7 +112,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -118,7 +130,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -137,7 +151,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );
@@ -160,7 +176,9 @@ describe("ChatPane", () => {
     renderWithProviders(
       <ChatPane
         agentName="my-agent"
+        resumeStreamUrl={null}
         onApprovalRequested={vi.fn()}
+        onResumeComplete={vi.fn()}
         onTraceEvent={vi.fn()}
       />
     );

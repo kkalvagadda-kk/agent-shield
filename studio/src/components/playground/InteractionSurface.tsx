@@ -89,7 +89,7 @@ export default function InteractionSurface({
 
   // Reactive agents: chat pane
   if (executionShape === "reactive") {
-    return <ChatPane agentName={agentName} onApprovalRequested={() => {}} onTraceEvent={() => {}} />;
+    return <ChatPane agentName={agentName} resumeStreamUrl={null} onApprovalRequested={() => {}} onResumeComplete={() => {}} onTraceEvent={() => {}} />;
   }
 
   // Durable agents: run launcher + step tracker

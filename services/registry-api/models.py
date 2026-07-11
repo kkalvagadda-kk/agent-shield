@@ -758,6 +758,9 @@ class Approval(Base):
     )
     reviewer_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     reviewer_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The LLM's stated reason for the tool call (best-effort; may be null).
+    # Surfaced to the reviewer as the "why" on every approval surface.
+    reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     decision_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False)
@@ -1278,6 +1281,21 @@ class PlaygroundRun(Base):
         ForeignKey("agent_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Deployment this run targeted (deployment-pinned chat). Lets the HITL
+    # console show which deployment/environment a pending approval came from.
+    deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("deployments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Conversation grouping key (many per-turn runs share one session). Used to
+    # scope the sandbox self-approve panel to a conversation and, later, to
+    # reload persisted conversations.
+    session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Requester provenance captured from the JWT at chat start, surfaced in the
+    # HITL console (username instead of raw sub; the requester's own team).
+    requested_by_username: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    requested_by_team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     context: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'playground'")
     )

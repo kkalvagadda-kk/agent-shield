@@ -302,7 +302,8 @@ class ApprovalCreate(BaseModel):
     )
     session_id: Optional[uuid.UUID] = None
     opa_decision_id: Optional[uuid.UUID] = None
-    context: str = Field("production", pattern="^(production|playground)$")
+    context: str = Field("production", pattern="^(production|playground|sandbox)$")
+    reasoning: str | None = None
 
 
 class ApprovalDecision(BaseModel):
@@ -329,6 +330,7 @@ class ApprovalResponse(BaseModel):
     status: str
     reviewer_id: str | None
     reviewer_notes: str | None
+    reasoning: str | None = None
     trace_id: str | None
     decision_at: datetime | None
     expires_at: datetime
@@ -338,6 +340,12 @@ class ApprovalResponse(BaseModel):
     opa_decision_id: Optional[uuid.UUID] = None
     context: str = "production"
     notify_slack: bool = True
+    # Provenance enrichment (populated by list_approvals via thread_id → run join).
+    # Lets the HITL console show who requested the tool and on which deployment.
+    requested_by: str | None = None          # username (falls back to sub for old rows)
+    requested_by_team: str | None = None      # the requester's own team
+    deployment_name: str | None = None
+    environment: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

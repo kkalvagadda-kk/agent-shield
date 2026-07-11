@@ -163,24 +163,24 @@ class HttpToolNodeExecutor:
         # inspect.signature() follows __wrapped__ chains, so wrapping via
         # functools.wraps in build_graph.py will transparently use this signature.
         if all_vars:
-            params = [
+            sig_params = [
                 inspect.Parameter(v, inspect.Parameter.KEYWORD_ONLY, annotation=str)
                 for v in all_vars
             ]
+            http_tool_fn.__annotations__ = {v: str for v in all_vars}
         else:
-            # No template vars — accept an optional freeform string.
-            params = [
+            sig_params = [
                 inspect.Parameter(
-                    "params",
+                    "query",
                     inspect.Parameter.KEYWORD_ONLY,
-                    default=None,
-                    annotation="str | None",
+                    default="",
+                    annotation=str,
                 )
             ]
+            http_tool_fn.__annotations__ = {"query": str}
         http_tool_fn.__signature__ = inspect.Signature(
-            params, return_annotation=str
+            sig_params, return_annotation=str
         )
-        http_tool_fn.__annotations__ = {v: str for v in all_vars}
 
         return http_tool_fn
 
@@ -249,24 +249,33 @@ class PythonToolNodeExecutor:
 # ---------------------------------------------------------------------------
 
 class AgentNodeExecutor:
-    """Creates an agentshield_sdk.Agent from node config and runs it.
+    """Builds a governed LangGraph ReAct subgraph from node config.
 
-    HTTP tool nodes reachable from this agent node in the workflow graph are
-    converted to ``@tool``-decorated callables and wired into the Agent as tools.
-    The agent is invoked via ``agentshield_sdk.Runner``.
+    HTTP/Python tool nodes reachable from this agent node in the workflow graph
+    are converted to ``@tool``-decorated callables, wrapped with OPA governance
+    + HITL via the SDK's ``build_graph()``, and compiled into a subgraph.
+
+    The subgraph is added directly as a node in the parent StateGraph (not
+    wrapped in a function). This is critical for HITL: when ``interrupt()``
+    fires inside the subgraph, LangGraph propagates the interrupt event to
+    the parent graph's ``astream_events()`` stream. A nested Runner with its
+    own checkpointer and ``ainvoke()`` would swallow the interrupt.
     """
 
     def __init__(self, node_config: dict, tool_executors: list) -> None:
         self.node_config = node_config
         self.tool_executors = tool_executors
-        self._runner: Any = None  # lazily initialised on first execute() call
 
-    async def _get_runner(self) -> Any:
-        """Lazily initialise the Runner (async setup done once per executor)."""
-        if self._runner is not None:
-            return self._runner
+    def build_subgraph(self) -> Any:
+        """Build and return a governed ReAct subgraph (no checkpointer).
 
-        from agentshield_sdk import Agent, Runner
+        The parent graph's checkpointer handles state persistence for all
+        nodes including this subgraph. Passing checkpointer=None here ensures
+        interrupt() propagates to the parent rather than being captured in a
+        separate checkpoint namespace.
+        """
+        from agentshield_sdk import Agent
+        from agentshield_sdk.graph_builder import build_graph
 
         tools = [ex.as_tool_callable() for ex in self.tool_executors]
 
@@ -279,51 +288,13 @@ class AgentNodeExecutor:
             model=self.node_config.get("model") or None,
         )
 
-        runner = Runner(agent)
-        await runner.setup()
-        self._runner = runner
+        graph = build_graph(agent, checkpointer=None, resolved_tools=tools)
         logger.info(
-            "AgentNodeExecutor ready: agent=%s tools=%s",
+            "AgentNodeExecutor subgraph built: agent=%s tools=%s",
             agent.name,
             [getattr(t, "tool_name", getattr(t, "__name__", "?")) for t in tools],
         )
-        return self._runner
-
-    async def execute(self, state: dict) -> dict:
-        """Run the agent with the last human message from *state*.
-
-        Extracts the most recent HumanMessage from state["messages"], invokes
-        the inner Runner, and returns an AIMessage to append to the graph state.
-        """
-        from langchain_core.messages import AIMessage, HumanMessage  # type: ignore[import]
-        from uuid import uuid4
-
-        # Extract last human message.
-        messages = state.get("messages", [])
-        last_human: str | None = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                last_human = msg.content
-                break
-
-        if not last_human:
-            logger.warning("AgentNodeExecutor.execute: no HumanMessage found in state")
-            return {"messages": [AIMessage(content="No input message found.")]}
-
-        runner = await self._get_runner()
-
-        # Each agent invocation uses its own thread_id to avoid checkpoint
-        # collisions with the outer workflow graph.
-        inner_thread_id = str(uuid4())
-        result = await runner.run(last_human, thread_id=inner_thread_id)
-
-        response_text: str = result.get("response", "")
-        logger.debug(
-            "AgentNodeExecutor response (thread=%s): %s",
-            inner_thread_id,
-            response_text[:80],
-        )
-        return {"messages": [AIMessage(content=response_text)]}
+        return graph
 
 
 # ---------------------------------------------------------------------------

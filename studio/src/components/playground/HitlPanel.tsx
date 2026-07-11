@@ -8,11 +8,14 @@ export interface HitlRequest {
   tool_name: string;
   risk_level: string;
   args_redacted: Record<string, unknown>;
+  reasoning?: string | null;
+  requested_by?: string | null;
+  requested_by_team?: string | null;
 }
 
 interface Props {
   request: HitlRequest | null;
-  onDecided: (decision: "approved" | "denied") => void;
+  onDecided: (decision: "approved" | "denied", threadId: string) => void;
 }
 
 export default function HitlPanel({ request, onDecided }: Props) {
@@ -23,9 +26,9 @@ export default function HitlPanel({ request, onDecided }: Props) {
   const decide = async (decision: "approved" | "denied") => {
     setDeciding(true);
     try {
-      await decidePlaygroundApproval(request.approval_id, decision);
+      const result = await decidePlaygroundApproval(request.approval_id, decision);
       toast.success(`Playground approval ${decision}.`);
-      onDecided(decision);
+      onDecided(decision, result.thread_id);
     } catch {
       toast.error("Could not submit decision.");
     } finally {
@@ -45,7 +48,19 @@ export default function HitlPanel({ request, onDecided }: Props) {
             <p className="text-xs text-slate-500 mt-0.5">
               Risk level:{" "}
               <span className="font-medium text-amber-700">{request.risk_level}</span>
+              {request.requested_by && (
+                <>
+                  {" · requested by "}
+                  <span className="font-medium text-slate-600">{request.requested_by}</span>
+                  {request.requested_by_team && ` (${request.requested_by_team})`}
+                </>
+              )}
             </p>
+            {request.reasoning && (
+              <p className="mt-1.5 text-xs italic text-slate-600 border-l-2 border-amber-300 pl-2">
+                {request.reasoning}
+              </p>
+            )}
             {Object.keys(request.args_redacted).length > 0 && (
               <pre className="mt-2 text-xs bg-slate-50 rounded p-2 overflow-auto max-h-24 text-slate-600">
                 {JSON.stringify(request.args_redacted, null, 2)}

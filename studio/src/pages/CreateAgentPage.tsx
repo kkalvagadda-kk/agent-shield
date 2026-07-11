@@ -393,7 +393,7 @@ export default function CreateAgentPage() {
   return (
     <div className="max-w-2xl mx-auto px-6 py-8">
       <button
-        onClick={() => (path ? setPath(null) : navigate("/"))}
+        onClick={() => (path ? setPath(null) : navigate("/agents"))}
         className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-900 mb-6 transition-colors"
       >
         <ArrowLeft size={14} />
@@ -675,7 +675,7 @@ function NoCodeForm({ team }: { team: string | null }) {
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100">
-        <button type="button" onClick={() => navigate("/")} className="btn-secondary">
+        <button type="button" onClick={() => navigate("/agents")} className="btn-secondary">
           Cancel
         </button>
         <button
@@ -817,7 +817,7 @@ function CodeForm({ team }: { team: string | null }) {
 
       {/* Actions */}
       <div className="flex items-center justify-end gap-3 pt-2 border-t border-slate-100">
-        <button type="button" onClick={() => navigate("/")} className="btn-secondary">
+        <button type="button" onClick={() => navigate("/agents")} className="btn-secondary">
           Cancel
         </button>
         <button

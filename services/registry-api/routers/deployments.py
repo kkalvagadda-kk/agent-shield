@@ -19,7 +19,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto import decrypt_json
@@ -30,6 +30,7 @@ from models import (
     AgentRun,
     AgentTool,
     AgentVersion,
+    ApprovalAuthority,
     AssetGrant,
     CompositeWorkflow,
     Deployment,
@@ -54,6 +55,69 @@ from schemas import (
 _PLATFORM_NAMESPACE = "agentshield-platform"
 
 logger = logging.getLogger(__name__)
+
+
+async def _auto_grant_approval_authority(
+    db: AsyncSession,
+    agent_tools: list,
+    team: str,
+    granted_by: str,
+) -> int:
+    """Auto-grant ApprovalAuthority to team members for high/critical-risk tools.
+
+    Called during deployment creation so the Approvals console works without
+    manual admin setup. Idempotent — skips if an active (non-revoked) record
+    already exists for a (user, tool) pair.
+
+    Returns the number of new authority records created.
+    """
+    risky_tools = [
+        t for t in agent_tools
+        if t.risk_level in ("high", "critical")
+    ]
+    if not risky_tools:
+        return 0
+
+    result = await db.execute(
+        text("SELECT user_sub FROM user_team_assignments WHERE team_name = :team"),
+        {"team": team},
+    )
+    team_members = [row[0] for row in result.all()]
+    if not team_members:
+        return 0
+
+    created = 0
+    for tool in risky_tools:
+        for user_sub in team_members:
+            existing = await db.execute(
+                select(ApprovalAuthority.id).where(
+                    ApprovalAuthority.resource_type == "tool",
+                    ApprovalAuthority.resource_id == tool.name,
+                    ApprovalAuthority.approver_user_id == user_sub,
+                    ApprovalAuthority.revoked_at.is_(None),
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                continue
+
+            db.add(ApprovalAuthority(
+                resource_type="tool",
+                resource_id=tool.name,
+                approver_user_id=user_sub,
+                granted_by=granted_by,
+            ))
+            created += 1
+
+    if created:
+        await db.flush()
+        logger.info(
+            "Auto-granted ApprovalAuthority: %d records for team '%s' "
+            "(%d members x %d risky tools)",
+            created, team, len(team_members), len(risky_tools),
+        )
+
+    return created
+
 
 router = APIRouter(prefix="/api/v1/agents", tags=["deployments"])
 
@@ -362,11 +426,24 @@ async def deploy_agent(
             "llm_provider_id": metadata.get("llm_provider_id"),
         }
 
+        # Auto-snapshot tools from agent_tools join table (authoritative bindings)
+        bound_tools_result = await db.execute(
+            select(Tool)
+            .join(AgentTool, AgentTool.tool_id == Tool.id)
+            .where(AgentTool.agent_id == agent.id)
+        )
+        bound_tools = bound_tools_result.scalars().all()
+        tools_snapshot = [
+            {"name": t.name, "risk": t.risk_level or "low"}
+            for t in bound_tools
+        ]
+
         version = AgentVersion(
             agent_id=agent.id,
             version_number=next_version,
             image_tag=None,
             config=config_snapshot,
+            tools=tools_snapshot,
         )
         db.add(version)
         await db.flush()
@@ -553,6 +630,18 @@ async def deploy_agent(
         await generate_and_store(db, agent.id, name, version, namespace=k8s_ns)
     except Exception as exc:
         logger.warning("Policy generation failed for agent '%s' (non-fatal): %s", name, exc)
+
+    # Auto-grant ApprovalAuthority to team members for high-risk tools
+    # so the Approvals console works without manual admin setup (non-fatal).
+    try:
+        await _auto_grant_approval_authority(
+            db, agent_tools, agent.team, granted_by=f"auto:deploy:{deployment.id}",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auto-grant ApprovalAuthority failed for agent '%s' (non-fatal): %s",
+            name, exc,
+        )
 
     # Emit Langfuse platform action trace
     from tracing import trace_platform_action

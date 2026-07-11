@@ -3,6 +3,13 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - studio:0.1.112 (Sandbox approval panel shows ONLY the current approval (match live event approval_id) — not the session-scoped pending list, which piled up benign pending "orphan" rows left by the tool-node re-run on resume; ChatPane dedupes tool chips by tool_call_id. Studio-only, no agent redeploy.)
+#   - registry-api:0.2.135 / studio:0.1.111 / declarative-runner:0.1.31 (Multi-tool HITL: provider-agnostic post_model_hook trims a turn to ONE high-risk tool call only when 2+ are high-risk (no concurrent-interrupt collision / duplicate execution); idempotent create_approval (no phantom duplicate on node re-run); resume chaining — resume proxies forward approval_requested + AgentChatPage/ChatPane handle re-interrupt during resume (ref + nonce); Evaluate-tab HitlPanel shows WHO. Needs agent redeploy.)
+#   - registry-api:0.2.134 / studio:0.1.110 / declarative-runner:0.1.29 (HITL approval context WHO/WHY/WHAT: SDK captures LLM reasoning via InjectedState on governed_tool + system-prompt nudge; migration 0053 approvals.reasoning; reasoning threaded hitl.py→approval record + approval_requested SSE; session_approvals adds reasoning + requester username/team; ConversationApprovalPanel/HitlPanel/HITLDashboard render who/why/what. Needs agent redeploy.)
+#   - registry-api:0.2.133 / studio:0.1.109 / declarative-runner:0.1.28 (Sandbox HITL 3 cases: (1) registry-derived approval context — sandbox deployment approvals routed to 'sandbox' out of the prod queue, migration 0052 playground_runs session_id + requester username/team, deployment_id on start_chat, session-approvals endpoint; studio env-aware AgentChatPage + ConversationApprovalPanel self-approve + HITL console username/team; (3) batch-eval auto-approve — registry sets x-agentshield-auto-approve only for eval-runner identity, runner threads it, SDK governed_tool skips the HITL interrupt gated on a trusted identity (defense-in-depth). Case 3 needs an agent redeploy.)
+#   - registry-api:0.2.132 (OPA bundle cold-start fix: bundle_generator includes 'deploying' deployments (not just 'running') so a new agent's identity is in the OPA bundle immediately; OPA sidecar poll delays lowered 30/60→5/15s)
+#   - registry-api:0.2.131 (Deployment-chat HITL: migration 0051 playground_runs.deployment_id; GET /agents/{n}/chat/{run}/approval-status (requester-scoped poll); list_approvals provenance enrichment (requested_by/deployment_name/environment via thread_id→run join))
+#   - studio:0.1.108       (Deployment-chat HITL: AgentChatPage waiting-banner + poll + auto-resume (no inline approve/deny); HITL console requested_by + deployment/env columns)
 #   - registry-api:0.2.105 (Slice 4: RBAC foundation — rbac.py module, migration 0044 artifact_role_grants, creator auto-grant, /me enrichment, role normalization)
 #   - studio:0.1.85        (Slice 4: RequireRole guard, isAtLeast() in AuthContext, admin sidebar gated, route-level platform-admin guards)
 #   - registry-api:0.2.104 (Slices 2+3: delete-version cascade (409 on published), workflow artifact page endpoints, WorkflowMiniGraph topology data)
@@ -77,12 +84,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.121"
+REGISTRY_API_TAG="0.2.135"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.28"
-STUDIO_TAG="0.1.103"
+DEPLOY_CONTROLLER_TAG="0.1.31"
+STUDIO_TAG="0.1.112"
 EVAL_RUNNER_TAG="0.1.4"
-DECLARATIVE_RUNNER_TAG="0.1.19"
+DECLARATIVE_RUNNER_TAG="0.1.31"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -114,19 +121,19 @@ fi
 #     -n agentshield-platform
 
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (auth config K8s Secret auto-create, delete guard, tool FK check)"
+echo "  → registry-api:${REGISTRY_API_TAG} (production chat resume-stream + remove dead playground_approvals decide)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
 docker build -t "registry.internal/agentshield/safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG}" services/safety-orchestrator/
 
-echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (mount tool credential secrets via envFrom)"
+echo "  → deploy-controller:${DEPLOY_CONTROLLER_TAG} (OPA readiness probe: /health?bundles gate)"
 docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTROLLER_TAG}" services/deploy-controller/
 
-echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (resolve header {{vars}} from env for tool credentials)"
+echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (fix HITL resume: Command(resume=) + streaming resume endpoint)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" -f services/declarative-runner/Dockerfile .
 
-echo "  → studio:${STUDIO_TAG} (Credentials page + tool credential dropdown)"
+echo "  → studio:${STUDIO_TAG} (CatalogChatPage HITL: approval_requested handler + resume-stream reconnect)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
 echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"

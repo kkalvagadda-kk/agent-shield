@@ -98,9 +98,10 @@ async def create_agent(
     await db.flush()  # populate server-generated id / timestamps
     await db.refresh(agent)
 
-    # Bind tools if provided
-    if body.tools:
-        for tool_name in body.tools:
+    # Bind tools if provided (top-level field or metadata.tools from Studio)
+    tool_names = body.tools or (body.metadata.get("tools", []) if body.metadata else [])
+    if tool_names:
+        for tool_name in tool_names:
             tool_row = await db.execute(select(Tool).where(Tool.name == tool_name))
             tool_obj = tool_row.scalar_one_or_none()
             if tool_obj:
@@ -594,29 +595,48 @@ async def create_agent_identity(
     body: AgentIdentityCreate,
     db: AsyncSession = Depends(get_db),
 ) -> AgentIdentityResponse:
-    """Record a new K8s ServiceAccount identity for the agent.
+    """Record or update a K8s ServiceAccount identity for the agent.
 
-    Called by the deploy-controller immediately after creating the SA.
-    Any existing non-revoked identity for the same sa_subject is left in place
-    (idempotent: the controller may retry on failure).
+    Called by the deploy-controller after creating/confirming the SA.
+    If an active (non-revoked) identity for the same sa_subject already exists,
+    update its deployment_id to the new deployment. This keeps the OPA bundle
+    generator happy when an agent is re-deployed (new deployment, same SA).
     """
     result = await db.execute(select(Agent).where(Agent.name == name))
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Agent '{name}' not found.")
 
-    identity = AgentIdentity(
-        agent_name=name,
-        deployment_id=body.deployment_id,
-        sa_subject=body.sa_subject,
-        sa_namespace=body.sa_namespace,
+    existing_result = await db.execute(
+        select(AgentIdentity).where(
+            AgentIdentity.sa_subject == body.sa_subject,
+            AgentIdentity.revoked_at.is_(None),
+        )
     )
-    db.add(identity)
+    identity = existing_result.scalar_one_or_none()
+
+    if identity:
+        identity.deployment_id = body.deployment_id
+        identity.sa_namespace = body.sa_namespace
+        logger.info(
+            "create_agent_identity: updated existing identity for agent='%s' "
+            "sa_subject='%s' -> deployment_id='%s'",
+            name, body.sa_subject, body.deployment_id,
+        )
+    else:
+        identity = AgentIdentity(
+            agent_name=name,
+            deployment_id=body.deployment_id,
+            sa_subject=body.sa_subject,
+            sa_namespace=body.sa_namespace,
+        )
+        db.add(identity)
+        logger.info(
+            "create_agent_identity: agent='%s' sa_subject='%s'",
+            name, body.sa_subject,
+        )
+
     await db.flush()
     await db.refresh(identity)
-
-    logger.info(
-        "create_agent_identity: agent='%s' sa_subject='%s'", name, body.sa_subject
-    )
     return AgentIdentityResponse.model_validate(identity)
 
 

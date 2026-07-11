@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -28,6 +28,8 @@ export default function PlaygroundPage() {
   const [agentSelection, setAgentSelection] = useState<AgentDeploymentSelection | null>(null);
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowDeploymentSelection | null>(null);
   const [hitlRequest, setHitlRequest] = useState<HitlRequest | null>(null);
+  const [resumeStreamUrl, setResumeStreamUrl] = useState<string | null>(null);
+  const resumeNonceRef = useRef(0);
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
 
@@ -56,13 +58,19 @@ export default function PlaygroundPage() {
     approvalId: string,
     toolName: string,
     riskLevel: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    reasoning?: string | null,
+    requestedBy?: string | null,
+    requestedByTeam?: string | null
   ) => {
     setHitlRequest({
       approval_id: approvalId,
       tool_name: toolName,
       risk_level: riskLevel,
       args_redacted: args,
+      reasoning: reasoning ?? null,
+      requested_by: requestedBy ?? null,
+      requested_by_team: requestedByTeam ?? null,
     });
     setTraceEvents((prev) => [
       ...prev,
@@ -74,8 +82,27 @@ export default function PlaygroundPage() {
     ]);
   };
 
-  const handleHitlDecided = (_decision: "approved" | "denied") => {
+  const handleHitlDecided = (_decision: "approved" | "denied", threadId: string) => {
     setHitlRequest(null);
+    // Nonce forces the resume effect to re-fire even for a SECOND approval on the
+    // same run (a later-turn tool call), where the base URL is unchanged. The
+    // backend ignores the extra query param.
+    resumeNonceRef.current += 1;
+    setResumeStreamUrl(
+      `/api/v1/playground/runs/${threadId}/resume-stream?_n=${resumeNonceRef.current}`
+    );
+    setTraceEvents((prev) => [
+      ...prev,
+      {
+        ts: new Date().toISOString(),
+        event: "approval_decided",
+        content: _decision,
+      },
+    ]);
+  };
+
+  const handleResumeComplete = () => {
+    setResumeStreamUrl(null);
   };
 
   const handleTraceEvent = (ev: TraceEvent) => {
@@ -282,7 +309,9 @@ export default function PlaygroundPage() {
           ) : (
             <ChatPane
               agentName={selectedAgent}
+              resumeStreamUrl={resumeStreamUrl}
               onApprovalRequested={handleApprovalRequested}
+              onResumeComplete={handleResumeComplete}
               onTraceEvent={handleTraceEvent}
             />
           )

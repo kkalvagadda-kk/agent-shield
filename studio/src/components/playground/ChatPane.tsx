@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Eye, ExternalLink, Loader2, Send, ThumbsDown, ThumbsUp } from "lucide-react";
 import { getRunTrace, startPlaygroundRun, submitRunFeedback } from "../../api/playgroundApi";
 import { toast } from "sonner";
@@ -8,18 +8,23 @@ import SafetyDetails, { SafetyResult } from "./SafetyDetails";
 interface Message {
   role: "user" | "assistant";
   content: string;
-  chips?: { type: "tool_start" | "tool_end"; label: string }[];
+  chips?: { type: "tool_start" | "tool_end"; label: string; id?: string }[];
   safetyBlock?: SafetyResult;
 }
 
 interface Props {
   agentName: string | null;
+  resumeStreamUrl: string | null;
   onApprovalRequested: (
     approvalId: string,
     toolName: string,
     riskLevel: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    reasoning?: string | null,
+    requestedBy?: string | null,
+    requestedByTeam?: string | null
   ) => void;
+  onResumeComplete: () => void;
   onTraceEvent: (event: { ts: string; event: string; content?: string; tool_name?: string; result?: string }) => void;
 }
 
@@ -35,7 +40,7 @@ function coerceToString(val: unknown): string {
   return String(val);
 }
 
-export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent }: Props) {
+export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequested, onResumeComplete, onTraceEvent }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
@@ -59,18 +64,164 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
     }
   }, [messages]);
 
+  const connectStream = useCallback((
+    url: string,
+    runId: string,
+    onDone?: () => void,
+  ) => {
+    esRef.current?.close();
+    const es = new EventSource(url);
+    esRef.current = es;
+    setRunning(true);
+
+    es.onmessage = (e) => {
+      try {
+        const payload = JSON.parse(e.data) as Record<string, unknown>;
+        const event = payload.event as string;
+        const ts = new Date().toISOString();
+
+        if (event && event !== "message" && event !== "text_delta") {
+          const traceContent = payload.content != null ? coerceToString(payload.content) : undefined;
+          const traceTool = payload.tool_name != null ? String(payload.tool_name) : undefined;
+          const traceResult = payload.result != null ? coerceToString(payload.result) : undefined;
+          onTraceEvent({ ts, event, content: traceContent, tool_name: traceTool, result: traceResult });
+        }
+
+        if (event === "text_delta") {
+          const content = coerceToString(payload.content);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last.role === "assistant") {
+              updated[updated.length - 1] = { ...last, content: last.content + content };
+            }
+            return updated;
+          });
+        } else if (event === "tool_call_start") {
+          const toolName = (payload.tool_name as string) ?? "tool";
+          const callId = (payload.tool_call_id as string) ?? undefined;
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last.role === "assistant") {
+              // Dedupe by tool_call_id: the tool node re-runs on resume and
+              // re-emits tool_call_start for the same call — don't add a 2nd chip.
+              if (callId && (last.chips ?? []).some((c) => c.id === callId)) {
+                return updated;
+              }
+              updated[updated.length - 1] = {
+                ...last,
+                chips: [...(last.chips ?? []), { type: "tool_start", label: `Calling ${toolName}…`, id: callId }],
+              };
+            }
+            return updated;
+          });
+        } else if (event === "tool_call_end") {
+          const toolName = (payload.tool_name as string) ?? "tool";
+          const result = (payload.result as string) ?? "done";
+          const callId = (payload.tool_call_id as string) ?? undefined;
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last.role === "assistant") {
+              const chips = [...(last.chips ?? [])];
+              // Match the chip for this call id if present, else the latest open start.
+              let idx = callId ? chips.findIndex((c) => c.id === callId && c.type === "tool_start") : -1;
+              if (idx < 0) {
+                for (let i = chips.length - 1; i >= 0; i--) { if (chips[i].type === "tool_start") { idx = i; break; } }
+              }
+              if (idx >= 0) chips[idx] = { type: "tool_end", label: `${toolName}: ${String(result).slice(0, 40)}`, id: callId };
+              updated[updated.length - 1] = { ...last, chips };
+            }
+            return updated;
+          });
+        } else if (event === "approval_requested") {
+          es.close();
+          esRef.current = null;
+          onApprovalRequested(
+            (payload.approval_id as string) ?? "",
+            (payload.tool_name as string) ?? "",
+            (payload.risk_level as string) ?? "high",
+            (payload.args as Record<string, unknown>) ?? {},
+            (payload.reasoning as string | null) ?? null,
+            (payload.requested_by as string | null) ?? null,
+            (payload.requested_by_team as string | null) ?? null
+          );
+        } else if (event === "error" && payload.type === "safety_blocked") {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last && last.role === "assistant") {
+              updated[updated.length - 1] = {
+                ...last,
+                content: last.content || "Message blocked by safety scan.",
+                safetyBlock: {
+                  reason: (payload.reason as string) || "Input blocked by safety scanner",
+                  type: "safety_blocked",
+                  scanners: payload.scanners as SafetyResult["scanners"],
+                },
+              };
+            }
+            return updated;
+          });
+          es.close();
+          esRef.current = null;
+          setRunning(false);
+          onDone?.();
+        } else if (event === "error") {
+          const errorMsg = (payload.reason as string) || (payload.message as string) || "Agent error";
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last && last.role === "assistant") {
+              updated[updated.length - 1] = { ...last, content: errorMsg };
+            }
+            return updated;
+          });
+          es.close();
+          esRef.current = null;
+          setRunning(false);
+          onDone?.();
+        } else if (event === "done") {
+          es.close();
+          esRef.current = null;
+          setRunning(false);
+          getRunTrace(runId).then((t) => {
+            if (t.trace_url) setTraceUrl(t.trace_url);
+            if (t.trace_id) setTraceId(t.trace_id);
+          }).catch(() => {});
+          onDone?.();
+        }
+      } catch {
+        // ignore parse errors in stream
+      }
+    };
+
+    es.onerror = () => {
+      es.close();
+      esRef.current = null;
+      setRunning(false);
+      toast.error("Stream connection lost.");
+      onDone?.();
+    };
+  }, [onApprovalRequested, onTraceEvent]);
+
+  // Connect to resume stream when URL is provided (after HITL approve/deny)
+  useEffect(() => {
+    if (!resumeStreamUrl || !currentRunId) return;
+    connectStream(resumeStreamUrl, currentRunId, onResumeComplete);
+  }, [resumeStreamUrl, currentRunId, connectStream, onResumeComplete]);
+
   const handleSend = async () => {
     if (!input.trim() || !agentName || running) return;
 
     const userMsg = input.trim();
     setInput("");
     setMessages((prev) => [...prev, { role: "user", content: userMsg }]);
-    setRunning(true);
     setCurrentRunId(null);
     setTraceUrl(null);
     setFeedbackGiven(null);
 
-    // Add empty assistant message that will grow as SSE events arrive
     setMessages((prev) => [...prev, { role: "assistant", content: "", chips: [] }]);
 
     try {
@@ -79,126 +230,8 @@ export default function ChatPane({ agentName, onApprovalRequested, onTraceEvent 
         input_message: userMsg,
       });
 
-      const es = new EventSource(stream_url);
-      esRef.current = es;
-
-      es.onmessage = (e) => {
-        try {
-          const payload = JSON.parse(e.data) as Record<string, unknown>;
-          const event = payload.event as string;
-          const ts = new Date().toISOString();
-
-          if (event && event !== "message" && event !== "text_delta") {
-            const traceContent = payload.content != null ? coerceToString(payload.content) : undefined;
-            const traceTool = payload.tool_name != null ? String(payload.tool_name) : undefined;
-            const traceResult = payload.result != null ? coerceToString(payload.result) : undefined;
-            onTraceEvent({ ts, event, content: traceContent, tool_name: traceTool, result: traceResult });
-          }
-
-          if (event === "text_delta") {
-            const content = coerceToString(payload.content);
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content + content,
-                };
-              }
-              return updated;
-            });
-          } else if (event === "tool_call_start") {
-            const toolName = (payload.tool_name as string) ?? "tool";
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  chips: [...(last.chips ?? []), { type: "tool_start", label: `Calling ${toolName}…` }],
-                };
-              }
-              return updated;
-            });
-          } else if (event === "tool_call_end") {
-            const toolName = (payload.tool_name as string) ?? "tool";
-            const result = (payload.result as string) ?? "done";
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last.role === "assistant") {
-                const chips = [...(last.chips ?? [])];
-                let idx = -1;
-                for (let i = chips.length - 1; i >= 0; i--) { if (chips[i].type === "tool_start") { idx = i; break; } }
-                if (idx >= 0) chips[idx] = { type: "tool_end", label: `${toolName}: ${String(result).slice(0, 40)}` };
-                updated[updated.length - 1] = { ...last, chips };
-              }
-              return updated;
-            });
-          } else if (event === "approval_requested") {
-            onApprovalRequested(
-              (payload.approval_id as string) ?? "",
-              (payload.tool_name as string) ?? "",
-              (payload.risk_level as string) ?? "high",
-              (payload.args as Record<string, unknown>) ?? {}
-            );
-          } else if (event === "error" && payload.type === "safety_blocked") {
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last && last.role === "assistant") {
-                updated[updated.length - 1] = {
-                  ...last,
-                  content: last.content || "Message blocked by safety scan.",
-                  safetyBlock: {
-                    reason: (payload.reason as string) || "Input blocked by safety scanner",
-                    type: "safety_blocked",
-                    scanners: payload.scanners as SafetyResult["scanners"],
-                  },
-                };
-              }
-              return updated;
-            });
-            es.close();
-            esRef.current = null;
-            setRunning(false);
-          } else if (event === "error") {
-            const errorMsg = (payload.reason as string) || (payload.message as string) || "Agent error";
-            setMessages((prev) => {
-              const updated = [...prev];
-              const last = updated[updated.length - 1];
-              if (last && last.role === "assistant") {
-                updated[updated.length - 1] = { ...last, content: errorMsg };
-              }
-              return updated;
-            });
-            es.close();
-            esRef.current = null;
-            setRunning(false);
-          } else if (event === "done") {
-            es.close();
-            esRef.current = null;
-            setRunning(false);
-            // Fetch trace after completion
-            getRunTrace(run_id).then((t) => {
-              if (t.trace_url) setTraceUrl(t.trace_url);
-              if (t.trace_id) setTraceId(t.trace_id);
-            }).catch(() => {});
-          }
-        } catch {
-          // ignore parse errors in stream
-        }
-      };
-
-      es.onerror = () => {
-        es.close();
-        esRef.current = null;
-        setRunning(false);
-        toast.error("Stream connection lost.");
-      };
-
       setCurrentRunId(run_id);
+      connectStream(stream_url, run_id);
     } catch (err) {
       setRunning(false);
       toast.error((err as Error)?.message ?? "Failed to start run.");

@@ -19,6 +19,11 @@ interface Approval {
   reviewer_notes: string | null;
   tool_args: Record<string, unknown>;
   version: number;
+  requested_by: string | null;
+  requested_by_team: string | null;
+  deployment_name: string | null;
+  environment: string | null;
+  reasoning: string | null;
 }
 
 const RISK_CHIP: Record<string, string> = {
@@ -166,7 +171,7 @@ export default function HITLDashboardPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {["Agent", "Tool", "Risk", "Context", "Created", "Expires", "Actions"].map(
+                  {["Agent", "Requested by", "Deployment", "Tool", "Risk", "Context", "Created", "Expires", "Actions"].map(
                     (h) => (
                       <th
                         key={h}
@@ -183,7 +188,48 @@ export default function HITLDashboardPage() {
                   <>
                     <tr key={ap.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-4 py-3 font-medium text-slate-800">{ap.agent_name}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-600">{ap.tool_name}</td>
+                      <td className="px-4 py-3 text-xs text-slate-600">
+                        {ap.requested_by ? (
+                          <div className="flex flex-col">
+                            <span className="font-medium text-slate-700">{ap.requested_by}</span>
+                            {ap.requested_by_team && (
+                              <span className="text-[10px] text-slate-400">
+                                team: {ap.requested_by_team}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-600">
+                        {ap.deployment_name ? (
+                          <div className="flex flex-col">
+                            <span className="font-mono">{ap.deployment_name}</span>
+                            {ap.environment && (
+                              <span
+                                className={`badge text-[10px] mt-0.5 w-fit ${
+                                  ap.environment === "production"
+                                    ? "bg-blue-100 text-blue-700"
+                                    : "bg-slate-100 text-slate-600"
+                                }`}
+                              >
+                                {ap.environment}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-600 max-w-xs">
+                        <span className="font-mono">{ap.tool_name}</span>
+                        {ap.reasoning && (
+                          <p className="mt-0.5 text-[11px] italic text-slate-500 line-clamp-2" title={ap.reasoning}>
+                            {ap.reasoning}
+                          </p>
+                        )}
+                      </td>
                       <td className="px-4 py-3">
                         <span
                           className={`badge ${
@@ -245,7 +291,7 @@ export default function HITLDashboardPage() {
                     {/* Inline approve form */}
                     {approvingId === ap.id && (
                       <tr key={`approve-${ap.id}`} className="bg-green-50 border-b border-green-100">
-                        <td colSpan={7} className="px-4 py-3">
+                        <td colSpan={9} className="px-4 py-3">
                           <div className="flex items-end gap-3">
                             <div className="flex-1">
                               <label className="label text-xs mb-1">
@@ -285,7 +331,7 @@ export default function HITLDashboardPage() {
                     {/* Inline reject form */}
                     {rejectingId === ap.id && (
                       <tr key={`reject-${ap.id}`} className="bg-red-50 border-b border-red-100">
-                        <td colSpan={7} className="px-4 py-3">
+                        <td colSpan={9} className="px-4 py-3">
                           <div className="flex items-center gap-3">
                             <span className="text-xs text-red-700">
                               Deny this approval request?

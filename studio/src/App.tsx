@@ -54,6 +54,7 @@ export default function App() {
             <ErrorBoundary>
             <Routes>
               <Route path="/" element={<AgentListPage />} />
+              <Route path="/agents" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
               <Route path="/agents/:name/chat" element={<AgentChatPage />} />
               {/* /agents/:name/deploy removed — deploy is now a modal on AgentDetailPage */}

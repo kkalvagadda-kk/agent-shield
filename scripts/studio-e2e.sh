@@ -19,6 +19,21 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 PORT="${STUDIO_E2E_PORT:-8080}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Gateway mode: run against the real https gateway instead of an http
+# port-forward. Required because Keycloak now sets Secure session cookies —
+# Playwright won't send those back over a plain-http port-forward, so SSO
+# silent-auth between specs breaks. The gateway (https) keeps SSO working and
+# is the more realistic path anyway. Set STUDIO_E2E_GATEWAY_URL to enable;
+# defaults on when reachable.
+GATEWAY_URL="${STUDIO_E2E_GATEWAY_URL:-https://agentshield.127.0.0.1.nip.io:8443}"
+if curl -sk -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/config.json" 2>/dev/null | grep -q 200; then
+  echo "=== Studio Playwright E2E (gateway mode) ==="
+  echo "  target: ${GATEWAY_URL}"
+  cd "$REPO_ROOT/studio"
+  PLAYWRIGHT_BASE_URL="$GATEWAY_URL" npx playwright test "$@"
+  exit $?
+fi
+
 echo "=== Studio Playwright E2E ==="
 echo "[1/2] Port-forwarding svc/agentshield-studio ${PORT}:80 ..."
 kubectl port-forward -n "$NAMESPACE" svc/agentshield-studio "${PORT}:80" > /tmp/studio-pf.log 2>&1 &

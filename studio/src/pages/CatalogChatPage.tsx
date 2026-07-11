@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Loader2, Send } from "lucide-react";
+import { ArrowLeft, Bot, Loader2, Send, ShieldAlert } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
 import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
@@ -9,6 +9,13 @@ import { getKeycloak } from "../lib/keycloak";
 interface Message {
   role: "user" | "assistant";
   content: string;
+}
+
+interface PendingApproval {
+  approvalId: string;
+  toolName: string;
+  risk: string;
+  runId: string;
 }
 
 export default function CatalogChatPage() {
@@ -31,11 +38,58 @@ export default function CatalogChatPage() {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [sessionId] = useState(() => crypto.randomUUID());
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const connectResumeStream = useCallback((name: string, runId: string) => {
+    setIsStreaming(true);
+    setPendingApproval(null);
+
+    const kc = getKeycloak();
+    const token = kc?.token;
+    const resumeUrl = token
+      ? `/api/v1/agents/${name}/chat/${runId}/resume-stream?token=${encodeURIComponent(token)}`
+      : `/api/v1/agents/${name}/chat/${runId}/resume-stream`;
+
+    const source = new EventSource(resumeUrl);
+
+    source.onmessage = (event) => {
+      const d = JSON.parse(event.data);
+      if (d.type === "token") {
+        setMessages((prev) => {
+          const copy = [...prev];
+          const last = copy[copy.length - 1];
+          copy[copy.length - 1] = {
+            ...last,
+            content: last.content + d.content,
+          };
+          return copy;
+        });
+      } else if (d.type === "done") {
+        source.close();
+        setIsStreaming(false);
+      } else if (d.type === "error") {
+        setMessages((prev) => {
+          const copy = [...prev];
+          const last = copy[copy.length - 1];
+          copy[copy.length - 1] = {
+            ...last,
+            content: last.content + `\n\n[Error: ${d.message}]`,
+          };
+          return copy;
+        });
+      }
+    };
+
+    source.onerror = () => {
+      source.close();
+      setIsStreaming(false);
+    };
+  }, []);
 
   const pollWorkflowResult = useCallback(async (workflowId: string, runId: string) => {
     const maxAttempts = 60;
@@ -136,6 +190,24 @@ export default function CatalogChatPage() {
             };
             return copy;
           });
+        } else if (d.type === "approval_requested") {
+          source.close();
+          setIsStreaming(false);
+          setPendingApproval({
+            approvalId: d.approval_id,
+            toolName: d.tool || d.tool_name || "unknown",
+            risk: d.risk || d.risk_level || "high",
+            runId: res.run_id,
+          });
+          setMessages((prev) => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            copy[copy.length - 1] = {
+              ...last,
+              content: last.content || `Requesting approval to use tool: ${d.tool || d.tool_name || "unknown"}`,
+            };
+            return copy;
+          });
         } else if (d.type === "done") {
           source.close();
           setIsStreaming(false);
@@ -208,6 +280,33 @@ export default function CatalogChatPage() {
         )}
       </div>
 
+      {/* HITL Approval Banner */}
+      {pendingApproval && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 flex items-center gap-3 shrink-0">
+          <ShieldAlert size={18} className="text-amber-600 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-amber-800">
+              Awaiting approval for tool: <span className="font-mono">{pendingApproval.toolName}</span>
+            </p>
+            <p className="text-xs text-amber-600 mt-0.5">
+              A reviewer must approve this in the{" "}
+              <Link to="/hitl" className="underline font-medium">HITL Dashboard</Link>
+              {" "}before the agent can continue.
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              if (agentName) {
+                connectResumeStream(agentName, pendingApproval.runId);
+              }
+            }}
+            className="px-3 py-1.5 bg-amber-600 text-white text-xs font-medium rounded-md hover:bg-amber-700 transition-colors"
+          >
+            Check &amp; Resume
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
         {messages.length === 0 && !isStreaming && (
@@ -260,9 +359,11 @@ export default function CatalogChatPage() {
             placeholder={
               isStreaming
                 ? "Waiting for response..."
-                : !agentName
-                  ? "Loading agent..."
-                  : "Message..."
+                : pendingApproval
+                  ? "Awaiting tool approval..."
+                  : !agentName
+                    ? "Loading agent..."
+                    : "Message..."
             }
           />
           <button

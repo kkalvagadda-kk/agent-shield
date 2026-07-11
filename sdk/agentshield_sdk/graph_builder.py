@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import inspect
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 from . import config
 from .agent import Agent
@@ -33,10 +34,99 @@ logger = logging.getLogger(__name__)
 # Registry mapping tool name -> risk level so streaming.py can look it up.
 _TOOL_RISK_REGISTRY: dict[str, str] = {}
 
+# Identities allowed to auto-approve HITL (skip the interrupt). ONLY the internal
+# batch/dataset-eval runner qualifies — it runs non-interactively so there is no
+# human to approve. A real user's identity (a Keycloak sub) is never in this set,
+# so auto_approve is inert on any interactive request even if the flag leaks.
+_AUTO_APPROVE_IDENTITIES: frozenset[str] = frozenset({"eval-runner"})
+
 
 def _get_tool_risk(tool_name: str) -> str:
     """Return the risk level for a tool name (populated during graph build)."""
     return _TOOL_RISK_REGISTRY.get(tool_name, "low")
+
+
+def _one_hitl_tool_per_turn(state: dict) -> dict:
+    """post_model_hook: enforce at most ONE high-risk (HITL) tool call per turn.
+
+    Two+ high-risk tool calls in one turn each `interrupt()` in the SAME LangGraph
+    super-step, which (in 0.6.x) collide on a shared interrupt id, hang the resume,
+    and — because resume re-runs the whole tool node — RE-EXECUTE already-approved
+    tools (duplicate external calls). Provider flags can't prevent this (Bedrock's
+    Converse has no parallel-tool-calls control), so we enforce it in the graph:
+    keep every non-high-risk tool call plus the FIRST high-risk one, drop the other
+    high-risk calls. The ReAct loop re-requests the dropped calls on the next turn.
+
+    Fires ONLY when 2+ tool calls are high-risk — low-risk concurrency and a single
+    high-risk call (with or without low-risk siblings) are left untouched.
+    """
+    messages = state.get("messages") or []
+    if not messages:
+        return {}
+    msg = messages[-1]
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    if len(tool_calls) < 2:
+        return {}
+    high = [tc for tc in tool_calls if _get_tool_risk(tc.get("name", "")) == "high"]
+    if len(high) <= 1:
+        return {}
+
+    drop_ids = {tc.get("id") for tc in high[1:]}
+    kept = [tc for tc in tool_calls if tc.get("id") not in drop_ids]
+
+    # Keep the message consistent with the kept tool_calls. Anthropic/Bedrock put
+    # `tool_use` blocks in a list `content`; drop the blocks for the removed calls.
+    # Providers with a plain-string content carry the calls only in `tool_calls`.
+    content = getattr(msg, "content", None)
+    new_content = content
+    if isinstance(content, list):
+        new_content = [
+            b
+            for b in content
+            if not (
+                isinstance(b, dict)
+                and b.get("type") == "tool_use"
+                and b.get("id") in drop_ids
+            )
+        ]
+
+    trimmed = msg.model_copy(update={"tool_calls": kept, "content": new_content})
+    logger.info(
+        "one-HITL-per-turn: trimmed %d concurrent high-risk tool calls to 1 (kept=%s)",
+        len(high), high[0].get("name"),
+    )
+    return {"messages": [trimmed]}
+
+
+def _extract_reasoning(state: Any) -> str:
+    """Best-effort LLM reasoning for a tool call: the text content of the last
+    AIMessage (the "Let me look up…" thought that accompanies the tool call).
+
+    Empty for some models / tool-forced calls — callers MUST treat it as
+    optional and never gate approval on it. We look only at the last message
+    (the tool-calling AIMessage); we do NOT fall back to earlier turns, which
+    would surface misleading reasoning.
+    """
+    try:
+        messages = (state or {}).get("messages") or []
+    except AttributeError:
+        return ""
+    if not messages:
+        return ""
+    content = getattr(messages[-1], "content", None)
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        # Anthropic returns content as a list of blocks; join the text blocks
+        # (same shape streaming.py handles for text_delta).
+        text = "".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        text = str(content)
+    return text.strip()
 
 
 def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
@@ -44,11 +134,23 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
 
     The wrapper preserves the original function's __name__, __doc__, and
     type-annotations so that LangChain's tool introspection works correctly.
+    It also injects the LangGraph state (via InjectedState) so the HITL approval
+    can carry the LLM's reasoning for the call — excluded from the model-facing
+    tool schema, so the LLM never sees or fills it.
     """
     @functools.wraps(fn)
     async def governed_tool(**kwargs: Any) -> Any:
+        # LangGraph injects the graph state here (see __signature__ below). Pop it
+        # before the real tool runs so the platform tool never receives it.
+        graph_state = kwargs.pop("graph_state", None)
+
         # 1. OPA decision.
-        decision = await opa_client.check_tool(agent_name, fn.tool_name, kwargs)
+        uc = _current_user_context.get({})
+        user_ctx = opa_client.UserContext(
+            user_id=uc.get("user_id", ""),
+            user_team=uc.get("user_team", ""),
+        ) if uc else None
+        decision = await opa_client.check_tool(agent_name, fn.tool_name, kwargs, user_context=user_ctx)
 
         if not decision.allow:
             logger.info(
@@ -58,15 +160,36 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
             return f"Tool '{fn.tool_name}' denied by policy: {decision.reason}"
 
         # 2. HITL — trust OPA's require_approval (risk→action is centralized in Rego).
+        #    Batch/dataset eval runs non-interactively (no human to approve), so
+        #    the platform sets an explicit auto_approve flag on the request; we
+        #    skip the interrupt and let the tool execute rather than hang forever.
+        #    OPA allow/deny is untouched — only the HITL *pause* is bypassed.
+        #    Defense-in-depth: the flag is honored ONLY when it is BOTH set AND
+        #    the caller is a trusted batch identity (never a real user), so an
+        #    interactive request can never skip HITL even if the flag is present.
         needs_approval = decision.require_approval
-        if needs_approval:
-            thread_id = _current_thread_id.get("")
+        caller_id = uc.get("user_id", "") if uc else ""
+        auto_approve = bool(uc.get("auto_approve")) and caller_id in _AUTO_APPROVE_IDENTITIES
+        if needs_approval and auto_approve:
+            logger.info(
+                "HITL auto-approved (batch eval) tool=%s agent=%s caller=%s",
+                fn.tool_name, agent_name, caller_id,
+            )
+        if needs_approval and not auto_approve:
+            # Read thread_id from LangGraph's config (works in subgraphs).
+            # Falls back to the ContextVar for custom-container SDK agents.
+            try:
+                from langgraph.config import get_config as _get_config
+                thread_id = _get_config().get("configurable", {}).get("thread_id", "")
+            except (RuntimeError, ImportError):
+                thread_id = _current_thread_id.get("")
             approval_result = await require_approval(
                 agent_name=agent_name,
                 tool_name=fn.tool_name,
                 tool_args=kwargs,
                 thread_id=thread_id,
                 risk=fn.risk,
+                reasoning=_extract_reasoning(graph_state),
                 conversation_history=None,
             )
             if approval_result.get("decision") != "approved":
@@ -84,6 +207,36 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
     governed_tool.risk = fn.risk
     governed_tool.tool_name = fn.tool_name
     governed_tool.__annotations__ = getattr(fn, "__annotations__", {})
+
+    # Inject the LangGraph state so we can read the LLM's reasoning at HITL time.
+    # We append a keyword-only `graph_state: Annotated[dict, InjectedState]` param
+    # to the tool's signature. InjectedState is excluded from the model-facing
+    # schema (LLM never sees it) and filled by ToolNode at call time. Setting an
+    # explicit __signature__ takes precedence over functools.wraps' __wrapped__
+    # follow, so lc_tool() picks up the injected param. Best-effort: if InjectedState
+    # is unavailable, fall back to the un-injected wrapper (reasoning stays empty).
+    try:
+        from langgraph.prebuilt import InjectedState  # type: ignore[import]
+
+        base_sig = inspect.signature(fn)
+        injected = inspect.Parameter(
+            "graph_state",
+            kind=inspect.Parameter.KEYWORD_ONLY,
+            annotation=Annotated[dict, InjectedState],
+        )
+        governed_tool.__signature__ = base_sig.replace(
+            parameters=[*base_sig.parameters.values(), injected]
+        )
+        # The annotation MUST also be present, or langchain's schema builder
+        # raises KeyError('graph_state'). InjectedState is still excluded from the
+        # model-facing tool_call_schema (verified), so the LLM never sees it.
+        governed_tool.__annotations__ = {
+            **getattr(fn, "__annotations__", {}),
+            "graph_state": Annotated[dict, InjectedState],
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inject graph state for reasoning capture: %s", exc)
+
     return governed_tool
 
 
@@ -91,6 +244,12 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
 # Set by the Runner before invoking the graph.
 _current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_thread_id", default=""
+)
+
+# ContextVar for user identity propagation to OPA.
+# Set by the declarative-runner before streaming; read by governed_tool.
+_current_user_context: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "current_user_context", default={}
 )
 
 
@@ -148,10 +307,24 @@ def build_graph(agent: Agent, checkpointer: Any = None, resolved_tools: list[Any
         lc_fn = lc_tool(governed)
         lc_tools.append(lc_fn)
 
+    # Nudge the model to state its intent before each tool call. This makes the
+    # AIMessage content (the reasoning we surface on HITL approvals) reliably
+    # populated across models — otherwise some models emit only tool_calls with
+    # empty content. Best-effort UX aid, not a governance control.
+    prompt = agent.instructions or ""
+    prompt = (
+        f"{prompt}\n\n"
+        "Before calling any tool, first state in one short sentence why you need "
+        "it and what specific information you are retrieving."
+    ).strip()
+
     graph = create_react_agent(
         model=llm,
         tools=lc_tools,
-        prompt=agent.instructions,
+        prompt=prompt,
         checkpointer=checkpointer,
+        # Runs after the model, before the tool node: caps a turn at one high-risk
+        # tool call so concurrent HITL interrupts can't collide (provider-agnostic).
+        post_model_hook=_one_hitl_tool_per_turn,
     )
     return graph

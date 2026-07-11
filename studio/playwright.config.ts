@@ -21,6 +21,10 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     actionTimeout: 15_000,
+    // The platform gateway serves a self-signed cert over https. Running against
+    // it (rather than an http port-forward) keeps Keycloak's Secure session
+    // cookies working, which is required for SSO silent-auth between specs.
+    ignoreHTTPSErrors: true,
   },
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },

@@ -16,6 +16,7 @@ dict to decide whether to proceed or abort the tool call.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -36,6 +37,7 @@ async def require_approval(
     tool_args: dict,
     thread_id: str,
     risk: str = "high",
+    reasoning: str = "",
     conversation_history: list[Any] | None = None,
 ) -> dict:
     """Pause execution and request human approval for a tool invocation.
@@ -53,6 +55,8 @@ async def require_approval(
         tool_args:            Arguments the tool was called with.
         thread_id:            LangGraph thread ID for the current conversation.
         risk:                 Risk level (always "high" when HITL is needed).
+        reasoning:            The LLM's stated reason for the call (best-effort; may
+                              be empty). Surfaced to the reviewer as the "why".
         conversation_history: Last N messages for reviewer context.
 
     Returns:
@@ -62,31 +66,28 @@ async def require_approval(
         datetime.now(tz=timezone.utc) + timedelta(minutes=APPROVAL_TTL_MINUTES)
     ).isoformat()
 
-    # Build context for the reviewer (last 10 turns).
-    history_snippet = (conversation_history or [])[-10:]
-
     approval_id: str | None = None
     queue_url: str = f"{config.AGENTSHIELD_STUDIO_URL}/approvals"
 
+    # Determine context: playground sessions use lightweight approval flow.
+    is_playground = os.getenv("AGENTSHIELD_PLAYGROUND", "false").lower() == "true"
+    context = "playground" if is_playground else "production"
+
     # 1. Create approval record in Registry API.
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
             resp = await client.post(
-                f"{config.AGENTSHIELD_REGISTRY_URL}/api/v1/approvals",
+                f"{config.AGENTSHIELD_REGISTRY_URL}/api/v1/approvals/",
                 json={
+                    "agent_id": config.AGENT_ID,
                     "agent_name": agent_name,
+                    "team": config.AGENT_TEAM,
                     "tool_name": tool_name,
                     "tool_args": tool_args,
                     "thread_id": thread_id,
-                    "risk": risk,
-                    "expires_at": expires_at,
-                    "context": {
-                        "conversation_history": [
-                            _serialise_message(m) for m in history_snippet
-                        ],
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    },
+                    "risk_level": risk,
+                    "context": context,
+                    "reasoning": reasoning or None,
                 },
             )
             resp.raise_for_status()
@@ -108,6 +109,7 @@ async def require_approval(
         "tool": tool_name,
         "args": tool_args,
         "risk": risk,
+        "reasoning": reasoning or None,
         "expires_at": expires_at,
         "queue_url": queue_url,
     }

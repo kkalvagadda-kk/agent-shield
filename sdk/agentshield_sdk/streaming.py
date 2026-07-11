@@ -41,18 +41,43 @@ def _get_tool_risk(tool_name: str) -> str:
         return "low"
 
 
+def _extract_interrupts(graph: Any, config: dict) -> list[dict]:
+    """Extract pending interrupt values from the graph's checkpoint state.
+
+    LangGraph does not emit on_interrupt in astream_events(v2). Instead,
+    interrupt data lives in graph.get_state().tasks[].interrupts after the
+    stream ends. This helper reads those values.
+    """
+    try:
+        snapshot = graph.get_state(config)
+        interrupts: list[dict] = []
+        if hasattr(snapshot, "tasks"):
+            for task in snapshot.tasks:
+                if hasattr(task, "interrupts") and task.interrupts:
+                    for intr in task.interrupts:
+                        val = intr.value if hasattr(intr, "value") else intr
+                        if isinstance(val, dict):
+                            interrupts.append(val)
+        return interrupts
+    except Exception as exc:
+        logger.warning("Could not check graph state for interrupts: %s", exc)
+        return []
+
+
 async def stream_events(
     graph: Any,
-    input_state: dict,
+    input_state: Any,
     config: dict,
 ) -> AsyncIterator[str]:
     """Stream LangGraph events as SSE-formatted strings.
 
     Yields:
         SSE-formatted strings for each meaningful event.  The last yield is
-        always a ``done`` event (or an ``error`` event if an exception occurs).
+        always a ``done`` or ``approval_requested`` event (or ``error``).
     """
     event_counter = 0
+    final_response = ""
+    thread_id = config.get("configurable", {}).get("thread_id")
 
     try:
         async for event in graph.astream_events(input_state, config, version="v2"):
@@ -62,8 +87,6 @@ async def stream_events(
             if event_type == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 content = chunk.content if hasattr(chunk, "content") else ""
-                # Anthropic models may return content as a list of blocks
-                # e.g. [{"type": "text", "text": "Hello"}] — extract text.
                 if isinstance(content, list):
                     content = "".join(
                         block.get("text", "") if isinstance(block, dict) else str(block)
@@ -96,7 +119,6 @@ async def stream_events(
                 tool_name = event.get("name", "unknown_tool")
                 output = event["data"].get("output")
                 run_id = event.get("run_id", "")
-                # Convert output to a JSON-safe form.
                 if hasattr(output, "content"):
                     result: Any = output.content
                 elif isinstance(output, (dict, list)):
@@ -116,42 +138,16 @@ async def stream_events(
                 )
 
             elif event_type == "on_chain_end":
-                # LangGraph emits a chain_end at the top level when the graph
-                # completes normally.  We use this to emit the done event.
-                # Only emit once — for the outermost "LangGraph" chain.
                 if event.get("name") in ("LangGraph", "__end__"):
                     output_data = event["data"].get("output", {})
                     messages = output_data.get("messages", [])
-                    last_content = ""
                     if messages:
                         last_msg = messages[-1]
-                        last_content = (
+                        final_response = (
                             last_msg.content
                             if hasattr(last_msg, "content")
                             else str(last_msg)
                         )
-                    yield format_sse(
-                        "done",
-                        {"thread_id": config.get("configurable", {}).get("thread_id"), "final_response": last_content},
-                        event_id=str(event_counter),
-                    )
-
-            elif event_type == "on_interrupt":
-                # LangGraph fires this when interrupt() is called inside a tool.
-                interrupt_value = event["data"].get("value", {})
-                yield format_sse(
-                    "approval_requested",
-                    {
-                        "approval_id": interrupt_value.get("approval_id"),
-                        "thread_id": interrupt_value.get("thread_id"),
-                        "tool": interrupt_value.get("tool"),
-                        "args": interrupt_value.get("args"),
-                        "risk": interrupt_value.get("risk", "high"),
-                        "expires_at": interrupt_value.get("expires_at"),
-                        "queue_url": interrupt_value.get("queue_url"),
-                    },
-                    event_id=str(event_counter),
-                )
 
     except Exception as exc:
         logger.exception("Unhandled error during streaming")
@@ -159,4 +155,30 @@ async def stream_events(
             "error",
             {"message": str(exc), "type": type(exc).__name__},
             event_id=str(event_counter + 1),
+        )
+        return
+
+    event_counter += 1
+    pending = _extract_interrupts(graph, config)
+    if pending:
+        interrupt_value = pending[0]
+        yield format_sse(
+            "approval_requested",
+            {
+                "approval_id": interrupt_value.get("approval_id"),
+                "thread_id": interrupt_value.get("thread_id") or thread_id,
+                "tool": interrupt_value.get("tool"),
+                "args": interrupt_value.get("args"),
+                "risk": interrupt_value.get("risk", "high"),
+                "reasoning": interrupt_value.get("reasoning"),
+                "expires_at": interrupt_value.get("expires_at"),
+                "queue_url": interrupt_value.get("queue_url"),
+            },
+            event_id=str(event_counter),
+        )
+    else:
+        yield format_sse(
+            "done",
+            {"thread_id": thread_id, "final_response": final_response},
+            event_id=str(event_counter),
         )

@@ -51,6 +51,7 @@ from uuid import uuid4
 from langchain_core.messages import HumanMessage  # type: ignore[import]
 from langgraph.graph import END, START, StateGraph  # type: ignore[import]
 from langgraph.graph.message import MessagesState  # type: ignore[import]
+from langgraph.types import Command  # type: ignore[import]
 
 from agentshield_sdk.checkpointer import get_checkpointer  # type: ignore[import]
 from agentshield_sdk.safety_client import SafetyBlockedError, scan_input, scan_output  # type: ignore[import]
@@ -153,7 +154,9 @@ class WorkflowExecutor:
                     f"/api/v1/agents/{AGENT_NAME}/tools"
                 )
                 if tools_resp.status_code == 200:
-                    for t in tools_resp.json():
+                    data = tools_resp.json()
+                    items = data.get("items", data) if isinstance(data, dict) else data
+                    for t in items:
                         tid = t.get("id") or t.get("tool_id")
                         if tid:
                             tool_ids.append(str(tid))
@@ -505,7 +508,8 @@ class WorkflowExecutor:
                 # Use pre-fetched executors if available (mix of Http + Python), else empty list
                 tool_executors = self._agent_tool_executors.get(node_id, [])
                 executor = AgentNodeExecutor(node_config, tool_executors)
-                builder.add_node(node_id, executor.execute)
+                subgraph = executor.build_subgraph()
+                builder.add_node(node_id, subgraph)
 
             elif node_type == "end":
                 end_executor = EndNodeExecutor(node_config)
@@ -588,7 +592,8 @@ class WorkflowExecutor:
                     node_id, nodes_by_id, edges, agent_owned_ids
                 )
                 executor = AgentNodeExecutor(node_config, legacy_tool_executors)
-                builder.add_node(node_id, executor.execute)
+                subgraph = executor.build_subgraph()
+                builder.add_node(node_id, subgraph)
 
             elif node_type == "http_tool":
                 executor = HttpToolNodeExecutor(node_config)  # type: ignore[assignment]
@@ -797,7 +802,7 @@ class WorkflowExecutor:
             config["callbacks"] = [lf_handler]
 
         result = await self.graph.ainvoke(
-            {"messages": [], "resume": decision}, config
+            Command(resume=decision), config
         )
 
         messages = result.get("messages", [])
@@ -812,3 +817,17 @@ class WorkflowExecutor:
             response_text, agent_name=agent_name, session_id=thread_id
         )
         return {"response": out_scan.clean_text, "thread_id": thread_id}
+
+    async def resume_stream(
+        self, thread_id: str, decision: dict, trace_id: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Resume a paused graph and stream SSE events for the continuation."""
+        config = {"configurable": {"thread_id": thread_id}}
+        lf_handler = _make_langfuse_handler(trace_id, thread_id)
+        if lf_handler:
+            config["callbacks"] = [lf_handler]
+
+        async for sse_chunk in stream_events(
+            self.graph, Command(resume=decision), config
+        ):
+            yield sse_chunk

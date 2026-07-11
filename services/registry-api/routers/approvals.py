@@ -154,8 +154,39 @@ async def create_approval(
     now = datetime.now(tz=timezone.utc)
     expires_at = now + timedelta(seconds=body.timeout_seconds)
 
-    # Playground approvals must not trigger Slack/on-call notifications.
-    notify_slack = body.context != "playground"
+    # Idempotency: LangGraph re-runs the tool node on resume, so `governed_tool`
+    # re-POSTs the same approval before `interrupt()` returns the cached decision.
+    # If a PENDING approval already exists for this exact (thread_id, tool, args),
+    # return it instead of creating a phantom duplicate that would linger in the
+    # panel. (Matches only pending — a decided/expired one shouldn't be reused.)
+    existing = (
+        await db.execute(
+            select(Approval)
+            .where(
+                Approval.thread_id == body.thread_id,
+                Approval.tool_name == body.tool_name,
+                Approval.tool_args == body.tool_args,
+                Approval.status == "pending",
+            )
+            .order_by(Approval.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        logger.info(
+            "create_approval: reusing pending approval id=%s (idempotent re-post) thread=%s tool=%s",
+            existing.id, body.thread_id, body.tool_name,
+        )
+        return ApprovalResponse.model_validate(existing)
+
+    # The agent pod cannot tell whether a run came from the Evaluate tab, a
+    # sandbox deployment chat, or a production chat (the same pod serves all,
+    # and its context env var is static). The Registry is the source of truth:
+    # derive context from the run this approval belongs to.
+    context = await _derive_context(body.thread_id, body.context, db)
+
+    # Only production approvals trigger Slack/on-call notifications.
+    notify_slack = context == "production"
 
     approval = Approval(
         agent_id=body.agent_id,
@@ -169,7 +200,8 @@ async def create_approval(
         expires_at=expires_at,
         session_id=body.session_id,
         opa_decision_id=body.opa_decision_id,
-        context=body.context,
+        context=context,
+        reasoning=body.reasoning,
         notify_slack=notify_slack,
     )
     db.add(approval)
@@ -177,7 +209,7 @@ async def create_approval(
 
     # Notify approvers — look up ApprovalAuthority records for this tool
     # (Slack notification deferred to Phase 11; log for now)
-    if body.context == "production":
+    if context == "production":
         auth_q = select(ApprovalAuthority).where(
             ApprovalAuthority.resource_type == "tool",
             ApprovalAuthority.resource_id == body.tool_name,
@@ -220,7 +252,7 @@ async def list_approvals(
     team: Optional[str] = Query(None, description="Filter by agent team"),
     context: Optional[str] = Query(
         None,
-        pattern="^(production|playground)$",
+        pattern="^(production|playground|sandbox)$",
         description="Filter by context. Defaults to 'production' when not specified.",
     ),
     limit: int = Query(50, ge=1, le=200),
@@ -270,10 +302,108 @@ async def list_approvals(
     total = len((await db.execute(count_q)).all())
 
     rows = (await db.execute(q.limit(limit).offset(offset))).scalars().all()
-    return PaginatedResponse(
-        items=[ApprovalResponse.model_validate(r) for r in rows],
-        total=total,
-    )
+
+    # Provenance enrichment: approval.thread_id == playground_runs.id. Join to
+    # surface the requester (run.user_id) and the deployment/environment the
+    # run targeted, so reviewers see *who* asked and *where* from.
+    provenance = await _load_provenance([r.thread_id for r in rows], db)
+
+    items = []
+    for r in rows:
+        item = ApprovalResponse.model_validate(r)
+        prov = provenance.get(r.thread_id)
+        if prov:
+            item.requested_by = prov.get("requested_by")
+            item.requested_by_team = prov.get("requested_by_team")
+            item.deployment_name = prov.get("deployment_name")
+            item.environment = prov.get("environment")
+        items.append(item)
+
+    return PaginatedResponse(items=items, total=total)
+
+
+async def _derive_context(thread_id: str, fallback: str, db: AsyncSession) -> str:
+    """Decide an approval's context from the run it belongs to (Registry is the
+    source of truth — the agent pod's static env var can't distinguish callers).
+
+    thread_id is the PlaygroundRun id. Rules:
+      - run.context == 'production'                          -> 'production'
+      - run on a deployment whose environment == 'sandbox'  -> 'sandbox'
+      - otherwise (Evaluate-tab playground run)              -> 'playground'
+      - no run found                                         -> fallback (pod's claim)
+    """
+    from models import Deployment, PlaygroundRun
+
+    try:
+        run_id = uuid.UUID(thread_id)
+    except (ValueError, AttributeError, TypeError):
+        return fallback
+
+    row = (
+        await db.execute(
+            select(PlaygroundRun.context, Deployment.environment)
+            .outerjoin(Deployment, Deployment.id == PlaygroundRun.deployment_id)
+            .where(PlaygroundRun.id == run_id)
+        )
+    ).first()
+    if row is None:
+        return fallback
+    run_context, environment = row
+    if run_context == "production":
+        return "production"
+    if environment == "sandbox":
+        return "sandbox"
+    return "playground"
+
+
+async def _load_provenance(
+    thread_ids: list[str], db: AsyncSession
+) -> dict[str, dict]:
+    """Resolve requester + deployment for a batch of approval thread_ids.
+
+    thread_id is the PlaygroundRun id. Returns {thread_id: {requested_by,
+    deployment_name, environment}}. Threads that don't parse as a run id (or
+    have no matching run) are simply absent from the map.
+    """
+    from models import Deployment, PlaygroundRun
+
+    parsed: dict[str, uuid.UUID] = {}
+    for tid in thread_ids:
+        try:
+            parsed[tid] = uuid.UUID(tid)
+        except (ValueError, AttributeError):
+            continue
+    if not parsed:
+        return {}
+
+    run_rows = (
+        await db.execute(
+            select(
+                PlaygroundRun.id,
+                PlaygroundRun.user_id,
+                PlaygroundRun.requested_by_username,
+                PlaygroundRun.requested_by_team,
+                PlaygroundRun.deployment_id,
+                Deployment.name,
+                Deployment.environment,
+            )
+            .outerjoin(Deployment, Deployment.id == PlaygroundRun.deployment_id)
+            .where(PlaygroundRun.id.in_(list(parsed.values())))
+        )
+    ).all()
+
+    by_run_id = {
+        # Prefer the human username; fall back to the raw sub for pre-migration rows.
+        str(row.id): {
+            "requested_by": row.requested_by_username or row.user_id,
+            "requested_by_team": row.requested_by_team,
+            "deployment_name": row.name,
+            "environment": row.environment,
+        }
+        for row in run_rows
+    }
+    # Re-key from run-id back to the original thread_id string form.
+    return {tid: by_run_id[str(rid)] for tid, rid in parsed.items() if str(rid) in by_run_id}
 
 
 # ---------------------------------------------------------------------------

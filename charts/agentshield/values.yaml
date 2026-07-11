@@ -585,7 +585,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.121"
+    tag: "0.2.135"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.4"
@@ -647,12 +647,12 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.28"
+    tag: "0.1.31"
     pullPolicy: IfNotPresent
 
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.19"
+  declarativeRunnerTag: "0.1.31"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -894,7 +894,7 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.103"
+    tag: "0.1.112"
     pullPolicy: IfNotPresent
 
   service:

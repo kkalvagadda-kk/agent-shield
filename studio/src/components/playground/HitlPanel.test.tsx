@@ -20,7 +20,13 @@ const REQUEST: HitlRequest = {
 
 describe("HitlPanel", () => {
   beforeEach(() => {
-    (decidePlaygroundApproval as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (decidePlaygroundApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+      approval_id: "apv-123",
+      status: "approved",
+      thread_id: "thread-abc",
+      agent_name: "test-agent",
+      team: "platform",
+    });
   });
 
   it("renders nothing when request is null", () => {
@@ -56,10 +62,17 @@ describe("HitlPanel", () => {
     await waitFor(() =>
       expect(decidePlaygroundApproval).toHaveBeenCalledWith("apv-123", "approved")
     );
-    await waitFor(() => expect(onDecided).toHaveBeenCalledWith("approved"));
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith("approved", "thread-abc"));
   });
 
   it("calls decidePlaygroundApproval with 'denied' and fires onDecided", async () => {
+    (decidePlaygroundApproval as ReturnType<typeof vi.fn>).mockResolvedValue({
+      approval_id: "apv-123",
+      status: "denied",
+      thread_id: "thread-abc",
+      agent_name: "test-agent",
+      team: "platform",
+    });
     const onDecided = vi.fn();
     renderWithProviders(<HitlPanel request={REQUEST} onDecided={onDecided} />);
 
@@ -68,7 +81,7 @@ describe("HitlPanel", () => {
     await waitFor(() =>
       expect(decidePlaygroundApproval).toHaveBeenCalledWith("apv-123", "denied")
     );
-    await waitFor(() => expect(onDecided).toHaveBeenCalledWith("denied"));
+    await waitFor(() => expect(onDecided).toHaveBeenCalledWith("denied", "thread-abc"));
   });
 
   it("disables buttons while decision is pending", async () => {

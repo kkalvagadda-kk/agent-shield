@@ -436,6 +436,19 @@ async def chat_stream(req: ChatRequest, request: Request):
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
     trace_id = request.headers.get("x-agentshield-trace-id")
+    user_id = request.headers.get("x-user-sub", "")
+    user_team = request.headers.get("x-agent-team", "")
+    # Batch/dataset eval sets this (registry-side, only for the eval-runner
+    # identity) so high-risk tools auto-approve instead of hanging on HITL. The
+    # SDK additionally gates it on a trusted batch identity (defense-in-depth).
+    auto_approve = request.headers.get("x-agentshield-auto-approve", "").lower() == "true"
+
+    from agentshield_sdk.graph_builder import _current_user_context
+    _current_user_context.set({
+        "user_id": user_id,
+        "user_team": user_team,
+        "auto_approve": auto_approve,
+    })
 
     async def sse_generator():
         try:
@@ -477,6 +490,22 @@ async def resume_thread(thread_id: str, req: ResumeRequest):
     except Exception as exc:
         logger.exception("Error resuming thread %s", thread_id)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/resume/{thread_id}/stream")
+async def resume_thread_stream(thread_id: str, req: ResumeRequest):
+    """Resume a HITL-paused workflow thread and stream the continuation as SSE."""
+    if workflow_executor is None:
+        raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
+    decision = {
+        "decision": req.decision,
+        "reviewer_id": req.reviewer_id,
+        "reason": req.reason,
+    }
+    return StreamingResponse(
+        workflow_executor.resume_stream(thread_id, decision),
+        media_type="text/event-stream",
+    )
 
 
 # ---------------------------------------------------------------------------

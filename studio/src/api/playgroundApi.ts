@@ -160,11 +160,23 @@ export async function listPlaygroundApprovals(statusFilter?: string): Promise<un
   return data;
 }
 
+export interface PlaygroundApprovalDecideResponse {
+  approval_id: string;
+  status: string;
+  thread_id: string;
+  agent_name: string;
+  team: string;
+}
+
 export async function decidePlaygroundApproval(
   approvalId: string,
   decision: "approved" | "denied"
-): Promise<void> {
-  await http.post(`/playground/approvals/${approvalId}/decide`, { decision });
+): Promise<PlaygroundApprovalDecideResponse> {
+  const { data } = await http.post<PlaygroundApprovalDecideResponse>(
+    `/playground/approvals/${approvalId}/decide`,
+    { decision },
+  );
+  return data;
 }
 
 // ---------------------------------------------------------------------------

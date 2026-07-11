@@ -16,7 +16,9 @@ export default async function globalSetup(config: FullConfig) {
   const statePath = path.join(authDir, "state.json");
 
   const browser = await chromium.launch();
-  const page = await browser.newPage();
+  // The gateway serves a self-signed cert; accept it so login can proceed.
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
   try {
     await page.goto(baseURL, { waitUntil: "domcontentloaded" });
     // Keycloak login form (redirected). Field ids are Keycloak defaults.

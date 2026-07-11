@@ -88,7 +88,7 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
             JOIN deployments d ON d.id = ai.deployment_id
             JOIN agent_versions av ON av.id = d.version_id
             WHERE ai.revoked_at IS NULL
-              AND d.status = 'running'
+              AND d.status IN ('deploying', 'running')
         """)
     )
 

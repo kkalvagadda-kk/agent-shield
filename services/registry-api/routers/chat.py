@@ -369,6 +369,10 @@ async def start_chat(
         agent_name=name,
         context=chat_context,
         sandbox=not is_production,
+        deployment_id=deployment.id,
+        session_id=session_id,
+        requested_by_username=caller.get("preferred_username"),
+        requested_by_team=caller_team,
         input_message=body.message,
         status="running",
         started_at=now,
@@ -595,6 +599,7 @@ async def start_deployment_chat(
         )
 
     user_sub = caller.get("sub", "")
+    caller_team = await _caller_team(db, user_sub)
     session_id = body.session_id or str(uuid.uuid4())
     now = datetime.now(tz=timezone.utc)
 
@@ -603,6 +608,10 @@ async def start_deployment_chat(
         agent_name=name,
         context="playground",
         sandbox=True,
+        deployment_id=deployment.id,
+        session_id=session_id,
+        requested_by_username=caller.get("preferred_username"),
+        requested_by_team=caller_team,
         input_message=body.message,
         status="running",
         started_at=now,
@@ -711,3 +720,287 @@ async def stream_deployment_chat(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/agents/{name}/chat/{run_id}/resume-stream
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{name}/chat/{run_id}/resume-stream",
+    summary="SSE stream for resumed output after HITL approval",
+    response_class=StreamingResponse,
+)
+async def resume_stream_chat(
+    name: str,
+    run_id: str,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """After a production HITL approval, stream the resumed agent output as SSE.
+
+    Reads the decided approval from DB, resolves the agent pod, and proxies
+    POST /resume/{thread_id}/stream back to the consumer."""
+    from models import Approval
+
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    result = await db.execute(
+        select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    user_sub = caller.get("sub", "")
+    if run.user_id != user_sub:
+        raise HTTPException(status_code=403, detail="Not your run")
+
+    thread_id = run_id
+
+    approval_result = await db.execute(
+        select(Approval)
+        .where(
+            Approval.thread_id == thread_id,
+            Approval.status.in_(["approved", "rejected"]),
+        )
+        .order_by(Approval.decision_at.desc())
+        .limit(1)
+    )
+    approval = approval_result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(
+            status_code=404,
+            detail="No decided approval found for this run",
+        )
+
+    agent_result = await db.execute(select(Agent).where(Agent.name == name))
+    agent = agent_result.scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    chat_context = run.context or "playground"
+    deployment = await _running_deployment(db, agent.id, context=chat_context)
+    if not deployment:
+        def _no_deploy():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'No running deployment'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'run_id': run_id})}\n\n"
+        return StreamingResponse(_no_deploy(), media_type="text/event-stream")
+
+    service_url = f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
+    decision_str = approval.status
+    reviewer = approval.reviewer_id or "unknown"
+
+    def _emit(payload: dict) -> str:
+        return f"data: {json.dumps(payload)}\n\n"
+
+    async def _proxy_resume() -> AsyncGenerator[str, None]:
+        timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+        try:
+            async with httpx.AsyncClient() as client:
+                async with client.stream(
+                    "POST",
+                    f"{service_url}/resume/{thread_id}/stream",
+                    json={
+                        "decision": decision_str,
+                        "reviewer_id": reviewer,
+                        "reason": approval.reviewer_notes,
+                    },
+                    headers={"Accept": "text/event-stream"},
+                    timeout=timeout,
+                ) as response:
+                    if response.status_code != 200:
+                        err = await response.aread()
+                        yield _emit({"type": "error", "message": f"Agent pod returned {response.status_code}: {err.decode()[:200]}"})
+                        yield _emit({"type": "done", "run_id": run_id})
+                        return
+
+                    current_event: Optional[str] = None
+                    current_data: Optional[str] = None
+                    output_parts: list[str] = []
+
+                    async for line in response.aiter_lines():
+                        if line.startswith("event:"):
+                            current_event = line[len("event:"):].strip()
+                        elif line.startswith("data:"):
+                            current_data = line[len("data:"):].strip()
+                        elif line == "":
+                            if current_data is not None:
+                                try:
+                                    payload = json.loads(current_data)
+                                except json.JSONDecodeError:
+                                    payload = {}
+
+                                if current_event == "text_delta":
+                                    output_parts.append(payload.get("content", ""))
+                                    yield _emit({"type": "token", "content": payload.get("content", "")})
+                                elif current_event == "done":
+                                    yield _emit({"type": "done", "run_id": run_id})
+                                elif current_event == "error":
+                                    yield _emit({"type": "error", "message": payload.get("message", "Agent error")})
+                                    yield _emit({"type": "done", "run_id": run_id})
+                                elif current_event == "tool_call_start":
+                                    yield _emit({"type": "tool_call_start", **payload})
+                                elif current_event == "tool_call_end":
+                                    yield _emit({"type": "tool_call_end", **payload})
+                                elif current_event == "approval_requested":
+                                    # A LATER-turn tool call re-interrupted during
+                                    # resume. Forward it so the chat surfaces the
+                                    # next approval instead of the stream ending
+                                    # silently (which read as "connection lost").
+                                    yield _emit({"type": "approval_requested", **payload})
+
+                            current_event = None
+                            current_data = None
+
+                    asyncio.get_event_loop().create_task(
+                        _complete_chat_run(run_id, "".join(output_parts), None, None)
+                    )
+
+        except httpx.ConnectError:
+            yield _emit({"type": "error", "message": "Agent pod is unreachable."})
+            yield _emit({"type": "done", "run_id": run_id})
+        except Exception as exc:
+            logger.exception("resume_stream_chat: error proxying to agent pod")
+            yield _emit({"type": "error", "message": str(exc)})
+            yield _emit({"type": "done", "run_id": run_id})
+
+    return StreamingResponse(
+        _proxy_resume(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/agents/{name}/chat/{run_id}/approval-status
+# ---------------------------------------------------------------------------
+@router.get(
+    "/{name}/chat/{run_id}/approval-status",
+    summary="Poll the HITL approval status for a chat run (requester-scoped)",
+)
+async def chat_approval_status(
+    name: str,
+    run_id: str,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the latest approval decision for this chat run's thread.
+
+    Scoped to the run's owner — the person who started the chat can watch the
+    status of their own approval without needing reviewer authority (that gate
+    lives on PATCH /approvals/{id}). The chat page polls this so it can auto-
+    resume the moment a reviewer decides in the HITL console.
+    """
+    from models import Approval
+
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    result = await db.execute(select(PlaygroundRun).where(PlaygroundRun.id == parsed_id))
+    run = result.scalar_one_or_none()
+    if not run or run.agent_name != name:
+        raise HTTPException(status_code=404, detail="Chat run not found.")
+    if run.user_id != caller.get("sub", ""):
+        raise HTTPException(status_code=403, detail="Not your chat run.")
+
+    approval_result = await db.execute(
+        select(Approval)
+        .where(Approval.thread_id == run_id)
+        .order_by(Approval.created_at.desc())
+        .limit(1)
+    )
+    approval = approval_result.scalar_one_or_none()
+    if not approval:
+        return {"run_id": run_id, "status": "none", "approval_id": None}
+
+    return {
+        "run_id": run_id,
+        "approval_id": str(approval.id),
+        "status": approval.status,  # pending | approved | rejected | timed_out
+        "tool": approval.tool_name,
+        "risk": approval.risk_level,
+        "reasoning": approval.reasoning,
+        "reviewer_id": approval.reviewer_id,
+        "decided": approval.status in ("approved", "rejected"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/agents/{name}/chat/session/{session_id}/approvals
+# ---------------------------------------------------------------------------
+@router.get(
+    "/{name}/chat/session/{session_id}/approvals",
+    summary="List HITL approvals for a chat session (requester-scoped)",
+)
+async def session_approvals(
+    name: str,
+    session_id: str,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """List the approvals for a whole conversation (session), owned by the caller.
+
+    Feeds the sandbox self-approve panel. A conversation is many per-turn runs
+    sharing one session_id; each run's id is an approval's thread_id. Today the
+    graph interrupts at the first high-risk tool so there is usually one pending
+    row, but the list shape is forward-proof for conversation history once
+    conversations are persisted.
+    """
+    from models import Approval
+
+    user_sub = caller.get("sub", "")
+
+    # Runs in this session owned by the caller — the thread_ids to look up, plus
+    # the requester provenance (username/team) to show WHO asked on each row.
+    run_rows = (
+        await db.execute(
+            select(
+                PlaygroundRun.id,
+                PlaygroundRun.requested_by_username,
+                PlaygroundRun.requested_by_team,
+            ).where(
+                PlaygroundRun.session_id == session_id,
+                PlaygroundRun.agent_name == name,
+                PlaygroundRun.user_id == user_sub,
+            )
+        )
+    ).all()
+    run_ids = [str(r.id) for r in run_rows]
+    if not run_ids:
+        return {"session_id": session_id, "approvals": []}
+    prov = {
+        str(r.id): (r.requested_by_username, r.requested_by_team) for r in run_rows
+    }
+
+    approvals = (
+        await db.execute(
+            select(Approval)
+            .where(Approval.thread_id.in_(run_ids))
+            .order_by(Approval.created_at.desc())
+        )
+    ).scalars().all()
+
+    def _row(a) -> dict[str, Any]:
+        username, team = prov.get(a.thread_id, (None, None))
+        return {
+            "approval_id": str(a.id),
+            "run_id": a.thread_id,
+            "status": a.status,
+            "tool": a.tool_name,          # WHAT (tool)
+            "args": a.tool_args or {},    # WHAT (arguments)
+            "risk": a.risk_level,
+            "reasoning": a.reasoning,     # WHY (best-effort LLM reason)
+            "requested_by": username,     # WHO
+            "requested_by_team": team,
+            "context": a.context,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+            "decided": a.status in ("approved", "rejected"),
+        }
+
+    return {"session_id": session_id, "approvals": [_row(a) for a in approvals]}

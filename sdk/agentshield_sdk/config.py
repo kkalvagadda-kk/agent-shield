@@ -37,6 +37,8 @@ OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 
 # --- Identity injected by deploy controller ---
 AGENT_NAME: str = os.getenv("AGENT_NAME", "unknown-agent")
+AGENT_ID: str = os.getenv("AGENTSHIELD_AGENT_ID", "")
+AGENT_TEAM: str = os.getenv("AGENTSHIELD_AGENT_TEAM", "platform")
 
 # --- LLM provider ---
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "anthropic")

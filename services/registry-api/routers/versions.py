@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Agent, AgentRun, AgentVersion, Deployment, ProductionDeployment, PublishedVersion
+from models import Agent, AgentRun, AgentTool, AgentVersion, Deployment, ProductionDeployment, PublishedVersion, Tool
 from schemas import AgentVersionCreate, AgentVersionPatch, AgentVersionResponse
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,26 @@ async def create_version(
     next_version = (max_version or 0) + 1
 
     metadata = agent.metadata_ or {}
+
+    # Auto-snapshot tools from agent_tools join table (authoritative bindings)
+    bound_tools_result = await db.execute(
+        select(Tool)
+        .join(AgentTool, AgentTool.tool_id == Tool.id)
+        .where(AgentTool.agent_id == agent.id)
+    )
+    bound_tools = bound_tools_result.scalars().all()
+    tools_snapshot = [
+        {"name": t.name, "risk": t.risk_level or "low"}
+        for t in bound_tools
+    ]
+    # Merge with any explicitly provided tools from request body
+    if body.tools:
+        seen = {t["name"] for t in tools_snapshot}
+        for t in body.tools:
+            d = t.model_dump()
+            if d.get("name") not in seen:
+                tools_snapshot.append(d)
+
     config_snapshot = {
         "instructions": metadata.get("instructions"),
         "tools": metadata.get("tools", []),
@@ -93,7 +113,7 @@ async def create_version(
         version_number=next_version,
         image_tag=body.image_tag,
         agent_graph_id=body.agent_graph_id,
-        tools=[t.model_dump() for t in body.tools],
+        tools=tools_snapshot,
         config=config_snapshot,
         eval_passed=body.eval_passed,
         adversarial_eval_passed=body.adversarial_eval_passed,

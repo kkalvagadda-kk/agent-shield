@@ -64,7 +64,7 @@ echo "--- Tools ---"
 
 # --- web-search (HTTP, Serper.dev) ---
 WEB_SEARCH=$(post_idempotent "/api/v1/tools/" \
-  "{\"name\":\"web_search\",\"display_name\":\"Web Search\",\"description\":\"Search the web using Serper.dev. Pass X-API-KEY header via agent auth config.\",\"type\":\"http\",\"risk_level\":\"low\",\"owner_team\":\"${TEAM}\",\"http_method\":\"POST\",\"http_url\":\"https://google.serper.dev/search\",\"http_headers\":{\"Content-Type\":\"application/json\",\"X-API-KEY\":\"{{serper_api_key}}\"},\"http_body_template\":\"{\\\"q\\\":\\\"{{query}}\\\",\\\"num\\\":5}\"}" \
+  "{\"name\":\"web_search\",\"display_name\":\"Web Search\",\"description\":\"Search the web using Serper.dev. Pass X-API-KEY header via agent auth config.\",\"type\":\"http\",\"risk_level\":\"high\",\"owner_team\":\"${TEAM}\",\"http_method\":\"POST\",\"http_url\":\"https://google.serper.dev/search\",\"http_headers\":{\"Content-Type\":\"application/json\",\"X-API-KEY\":\"{{serper_api_key}}\"},\"http_body_template\":\"{\\\"q\\\":\\\"{{query}}\\\",\\\"num\\\":5}\"}" \
   "web_search")
 WEB_SEARCH_ID=$(echo "$WEB_SEARCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
 

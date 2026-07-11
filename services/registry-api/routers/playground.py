@@ -25,7 +25,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
@@ -89,6 +89,19 @@ async def create_playground_run(
     # Ensure per-user playground SA exists (best-effort; non-blocking)
     background_tasks.add_task(ensure_playground_sa, caller)
 
+    # Requester provenance for the HITL panel (WHO): username from the JWT, team
+    # from user_team_assignments. Skipped for service identities (eval-runner).
+    requested_by_username = (user or {}).get("preferred_username")
+    requested_by_team = None
+    if caller and caller not in _SERVICE_IDENTITIES:
+        _tr = await db.execute(
+            text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub LIMIT 1"),
+            {"sub": caller},
+        )
+        _row = _tr.first()
+        if _row:
+            requested_by_team = _row[0]
+
     shape = body.execution_shape or agent.execution_shape or "reactive"
     now = datetime.now(tz=timezone.utc)
     run = PlaygroundRun(
@@ -102,6 +115,8 @@ async def create_playground_run(
         input_payload=body.input_payload,
         trigger_type=body.trigger_type,
         trigger_payload=body.trigger_payload,
+        requested_by_username=requested_by_username,
+        requested_by_team=requested_by_team,
         status="running",
         started_at=now,
     )
@@ -417,6 +432,10 @@ async def _real_agent_stream(
     input_message: str,
     thread_id: str,
     trace_id: str | None = None,
+    user_id: str = "",
+    user_team: str = "",
+    requested_by: str | None = None,
+    requested_by_team: str | None = None,
 ) -> AsyncIterator[str]:
     """Proxy SSE from the agent pod, converting named events to unnamed events.
 
@@ -441,6 +460,16 @@ async def _real_agent_stream(
             req_headers = {"Accept": "text/event-stream"}
             if trace_id:
                 req_headers["x-agentshield-trace-id"] = trace_id
+            if user_id:
+                req_headers["x-user-sub"] = user_id
+            if user_team:
+                req_headers["x-agent-team"] = user_team
+            # Batch/dataset eval runs non-interactively — no human to approve HITL.
+            # Only the internal eval-runner service identity may auto-approve; the
+            # SDK re-checks this identity as defense-in-depth. Interactive chats
+            # (real user subs) never take this branch.
+            if user_id in _SERVICE_IDENTITIES:
+                req_headers["x-agentshield-auto-approve"] = "true"
             async with aclient.stream(
                 "POST",
                 f"{agent_svc_url}/chat/stream",
@@ -476,6 +505,14 @@ async def _real_agent_stream(
                             payload["event"] = current_event
                         elif "event" not in payload:
                             payload["event"] = "message"
+
+                        # Enrich the approval with the requester (WHO) — the pod
+                        # doesn't know it; the registry captured it on the run.
+                        if payload.get("event") == "approval_requested":
+                            if requested_by:
+                                payload["requested_by"] = requested_by
+                            if requested_by_team:
+                                payload["requested_by_team"] = requested_by_team
 
                         yield f"data: {json.dumps(payload)}\n\n"
                         current_event = None
@@ -612,6 +649,23 @@ async def stream_playground_run(
     input_message = run.input_message or ""
     thread_id = run_id  # use run_id as thread_id for traceability
 
+    # Resolve user team for OPA identity propagation
+    caller_id = run.user_id or ""
+    caller_team = ""
+    if caller_id:
+        team_result = await db.execute(
+            text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub LIMIT 1"),
+            {"sub": caller_id},
+        )
+        row = team_result.first()
+        if row:
+            caller_team = row[0]
+
+    # Requester provenance (WHO) captured on the run at create time — surfaced on
+    # the approval so the HitlPanel shows who asked (falls back to team only).
+    requested_by = run.requested_by_username
+    requested_by_team = run.requested_by_team or caller_team
+
     async def _stream_reactive():
         if not agent_svc_url:
             no_deploy_msg = f'No running deployment found for agent "{agent_name}". Deploy the agent first.'
@@ -626,6 +680,10 @@ async def stream_playground_run(
             input_message=input_message,
             thread_id=thread_id,
             trace_id=run_id,
+            user_id=caller_id,
+            user_team=caller_team,
+            requested_by=requested_by,
+            requested_by_team=requested_by_team,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -1095,3 +1153,199 @@ async def test_event(
         "matched": False,
         "reason": last_reason.get("reason", "no trigger filter matched"),
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/playground/approvals/{approval_id}/decide
+# ---------------------------------------------------------------------------
+class PlaygroundApprovalDecision(BaseModel):
+    decision: str  # "approved" | "denied"
+
+
+@router.post(
+    "/approvals/{approval_id}/decide",
+    summary="Approve or deny a playground HITL request",
+)
+async def decide_playground_approval(
+    approval_id: str,
+    body: PlaygroundApprovalDecision,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Lightweight decide endpoint for playground approvals.
+
+    Updates the approval record in the DB.  Does NOT resume the agent here —
+    the caller opens ``/runs/{run_id}/resume-stream`` afterwards, which proxies
+    the streaming resume to the agent pod.
+    """
+    from datetime import timedelta
+    from models import Approval
+
+    try:
+        parsed_id = uuid.UUID(approval_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid approval_id format")
+
+    result = await db.execute(
+        select(Approval).where(Approval.id == parsed_id)
+    )
+    approval = result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(status_code=404, detail="Approval not found")
+
+    if approval.status != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Approval is already '{approval.status}'",
+        )
+
+    now = datetime.now(tz=timezone.utc)
+    # DB constraint uses "rejected" not "denied"; normalize for callers
+    db_status = "rejected" if body.decision == "denied" else body.decision
+    approval.status = db_status
+    approval.decision_at = now
+    approval.reviewer_id = x_user_sub or "playground-user"
+    approval.version = approval.version + 1
+    await db.commit()
+
+    logger.info(
+        "decide_playground_approval: id=%s decision=%s thread_id=%s",
+        approval_id, body.decision, approval.thread_id,
+    )
+
+    return {
+        "approval_id": approval_id,
+        "status": body.decision,
+        "thread_id": approval.thread_id,
+        "agent_name": approval.agent_name,
+        "team": approval.team,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/playground/runs/{run_id}/resume-stream
+# ---------------------------------------------------------------------------
+@router.get(
+    "/runs/{run_id}/resume-stream",
+    summary="Stream the resumed agent output after HITL approval (SSE)",
+    response_class=StreamingResponse,
+)
+async def resume_stream_playground_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """After a playground approval, this proxies SSE from the agent pod's
+    streaming resume endpoint.  The latest approval decision for this
+    thread is read from the DB and forwarded to the agent."""
+    from models import Approval
+
+    try:
+        parsed_id = uuid.UUID(run_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid run_id format")
+
+    result = await db.execute(
+        select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+    )
+    run = result.scalar_one_or_none()
+    if not run:
+        raise HTTPException(status_code=404, detail="Playground run not found")
+
+    thread_id = run_id
+
+    # Find the most recent decided approval for this thread.
+    approval_result = await db.execute(
+        select(Approval)
+        .where(
+            Approval.thread_id == thread_id,
+            Approval.status.in_(["approved", "rejected", "denied"]),
+        )
+        .order_by(Approval.decision_at.desc())
+        .limit(1)
+    )
+    approval = approval_result.scalar_one_or_none()
+    if not approval:
+        raise HTTPException(
+            status_code=404,
+            detail="No decided approval found for this run",
+        )
+
+    # Resolve agent pod URL.
+    deploy_result = await db.execute(
+        select(Deployment)
+        .join(Agent, Deployment.agent_id == Agent.id)
+        .where(Agent.name == run.agent_name, Deployment.status == "running")
+        .order_by(Deployment.deployed_at.desc())
+        .limit(1)
+    )
+    deployment = deploy_result.scalar_one_or_none()
+    if not deployment:
+        async def _no_deploy():
+            yield f"data: {json.dumps({'event': 'error', 'message': 'No running deployment'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
+        return StreamingResponse(_no_deploy(), media_type="text/event-stream")
+
+    agent_svc_url = _agent_svc_url(deployment)
+    decision_str = approval.status  # "approved" or "denied"
+    reviewer = approval.reviewer_id or "playground-user"
+
+    async def _proxy_resume() -> AsyncIterator[str]:
+        try:
+            async with httpx.AsyncClient(timeout=_AGENT_STREAM_TIMEOUT) as aclient:
+                async with aclient.stream(
+                    "POST",
+                    f"{agent_svc_url}/resume/{thread_id}/stream",
+                    json={
+                        "decision": decision_str,
+                        "reviewer_id": reviewer,
+                        "reason": approval.reviewer_notes,
+                    },
+                    headers={"Accept": "text/event-stream"},
+                ) as response:
+                    if response.status_code != 200:
+                        err = await response.aread()
+                        yield f"data: {json.dumps({'event': 'error', 'message': f'Agent pod returned {response.status_code}: {err.decode()[:200]}'})}\n\n"
+                        yield f"data: {json.dumps({'event': 'done'})}\n\n"
+                        return
+
+                    output_parts: list[str] = []
+                    current_event: str | None = None
+                    async for line in response.aiter_lines():
+                        if line.startswith("event:"):
+                            current_event = line[len("event:"):].strip()
+                        elif line.startswith("data:"):
+                            raw_data = line[len("data:"):].strip()
+                            try:
+                                payload = json.loads(raw_data)
+                            except json.JSONDecodeError:
+                                payload = {"raw": raw_data}
+                            if "tool" in payload and "tool_name" not in payload:
+                                payload["tool_name"] = payload.pop("tool")
+                            if "risk" in payload and "risk_level" not in payload:
+                                payload["risk_level"] = payload.pop("risk")
+                            if current_event:
+                                payload["event"] = current_event
+                                if current_event == "text_delta":
+                                    output_parts.append(payload.get("content", ""))
+                            elif "event" not in payload:
+                                payload["event"] = "message"
+                            yield f"data: {json.dumps(payload)}\n\n"
+                            current_event = None
+                        elif line == "":
+                            current_event = None
+
+                    background_tasks.add_task(
+                        _complete_run, run_id, "".join(output_parts),
+                    )
+
+        except httpx.ConnectError as exc:
+            logger.warning("resume_stream: connect error: %s", exc)
+            yield f"data: {json.dumps({'event': 'error', 'message': 'Could not connect to agent pod'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
+        except Exception as exc:
+            logger.error("resume_stream: error: %s", exc)
+            yield f"data: {json.dumps({'event': 'error', 'message': f'Stream error: {exc}'})}\n\n"
+            yield f"data: {json.dumps({'event': 'done'})}\n\n"
+
+    return StreamingResponse(_proxy_resume(), media_type="text/event-stream")

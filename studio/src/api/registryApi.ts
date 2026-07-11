@@ -1367,6 +1367,67 @@ export const decideApproval = async (
   });
 };
 
+export interface ChatApprovalStatus {
+  run_id: string;
+  approval_id: string | null;
+  status: "none" | "pending" | "approved" | "rejected" | "timed_out";
+  tool?: string;
+  risk?: string;
+  reasoning?: string | null;
+  reviewer_id?: string | null;
+  decided?: boolean;
+}
+
+// Requester-scoped poll: the person who started the chat watches their own
+// approval status so the chat can auto-resume once a reviewer decides in the
+// HITL console. No reviewer authority required (that gate is on PATCH /approvals).
+export const getChatApprovalStatus = async (
+  name: string,
+  runId: string
+): Promise<ChatApprovalStatus> => {
+  const { data } = await http.get<ChatApprovalStatus>(
+    `/agents/${name}/chat/${runId}/approval-status`
+  );
+  return data;
+};
+
+export interface SessionApproval {
+  approval_id: string;
+  run_id: string;
+  status: "pending" | "approved" | "rejected" | "timed_out";
+  tool: string;
+  args: Record<string, unknown>;
+  risk: string;
+  reasoning: string | null;          // WHY — the LLM's stated reason (best-effort)
+  requested_by: string | null;       // WHO — requester username
+  requested_by_team: string | null;
+  context: string;
+  created_at: string | null;
+  decided: boolean;
+}
+
+// Requester-scoped list of a conversation's approvals — feeds the sandbox
+// self-approve panel. Usually one pending row today (graph interrupts at the
+// first high-risk tool); list-shaped for future conversation history.
+export const getSessionApprovals = async (
+  name: string,
+  sessionId: string
+): Promise<SessionApproval[]> => {
+  const { data } = await http.get<{ session_id: string; approvals: SessionApproval[] }>(
+    `/agents/${name}/chat/session/${sessionId}/approvals`
+  );
+  return data.approvals;
+};
+
+// Sandbox self-approve: no reviewer authority (the developer approves their own
+// test call). Reuses the context-agnostic playground decide endpoint.
+export const decideSandboxApproval = async (
+  approvalId: string,
+  decision: "approved" | "denied"
+): Promise<void> => {
+  await http.post(`/playground/approvals/${approvalId}/decide`, { decision });
+};
+
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------

@@ -140,10 +140,14 @@ def build_deployment(
         "agentshield.io/agent-class": agent_class,
     }
 
+    agent_id = str(agent.get("id", ""))
+
     # --- Base env vars ---
     env_vars = [
         k8s_client.V1EnvVar(name="AGENT_NAME", value=agent_name),
         k8s_client.V1EnvVar(name="AGENT_VERSION", value=version_number),
+        k8s_client.V1EnvVar(name="AGENTSHIELD_AGENT_ID", value=agent_id),
+        k8s_client.V1EnvVar(name="AGENTSHIELD_AGENT_TEAM", value=team),
         k8s_client.V1EnvVar(name="OPA_URL", value="http://localhost:8181"),
         k8s_client.V1EnvVar(name="AGENTSHIELD_OPA_URL", value="http://localhost:8181"),
         # Phase 9.1: agent_class tells SDK which OPA authorization flow to use
@@ -213,6 +217,9 @@ def build_deployment(
 
     env_vars.append(
         k8s_client.V1EnvVar(name="REGISTRY_API_URL", value=registry_api_url)
+    )
+    env_vars.append(
+        k8s_client.V1EnvVar(name="AGENTSHIELD_REGISTRY_URL", value=registry_api_url)
     )
 
     python_executor_url = deployment.get(
@@ -284,6 +291,23 @@ def build_deployment(
             "--config-file=/config/opa-config.yaml",
         ],
         ports=[k8s_client.V1ContainerPort(container_port=8181)],
+        readiness_probe=k8s_client.V1Probe(
+            http_get=k8s_client.V1HTTPGetAction(
+                path="/health?bundles",
+                port=8181,
+            ),
+            initial_delay_seconds=5,
+            period_seconds=5,
+            failure_threshold=60,
+        ),
+        liveness_probe=k8s_client.V1Probe(
+            http_get=k8s_client.V1HTTPGetAction(
+                path="/health",
+                port=8181,
+            ),
+            initial_delay_seconds=10,
+            period_seconds=15,
+        ),
         volume_mounts=[
             k8s_client.V1VolumeMount(
                 name="opa-config",
