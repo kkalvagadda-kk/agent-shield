@@ -152,16 +152,19 @@ On first boot, `LANGFUSE_INIT_*` env vars (`values.yaml`) create the org, projec
 
 Verified against actual code this session (some checks done live, via `kubectl exec` into a running agent pod — not just static reading).
 
+_Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observability worktree)._
+
 | Capability | Status | Notes |
 |---|---|---|
 | Root trace created on `/agents/{name}/chat` (auto-resolve deployment) | ✅ Built | `chat.py: start_chat` |
-| Root trace created on `/agents/{name}/deployments/{id}/chat` (pinned deployment) | ❌ **Missing** | Gap 1 below — the endpoint `DeploymentOverviewPage`'s primary Chat button uses |
-| Trace_id propagated to agent pod via header | ⚠️ Partial | Works on `start_chat`'s path; missing on the deployment-pinned path (same gap as above) |
-| SDK-level tracer actually enabled on agent pods | ❌ **Disabled platform-wide** | Gap 0a — env var name mismatch + missing `public_key`, live-confirmed via pod exec |
-| Spans for LLM calls / tool calls | ❌ Not built | Gap 0b — only safety-scan spans exist anywhere in the codebase |
-| Spans for safety scans | ✅ Built | `safety-orchestrator/orchestrator.py` |
-| Trace "User" field shows readable name | ❌ Shows raw UUID | Gap 2 |
-| Trace identifies which deployment/instance produced it | ❌ Not built | Gap 3 |
+| Root trace created on `/agents/{name}/deployments/{id}/chat` (pinned deployment) | ✅ **Fixed (Phase 1)** | shared `_create_traced_chat_run` helper |
+| Trace_id propagated to agent pod via header | ✅ **Fixed (Phase 1)** | `stream_deployment_chat` + `resume_stream_chat` now pass it |
+| SDK-level tracer actually enabled on agent pods | ✅ **Fixed (Phase 2)** | env-var names + `public_key`; live-confirmed `tracer._enabled=True` |
+| Agent pod can reach Langfuse (cross-namespace) | ✅ **Fixed (Phase 2)** | deploy-controller injects FQN `…-langfuse-web.{ns}:3000` |
+| Spans for safety scans (SDK tracer) | ✅ **Working (Phase 2)** | `safety_scan_*` spans now appear (0→1 observation verified) |
+| Spans for LLM calls / tool calls (langchain handler) | ❌ **Blocked — needs v4** | agent langchain stack is 1.x; langfuse v2 handler incompatible. See `docs/design/todo/langfuse-v4-migration.md` |
+| Trace "User" field shows readable name | ✅ **Fixed (Phase 1)** | `preferred_username`; DB FK cols keep UUID |
+| Trace identifies which deployment/instance produced it | ✅ **Fixed (Phase 1)** | `deployment_id` + `environment` in metadata/tags |
 | M1 — Traces list page | ✅ Built | `observability.py` + `ObservabilityTracesPage.tsx` |
 | M2 — Latency/score dashboard | ⚠️ Partial | Missing feedback ratio (needs new DB column, Langfuse-only today) and tool-call frequency/latency (blocked on Gap 0b) |
 | M3 — Eval results deep-linking | ✅ Built | `EvalResultsPage.tsx` |
