@@ -2,6 +2,10 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 
 interface Props {
   children: ReactNode;
+  // Optional replacement for the default full-screen error UI. Use `fallback={null}`
+  // for infrastructure like the toast sink, where a crash should degrade silently
+  // rather than blank/replace the whole app.
+  fallback?: ReactNode;
 }
 
 interface State {
@@ -21,6 +25,9 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (this.state.error) {
+      if (this.props.fallback !== undefined) {
+        return this.props.fallback;
+      }
       return (
         <div className="flex items-center justify-center min-h-screen bg-slate-50 p-8">
           <div className="max-w-lg w-full bg-white rounded-lg shadow-sm border border-red-200 p-6">

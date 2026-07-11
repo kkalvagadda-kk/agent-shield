@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 import httpx
 
 from config import Settings
+from identity import register_agent_identity
 from k8s_client import K8sClient
 from manifest_builder import build_deployment, build_service
+from tool_secrets import resolve_and_copy_tool_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,11 @@ def _build_agent_dict(dep_info: dict) -> dict:
     return {
         "name": dep_info["artifact_name"],
         "team": dep_info["artifact_team"],
+        # Source agent id → AGENTSHIELD_AGENT_ID in the pod. The SDK sends this as
+        # approvals.agent_id (FK agents.id); if empty, the approval POST 422s and
+        # HITL requests never reach the queue. Sandbox pods get this from the live
+        # agent record — production must pass it through from the catalog.
+        "id": dep_info.get("source_agent_id"),
         "agent_type": config.get("agent_type", "declarative"),
         "agent_class": config.get("agent_class", "user_delegated"),
         "execution_shape": config.get("execution_shape", "reactive"),
@@ -108,9 +115,16 @@ async def reconcile_production(
             None, lambda: k8s.ensure_namespace(namespace)
         )
 
-        # Ensure ServiceAccount exists (pod spec references it)
-        await loop.run_in_executor(
+        # Ensure ServiceAccount exists (pod spec references it) and register its
+        # SA subject as a machine identity — same shared path as sandbox. Without
+        # this the production SA subject never enters the OPA bundle and every
+        # production tool call fails closed (agent_unauthenticated).
+        sa_subject = await loop.run_in_executor(
             None, lambda: k8s.ensure_service_account(agent_name, namespace)
+        )
+        await register_agent_identity(
+            agent_name, sa_subject, namespace, settings,
+            production_deployment_id=dep_info["id"],
         )
 
         # Ensure LLM credentials secret exists in the production namespace
@@ -126,10 +140,18 @@ async def reconcile_production(
             None, lambda: k8s.ensure_opa_configmap(namespace)
         )
 
+        # Resolve + copy tool credential secrets (Serper key, etc.) into the
+        # production namespace and expose via envFrom — same shared path as sandbox.
+        # Without this, external-API tools 401 ("authentication issue with the tool").
+        tool_secret_refs = await resolve_and_copy_tool_secrets(
+            agent_name, namespace, k8s, settings
+        )
+
         # Build and apply K8s Deployment (add restart annotation to force clean rollout)
         manifest = build_deployment(
             deployment_dict, agent_dict, version_dict,
-            settings.opa_image, settings.registry_api_url
+            settings.opa_image, settings.registry_api_url,
+            tool_secret_refs=tool_secret_refs,
         )
         restart_ts = datetime.now(timezone.utc).isoformat()
         tmpl_meta = manifest.spec.template.metadata
@@ -324,7 +346,13 @@ async def reconcile_workflow_production(
 
     try:
         await loop.run_in_executor(None, lambda: k8s.ensure_namespace(namespace))
-        await loop.run_in_executor(None, lambda: k8s.ensure_service_account(agent_name, namespace))
+        sa_subject = await loop.run_in_executor(
+            None, lambda: k8s.ensure_service_account(agent_name, namespace)
+        )
+        await register_agent_identity(
+            agent_name, sa_subject, namespace, settings,
+            production_deployment_id=dep_info["id"],
+        )
         await loop.run_in_executor(None, lambda: k8s.ensure_opa_configmap(namespace))
 
         manifest = build_deployment(

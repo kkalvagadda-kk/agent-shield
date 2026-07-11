@@ -47,6 +47,7 @@ export interface AgentVersion {
   agent_graph_id: string | null;
   tools: { name: string; risk: string; description?: string }[];
   eval_passed: boolean;
+  adversarial_eval_passed: boolean;
   git_sha: string | null;
   git_branch: string | null;
   notes: string | null;
@@ -221,7 +222,7 @@ export const createVersion = async (
 export const patchVersion = async (
   agentName: string,
   versionId: string,
-  body: { eval_passed?: boolean; notes?: string }
+  body: { eval_passed?: boolean; adversarial_eval_passed?: boolean; notes?: string }
 ): Promise<AgentVersion> => {
   const { data } = await http.patch<AgentVersion>(
     `/agents/${agentName}/versions/${versionId}`,
@@ -329,7 +330,14 @@ export interface AgentChatStart {
 
 export const startAgentChat = async (
   name: string,
-  body: { message: string; session_id?: string; context?: "production" | "playground" }
+  body: {
+    message: string;
+    session_id?: string;
+    context?: "production" | "playground";
+    // Pin the run to an exact deployment (prod: ProductionDeployment id). When
+    // omitted the backend resolves the single running deployment for the context.
+    deployment_id?: string;
+  }
 ): Promise<AgentChatStart> => {
   const { data } = await http.post<AgentChatStart>(`/agents/${name}/chat`, body);
   return data;

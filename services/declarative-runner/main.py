@@ -33,6 +33,13 @@ from agentshield_sdk.safety_client import SafetyBlockedError  # type: ignore[imp
 
 logger = logging.getLogger(__name__)
 
+# Emit INFO logs to the pod's stdout. Without this the root logger defaults to
+# WARNING, so the SDK's governance/HITL INFO lines (e.g. "HITL approval record
+# created …") never reach the pod log — only failures did, which made HITL issues
+# hard to diagnose. Governance flow should be visible in the pod log by default.
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("agentshield_sdk").setLevel(logging.INFO)
+
 # ---------------------------------------------------------------------------
 # Prometheus metrics
 # ---------------------------------------------------------------------------

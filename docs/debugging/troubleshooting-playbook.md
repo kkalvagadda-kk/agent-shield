@@ -126,6 +126,23 @@ TypeError without a failed deploy cycle.
 - **Fix (done):** provider-agnostic `post_model_hook` (`_one_hitl_tool_per_turn`) trims a turn to ONE high-risk tool call **only when 2+ are high-risk**; idempotent `create_approval`; resume proxies forward `approval_requested` + `AgentChatPage`/`ChatPane` handle re-interrupt (ref + nonce); the sandbox panel shows only the current approval (not the session list, which surfaced the benign orphans). Design §8b + §9.1.
 - **Provider trap:** do NOT fix this with `bind_tools(parallel_tool_calls=False)` — `ChatBedrockConverse` (langchain_aws 0.2.35) has no such param and **TypeErrors** at runtime. Enforce it in the graph.
 
+### C-9. Blank white screen on a button click (e.g. Publish) — whole app disappears
+- **Look:** the URL of the blank page (which route); reproduce with a Playwright
+  debug that captures `page.on('pageerror')` + `console` errors and body length
+  (playbook §1.4). Then hit the button's API directly (§1.3) and inspect the error
+  **response shape**.
+- **Evidence pattern:** the page loads fine on navigation (body has content, no
+  errors) but a specific **action** blanks it. The API returns a non-2xx whose
+  `detail` is an **object** (e.g. `{"error":"...","version_number":4}`), and the
+  `onError` handler does `toast.error(detail)`.
+- **Root cause:** passing a non-string (object) to `toast.error()` (or any React
+  child slot) throws **"Objects are not valid as a React child."** If the sonner
+  `<Toaster>` is **outside** the app's `ErrorBoundary`, the throw is uncaught and
+  unmounts the whole tree → blank. (React error boundaries also don't catch errors
+  in event handlers/async — but the *Toaster's render* of the bad content is what
+  crashes here.)
+- **Fix:** extract a safe **string** before toasting (`typeof detail === 'string' ? detail : detail?.error ?? fallback`); and wrap the `<Toaster>` in `<ErrorBoundary fallback={null}>` so a bad toast degrades silently instead of blanking the app.
+
 ### C-8. Playwright/browser redirects to Keycloak login every time (SSO won't stick) / gateway 000
 - **Root causes:** (a) the http **port-forward** can't carry Keycloak's `Secure` session cookies, so SSO silent-auth fails — run against the **https gateway** with `ignoreHTTPSErrors`; (b) the gateway port-forward wedges under load (000) — use a **self-healing loop** (`while true; do kubectl port-forward svc/gateway-port-8443 8443:8443 -n envoy-gateway-system; sleep 2; done`).
 

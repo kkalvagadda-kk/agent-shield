@@ -92,6 +92,7 @@ run_suite "Suite 42: RBAC Foundations"              "suite-42-rbac.sh"
 run_suite "Suite 43: Memory Isolation + TTL"        "suite-43-memory-isolation-ttl.sh"
 run_suite "Suite 44: Version Management"              "suite-44-version-management.sh"
 run_suite "Suite 45: HITL E2E (sandbox+prod)"       "suite-45-hitl-e2e.sh"
+run_suite "Suite 46: Chat Deployment Pinning"       "suite-46-chat-deployment-pinning.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

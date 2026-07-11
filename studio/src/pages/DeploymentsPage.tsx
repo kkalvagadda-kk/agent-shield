@@ -170,7 +170,7 @@ export default function DeploymentsPage() {
                         {d.status === "running" && (
                           <>
                             <Link
-                              to={`/catalog/${d.artifact_id}/chat`}
+                              to={`/catalog/${d.artifact_id}/chat?dep=${d.id}`}
                               className="p-1.5 rounded-md hover:bg-blue-50 transition-colors text-blue-600"
                               title="Chat"
                             >

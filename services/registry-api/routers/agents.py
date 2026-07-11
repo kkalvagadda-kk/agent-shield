@@ -616,16 +616,18 @@ async def create_agent_identity(
 
     if identity:
         identity.deployment_id = body.deployment_id
+        identity.production_deployment_id = body.production_deployment_id
         identity.sa_namespace = body.sa_namespace
         logger.info(
             "create_agent_identity: updated existing identity for agent='%s' "
-            "sa_subject='%s' -> deployment_id='%s'",
-            name, body.sa_subject, body.deployment_id,
+            "sa_subject='%s' -> deployment_id='%s' production_deployment_id='%s'",
+            name, body.sa_subject, body.deployment_id, body.production_deployment_id,
         )
     else:
         identity = AgentIdentity(
             agent_name=name,
             deployment_id=body.deployment_id,
+            production_deployment_id=body.production_deployment_id,
             sa_subject=body.sa_subject,
             sa_namespace=body.sa_namespace,
         )

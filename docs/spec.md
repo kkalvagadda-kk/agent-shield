@@ -14,6 +14,7 @@ This document is the high-level overview. Detailed implementation specs live in 
 | [authorization-model-spec.md](design/todo/authorization-model-spec.md) | Agent machine identity (K8s SA tokens + Istio Ambient), OPA policy enforcement, asset lifecycle (private → publish → grant), deploy gate, HITL approval authority (per-agent/tool/skill), Playground authorization | Draft |
 | [playground-spec.md](design/playground-spec.md) | Interactive test console, sandbox mode (grant-bypass), per-run trace panel, LLM-as-Judge, dataset curation, eval runner, version comparison, Playground HITL (self-approval), Playground namespace | Draft |
 | [observability-architecture.md](design/observability-architecture.md) | Canonical trace/span/score data model, the standard integration pattern every new run-creating/agent-executing code path must follow (trace creation → propagation → completion → span emission), env var contract, frontend contract, component responsibility map, implementation status matrix, anti-patterns from real bugs | Living reference |
+| [sandbox-production-parity-architecture.md](design/sandbox-production-parity-architecture.md) | The two deploy code paths (sandbox vs production reconciler), the `deployments`/`production_deployments` two-table split + the two-column FK pattern, the identity→OPA-bundle→governance data flow for both envs, the shared-helper anti-drift rule, and a per-pod parity matrix | Living reference |
 
 Requirements that drove these specs:
 - `docs/authorization-model.md` — authorization requirements (REQ-AUTH, REQ-PUB, REQ-DEPLOY, REQ-RT, REQ-AUDIT)
@@ -1107,6 +1108,8 @@ Authorization covers three lifecycle stages: authoring (private workspace), cont
 - **Class B (User-Delegated)**: user identity threaded to every tool call; OPA enforces the intersection rule: `effective_permissions = agent_registered_scope ∩ user_granted_permissions`
 
 **Asset lifecycle** — assets move through `private → pending_review → published`. Admin approval gates the transition and grants access to specific teams. A team must have an active grant to every tool in an agent's dependency graph before deployment is permitted.
+
+The `POST /publish` request is itself gated at the **version** level by two flags on the pinned `AgentVersion`: `eval_passed` (always required) and `adversarial_eval_passed` (required only when the version binds a **high/critical-risk** tool — the `has_risky` branch — else skipped). Both are operator sign-offs today, set from the Playground promote panel ("Mark Version Passed" / "Mark Adversarial Passed"); a failed gate returns `422` with a structured `detail` (`eval_not_passed` / `adversarial_eval_not_passed`). An automated red-team eval runner that would set `adversarial_eval_passed` on a passing evaluation is a deferred follow-up — the flag is currently a manual attestation, not an evaluated result.
 
 **HITL approval authority** — approval rights are scoped per-agent via the `approver` artifact-scoped role (see RBAC below). Reviewers see only HITL requests for agents they hold the `approver` role on. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
 

@@ -131,6 +131,12 @@ This runs on **every** run — no developer action needed. On timeout `judge_sta
 
 **Save a run to a dataset — build the golden set.** `POST /runs/{id}/save-to-dataset` appends a new item to `PlaygroundDataset.items` (JSONB): `{ input, label, langfuse_trace_id, added_by, agent_name, source_run_id, added_at }`. Note: only the **input** is captured today — the response isn't persisted on the item yet (`output_text` is unmapped, see Known limitations). Promote runs that represent edge cases, failures, or regression anchors.
 
+**Promote a version — the two publish gates.** Once a version looks good, the left "Promote" panel (visible when a version is selected) carries three actions, run in order:
+
+1. **Mark Version Passed** → `PATCH /agents/{name}/versions/{id}` with `eval_passed=true`. Satisfies the ordinary eval gate.
+2. **Mark Adversarial Passed** → same endpoint with `adversarial_eval_passed=true`. This is a **separate, explicit** red-team sign-off, kept as its own button so it can't be silently bundled into publish. It is **required** to publish any agent whose version uses a **high/critical-risk** tool — publish checks `adversarial_eval_passed` in addition to `eval_passed` (`agents.py`, `has_risky` branch). For low-risk agents this gate is skipped, so the button is optional (harmless to click).
+3. **Publish Agent** → `POST /agents/{name}/publish` (pins the selected `version_id`). Returns **422** with a structured `detail` object if a gate fails: `{error:"eval_not_passed"}` or `{error:"adversarial_eval_not_passed", version_number}`. The panel turns that object into a readable toast (`publishErrorMessage`) — an earlier build passed the raw object to `toast.error`, which crashed the toast sink and blanked the app; the toaster is now inside its own `ErrorBoundary fallback={null}`.
+
 ### Path 2 — Batch evaluation (Datasets → Eval Runs)
 
 **1. Create a dataset.** From the Playground left panel's "Manage Datasets / Eval" link (or `/playground/datasets`), click **New Dataset**. Items are one JSON object per line:

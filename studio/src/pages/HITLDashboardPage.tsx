@@ -186,14 +186,14 @@ export default function HITLDashboardPage() {
               <tbody className="divide-y divide-slate-100">
                 {data.items.map((ap) => (
                   <>
-                    <tr key={ap.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-4 py-3 font-medium text-slate-800">{ap.agent_name}</td>
+                    <tr key={ap.id} data-testid="hitl-row" className="hover:bg-slate-50 transition-colors">
+                      <td data-testid="hitl-cell-agent" className="px-4 py-3 font-medium text-slate-800">{ap.agent_name}</td>
                       <td className="px-4 py-3 text-xs text-slate-600">
                         {ap.requested_by ? (
                           <div className="flex flex-col">
-                            <span className="font-medium text-slate-700">{ap.requested_by}</span>
+                            <span data-testid="hitl-cell-requested-by" className="font-medium text-slate-700">{ap.requested_by}</span>
                             {ap.requested_by_team && (
-                              <span className="text-[10px] text-slate-400">
+                              <span data-testid="hitl-cell-team" className="text-[10px] text-slate-400">
                                 team: {ap.requested_by_team}
                               </span>
                             )}
@@ -205,9 +205,10 @@ export default function HITLDashboardPage() {
                       <td className="px-4 py-3 text-xs text-slate-600">
                         {ap.deployment_name ? (
                           <div className="flex flex-col">
-                            <span className="font-mono">{ap.deployment_name}</span>
+                            <span data-testid="hitl-cell-deployment" className="font-mono">{ap.deployment_name}</span>
                             {ap.environment && (
                               <span
+                                data-testid="hitl-cell-env"
                                 className={`badge text-[10px] mt-0.5 w-fit ${
                                   ap.environment === "production"
                                     ? "bg-blue-100 text-blue-700"
@@ -223,15 +224,16 @@ export default function HITLDashboardPage() {
                         )}
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-600 max-w-xs">
-                        <span className="font-mono">{ap.tool_name}</span>
+                        <span data-testid="hitl-cell-tool" className="font-mono">{ap.tool_name}</span>
                         {ap.reasoning && (
-                          <p className="mt-0.5 text-[11px] italic text-slate-500 line-clamp-2" title={ap.reasoning}>
+                          <p data-testid="hitl-cell-reasoning" className="mt-0.5 text-[11px] italic text-slate-500 line-clamp-2" title={ap.reasoning}>
                             {ap.reasoning}
                           </p>
                         )}
                       </td>
                       <td className="px-4 py-3">
                         <span
+                          data-testid="hitl-cell-risk"
                           className={`badge ${
                             RISK_CHIP[ap.risk_level] ?? "bg-slate-100 text-slate-600"
                           }`}
@@ -241,6 +243,7 @@ export default function HITLDashboardPage() {
                       </td>
                       <td className="px-4 py-3">
                         <span
+                          data-testid="hitl-cell-context"
                           className={`badge ${
                             CONTEXT_CHIP[ap.context] ?? "bg-slate-100 text-slate-600"
                           }`}
@@ -258,6 +261,7 @@ export default function HITLDashboardPage() {
                         {ap.status === "pending" && (
                           <div className="flex items-center gap-2">
                             <button
+                              data-testid="hitl-approve"
                               onClick={() => {
                                 setApprovingId(approvingId === ap.id ? null : ap.id);
                                 setRejectingId(null);
@@ -269,6 +273,7 @@ export default function HITLDashboardPage() {
                               Approve
                             </button>
                             <button
+                              data-testid="hitl-deny"
                               onClick={() => {
                                 setRejectingId(rejectingId === ap.id ? null : ap.id);
                                 setApprovingId(null);
@@ -305,6 +310,7 @@ export default function HITLDashboardPage() {
                               />
                             </div>
                             <button
+                              data-testid="hitl-confirm-approve"
                               onClick={() =>
                                 approveMutation.mutate({ id: ap.id, version: ap.version })
                               }
@@ -337,6 +343,7 @@ export default function HITLDashboardPage() {
                               Deny this approval request?
                             </span>
                             <button
+                              data-testid="hitl-confirm-deny"
                               onClick={() =>
                                 rejectMutation.mutate({ id: ap.id, version: ap.version })
                               }

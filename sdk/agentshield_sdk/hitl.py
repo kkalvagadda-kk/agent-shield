@@ -74,32 +74,62 @@ async def require_approval(
     context = "playground" if is_playground else "production"
 
     # 1. Create approval record in Registry API.
+    request_body = {
+        "agent_id": config.AGENT_ID,
+        "agent_name": agent_name,
+        "team": config.AGENT_TEAM,
+        "tool_name": tool_name,
+        "tool_args": tool_args,
+        "thread_id": thread_id,
+        "risk_level": risk,
+        "context": context,
+        "reasoning": reasoning or None,
+    }
+    created = False
     try:
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
             resp = await client.post(
                 f"{config.AGENTSHIELD_REGISTRY_URL}/api/v1/approvals/",
-                json={
-                    "agent_id": config.AGENT_ID,
-                    "agent_name": agent_name,
-                    "team": config.AGENT_TEAM,
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                    "thread_id": thread_id,
-                    "risk_level": risk,
-                    "context": context,
-                    "reasoning": reasoning or None,
-                },
+                json=request_body,
             )
             resp.raise_for_status()
             body = resp.json()
             approval_id = body.get("id") or body.get("approval_id")
+            created = approval_id is not None
             if approval_id:
                 queue_url = f"{config.AGENTSHIELD_STUDIO_URL}/approvals/{approval_id}"
-    except Exception as exc:
-        logger.warning(
-            "Could not create approval record in Registry API: %s — proceeding with interrupt",
-            exc,
+            logger.info(
+                "HITL approval record created id=%s tool=%s thread=%s context=%s risk=%s",
+                approval_id, tool_name, thread_id, context, risk,
+            )
+    except httpx.HTTPStatusError as exc:
+        # Log the FULL server response (status + validation body) — the response body
+        # names the exact field that failed (e.g. agent_id/risk_level), which the bare
+        # exception string hides. Also log the request so the mismatch is obvious.
+        logger.error(
+            "HITL approval record creation FAILED: status=%s body=%s | request agent_id=%r "
+            "team=%r risk_level=%r context=%r tool=%s thread=%s",
+            exc.response.status_code, exc.response.text[:1000],
+            config.AGENT_ID, config.AGENT_TEAM, risk, context, tool_name, thread_id,
         )
+    except Exception as exc:
+        logger.error(
+            "HITL approval record creation FAILED (transport): %r | tool=%s thread=%s "
+            "registry=%s", exc, tool_name, thread_id, config.AGENTSHIELD_REGISTRY_URL,
+        )
+
+    # Fail CLOSED: if no approval record exists, nobody can approve it — interrupting
+    # here would hang the conversation forever on an un-actionable pause. Deny the tool
+    # instead, with a clear reason the user (and the logs) can see.
+    if not created:
+        logger.error(
+            "HITL denying tool=%s (no approval record could be created) — fail-closed",
+            tool_name,
+        )
+        return {
+            "decision": "rejected",
+            "reason": "approval could not be recorded (see agent pod logs) — denied for safety",
+        }
 
     # 2. Interrupt the graph.  LangGraph checkpoints state and pauses here.
     #    The value passed to interrupt() is emitted as the approval_requested SSE payload.

@@ -63,8 +63,16 @@ export default function OverviewReactive({ agentName, deploymentId, context }: O
           API Endpoint
         </h3>
         <code className="text-sm font-mono text-slate-700 bg-slate-50 rounded px-2 py-1 block">
-          POST /api/v1/agents/{agentName}/chat
+          POST{" "}
+          {context === "production"
+            ? `/api/v1/agents/${agentName}/chat`
+            : `/api/v1/agents/${agentName}/deployments/${deploymentId}/chat`}
         </code>
+        <p className="text-xs text-slate-400 mt-2">
+          {context === "production"
+            ? "Production runs one deployment per agent; the agent-scoped path always routes to the live production pod."
+            : "Sandbox deployments are pinned by id — this path always routes to this exact deployment, not the most-recent one."}
+        </p>
       </div>
 
       {/* Recent runs mini-table */}

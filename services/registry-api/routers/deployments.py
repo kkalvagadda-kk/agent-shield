@@ -59,23 +59,27 @@ logger = logging.getLogger(__name__)
 
 async def _auto_grant_approval_authority(
     db: AsyncSession,
-    agent_tools: list,
+    tools: list[tuple[str, str]],
     team: str,
     granted_by: str,
 ) -> int:
     """Auto-grant ApprovalAuthority to team members for high/critical-risk tools.
 
-    Called during deployment creation so the Approvals console works without
-    manual admin setup. Idempotent — skips if an active (non-revoked) record
-    already exists for a (user, tool) pair.
+    ``tools`` is a list of ``(tool_name, risk_level)`` pairs — source-agnostic so
+    BOTH the sandbox deploy path (ORM Tool objects) and the production deploy path
+    (config_snapshot dicts) can feed it, without either coupling to the other's
+    data shape. Interim measure until RBAC lands: every team member can approve
+    the team's high-risk tools. Called during deployment creation so the Approvals
+    console works without manual admin setup. Idempotent — skips if an active
+    (non-revoked) record already exists for a (user, tool) pair.
 
     Returns the number of new authority records created.
     """
-    risky_tools = [
-        t for t in agent_tools
-        if t.risk_level in ("high", "critical")
-    ]
-    if not risky_tools:
+    risky_tool_names = sorted({
+        name for (name, risk) in tools
+        if (risk or "").lower() in ("high", "critical")
+    })
+    if not risky_tool_names:
         return 0
 
     result = await db.execute(
@@ -87,12 +91,12 @@ async def _auto_grant_approval_authority(
         return 0
 
     created = 0
-    for tool in risky_tools:
+    for tool_name in risky_tool_names:
         for user_sub in team_members:
             existing = await db.execute(
                 select(ApprovalAuthority.id).where(
                     ApprovalAuthority.resource_type == "tool",
-                    ApprovalAuthority.resource_id == tool.name,
+                    ApprovalAuthority.resource_id == tool_name,
                     ApprovalAuthority.approver_user_id == user_sub,
                     ApprovalAuthority.revoked_at.is_(None),
                 )
@@ -102,7 +106,7 @@ async def _auto_grant_approval_authority(
 
             db.add(ApprovalAuthority(
                 resource_type="tool",
-                resource_id=tool.name,
+                resource_id=tool_name,
                 approver_user_id=user_sub,
                 granted_by=granted_by,
             ))
@@ -113,7 +117,7 @@ async def _auto_grant_approval_authority(
         logger.info(
             "Auto-granted ApprovalAuthority: %d records for team '%s' "
             "(%d members x %d risky tools)",
-            created, team, len(team_members), len(risky_tools),
+            created, team, len(team_members), len(risky_tool_names),
         )
 
     return created
@@ -635,7 +639,10 @@ async def deploy_agent(
     # so the Approvals console works without manual admin setup (non-fatal).
     try:
         await _auto_grant_approval_authority(
-            db, agent_tools, agent.team, granted_by=f"auto:deploy:{deployment.id}",
+            db,
+            [(t.name, t.risk_level) for t in agent_tools],
+            agent.team,
+            granted_by=f"auto:deploy:{deployment.id}",
         )
     except Exception as exc:
         logger.warning(

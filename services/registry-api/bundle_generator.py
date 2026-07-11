@@ -71,8 +71,14 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
     Includes only agents that have at least one active (non-revoked) identity
     AND an active deployment in running state.
     """
-    # Fetch all active agent identities with their agent + tool snapshot
-    # Join: agent_identities → agents → agent_versions (via deployments)
+    # Fetch all active agent identities with their agent + tool snapshot, for BOTH
+    # environments. Sandbox identities resolve via the `deployments` table +
+    # agent_versions; production identities live in a separate `production_deployments`
+    # table and take their tool scope from published_versions.config_snapshot->'tools'.
+    # A row sets exactly one of deployment_id / production_deployment_id, so the two
+    # legs are disjoint and UNION ALL is safe. Without the production leg, production
+    # SA subjects never enter the bundle and every production tool call fails closed
+    # (agent_unauthenticated) — see docs/design/sandbox-production-parity-architecture.md.
     rows = await db.execute(
         text("""
             SELECT
@@ -89,6 +95,23 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
             JOIN agent_versions av ON av.id = d.version_id
             WHERE ai.revoked_at IS NULL
               AND d.status IN ('deploying', 'running')
+
+            UNION ALL
+
+            SELECT
+                ai.sa_subject,
+                ai.sa_namespace,
+                a.name         AS agent_name,
+                a.team         AS agent_team,
+                a.agent_class,
+                a.execution_shape,
+                (pv.config_snapshot -> 'tools') AS tool_snapshot
+            FROM agent_identities ai
+            JOIN agents a ON a.name = ai.agent_name
+            JOIN production_deployments pd ON pd.id = ai.production_deployment_id
+            JOIN published_versions pv ON pv.id = pd.version_id
+            WHERE ai.revoked_at IS NULL
+              AND pd.status IN ('deploying', 'running')
         """)
     )
 
@@ -96,6 +119,16 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
     for row in rows.mappings():
         sa_subject = row["sa_subject"]
         tool_snapshot = row["tool_snapshot"] or []
+        # A JSONB column decodes to a Python list, but a computed JSONB expression
+        # (config_snapshot -> 'tools', production leg) can come back as a JSON string
+        # depending on the driver codec — parse it so both legs behave identically.
+        if isinstance(tool_snapshot, str):
+            try:
+                tool_snapshot = json.loads(tool_snapshot)
+            except (ValueError, TypeError):
+                tool_snapshot = []
+        if not isinstance(tool_snapshot, list):
+            tool_snapshot = []
 
         # tool_snapshot may be a list of tool names (strings) or dicts carrying
         # "name" + "risk". Emit {name, risk} objects; a bare string or a missing

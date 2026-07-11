@@ -1,6 +1,6 @@
 # Human-in-the-Loop (HITL) Approval System
 
-**Status:** implementing. HITL is **environment-driven across three sandbox surfaces + production** — see **§8b (the current, authoritative model; §4/§5/§8 below are the earlier two-context framing and are partially superseded by §8b)**. In short: sandbox deployment chat = self-approve right-side panel; Evaluate tab = inline HitlPanel; batch eval = auto-approve (skip HITL); production consumer chat = HITL console. Every approval carries WHO (requester username+team) / WHY (LLM reasoning) / WHAT (tool+args). Proven by Playwright (`hitl-deployment-chat.spec.ts`) + `suite-45` (10/0). Current tags: registry-api 0.2.134, studio 0.1.110, declarative-runner 0.1.30.
+**Status:** implementing. HITL is **environment-driven across three sandbox surfaces + production** — see **§8b (the current, authoritative model; §4/§5/§8 below are the earlier two-context framing and are partially superseded by §8b)**. In short: sandbox deployment chat = self-approve right-side panel; Evaluate tab = inline HitlPanel; batch eval = auto-approve (skip HITL); production consumer chat = HITL console. Every approval carries WHO (requester username+team) / WHY (LLM reasoning) / WHAT (tool+args). Proven by Playwright (`hitl-deployment-chat.spec.ts`) + `suite-45` (10/0). **Production HITL is now functional end-to-end** (was structurally broken until 2026-07-11 — see §9). Current tags: registry-api **0.2.139**, studio **0.1.115**, declarative-runner **0.1.33**, deploy-controller **0.1.34**.
 
 This document describes the full HITL approval system — how high-risk tool calls pause for human review, how reviewers approve or deny, and how agents resume execution in both sandbox and production environments.
 
@@ -152,7 +152,7 @@ Production HITL is **authority-gated** — only users with an active `ApprovalAu
 
 ### 5.1 ApprovalAuthority
 
-When an agent with high-risk tools is deployed, `_auto_grant_approval_authority()` in `deployments.py` creates `ApprovalAuthority` records for every member of the agent's team:
+When an agent with high-risk tools is deployed, `_auto_grant_approval_authority()` in `deployments.py` creates `ApprovalAuthority` records for every member of the agent's team. This is an **interim** behavior (every team member can approve the team's high-risk tools) that will be replaced when RBAC lands. It runs on **both** deploy paths — the sandbox deploy endpoint (`deployments.py`) and the **production** deploy (`catalog.py`, added 2026-07-11; the helper takes source-agnostic `(name, risk)` pairs so it serves both ORM tools and `config_snapshot` dicts). Users in `_ADMIN_ROLES` (`platform_admin`, `team_lead`) always have authority regardless. Example record:
 
 ```
 ApprovalAuthority {
@@ -181,7 +181,7 @@ This means team members can see and decide production approvals without manual s
 
 7. **Agent resumes** → `_resume_and_advance()` calls `POST /resume/{thread_id}` on the agent pod. If this approval belonged to a composite workflow member, it also advances the parent workflow.
 
-8. **Consumer gets resumed output** → Consumer connects to `GET /api/v1/agents/{name}/chat/{run_id}/resume-stream`. Backend reads the decided approval, proxies streaming resume to agent pod, translates SSE events.
+8. **Consumer gets resumed output (automatic)** → while the approval is pending, `CatalogChatPage` polls `GET /api/v1/agents/{name}/chat/{run_id}/approval-status` every 3s; the moment it reports `decided`, it auto-connects `GET /api/v1/agents/{name}/chat/{run_id}/resume-stream` (no manual "Check & Resume"). Backend reads the decided approval, proxies streaming resume to the agent pod, translates SSE events. A "Resume now" button remains as a manual override.
 
 ### 5.3 Key Files
 
@@ -202,8 +202,13 @@ High-risk tools often call external APIs that need credentials (e.g., Serper.dev
 
 1. **AuthConfig** record stores metadata + creates a K8s Secret (`auth_configs.py`, `k8s.py`)
 2. **Tool.auth_config_id** links a tool to its credential
-3. **Deploy-controller** copies the K8s Secret to the agent's namespace and mounts it as `envFrom` in the pod manifest (`reconciler.py`, `manifest_builder.py`)
+3. **Deploy-controller** copies the K8s Secret to the agent's namespace and mounts it as `envFrom` in the pod manifest, via the shared `deploy-controller/tool_secrets.py::resolve_and_copy_tool_secrets` called by **both** reconcilers (`reconciler.py`, `production_reconciler.py`, `manifest_builder.py`)
 4. **Runtime** resolves `{{var}}` placeholders in HTTP tool headers from `os.environ` (`node_executors.py`, `tool_executor.py`)
+
+> **Production parity note (2026-07-11):** step 3 originally ran **only in the sandbox
+> reconciler**, so production pods shipped without tool credentials and external-API tools
+> 401'd. It's now a shared helper both paths call. See
+> `docs/debugging/007-production-tool-credentials-missing.md`.
 
 Example: `web_search` header `"X-API-KEY": "{{serper_api_key}}"` is resolved from the `serper_api_key` env var injected by the K8s Secret.
 
@@ -239,6 +244,19 @@ The bundle (`GET /api/v1/bundle/data.json`) provides all per-request variation t
 The Rego evaluates: `identity_present` → `identity_matches` → `tool_in_set` (own tools ∪ grants) → `risk_allows` → `require_approval` if high.
 
 Bundle propagation (updated 2026-07-10): registry-api builds it live → `bundle-sync` sidecar polls → OPA sidecar reloads (poll delays lowered 30/60s → **5/15s**). Critically, `bundle_generator` now includes agents whose deployment is `status IN ('deploying','running')` — **not just `running`** — so a new agent's identity is in the bundle before its pod is even Ready. Measured cold start (pod start → governable): **~22s** (was ~5 min). See `docs/debugging/003-opa-bundle-5min-cold-start.md`. The agent-pod OPA sidecar also has a `/health?bundles` readiness probe so the pod isn't marked Ready (and doesn't receive traffic) until its bundle is loaded.
+
+**Production identities (2026-07-11).** The example above shows a *sandbox* subject
+(`agents-platform` namespace). Until 2026-07-11, **production subjects were entirely
+absent from the bundle** — the production reconciler never registered the identity, and
+even the schema/query only knew the sandbox `deployments` table — so OPA fail-closed
+denied every production tool call as `agent_unauthenticated` (HITL never fired). Now
+`bundle_generator` **UNIONs** a production leg (`agent_identities.production_deployment_id
+→ production_deployments → published_versions.config_snapshot->'tools'`), so a production
+subject (`system:serviceaccount:production-<name>-<hash>:agent-<name>-sa`) appears in
+`data.agents` exactly like a sandbox one. Registration is shared via
+`deploy-controller/identity.py::register_agent_identity` (both reconcilers). See
+`docs/debugging/008-production-opa-identity-parity.md` and
+`docs/design/sandbox-production-parity-architecture.md`.
 
 ---
 
@@ -329,23 +347,70 @@ Proven by `studio/e2e/hitl-deployment-chat.spec.ts` (real browser sandbox panel)
 + `scripts/e2e/suite-45-hitl-e2e.sh` T-S45-009 (sandbox context+provenance),
 T-S45-010 (eval auto-approve + real-user-still-gated).
 
-## 9. Current State and Gaps (updated 2026-07-10)
+## 8c. Concurrency & failure mechanics
 
-### Working (verified end-to-end this session)
+**One HITL tool per turn.** When a single model turn emits 2+ high-risk tool calls they
+would each `interrupt()` in the same LangGraph super-step (shared interrupt id in 0.6.x) —
+colliding, hanging the resume, and re-executing already-approved tools. A **provider-agnostic**
+`post_model_hook` (`_one_hitl_tool_per_turn`, `graph_builder.py`, wired into
+`create_react_agent`) trims a turn to **one** high-risk tool call — **only when 2+ are
+high-risk**; low-risk concurrency and single-HITL turns are untouched. Dropped high-risk
+calls are re-requested by the ReAct loop next turn (naturally sequential). Provider-agnostic
+because `ChatBedrockConverse` (Bedrock) has no parallel-tool-calls control. *Residual:* a
+low-risk tool sharing a super-step with the surviving high-risk one still re-executes on that
+node's resume (idempotent reads; the trim is intentionally limited to 2+ HITL tools).
+
+**Idempotent approval creation.** `interrupt()` re-runs the whole tool node on resume, so
+`require_approval` would re-POST a duplicate. `create_approval` is idempotent per
+`(thread_id, tool_name, tool_args)` — a matching pending approval is reused, not duplicated.
+
+**Resume chaining.** A later-turn tool call during a resume re-interrupts; the resume proxies
+forward the `approval_requested` event and `AgentChatPage`/`ChatPane`/`CatalogChatPage` handle
+the re-interrupt (surface the next approval / re-arm the poll) instead of hanging. Net: one
+approval per turn, each tool executes exactly once, chains to `done`.
+
+**Approval-creation failure = fail-closed (declarative-runner 0.1.33).** If
+`hitl.require_approval` cannot create the record (any error from `POST /approvals`), it logs
+the **full server response body at ERROR** (names the failing field) and returns a `rejected`
+decision — the tool is **denied**, never left paused on an un-actionable interrupt. Success is
+logged at INFO so the HITL flow is visible in the pod log.
+
+## 9. Current State and Gaps (updated 2026-07-11)
+
+> **Important correction (2026-07-11):** prior versions of this doc listed the whole
+> **production** path as "working, verified." That was true only for the *sandbox*
+> surfaces. **Production HITL was in fact structurally non-functional** until 2026-07-11:
+> production pods were never registered as OPA identities (so OPA fail-closed denied every
+> tool — "authentication issue with the search tool", doc 008), shipped without tool
+> credentials (doc 007), and had an empty `AGENTSHIELD_AGENT_ID` so the approval POST 422'd
+> and no record was ever created (doc 009 — the prompt showed in chat but the Production
+> HITL Queue stayed empty). All three are now fixed. The root cause of the cluster was the
+> sandbox/production **two-code-path divergence** — see
+> `docs/design/sandbox-production-parity-architecture.md`.
+
+### Working
 - OPA policy `require_approval=true` for high-risk tools; SDK `governed_tool` → OPA → `hitl.require_approval` → `interrupt`.
-- **Three sandbox surfaces + production** (§8b): deployment-chat self-approve panel, Evaluate-tab HitlPanel, batch-eval auto-approve, production console — all proven by suite-45 (10/0) + Playwright.
+- **Three sandbox surfaces** (§8b): deployment-chat self-approve panel, Evaluate-tab HitlPanel, batch-eval auto-approve — proven by suite-45 (10/0) + Playwright.
 - **Registry-side context derivation** — sandbox approvals leave the production queue.
 - **Provenance** — requester username+team + deployment/environment on every approval.
-- **WHO/WHY/WHAT** — LLM reasoning captured via InjectedState + prompt nudge; rendered on all three panels.
-- Production resume-stream endpoint, CatalogChatPage HITL handling, auto-grant authority, optimistic-lock decide, credential pipeline, OPA cold-start fix (~22s). *(The four "gaps being fixed" listed in prior versions of this doc are all resolved.)*
+- **WHO/WHY/WHAT** — LLM reasoning captured via InjectedState + prompt nudge; rendered on all panels.
+- Production resume-stream endpoint, CatalogChatPage HITL handling, auto-grant authority, optimistic-lock decide, OPA cold-start fix (~22s).
+- **Production HITL end-to-end (NEW 2026-07-11).** A production high-risk tool call is now OPA-governed (identity in the bundle), the Serper credential is present (`envFrom`), the approval record is created (`agent_id` populated), it lands in the Production HITL Queue with `context=production`, and the reviewer console decides it. **Verified with a real tool call** (not a simulation): drove `web_search` on the production pod → `tool_call_start` → `approval_requested` → a real pending `context=production` row + the pod-log line `HITL approval record created …`. suite-7 **T-S7-013** guards the bundle/identity path.
+- **Production consumer chat auto-resume (NEW 2026-07-11, studio 0.1.115).** `CatalogChatPage` now polls the console (`approval-status`, 3s) and auto-reconnects the resume stream on decision — the consumer no longer clicks "Check & Resume" (parity with `AgentChatPage`). Guarded by `CatalogChatPage.test.tsx`.
+- **Production auto-grant ApprovalAuthority (NEW 2026-07-11, registry-api 0.2.139).** The high-risk-tool auto-grant now runs on the **production** deploy path too (`catalog.py`), not just sandbox — so a production team's members can see/approve without manual setup (interim, until RBAC). Verified: 2 grants created for a new high-risk tool.
 
 ### Open gaps / tradeoffs we are currently taking
-1. **Multi-tool-call HITL — RESOLVED 2026-07-10 (registry-api 0.2.135 / studio 0.1.111 / declarative-runner 0.1.31).** Parallel high-risk tool calls used to collide (two interrupts in one super-step, shared id in 0.6.x), hang the resume, and **re-execute approved tools** (duplicate external calls). Fix is **provider-agnostic** (Bedrock has no parallel-tool-calls control): a `post_model_hook` in `graph_builder.py` (`_one_hitl_tool_per_turn`) trims a turn to **one high-risk tool call, only when 2+ are high-risk** — low-risk concurrency and single-HITL turns are untouched. Dropped calls are re-requested next turn. Plus: `create_approval` is idempotent per `(thread_id, tool, args)` (no phantom duplicate on the node re-run), and the resume path now **chains** — the resume proxies forward `approval_requested` and `AgentChatPage`/`ChatPane` handle a re-interrupt during resume. Verified end-to-end: one approval per turn, each tool executes exactly once, chains to `done`. **Residual (scoped out):** a low-risk tool sharing a super-step with the surviving high-risk one still re-executes on that node's resume (idempotent reads; the trim is intentionally limited to 2+ HITL tools).
-2. **Conversation persistence is deferred (intentional).** `AgentChatPage` chat state is in-memory — navigating away loses it. The sandbox panel is already `session_id`-scoped (migration 0052) and `agent_runs` already stores per-turn input/output by session, so the future work is mostly: put `session_id` in the URL + hydrate on mount. Until then, the panel shows only the *current* turn's approval.
-3. **Reasoning (WHY) is best-effort.** It's the LLM's AIMessage content; empty for some models / tool-forced calls. Mitigated by a system-prompt nudge; the WHY block is hidden when empty and never gates approval.
-4. **Provenance/reasoning only backfill new rows.** Approvals created before migrations 0051–0053 show empty requester/reasoning.
-5. **Deploy caveat (not a product gap).** The `alembic-migrate` **init** container must be bumped to the new image alongside the main container — `kubectl set image <dep> registry-api=` alone leaves it stale and it can't locate newer revisions. Use the deploy script/helm (sets both) or bump both containers.
-6. **Sandbox self-approve = no separation of duties (by design).** A developer approves their own test calls; that's the intended sandbox trust model. Real reviewer authority applies only to `context="production"`.
+
+*(Resolved items — multi-tool-call HITL and SDK approval-failure handling — are folded into
+§8c as current behavior, not listed here. Non-gaps — historical-row backfill and the
+alembic init-container deploy footgun — were removed. See git history / debugging 004, 009
+for the resolved details.)*
+
+1. **Conversation persistence is deferred (intentional) — the main open *product* gap.** `AgentChatPage`/`CatalogChatPage` chat state is in-memory — navigating away loses it. The sandbox panel is already `session_id`-scoped (migration 0052) and `agent_runs` already stores per-turn input/output by session, so the work is mostly: put `session_id` in the URL + hydrate on mount. Until then, the panel shows only the *current* turn's approval.
+2. **Reasoning (WHY) is best-effort, by mechanism.** It's extracted from the LLM's `AIMessage.content` (`_extract_reasoning`), nudged by a system prompt — empty for some models / tool-forced calls. The WHY block is hidden when empty and never gates approval. **To make it guaranteed:** inject a required `reasoning` argument into each governed tool's model-facing schema (opposite of how `graph_state` is hidden via `InjectedState`), so the model *cannot* call the tool without a reason; the wrapper reads it and strips it before executing the tool. Contained SDK change + runner rebuild — do when we want a hard guarantee across models.
+3. **Sandbox self-approve = no separation of duties (by design).** A developer approves their own test calls; that's the intended sandbox trust model. Real reviewer authority applies only to `context="production"`. `_ADMIN_ROLES` (`platform_admin`, `team_lead`) always have production authority; other team members are auto-granted on deploy (interim, until RBAC).
+4. **Risk value single-source-of-truth — latent, fail-safe, fix-when-touching-OPA.** OPA gets its risk from the **pinned** version snapshot (bundle), while the SDK sends its **live-fetched** `fn.risk`; they diverge only if a tool's `risk_level` is edited *after* a version was published. On divergence the `/approvals` POST 422s — but per §8c this is now **logged (full body) and fail-closed (denied)**, not silent or hung, and the trigger is narrow. Note OPA using the pinned risk is *correct* (a published version shouldn't drift); the smell is the SDK reading the live risk. **Disposition: leave as-is; fix opportunistically when next touching the OPA decision path** — have the Rego emit the deciding risk (it already computes `_risk_of`) and send `decision.risk`. Lowest priority of the open items.
+5. **Production deploy parity — the recurring root cause (process note, not a bug).** Docs 006–009 were all the same class: the production reconciler is a separate code path from sandbox. Mitigations in place — shared helpers (`tool_secrets.py`, `identity.py`), the two-column FK pattern, and `docs/design/sandbox-production-parity-architecture.md`. **Rule:** any *new* per-pod provisioning/governance step must be wired into both reconcilers. **Out of scope:** workflow-production **member** tool credentials (sandbox has the same limitation); Envoy per-agent HTTPRoute (blocked on deploy-controller RBAC, unused by the chat path).
 
 ---
 

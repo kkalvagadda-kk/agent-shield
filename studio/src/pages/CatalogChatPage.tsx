@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Bot, Loader2, Send, ShieldAlert } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
-import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree } from "../api/registryApi";
+import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree, getChatApprovalStatus } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 
 interface Message {
@@ -27,10 +27,15 @@ export default function CatalogChatPage() {
     enabled: !!artifactId,
   });
 
+  const [searchParams] = useSearchParams();
+  // When launched from a specific fleet row, ?dep=<id> pins the run to exactly
+  // that deployment. Otherwise fall back to the single running deployment.
+  const pinnedDepId = searchParams.get("dep");
+
   const artifact = data?.artifact;
-  const activeDeployment = data?.deployments.find(
-    (d) => d.status === "running"
-  );
+  const activeDeployment =
+    (pinnedDepId && data?.deployments.find((d) => d.id === pinnedDepId)) ||
+    data?.deployments.find((d) => d.status === "running");
   const agentName = artifact?.name;
   const isWorkflow = artifact?.type === "workflow";
 
@@ -40,10 +45,20 @@ export default function CatalogChatPage() {
   const [sessionId] = useState(() => crypto.randomUUID());
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Polls the HITL console for a decision, then auto-resumes — so the consumer
+  // never has to click "Check & Resume" (parity with the deployment-chat page).
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Clean up any poll on unmount.
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   const connectResumeStream = useCallback((name: string, runId: string) => {
     setIsStreaming(true);
@@ -90,6 +105,32 @@ export default function CatalogChatPage() {
       setIsStreaming(false);
     };
   }, []);
+
+  // Auto-resume: while an approval is pending, poll the HITL console for the
+  // decision and reconnect the resume stream as soon as it's decided. Mirrors the
+  // deployment-chat page so the consumer doesn't have to click "Check & Resume".
+  useEffect(() => {
+    if (!pendingApproval || !agentName) return;
+    const name = agentName;
+    const runId = pendingApproval.runId;
+    const id = setInterval(async () => {
+      try {
+        const s = await getChatApprovalStatus(name, runId);
+        if (s.decided) {
+          clearInterval(id);
+          pollRef.current = null;
+          connectResumeStream(name, runId);
+        }
+      } catch {
+        // transient — keep polling
+      }
+    }, 3000);
+    pollRef.current = id;
+    return () => {
+      clearInterval(id);
+      pollRef.current = null;
+    };
+  }, [pendingApproval, agentName, connectResumeStream]);
 
   const pollWorkflowResult = useCallback(async (workflowId: string, runId: string) => {
     const maxAttempts = 60;
@@ -162,6 +203,7 @@ export default function CatalogChatPage() {
         message: userMsg,
         session_id: sessionId,
         context: "production",
+        ...(activeDeployment?.id ? { deployment_id: activeDeployment.id } : {}),
       });
 
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
@@ -229,7 +271,7 @@ export default function CatalogChatPage() {
         },
       ]);
     }
-  }, [agentName, sessionId]);
+  }, [agentName, sessionId, activeDeployment?.id]);
 
   const sendMessage = async () => {
     if (!input.trim() || isStreaming || !agentName) return;
@@ -282,27 +324,32 @@ export default function CatalogChatPage() {
 
       {/* HITL Approval Banner */}
       {pendingApproval && (
-        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3 flex items-center gap-3 shrink-0">
+        <div data-testid="consumer-approval-banner" className="bg-amber-50 border-b border-amber-200 px-6 py-3 flex items-center gap-3 shrink-0">
           <ShieldAlert size={18} className="text-amber-600 shrink-0" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-amber-800">
-              Awaiting approval for tool: <span className="font-mono">{pendingApproval.toolName}</span>
+              Awaiting approval for tool: <span data-testid="consumer-approval-tool" className="font-mono">{pendingApproval.toolName}</span>
             </p>
             <p className="text-xs text-amber-600 mt-0.5">
               A reviewer must approve this in the{" "}
               <Link to="/hitl" className="underline font-medium">HITL Dashboard</Link>
-              {" "}before the agent can continue.
+              . The chat resumes automatically once approved.
             </p>
           </div>
+          <span className="flex items-center gap-1.5 text-xs text-amber-600">
+            <Loader2 size={14} className="animate-spin" /> Waiting…
+          </span>
           <button
+            data-testid="consumer-resume-now"
             onClick={() => {
               if (agentName) {
                 connectResumeStream(agentName, pendingApproval.runId);
               }
             }}
             className="px-3 py-1.5 bg-amber-600 text-white text-xs font-medium rounded-md hover:bg-amber-700 transition-colors"
+            title="The chat resumes automatically; use this only to force a check"
           >
-            Check &amp; Resume
+            Resume now
           </button>
         </div>
       )}

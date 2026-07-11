@@ -54,6 +54,7 @@ class AgentChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     context: Optional[str] = None  # "production" or "playground"; determines deployment lookup
+    deployment_id: Optional[str] = None  # pin to this exact deployment; prod uses ProductionDeployment.id
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +122,28 @@ async def _running_sandbox_deployment(
     return result.scalar_one_or_none()
 
 
+def _synth_prod_deployment(
+    prod_dep: Any, agent_id: Optional[uuid.UUID], agent_name: str
+) -> Deployment:
+    """Build a Deployment-like object from a ProductionDeployment row.
+
+    Production runs one k8s Deployment per agent (``{agent}-production`` in
+    ``production-{agent}``); redeploys roll that same Deployment. The synthesized
+    object carries the k8s coordinates downstream proxy code needs.
+    """
+    dep = Deployment(
+        id=prod_dep.id,
+        agent_id=agent_id,
+        version_id=prod_dep.version_id,
+        environment="production",
+        status="running",
+        k8s_namespace=prod_dep.namespace,
+        k8s_deployment_name=f"{agent_name}-production",
+    )
+    dep.deployed_at = prod_dep.deployed_at
+    return dep
+
+
 async def _running_production_deployment(
     db: AsyncSession, agent_id: uuid.UUID
 ) -> Optional[Deployment]:
@@ -153,18 +176,93 @@ async def _running_production_deployment(
     if not prod_dep:
         return None
 
-    # Synthesize a Deployment-like object so downstream proxy code works
-    dep = Deployment(
-        id=prod_dep.id,
-        agent_id=agent_id,
-        version_id=prod_dep.version_id,
-        environment="production",
-        status="running",
-        k8s_namespace=prod_dep.namespace,
-        k8s_deployment_name=f"{agent.name}-production",
+    return _synth_prod_deployment(prod_dep, agent_id, agent.name)
+
+
+async def _production_deployment_by_id(
+    db: AsyncSession, prod_dep_id: uuid.UUID
+) -> Optional[Deployment]:
+    """Resolve one specific ProductionDeployment by id (must be running).
+
+    Used to pin a run to the exact production deployment it was started against,
+    rather than re-resolving "most recent running".
+    """
+    from models import ProductionDeployment, PublishedArtifact
+
+    prod_row = await db.execute(
+        select(ProductionDeployment).where(ProductionDeployment.id == prod_dep_id)
     )
-    dep.deployed_at = prod_dep.deployed_at
-    return dep
+    prod_dep = prod_row.scalar_one_or_none()
+    if not prod_dep or prod_dep.status != "running":
+        return None
+
+    art_row = await db.execute(
+        select(PublishedArtifact).where(PublishedArtifact.id == prod_dep.artifact_id)
+    )
+    artifact = art_row.scalar_one_or_none()
+    if not artifact:
+        return None
+
+    ag_row = await db.execute(select(Agent).where(Agent.name == artifact.name))
+    agent = ag_row.scalar_one_or_none()
+    return _synth_prod_deployment(prod_dep, agent.id if agent else None, artifact.name)
+
+
+async def _deployment_for_run(
+    db: AsyncSession, run: PlaygroundRun
+) -> Optional[Deployment]:
+    """Return the exact deployment this run was pinned to at creation time.
+
+    The run records its target when it starts — ``production_deployment_id`` for
+    production runs, ``deployment_id`` for sandbox. The stream/resume path MUST
+    resolve the pod from that stored id and never re-resolve "most recent
+    running": a redeploy or a second running deployment landing between POST and
+    stream would otherwise proxy the run to the wrong pod (and, for HITL resume,
+    to a pod that doesn't hold the thread's checkpoint).
+    """
+    if run.production_deployment_id:
+        return await _production_deployment_by_id(db, run.production_deployment_id)
+    if run.deployment_id:
+        res = await db.execute(
+            select(Deployment).where(Deployment.id == run.deployment_id)
+        )
+        return res.scalar_one_or_none()
+    return None
+
+
+async def _pinned_deployment(
+    db: AsyncSession,
+    agent: Agent,
+    dep_id_str: str,
+    is_production: bool,
+) -> Optional[Deployment]:
+    """Resolve a caller-supplied deployment id, scoped to ``agent`` and running.
+
+    Returns None if the id is malformed, not running, or belongs to a different
+    agent — the caller turns that into a 404 so a chat can never be pinned to
+    another agent's pod.
+    """
+    try:
+        dep_id = uuid.UUID(dep_id_str)
+    except (ValueError, TypeError):
+        return None
+
+    if is_production:
+        dep = await _production_deployment_by_id(db, dep_id)
+        # _production_deployment_by_id derives agent_id from the artifact name;
+        # reject a prod deployment that resolves to a different agent.
+        if dep and dep.agent_id is not None and dep.agent_id != agent.id:
+            return None
+        return dep
+
+    res = await db.execute(
+        select(Deployment).where(
+            Deployment.id == dep_id,
+            Deployment.agent_id == agent.id,
+            Deployment.status == "running",
+        )
+    )
+    return res.scalar_one_or_none()
 
 
 async def _complete_chat_run(
@@ -351,14 +449,27 @@ async def start_chat(
     chat_context = body.context or "playground"
     is_production = chat_context == "production"
 
-    # -- Require a running deployment -----------------------------------------
-    deployment = await _running_deployment(db, agent.id, context=chat_context)
-    if not deployment:
-        env_label = "production" if is_production else "playground"
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Agent '{name}' has no running {env_label} deployment.",
+    # -- Resolve the target deployment ----------------------------------------
+    # If the caller pinned an explicit deployment (e.g. launched from a specific
+    # fleet row), bind the run to exactly that deployment. Otherwise fall back to
+    # the single running deployment for the context.
+    if body.deployment_id:
+        deployment = await _pinned_deployment(
+            db, agent, body.deployment_id, is_production
         )
+        if not deployment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Deployment '{body.deployment_id}' is not a running deployment of agent '{name}'.",
+            )
+    else:
+        deployment = await _running_deployment(db, agent.id, context=chat_context)
+        if not deployment:
+            env_label = "production" if is_production else "playground"
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Agent '{name}' has no running {env_label} deployment.",
+            )
 
     session_id = body.session_id or str(uuid.uuid4())
 
@@ -369,7 +480,11 @@ async def start_chat(
         agent_name=name,
         context=chat_context,
         sandbox=not is_production,
-        deployment_id=deployment.id,
+        # Write the FK column whose table the id actually belongs to: production
+        # deployments live in `production_deployments`, sandbox in `deployments`.
+        # Mixing them violates the FK (production id in a sandbox-FK column → 500).
+        deployment_id=deployment.id if not is_production else None,
+        production_deployment_id=deployment.id if is_production else None,
         session_id=session_id,
         requested_by_username=caller.get("preferred_username"),
         requested_by_team=caller_team,
@@ -479,18 +594,10 @@ async def stream_chat(
             detail="Not your chat run.",
         )
 
-    # -- Resolve agent + deployment -------------------------------------------
-    # Use the context stored on the run record to search the correct table
-    chat_context = run.context or "playground"
-
-    agent_result = await db.execute(
-        select(Agent).where(Agent.name == name, Agent.status == "active")
-    )
-    agent = agent_result.scalar_one_or_none()
-
-    deployment: Optional[Deployment] = None
-    if agent:
-        deployment = await _running_deployment(db, agent.id, context=chat_context)
+    # -- Resolve the deployment this run was pinned to -------------------------
+    # Read the pod from the id stored on the run at POST time — never re-resolve
+    # "most recent running", which can race a redeploy and hit the wrong pod.
+    deployment = await _deployment_for_run(db, run)
 
     if not deployment or not deployment.k8s_deployment_name:
         async def _no_deploy() -> AsyncGenerator[str, None]:
@@ -674,8 +781,15 @@ async def stream_deployment_chat(
     if run.user_id != caller.get("sub", ""):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not your chat run.")
 
-    dep_result = await db.execute(select(Deployment).where(Deployment.id == parsed_dep_id))
-    deployment = dep_result.scalar_one_or_none()
+    # The path dep_id must match the deployment this run was actually pinned to,
+    # or a caller could stream their own run against an unrelated pod.
+    if run.deployment_id != parsed_dep_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment does not match this chat run.",
+        )
+
+    deployment = await _deployment_for_run(db, run)
 
     if not deployment or not deployment.k8s_deployment_name:
         async def _no_deploy() -> AsyncGenerator[str, None]:
@@ -782,8 +896,9 @@ async def resume_stream_chat(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    chat_context = run.context or "playground"
-    deployment = await _running_deployment(db, agent.id, context=chat_context)
+    # Resume MUST hit the same pod the run started on — the HITL thread's
+    # checkpoint lives there. Pin to the run's stored deployment id.
+    deployment = await _deployment_for_run(db, run)
     if not deployment:
         def _no_deploy():
             yield f"data: {json.dumps({'type': 'error', 'message': 'No running deployment'})}\n\n"

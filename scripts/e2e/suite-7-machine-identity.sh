@@ -12,6 +12,8 @@
 #   T-S7-002  — agent pod has projected sa-token volume with agentshield-opa audience
 #   T-S7-002b — token file readable at /var/run/secrets/sa-token/token
 #   T-S7-008  — SDK reads projected token
+#   T-S7-013  — production identities enter the OPA bundle: production_deployment_id
+#               FK accepts a production id (deployment_id rejects it) + bundle UNION leg
 #
 # T-S7-003..007: OPA sidecar decisions covered by suite-18 (OPA Governance)
 #
@@ -480,6 +482,65 @@ if echo "$POLICY_CHECK" | grep -q "user_context_missing"; then
 else
   fail "T-S7-012: user_context_missing deny_reason missing from policy.rego — Class B agents with missing user context get no informative deny reason"
 fi
+echo ""
+
+# ---------------------------------------------------------------------------
+# T-S7-013: production identities enter the OPA bundle (production parity)
+#   Regression guard for docs/design/sandbox-production-parity-architecture.md:
+#   (A) agent_identities.production_deployment_id accepts a production_deployments
+#       id, and the sandbox deployment_id FK rejects it.
+#   (B) generate_bundle_data surfaces a production SA subject (via the UNION leg).
+#   Skips if no production_deployments row exists.
+# ---------------------------------------------------------------------------
+echo "--- T-S7-013: production identity → OPA bundle (parity) ---"
+PARITY=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import asyncio
+from db import AsyncSessionLocal
+from sqlalchemy import select, text
+from models import ProductionDeployment, AgentIdentity
+from bundle_generator import generate_bundle_data
+async def m():
+    async with AsyncSessionLocal() as db:
+        pd = (await db.execute(select(ProductionDeployment).limit(1))).scalar_one_or_none()
+        if not pd:
+            print('SKIP: no production_deployments row'); return
+        pd_id = pd.id
+        # (A) FK: production id accepted by production_deployment_id
+        ident = AgentIdentity(agent_name='__s7_013__', sa_subject='s7-013', sa_namespace='ns',
+                              production_deployment_id=pd_id)
+        db.add(ident)
+        try:
+            await db.flush()
+        except Exception as e:
+            # agent_name FK may reject a fake agent; retry against a real agent name
+            await db.rollback()
+            real = (await db.execute(text('SELECT name FROM agents LIMIT 1'))).scalar()
+            ident = AgentIdentity(agent_name=real, sa_subject='s7-013', sa_namespace='ns',
+                                  production_deployment_id=pd_id)
+            db.add(ident); await db.flush()
+        await db.rollback()
+    # (A2) sandbox deployment_id FK must reject a production id
+    async with AsyncSessionLocal() as db2:
+        real = (await db2.execute(text('SELECT name FROM agents LIMIT 1'))).scalar()
+        bad = AgentIdentity(agent_name=real, sa_subject='s7-013b', sa_namespace='ns',
+                            deployment_id=pd_id)
+        db2.add(bad)
+        try:
+            await db2.flush(); await db2.rollback(); print('FK_LEAK'); return
+        except Exception:
+            await db2.rollback()
+    # (B) bundle contains a production subject (serper prod is live in this env)
+    async with AsyncSessionLocal() as db3:
+        data = await generate_bundle_data(db3)
+        prod = [k for k in data.get('agents', {}) if 'production-' in k]
+        print('OK' if prod else 'NO_PROD_IN_BUNDLE')
+asyncio.run(m())
+" 2>/dev/null | tail -1)
+case "$PARITY" in
+  OK)    pass "T-S7-013: production identity FK + OPA bundle UNION leg work" ;;
+  SKIP*) echo "  SKIP: T-S7-013 — $PARITY"; MANUAL=$((MANUAL + 1)) ;;
+  *)     fail "T-S7-013: $PARITY" ;;
+esac
 echo ""
 
 # ---------------------------------------------------------------------------

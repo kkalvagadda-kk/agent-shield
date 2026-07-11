@@ -365,7 +365,7 @@ async def _load_provenance(
     deployment_name, environment}}. Threads that don't parse as a run id (or
     have no matching run) are simply absent from the map.
     """
-    from models import Deployment, PlaygroundRun
+    from models import Deployment, PlaygroundRun, ProductionDeployment
 
     parsed: dict[str, uuid.UUID] = {}
     for tid in thread_ids:
@@ -376,6 +376,9 @@ async def _load_provenance(
     if not parsed:
         return {}
 
+    # A run targets EITHER a sandbox deployment (deployment_id → deployments) OR a
+    # production one (production_deployment_id → production_deployments). Join both
+    # and coalesce so the console shows deployment/environment for either context.
     run_rows = (
         await db.execute(
             select(
@@ -383,11 +386,16 @@ async def _load_provenance(
                 PlaygroundRun.user_id,
                 PlaygroundRun.requested_by_username,
                 PlaygroundRun.requested_by_team,
-                PlaygroundRun.deployment_id,
+                PlaygroundRun.production_deployment_id,
                 Deployment.name,
                 Deployment.environment,
+                ProductionDeployment.namespace,
             )
             .outerjoin(Deployment, Deployment.id == PlaygroundRun.deployment_id)
+            .outerjoin(
+                ProductionDeployment,
+                ProductionDeployment.id == PlaygroundRun.production_deployment_id,
+            )
             .where(PlaygroundRun.id.in_(list(parsed.values())))
         )
     ).all()
@@ -397,8 +405,10 @@ async def _load_provenance(
         str(row.id): {
             "requested_by": row.requested_by_username or row.user_id,
             "requested_by_team": row.requested_by_team,
-            "deployment_name": row.name,
-            "environment": row.environment,
+            # Sandbox deployment name, else the production namespace.
+            "deployment_name": row.name or (row.namespace if row.production_deployment_id else None),
+            # Sandbox env, else 'production' when a production deployment is linked.
+            "environment": row.environment or ("production" if row.production_deployment_id else None),
         }
         for row in run_rows
     }

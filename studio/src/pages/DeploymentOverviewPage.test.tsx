@@ -78,6 +78,11 @@ describe("DeploymentOverviewPage", () => {
     await waitFor(() => expect(screen.getByText(/agent:/)).toBeInTheDocument());
     // OverviewReactive renders the API Endpoint card.
     expect(await screen.findByText("API Endpoint")).toBeInTheDocument();
+    // Sandbox deployment → endpoint is pinned to THIS deployment id, not the
+    // agent-scoped path (which re-resolves the most-recent running pod).
+    expect(
+      screen.getByText("/api/v1/agents/my-agent/deployments/dep-1/chat", { exact: false })
+    ).toBeInTheDocument();
   });
 
   it("scopes stats to the deployment (playground context)", async () => {

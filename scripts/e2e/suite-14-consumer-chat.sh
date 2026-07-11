@@ -11,6 +11,8 @@
 #   T-S14-004 — Production HITL queue excludes playground-context approvals
 #   T-S14-005 — Chat returns 503 when agent has no running deployment (MANUAL)
 #   T-S14-006 — Chat SSE stream returns text/event-stream Content-Type (MANUAL)
+#   T-S14-008 — production chat run persists via production_deployment_id; the
+#               sandbox deployment_id FK rejects a production id (regression guard)
 #   T-S14-007 — Cleanup test artifacts
 #
 # Usage:
@@ -169,6 +171,57 @@ echo "[T-S14-006] MANUAL: chat SSE stream returns text/event-stream"
 check_manual "T-S14-006" \
   "Chat SSE stream Content-Type is text/event-stream" \
   "For a deployed agent: POST /chat → use run_id for GET stream_url → verify Content-Type header and data: lines"
+
+# ---------------------------------------------------------------------------
+# T-S14-008: production chat run persists against production_deployments (FK fix)
+#   Regression guard: PlaygroundRun.deployment_id FKs the sandbox `deployments`
+#   table. Production chat targets a `production_deployments` row — writing that
+#   id into deployment_id violated the FK → INSERT 500 → "no running production
+#   deployment". A production id must be accepted by production_deployment_id and
+#   REJECTED by deployment_id. Skips if no production_deployments row exists.
+# ---------------------------------------------------------------------------
+echo "[T-S14-008] production_deployment_id accepts a prod id; deployment_id rejects it"
+RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+import asyncio, datetime
+from db import AsyncSessionLocal
+from sqlalchemy import select
+from models import PlaygroundRun, ProductionDeployment
+async def m():
+    async with AsyncSessionLocal() as db:
+        pd = (await db.execute(select(ProductionDeployment).limit(1))).scalar_one_or_none()
+        if not pd:
+            print('SKIP: no production_deployments row'); return
+        pd_id = pd.id  # capture PK before the session closes (avoid DetachedInstanceError)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        # (1) production id in production_deployment_id → FK satisfied
+        run = PlaygroundRun(user_id='e2e-s14-008', agent_name='e2e', context='production',
+                            sandbox=False, status='running', started_at=now,
+                            input_message='x', production_deployment_id=pd_id)
+        db.add(run)
+        try:
+            await db.flush()
+        except Exception as e:
+            print('PROD_FK_FAIL:', type(e).__name__); return
+        await db.rollback()
+    # (2) same production id in deployment_id (sandbox FK) → must be rejected
+    async with AsyncSessionLocal() as db2:
+        bad = PlaygroundRun(user_id='e2e-s14-008', agent_name='e2e', context='production',
+                            sandbox=False, status='running', started_at=now,
+                            input_message='x', deployment_id=pd_id)
+        db2.add(bad)
+        try:
+            await db2.flush()
+            print('SANDBOX_FK_LEAK: deployment_id wrongly accepted a prod id')
+        except Exception:
+            await db2.rollback()
+            print('OK')
+asyncio.run(m())
+" 2>/dev/null | tail -1)
+case "$RESULT" in
+  OK)   pass "T-S14-008: prod id → production_deployment_id ok, deployment_id rejects it" ;;
+  SKIP*) echo "  SKIP: T-S14-008 — $RESULT"; ((MANUAL++)) || true ;;
+  *)    fail "T-S14-008: $RESULT" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # T-S14-007: Cleanup — delete s14-promote-test agent

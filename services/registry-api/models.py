@@ -202,9 +202,21 @@ class AgentIdentity(Base):
         ForeignKey("agents.name", ondelete="CASCADE"),
         nullable=False,
     )
+    # Sandbox deployment this identity belongs to (FK sandbox `deployments`).
+    # Production identities use `production_deployment_id` instead — the two are
+    # mutually exclusive per row (see sandbox-production-parity-architecture.md).
     deployment_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
         ForeignKey("deployments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Production deployment this identity belongs to. Production deployments live
+    # in `production_deployments` (a different table), so they need their own FK
+    # column — without it, production SA subjects never enter the OPA bundle and
+    # every production tool call fails closed (agent_unauthenticated).
+    production_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("production_deployments.id", ondelete="SET NULL"),
         nullable=True,
     )
     # Full K8s SA subject: system:serviceaccount:{namespace}:{sa-name}
@@ -1281,11 +1293,21 @@ class PlaygroundRun(Base):
         ForeignKey("agent_versions.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # Deployment this run targeted (deployment-pinned chat). Lets the HITL
+    # Sandbox deployment this run targeted (deployment-pinned chat). Lets the HITL
     # console show which deployment/environment a pending approval came from.
+    # FK to the sandbox `deployments` table — production runs use
+    # `production_deployment_id` (a different table); never cross them.
     deployment_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
         ForeignKey("deployments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Production deployment this run targeted. Production deployments live in
+    # `production_deployments` (published-artifact model), not `deployments`, so
+    # they need their own FK column — mirrors AgentRun.production_deployment_id.
+    production_deployment_id: Mapped[uuid.UUID | None] = mapped_column(
+        _UUID,
+        ForeignKey("production_deployments.id", ondelete="SET NULL"),
         nullable=True,
     )
     # Conversation grouping key (many per-turn runs share one session). Used to

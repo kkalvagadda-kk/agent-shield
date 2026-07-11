@@ -95,7 +95,11 @@ export default function App() {
             </ErrorBoundary>
           </main>
         </div>
-        <Toaster position="top-right" richColors closeButton />
+        {/* The toast sink lives OUTSIDE the routes boundary; a non-string toast
+            content would otherwise crash it and blank the whole app. Contain it. */}
+        <ErrorBoundary fallback={null}>
+          <Toaster position="top-right" richColors closeButton />
+        </ErrorBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   );

@@ -140,13 +140,17 @@ class AgentResponse(BaseModel):
 class AgentIdentityCreate(BaseModel):
     sa_subject: str = Field(..., max_length=512)
     sa_namespace: str = Field(..., max_length=256)
+    # Exactly one of these is set: sandbox deployments use deployment_id (FK
+    # deployments); production deployments use production_deployment_id.
     deployment_id: uuid.UUID | None = None
+    production_deployment_id: uuid.UUID | None = None
 
 
 class AgentIdentityResponse(BaseModel):
     id: uuid.UUID
     agent_name: str
     deployment_id: uuid.UUID | None
+    production_deployment_id: uuid.UUID | None = None
     sa_subject: str
     sa_namespace: str
     provisioned_at: datetime

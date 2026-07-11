@@ -264,6 +264,25 @@ async def deploy_version(
         namespace=namespace,
     )
     db.add(deployment)
+
+    # Auto-grant ApprovalAuthority to the artifact team's members for this version's
+    # high-risk tools — same interim behavior as the sandbox deploy path, so the
+    # Production HITL Queue is actionable without manual admin setup (until RBAC
+    # lands). Production goes through this separate path, so the sandbox call in
+    # deployments.py doesn't cover it. config_snapshot tools are {name, risk} dicts.
+    from routers.deployments import _auto_grant_approval_authority
+    snapshot_tools = (version.config_snapshot or {}).get("tools", []) or []
+    try:
+        granted = await _auto_grant_approval_authority(
+            db,
+            [(t.get("name"), t.get("risk", "low")) for t in snapshot_tools if isinstance(t, dict) and t.get("name")],
+            art.team,
+            granted_by=f"auto:production-deploy:{dep_id}",
+        )
+        logger.info("catalog_deploy: auto-granted %d approval-authority records", granted)
+    except Exception as exc:  # non-fatal — deploy proceeds even if grant fails
+        logger.warning("catalog_deploy: auto-grant ApprovalAuthority failed (non-fatal): %s", exc)
+
     await db.commit()
     await db.refresh(deployment)
 
@@ -510,6 +529,11 @@ async def list_pending_production_deployments(
             "artifact_name": artifact.name,
             "artifact_type": artifact.type,
             "artifact_team": artifact.team,
+            # Source agent id — the pod needs it as AGENTSHIELD_AGENT_ID so the SDK
+            # can create approval records (approvals.agent_id FKs agents.id). Without
+            # it the env is empty and the approval POST 422s (invalid UUID) → HITL
+            # requests never reach the queue.
+            "source_agent_id": str(artifact.source_id) if artifact.source_id else None,
             "version_label": version.version_label,
             "config_snapshot": version.config_snapshot,
             **llm_info,
