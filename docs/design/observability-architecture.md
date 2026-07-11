@@ -162,7 +162,7 @@ _Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observ
 | SDK-level tracer actually enabled on agent pods | ✅ **Fixed (Phase 2)** | env-var names + `public_key`; live-confirmed `tracer._enabled=True` |
 | Agent pod can reach Langfuse (cross-namespace) | ✅ **Fixed (Phase 2)** | deploy-controller injects FQN `…-langfuse-web.{ns}:3000` |
 | Spans for safety scans (SDK tracer) | ✅ **Working (Phase 2)** | `safety_scan_*` spans now appear (0→1 observation verified) |
-| Spans for LLM calls / tool calls (langchain handler) | ❌ **Blocked — needs v4** | agent langchain stack is 1.x; langfuse v2 handler incompatible. See `docs/design/todo/langfuse-v4-migration.md` |
+| Spans for LLM calls / tool calls (langchain handler) | ❌ **Blocked — needs v4** | agent langchain stack is 1.x; langfuse v2 handler incompatible. See `docs/design/todo/observability-provider-abstraction.md` |
 | Trace "User" field shows readable name | ✅ **Fixed (Phase 1)** | `preferred_username`; DB FK cols keep UUID |
 | Trace identifies which deployment/instance produced it | ✅ **Fixed (Phase 1)** | `deployment_id` + `environment` in metadata/tags |
 | M1 — Traces list page | ✅ Built | `observability.py` + `ObservabilityTracesPage.tsx` |

@@ -70,6 +70,16 @@ workflow_executor: Any = None  # set during lifespan startup
 async def lifespan(app: FastAPI):
     global workflow_executor
 
+    # Enable OpenTelemetry LLM/tool span capture (OpenInference instruments
+    # langchain/langgraph globally; exports OTLP to the configured backend —
+    # Langfuse today). No-ops if unconfigured. Must run before any langchain
+    # object is constructed so the instrumentation hooks are in place.
+    try:
+        from agentshield_sdk.otel import setup_otel
+        setup_otel()
+    except Exception as exc:  # never let tracing setup break startup
+        logger.warning("OTEL setup skipped: %s", exc)
+
     if cfg.COMPOSITE_WORKFLOW_ID:
         import base64 as _b64
         logger.info(

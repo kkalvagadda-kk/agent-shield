@@ -15,13 +15,17 @@ dependencies = [
     "langchain-anthropic>=0.3",
     "langchain-aws>=0.2",
     "langchain-core>=0.3",
-    # Pinned to v2: the platform's distributed tracing (registry-api creates the
-    # trace by id=run_id, agent pods attach spans via trace_id) is written for the
-    # v2 API and matches registry-api's own langfuse==2.* client. v4 is an
-    # OpenTelemetry rewrite tracked as a deliberate future migration
-    # (docs/design/todo/langfuse-v4-migration.md). langchain (base pkg) is
-    # required by langfuse.callback.CallbackHandler.
+    # langfuse v2 client is kept only for the SDK's safety-scan tracer; LLM/tool
+    # span capture is done via OpenTelemetry (see below), NOT langfuse's langchain
+    # handler — which is incompatible with langchain 1.x. Provider-agnostic path:
+    # docs/design/todo/observability-provider-abstraction.md.
     "langfuse>=2.60,<3",
+    # OpenTelemetry emit — vendor-neutral LLM/tool span capture. OpenInference
+    # instruments langchain/langgraph (tested against langchain 1.x) and exports
+    # OTLP to any backend (Langfuse's /api/public/otel today).
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "openinference-instrumentation-langchain>=0.1.40",
     "httpx>=0.27",
     "click>=8.1",
     "prometheus-client>=0.20",

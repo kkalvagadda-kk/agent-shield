@@ -654,7 +654,7 @@ deploy-controller:
   # changes — existing agent pods keep their old tag until re-deployed.
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.35"
+  declarativeRunnerTag: "0.1.36"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
