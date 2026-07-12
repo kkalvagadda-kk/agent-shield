@@ -39,6 +39,7 @@ class NormalizedSpan(BaseModel):
     id: str
     name: str
     type: str
+    parent_id: str | None = None       # for nesting spans into a tree/waterfall
     start_time: str | None = None
     end_time: str | None = None
     input: Any = None
@@ -46,6 +47,11 @@ class NormalizedSpan(BaseModel):
     metadata: dict[str, Any] | None = None
     status_message: str | None = None
     level: str | None = None
+    # Per-generation economics (populated for GENERATION spans; None otherwise)
+    model: str | None = None
+    cost_usd: float | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
 
 
 class NormalizedScore(BaseModel):
@@ -166,6 +172,7 @@ class LangfuseBackend:
                 id=str(o.get("id") or ""),
                 name=o.get("name") or "",
                 type=o.get("type") or "SPAN",
+                parent_id=o.get("parentObservationId"),
                 start_time=o.get("startTime"),
                 end_time=o.get("endTime"),
                 input=o.get("input"),
@@ -173,6 +180,14 @@ class LangfuseBackend:
                 metadata=o.get("metadata") if isinstance(o.get("metadata"), dict) else None,
                 status_message=o.get("statusMessage"),
                 level=o.get("level"),
+                model=o.get("model"),
+                cost_usd=(
+                    round(float(c), 6)
+                    if isinstance((c := o.get("calculatedTotalCost") or o.get("totalCost")), (int, float)) and c
+                    else None
+                ),
+                prompt_tokens=o.get("promptTokens") if isinstance(o.get("promptTokens"), int) else None,
+                completion_tokens=o.get("completionTokens") if isinstance(o.get("completionTokens"), int) else None,
             )
             for o in (raw.get("observations") or [])
         ]

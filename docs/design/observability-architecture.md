@@ -163,7 +163,7 @@ Genre-specific docs stay separate (`bugs/`, `debugging/`). Everything forward-lo
 
 **Open — single-click trace viewing.** `EvalResultsPage`, `ChatPane`, `RunsTab` still default to the raw external Langfuse link instead of the inline `TraceDrawer`, sending users through Langfuse's multi-step SSO chooser. The drawer + backing endpoint exist and now consume the neutral shape, so this is a small change: make the drawer the primary click target, demote the external link to the secondary "Trace ↗". (Was `langfuse-trace-single-click.md`.)
 
-**Open — `NormalizedTrace` UI polish.** Spans render as a flat list; no nested waterfall/tree, no per-generation token/cost inline, no inline scores in the drawer.
+**Done — `NormalizedTrace` UI polish** (registry-api 0.2.155 / studio 0.1.126). `TraceDrawer` now renders a nested **waterfall/tree** (spans nested by `parent_id`, duration-proportional bars scaled to the trace window), **per-generation economics** (model + cost + prompt/completion tokens on GENERATION spans, inline + on expand), and **trace scores** as chips + trace total cost. `NormalizedSpan` carries `parent_id`/`model`/`cost_usd`/`prompt_tokens`/`completion_tokens` (mapped in `LangfuseBackend`). Covered by `TraceDrawer.test.tsx`.
 
 **Open — safety-orchestrator disabled in this env.** No safety spans exist here, and PII reaches Langfuse unredacted (the scanner does placeholder redaction). Accepted while deferred; revisit when safety-orchestrator lands.
 

@@ -69,6 +69,7 @@ export interface NormalizedSpan {
   id: string;
   name: string;
   type: string;
+  parent_id?: string | null;
   start_time: string | null;
   end_time: string | null;
   input?: unknown;
@@ -76,6 +77,10 @@ export interface NormalizedSpan {
   metadata?: Record<string, unknown> | null;
   status_message?: string | null;
   level?: string | null;
+  model?: string | null;
+  cost_usd?: number | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
 }
 
 export interface NormalizedScore {
