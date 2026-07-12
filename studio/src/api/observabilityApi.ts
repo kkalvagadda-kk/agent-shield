@@ -57,13 +57,18 @@ export interface FeedbackSummary {
   ratio: number | null;
 }
 
+export interface FeedbackBreakdown {
+  production: FeedbackSummary;
+  sandbox: FeedbackSummary;
+}
+
 export interface DashboardData {
   latency_series: TimeseriesPoint[];
   score_histogram: HistogramBucket[];
   status_counts: StatusCount[];
   cost_series: TimeseriesPoint[];
   safety_blocks: AgentBlockRate[];
-  feedback: FeedbackSummary;
+  feedback: FeedbackBreakdown;
   total_runs: number;
   total_cost_usd: number;
 }

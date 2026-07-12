@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown } from "lucide-react";
 import { useState } from "react";
-import { getDashboard, DashboardData } from "../api/observabilityApi";
+import { getDashboard, DashboardData, FeedbackSummary } from "../api/observabilityApi";
 import { listAgents } from "../api/registryApi";
 
 const PERIOD_OPTIONS = [
@@ -15,6 +15,39 @@ function MetricCard({ label, value, sub }: { label: string; value: string; sub?:
       <p className="text-xs text-slate-500 uppercase tracking-wide">{label}</p>
       <p className="text-2xl font-semibold text-slate-800 mt-1">{value}</p>
       {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
+    </div>
+  );
+}
+
+function FeedbackRow({ label, fb, muted }: { label: string; fb?: FeedbackSummary; muted?: boolean }) {
+  const total = fb?.total ?? 0;
+  const ratio = fb?.ratio ?? 0;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className={muted ? "text-slate-400" : "font-medium text-slate-600"}>{label}</span>
+        {total === 0 ? (
+          <span className="text-slate-300">no feedback yet</span>
+        ) : (
+          <span className="text-slate-500">
+            {Math.round(ratio * 100)}% positive · {total} rated
+          </span>
+        )}
+      </div>
+      <div className="flex h-3 w-full overflow-hidden rounded bg-slate-100">
+        {total > 0 && (
+          <>
+            <div className="h-full bg-emerald-400" style={{ width: `${ratio * 100}%` }} />
+            <div className="h-full flex-1 bg-rose-300" />
+          </>
+        )}
+      </div>
+      {total > 0 && (
+        <div className="flex items-center justify-between text-[11px] text-slate-500 mt-0.5">
+          <span className="flex items-center gap-1 text-emerald-600"><ThumbsUp size={11} /> {fb?.up ?? 0}</span>
+          <span className="flex items-center gap-1 text-rose-500">{fb?.down ?? 0} <ThumbsDown size={11} /></span>
+        </div>
+      )}
     </div>
   );
 }
@@ -92,16 +125,16 @@ export default function ObservabilityDashboardPage() {
               }
             />
             <MetricCard
-              label="Satisfaction"
+              label="Prod Satisfaction"
               value={
-                d.feedback?.ratio != null
-                  ? `${Math.round(d.feedback.ratio * 100)}%`
+                d.feedback?.production?.ratio != null
+                  ? `${Math.round(d.feedback.production.ratio * 100)}%`
                   : "—"
               }
               sub={
-                d.feedback?.total
-                  ? `${d.feedback.up}👍 / ${d.feedback.down}👎`
-                  : "no feedback yet"
+                d.feedback?.production?.total
+                  ? `${d.feedback.production.up}👍 / ${d.feedback.production.down}👎 (prod)`
+                  : "no production feedback yet"
               }
             />
           </div>
@@ -181,40 +214,15 @@ export default function ObservabilityDashboardPage() {
             </div>
           </div>
 
-          {/* User feedback ratio */}
+          {/* User feedback — production vs sandbox (production is the signal that matters) */}
           <div className="bg-white border border-slate-200 rounded-lg p-4">
             <h2 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
               <ThumbsUp size={14} /> User Feedback
             </h2>
-            {!d.feedback || d.feedback.total === 0 ? (
-              <p className="text-sm text-slate-400">
-                No thumbs feedback in this period.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex h-4 w-full overflow-hidden rounded bg-slate-100">
-                  <div
-                    className="h-full bg-emerald-400"
-                    style={{ width: `${(d.feedback.ratio ?? 0) * 100}%` }}
-                  />
-                  <div className="h-full flex-1 bg-rose-300" />
-                </div>
-                <div className="flex items-center justify-between text-sm text-slate-600">
-                  <span className="flex items-center gap-1 text-emerald-600">
-                    <ThumbsUp size={13} /> {d.feedback.up}
-                  </span>
-                  <span className="font-medium text-slate-800">
-                    {Math.round((d.feedback.ratio ?? 0) * 100)}% positive
-                    <span className="text-slate-400 font-normal">
-                      {" "}({d.feedback.total} rated)
-                    </span>
-                  </span>
-                  <span className="flex items-center gap-1 text-rose-500">
-                    {d.feedback.down} <ThumbsDown size={13} />
-                  </span>
-                </div>
-              </div>
-            )}
+            <div className="space-y-4">
+              <FeedbackRow label="Production" fb={d.feedback?.production} />
+              <FeedbackRow label="Sandbox / Playground" fb={d.feedback?.sandbox} muted />
+            </div>
           </div>
 
           {/* Safety blocks */}

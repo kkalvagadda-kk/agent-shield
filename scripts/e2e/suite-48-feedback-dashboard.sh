@@ -53,36 +53,46 @@ async def m():
             a = Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
             db.add(a); await db.flush()
         now = datetime.datetime.now(datetime.timezone.utc)
-        runs=[]
+        # 3 SANDBOX runs (sandbox=True) → 2 up / 1 down
+        sandbox_runs=[]
         for i in range(3):
             r = PlaygroundRun(user_id=SUB, agent_name=AG, context='playground',
-                              status='completed', started_at=now)
-            db.add(r); await db.flush(); runs.append(r)
+                              sandbox=True, status='completed', started_at=now)
+            db.add(r); await db.flush(); sandbox_runs.append(r)
+        # 2 PRODUCTION runs (sandbox=False) → 2 up
+        prod_runs=[]
+        for i in range(2):
+            r = PlaygroundRun(user_id=SUB, agent_name=AG, context='production',
+                              sandbox=False, status='completed', started_at=now)
+            db.add(r); await db.flush(); prod_runs.append(r)
         await db.commit()
 
-        # T-S48-001: POST feedback via the real HTTP endpoint (2 up, 1 down)
-        scores=[1,1,-1]
-        for r,s in zip(runs,scores):
+        # T-S48-001: POST feedback via the real HTTP endpoint
+        for r,s in zip(sandbox_runs,[1,1,-1]):
             httpx.post(f'http://localhost:8000/api/v1/playground/runs/{r.id}/feedback',
                        json={'score': s}, headers={'X-User-Sub': SUB}, timeout=8)
-        # reload run[0] to prove persistence
-        f0 = (await db.execute(select(PlaygroundRun).where(PlaygroundRun.id==runs[0].id))).scalar_one()
+        for r in prod_runs:
+            httpx.post(f'http://localhost:8000/api/v1/playground/runs/{r.id}/feedback',
+                       json={'score': 1}, headers={'X-User-Sub': SUB}, timeout=8)
+        # reload one to prove persistence
+        f0 = (await db.execute(select(PlaygroundRun).where(PlaygroundRun.id==sandbox_runs[0].id))).scalar_one()
         await db.refresh(f0)
         t1 = (f0.user_feedback == 1)
 
-        # T-S48-002: dashboard aggregation via the endpoint function
+        # T-S48-002: dashboard SPLIT — production vs sandbox reported separately
         dash = await get_dashboard(agent_name=AG, period='7d', from_date=None,
                                    to_date=None, claims={'sub': SUB}, db=db)
-        fb = dash.feedback
-        t2 = (fb.up==2 and fb.down==1 and abs((fb.ratio or 0)-2/3) < 0.01)
+        prod, sand = dash.feedback.production, dash.feedback.sandbox
+        t2 = (sand.up==2 and sand.down==1 and abs((sand.ratio or 0)-2/3) < 0.01
+              and prod.up==2 and prod.down==0 and abs((prod.ratio or 0)-1.0) < 0.01)
 
         # cleanup
-        for r in runs:
+        for r in sandbox_runs + prod_runs:
             await db.delete((await db.execute(select(PlaygroundRun).where(PlaygroundRun.id==r.id))).scalar_one())
         await db.delete((await db.execute(select(Agent).where(Agent.name==AG))).scalar_one())
         await db.execute(sa_text('DELETE FROM user_team_assignments WHERE user_sub=:s'), {'s': SUB})
         await db.commit()
-        print(f'T1={t1} T2={t2} up={fb.up} down={fb.down} ratio={fb.ratio}')
+        print(f'T1={t1} T2={t2} prod(up={prod.up},down={prod.down}) sandbox(up={sand.up},down={sand.down})')
 
 asyncio.run(m())
 " 2>/dev/null | tail -1)
@@ -93,7 +103,7 @@ PASS=0; FAIL=0
 case "$RESULT" in
   *"T1=True T2=True"*)
     echo "  PASS: T-S48-001 user_feedback persisted on PlaygroundRun"
-    echo "  PASS: T-S48-002 dashboard feedback aggregation (up=2 down=1 ratio≈0.67)"
+    echo "  PASS: T-S48-002 dashboard SPLIT — production(2up) vs sandbox(2up/1down) reported separately"
     PASS=2 ;;
   *) echo "  FAIL: $RESULT"; FAIL=1 ;;
 esac

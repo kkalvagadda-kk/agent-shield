@@ -1,14 +1,18 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Loader2, Send, ShieldAlert } from "lucide-react";
+import { ArrowLeft, Bot, Loader2, Send, ShieldAlert, ThumbsUp, ThumbsDown } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
 import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree, getChatApprovalStatus } from "../api/registryApi";
+import { submitRunFeedback } from "../api/playgroundApi";
 import { getKeycloak } from "../lib/keycloak";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  // Present on a completed assistant turn so the user can rate it. Production
+  // feedback is the signal the observability dashboard cares about most.
+  runId?: string;
 }
 
 interface PendingApproval {
@@ -42,6 +46,22 @@ export default function CatalogChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  // Thumbs feedback per run id (locks the control after a rating is submitted).
+  const [feedbackByRun, setFeedbackByRun] = useState<Record<string, 1 | -1>>({});
+
+  const rateRun = async (runId: string, score: 1 | -1) => {
+    setFeedbackByRun((prev) => ({ ...prev, [runId]: score }));
+    try {
+      await submitRunFeedback(runId, score);
+    } catch {
+      // Roll back so the user can retry if the write failed.
+      setFeedbackByRun((prev) => {
+        const copy = { ...prev };
+        delete copy[runId];
+        return copy;
+      });
+    }
+  };
   const [sessionId] = useState(() => crypto.randomUUID());
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -253,6 +273,19 @@ export default function CatalogChatPage() {
         } else if (d.type === "done") {
           source.close();
           setIsStreaming(false);
+          // Tag the completed turn with its run id so the feedback control can
+          // rate it. Prefer the id on the done event, fall back to the start id.
+          const runId = d.run_id || res.run_id;
+          if (runId) {
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last && last.role === "assistant") {
+                copy[copy.length - 1] = { ...last, runId };
+              }
+              return copy;
+            });
+          }
         }
       };
 
@@ -383,6 +416,31 @@ export default function CatalogChatPage() {
                 i === messages.length - 1 && (
                   <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
                 )}
+              {m.role === "assistant" && m.runId && (
+                <div className="flex items-center gap-1 mt-2 pt-2 border-t border-slate-200">
+                  <span className="text-[11px] text-slate-400 mr-1">Helpful?</span>
+                  <button
+                    onClick={() => rateRun(m.runId!, 1)}
+                    disabled={feedbackByRun[m.runId] !== undefined}
+                    title="Thumbs up"
+                    className={`p-1 rounded hover:bg-emerald-50 disabled:hover:bg-transparent ${
+                      feedbackByRun[m.runId] === 1 ? "text-emerald-600" : "text-slate-400"
+                    }`}
+                  >
+                    <ThumbsUp size={13} />
+                  </button>
+                  <button
+                    onClick={() => rateRun(m.runId!, -1)}
+                    disabled={feedbackByRun[m.runId] !== undefined}
+                    title="Thumbs down"
+                    className={`p-1 rounded hover:bg-rose-50 disabled:hover:bg-transparent ${
+                      feedbackByRun[m.runId] === -1 ? "text-rose-600" : "text-slate-400"
+                    }`}
+                  >
+                    <ThumbsDown size={13} />
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}

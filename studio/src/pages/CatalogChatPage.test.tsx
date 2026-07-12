@@ -15,9 +15,11 @@ vi.mock("../api/registryApi", () => ({
 vi.mock("../lib/keycloak", () => ({
   getKeycloak: () => ({ authenticated: true, token: "tok", updateToken: vi.fn() }),
 }));
+vi.mock("../api/playgroundApi", () => ({ submitRunFeedback: vi.fn().mockResolvedValue({}) }));
 
 import { getCatalogDetail } from "../api/catalogApi";
 import { startAgentChat, getChatApprovalStatus } from "../api/registryApi";
+import { submitRunFeedback } from "../api/playgroundApi";
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -88,6 +90,28 @@ describe("CatalogChatPage — production consumer HITL auto-resume", () => {
       { timeout: 5000 }
     );
     expect(getChatApprovalStatus).toHaveBeenCalledWith("serper-agent-4", "run-1");
+  });
+
+  it("shows a thumbs control after a turn completes and submits production feedback", async () => {
+    const user = userEvent.setup();
+    renderChat();
+
+    const input = await screen.findByPlaceholderText(/message/i);
+    await user.type(input, "what's the weather");
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(MockEventSource.instances.length).toBe(1));
+
+    // Stream a token then complete the turn — the done event carries the run id.
+    act(() => MockEventSource.instances[0].emit({ type: "token", content: "Sunny." }));
+    act(() => MockEventSource.instances[0].emit({ type: "done", run_id: "run-1" }));
+
+    // The thumbs control appears now that the turn has a run id.
+    const thumbsUp = await screen.findByTitle("Thumbs up");
+    await user.click(thumbsUp);
+
+    expect(submitRunFeedback).toHaveBeenCalledWith("run-1", 1);
+    // Locked after submitting.
+    await waitFor(() => expect(screen.getByTitle("Thumbs down")).toBeDisabled());
   });
 });
 

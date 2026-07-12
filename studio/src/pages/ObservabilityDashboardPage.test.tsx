@@ -12,13 +12,15 @@ vi.mock("../api/registryApi", () => ({
 }));
 import { getDashboard } from "../api/observabilityApi";
 
+const EMPTY = { up: 0, down: 0, total: 0, ratio: null };
+
 const BASE: DashboardData = {
   latency_series: [],
   score_histogram: [],
   status_counts: [],
   cost_series: [],
   safety_blocks: [],
-  feedback: { up: 0, down: 0, total: 0, ratio: null },
+  feedback: { production: EMPTY, sandbox: EMPTY },
   total_runs: 0,
   total_cost_usd: 0,
 };
@@ -33,24 +35,34 @@ function mockDashboard(over: Partial<DashboardData>) {
 describe("ObservabilityDashboardPage — user feedback panel", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("renders the positive ratio + thumbs breakdown when feedback exists", async () => {
-    mockDashboard({ feedback: { up: 3, down: 1, total: 4, ratio: 0.75 } });
+  it("leads with production satisfaction and splits prod vs sandbox", async () => {
+    mockDashboard({
+      feedback: {
+        production: { up: 3, down: 1, total: 4, ratio: 0.75 },
+        sandbox: { up: 1, down: 1, total: 2, ratio: 0.5 },
+      },
+    });
     renderWithProviders(<ObservabilityDashboardPage />);
-    // Satisfaction metric card + panel both show 75%.
+    // Prod Satisfaction card shows the PRODUCTION ratio (75%), not sandbox.
     await waitFor(() =>
-      expect(screen.getAllByText(/75%/).length).toBeGreaterThan(0)
+      expect(screen.getAllByText(/75% positive/).length).toBeGreaterThan(0)
     );
-    expect(screen.getByText(/4 rated/)).toBeInTheDocument();
+    // Both environment rows render.
+    expect(screen.getByText("Production")).toBeInTheDocument();
+    expect(screen.getByText(/Sandbox \/ Playground/)).toBeInTheDocument();
+    expect(screen.getByText(/50% positive/)).toBeInTheDocument(); // sandbox row
   });
 
-  it("shows an empty state when no feedback was submitted", async () => {
-    mockDashboard({ feedback: { up: 0, down: 0, total: 0, ratio: null } });
+  it("shows production empty state when only sandbox has feedback", async () => {
+    mockDashboard({
+      feedback: {
+        production: EMPTY,
+        sandbox: { up: 2, down: 0, total: 2, ratio: 1 },
+      },
+    });
     renderWithProviders(<ObservabilityDashboardPage />);
-    await waitFor(() =>
-      expect(
-        screen.getByText(/No thumbs feedback in this period/i)
-      ).toBeInTheDocument()
-    );
-    expect(screen.getByText(/no feedback yet/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("Production")).toBeInTheDocument());
+    // Production card + row both signal no production feedback yet.
+    expect(screen.getByText(/no production feedback yet/i)).toBeInTheDocument();
   });
 });
