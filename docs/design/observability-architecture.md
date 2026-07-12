@@ -162,7 +162,8 @@ _Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observ
 | SDK-level tracer actually enabled on agent pods | ✅ **Fixed (Phase 2)** | env-var names + `public_key`; live-confirmed `tracer._enabled=True` |
 | Agent pod can reach Langfuse (cross-namespace) | ✅ **Fixed (Phase 2)** | deploy-controller injects FQN `…-langfuse-web.{ns}:3000` |
 | Spans for safety scans (SDK tracer) | ✅ **Working (Phase 2)** | `safety_scan_*` spans now appear (0→1 observation verified) |
-| Spans for LLM calls / tool calls (langchain handler) | ❌ **Blocked — needs v4** | agent langchain stack is 1.x; langfuse v2 handler incompatible. See `docs/design/todo/observability-provider-abstraction.md` |
+| Spans for LLM calls / tool calls | ✅ **Working (OTEL)** | vendor-neutral OpenInference OTEL instrumentation → Langfuse OTLP (NOT langfuse's langchain handler, which is v2-only). GENERATION/AGENT/CHAIN spans captured. `sdk/agentshield_sdk/otel.py` |
+| LLM/tool spans unified onto the run's clicked trace | ✅ **Working** | `otel_run_context(run_id)` binds OTEL spans to a run_id-derived trace; registry-api normalizes its trace id to the same undashed 32-hex (`_lf_trace_id`) so envelope + safety + LLM/tool land on one trace |
 | Trace "User" field shows readable name | ✅ **Fixed (Phase 1)** | `preferred_username`; DB FK cols keep UUID |
 | Trace identifies which deployment/instance produced it | ✅ **Fixed (Phase 1)** | `deployment_id` + `environment` in metadata/tags |
 | M1 — Traces list page | ✅ Built | `observability.py` + `ObservabilityTracesPage.tsx` |
