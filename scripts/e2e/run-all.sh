@@ -95,6 +95,7 @@ run_suite "Suite 45: HITL E2E (sandbox+prod)"       "suite-45-hitl-e2e.sh"
 run_suite "Suite 46: Chat Deployment Pinning"       "suite-46-chat-deployment-pinning.sh"
 run_suite "Suite 47: Deployment Chat Tracing"       "suite-47-deployment-chat-tracing.sh"
 run_suite "Suite 48: Feedback Dashboard Panel"      "suite-48-feedback-dashboard.sh"
+run_suite "Suite 49: Credential Validation"         "suite-49-credential-validation.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
