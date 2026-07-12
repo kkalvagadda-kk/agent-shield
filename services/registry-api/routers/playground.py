@@ -970,6 +970,11 @@ async def submit_run_feedback(
     if not run:
         raise HTTPException(status_code=404, detail=f"Playground run '{run_id}' not found")
 
+    # Persist locally (source of truth for the dashboard feedback-ratio panel);
+    # the Langfuse score push below is best-effort and only for the trace view.
+    run.user_feedback = body.score
+    await db.commit()
+
     langfuse_score_id: Optional[str] = None
 
     if run.langfuse_trace_id:

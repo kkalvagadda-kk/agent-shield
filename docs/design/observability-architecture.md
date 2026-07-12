@@ -24,7 +24,7 @@ Trace (id = run_id, created once when the user sends a message)
   └─ span: safety_scan_output                (built, orchestrator.py)
   scores:
     llm-judge (0.0–1.0)                       (built, judge.py)
-    user-feedback (+1/-1)                     (built, playground.py — Langfuse-only, no local DB column yet)
+    user-feedback (+1/-1)                     (built, playground.py — Langfuse score + local playground_runs.user_feedback col since migration 0057)
 ```
 
 Key invariant: **`trace_id` always equals the platform's own `run_id`** (or `eval_run_id`, `approval_id`). No separate ID mapping table exists or should ever be introduced — direct lookup by UUID is the whole point.
@@ -152,22 +152,26 @@ On first boot, `LANGFUSE_INIT_*` env vars (`values.yaml`) create the org, projec
 
 Verified against actual code this session (some checks done live, via `kubectl exec` into a running agent pod — not just static reading).
 
+_Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observability worktree)._
+
 | Capability | Status | Notes |
 |---|---|---|
 | Root trace created on `/agents/{name}/chat` (auto-resolve deployment) | ✅ Built | `chat.py: start_chat` |
-| Root trace created on `/agents/{name}/deployments/{id}/chat` (pinned deployment) | ❌ **Missing** | Gap 1 below — the endpoint `DeploymentOverviewPage`'s primary Chat button uses |
-| Trace_id propagated to agent pod via header | ⚠️ Partial | Works on `start_chat`'s path; missing on the deployment-pinned path (same gap as above) |
-| SDK-level tracer actually enabled on agent pods | ❌ **Disabled platform-wide** | Gap 0a — env var name mismatch + missing `public_key`, live-confirmed via pod exec |
-| Spans for LLM calls / tool calls | ❌ Not built | Gap 0b — only safety-scan spans exist anywhere in the codebase |
-| Spans for safety scans | ✅ Built | `safety-orchestrator/orchestrator.py` |
-| Trace "User" field shows readable name | ❌ Shows raw UUID | Gap 2 |
-| Trace identifies which deployment/instance produced it | ❌ Not built | Gap 3 |
+| Root trace created on `/agents/{name}/deployments/{id}/chat` (pinned deployment) | ✅ **Fixed (Phase 1)** | shared `_create_traced_chat_run` helper |
+| Trace_id propagated to agent pod via header | ✅ **Fixed (Phase 1)** | `stream_deployment_chat` + `resume_stream_chat` now pass it |
+| SDK-level tracer actually enabled on agent pods | ✅ **Fixed (Phase 2)** | env-var names + `public_key`; live-confirmed `tracer._enabled=True` |
+| Agent pod can reach Langfuse (cross-namespace) | ✅ **Fixed (Phase 2)** | deploy-controller injects FQN `…-langfuse-web.{ns}:3000` |
+| Spans for safety scans (SDK tracer) | ✅ **Working (Phase 2)** | `safety_scan_*` spans now appear (0→1 observation verified) |
+| Spans for LLM calls / tool calls | ✅ **Working (OTEL)** | vendor-neutral OpenInference OTEL instrumentation → Langfuse OTLP (NOT langfuse's langchain handler, which is v2-only). GENERATION/AGENT/CHAIN spans captured. `sdk/agentshield_sdk/otel.py` |
+| LLM/tool spans unified onto the run's clicked trace | ✅ **Working** | `otel_run_context(run_id)` binds OTEL spans to a run_id-derived trace; registry-api normalizes its trace id to the same undashed 32-hex (`_lf_trace_id`) so envelope + safety + LLM/tool land on one trace |
+| Trace "User" field shows readable name | ✅ **Fixed (Phase 1)** | `preferred_username`; DB FK cols keep UUID |
+| Trace identifies which deployment/instance produced it | ✅ **Fixed (Phase 1)** | `deployment_id` + `environment` in metadata/tags |
 | M1 — Traces list page | ✅ Built | `observability.py` + `ObservabilityTracesPage.tsx` |
-| M2 — Latency/score dashboard | ⚠️ Partial | Missing feedback ratio (needs new DB column, Langfuse-only today) and tool-call frequency/latency (blocked on Gap 0b) |
+| M2 — Latency/score dashboard | ⚠️ Partial | **Feedback ratio ✅ shipped (Phase 3a)** — `playground_runs.user_feedback` (migration 0057) written by the thumbs endpoint; `get_dashboard` returns `feedback{up,down,total,ratio}`; Satisfaction card + panel in `ObservabilityDashboardPage`. **Tool-call frequency/latency still deferred (G-14)** — Langfuse observations API returns no tool/GENERATION spans yet + has no team filter |
 | M3 — Eval results deep-linking | ✅ Built | `EvalResultsPage.tsx` |
 | M4 — Safety scan visibility | ✅ Built | `SafetyDetails.tsx` + `TraceDrawer.tsx` |
-| M5 — Production chat observability | ⚠️ Partial | Exists via `catalog.py` runs endpoint (different shape than originally spec'd), missing `user`/`score` columns |
-| M6 — Trace comparison | ⚠️ Partial | Span/duration diffing built; no score delta |
+| M5 — Production chat observability | ✅ **Built (Phase 4)** | `catalog.py` runs endpoint; `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User + Score columns |
+| M6 — Trace comparison | ✅ **Built (Phase 4)** | Span/duration diffing + Judge Score (A→B) + Score Delta card, sourced from the trace's `scores[]` |
 | Frontend defaults to inline `TraceDrawer`, not external Langfuse link | ❌ Inverted | `docs/design/todo/langfuse-trace-single-click.md` — external link is primary in 3 components today, drawer is dead-code fallback |
 | L1 Real-time trace streaming | ❌ Not built | Quarter+ scope, intentionally deferred |
 | L2 Custom dashboards per agent | ❌ Not built | Quarter+ scope, intentionally deferred |
@@ -186,9 +190,9 @@ Full designs for the actionable (non-Quarter+) gaps live in the working plan for
 - **Gap 1 — `start_deployment_chat` never creates a trace.** Fix: extract a shared `_create_traced_chat_run(...)` helper in `chat.py` used by both `start_chat` and `start_deployment_chat`; fix `stream_deployment_chat` to propagate `trace_id` the same way `stream_chat` does.
 - **Gap 2 — Trace user field shows a UUID.** Fix: pass `preferred_username` (JWT claim) instead of `sub` to `trace_create_run`'s `user_id` param. DB columns unaffected.
 - **Gap 3 — No deployment/instance identity on traces.** Fix: add `deployment_id`/`environment` to `trace_create_run`'s metadata/tags. Bundle with Gap 1/2 — same call site.
-- **Gap 4 — M2 dashboard missing panels.** Feedback ratio needs a new `user_feedback` DB column (migration) + write-through in `submit_run_feedback`, since feedback is Langfuse-only today. Tool-call frequency/latency is blocked on Gap 0b.
-- **Gap 5 — M5 missing columns.** Add `user`/`score` to the catalog runs endpoint + Studio table.
-- **Gap 6 — M6 missing score delta.** Add score-delta computation to the compare endpoint + `ObservabilityComparePage.tsx`.
+- **Gap 4 — M2 dashboard missing panels.** ✅ **Feedback ratio RESOLVED (Phase 3a):** `user_feedback` column (migration 0057) + write-through in `submit_run_feedback`; `get_dashboard` aggregates `feedback{up,down,total,ratio}` from PlaygroundRun⋈Agent(team); Satisfaction card + panel. ⏳ **Tool-call frequency/latency still deferred (G-14):** the Langfuse observations API returns only unclosed `safety_scan` spans today (no tool/GENERATION observations) and has no team filter, so a panel would render empty or aggregate globally — revisit after verifying OTEL tool-span ingestion + a traces→observations team-scope join.
+- **Gap 5 — M5 missing columns.** ✅ **RESOLVED (Phase 4):** `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User (`run_by`/`user_id`) + Score columns.
+- **Gap 6 — M6 missing score delta.** ✅ **RESOLVED (Phase 4):** `ObservabilityComparePage` reads each trace's `scores[]` (name~judge) and renders a Judge Score (A→B) + Score Delta card.
 
 ---
 

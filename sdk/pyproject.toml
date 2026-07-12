@@ -11,10 +11,21 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "langgraph>=0.3",
+    "langchain>=0.3",
     "langchain-anthropic>=0.3",
     "langchain-aws>=0.2",
     "langchain-core>=0.3",
-    "langfuse>=3.0",
+    # langfuse v2 client is kept only for the SDK's safety-scan tracer; LLM/tool
+    # span capture is done via OpenTelemetry (see below), NOT langfuse's langchain
+    # handler — which is incompatible with langchain 1.x. Provider-agnostic path:
+    # docs/design/todo/observability-provider-abstraction.md.
+    "langfuse>=2.60,<3",
+    # OpenTelemetry emit — vendor-neutral LLM/tool span capture. OpenInference
+    # instruments langchain/langgraph (tested against langchain 1.x) and exports
+    # OTLP to any backend (Langfuse's /api/public/otel today).
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+    "openinference-instrumentation-langchain>=0.1.40",
     "httpx>=0.27",
     "click>=8.1",
     "prometheus-client>=0.20",

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, TrendingUp } from "lucide-react";
+import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown } from "lucide-react";
 import { useState } from "react";
 import { getDashboard, DashboardData } from "../api/observabilityApi";
 import { listAgents } from "../api/registryApi";
@@ -80,7 +80,7 @@ export default function ObservabilityDashboardPage() {
       ) : (
         <>
           {/* Summary cards */}
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-4 gap-4">
             <MetricCard label="Total Runs" value={d.total_runs.toLocaleString()} />
             <MetricCard label="Total Cost" value={`$${d.total_cost_usd.toFixed(4)}`} />
             <MetricCard
@@ -89,6 +89,19 @@ export default function ObservabilityDashboardPage() {
                 d.latency_series.length > 0
                   ? `${((d.latency_series.reduce((s, p) => s + (p.p50 ?? 0), 0) / d.latency_series.length) / 1000).toFixed(1)}s`
                   : "—"
+              }
+            />
+            <MetricCard
+              label="Satisfaction"
+              value={
+                d.feedback?.ratio != null
+                  ? `${Math.round(d.feedback.ratio * 100)}%`
+                  : "—"
+              }
+              sub={
+                d.feedback?.total
+                  ? `${d.feedback.up}👍 / ${d.feedback.down}👎`
+                  : "no feedback yet"
               }
             />
           </div>
@@ -166,6 +179,42 @@ export default function ObservabilityDashboardPage() {
                 </div>
               )}
             </div>
+          </div>
+
+          {/* User feedback ratio */}
+          <div className="bg-white border border-slate-200 rounded-lg p-4">
+            <h2 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
+              <ThumbsUp size={14} /> User Feedback
+            </h2>
+            {!d.feedback || d.feedback.total === 0 ? (
+              <p className="text-sm text-slate-400">
+                No thumbs feedback in this period.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex h-4 w-full overflow-hidden rounded bg-slate-100">
+                  <div
+                    className="h-full bg-emerald-400"
+                    style={{ width: `${(d.feedback.ratio ?? 0) * 100}%` }}
+                  />
+                  <div className="h-full flex-1 bg-rose-300" />
+                </div>
+                <div className="flex items-center justify-between text-sm text-slate-600">
+                  <span className="flex items-center gap-1 text-emerald-600">
+                    <ThumbsUp size={13} /> {d.feedback.up}
+                  </span>
+                  <span className="font-medium text-slate-800">
+                    {Math.round((d.feedback.ratio ?? 0) * 100)}% positive
+                    <span className="text-slate-400 font-normal">
+                      {" "}({d.feedback.total} rated)
+                    </span>
+                  </span>
+                  <span className="flex items-center gap-1 text-rose-500">
+                    {d.feedback.down} <ThumbsDown size={13} />
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Safety blocks */}

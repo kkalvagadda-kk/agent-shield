@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from crypto import encrypt_json
 from db import get_db
 from k8s import delete_secret, upsert_secret
 from models import AuthConfig, MCPServer, Tool
@@ -67,6 +68,9 @@ async def create_auth_config(
 
     if body.credentials:
         secret_name = f"auth-config-{config.id}"
+        # Durable source of truth: encrypt into the DB (captured by pg backups).
+        config.credentials_encrypted = encrypt_json(body.credentials)
+        # Runtime materialization: the K8s secret pods mount.
         await upsert_secret(secret_name, _PLATFORM_NAMESPACE, body.credentials)
         config.k8s_secret_ref = secret_name
 
@@ -154,6 +158,8 @@ async def update_auth_config(
 
     if body.credentials:
         secret_name = config.k8s_secret_ref or f"auth-config-{config.id}"
+        # Durable source of truth (backed up) + runtime K8s materialization.
+        config.credentials_encrypted = encrypt_json(body.credentials)
         await upsert_secret(secret_name, _PLATFORM_NAMESPACE, body.credentials)
         config.k8s_secret_ref = secret_name
 

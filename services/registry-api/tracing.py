@@ -97,6 +97,22 @@ def trace_eval_run_completed(run_id: str, status: str, overall_score: float | No
         logger.debug("Langfuse trace_eval_run_completed error: %s", exc)
 
 
+def _lf_trace_id(run_id: str) -> str:
+    """Normalize a run id to the OTEL 32-hex trace-id form (no dashes).
+
+    Agent-side spans are emitted via OpenTelemetry, whose trace ids are 32-hex
+    (a UUID with the dashes stripped). To land the platform's envelope trace on
+    the SAME Langfuse trace as those spans, registry-api must use the identical
+    id. ``uuid.UUID`` accepts both dashed and undashed input, so this is
+    idempotent for either form; non-UUID ids pass through unchanged.
+    """
+    import uuid as _uuid
+    try:
+        return _uuid.UUID(str(run_id)).hex
+    except Exception:
+        return str(run_id)
+
+
 def trace_create_run(
     run_id: str,
     agent_name: str,
@@ -130,8 +146,9 @@ def trace_create_run(
         if environment:
             metadata["environment"] = environment
             tags.append(f"env:{environment}")
+        lf_id = _lf_trace_id(run_id)
         lf.trace(
-            id=run_id,
+            id=lf_id,
             name=f"agent-run.{context}",
             user_id=user_id,
             input={"message": input_message} if input_message else None,
@@ -139,7 +156,9 @@ def trace_create_run(
             tags=tags,
         )
         lf.flush()
-        return run_id
+        # Return the undashed id — stored as langfuse_trace_id, propagated to the
+        # agent, and used to build the Studio trace URL, so all land on one trace.
+        return lf_id
     except Exception as exc:
         logger.debug("Langfuse trace_create_run error: %s", exc)
         return None
@@ -162,7 +181,7 @@ def trace_complete_run(
         if judge_score is not None:
             output["judge_score"] = judge_score
         lf.trace(
-            id=run_id,
+            id=_lf_trace_id(run_id),
             name="agent-run",
             output=output,
             tags=[f"status:{status}"],

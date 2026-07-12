@@ -70,6 +70,16 @@ workflow_executor: Any = None  # set during lifespan startup
 async def lifespan(app: FastAPI):
     global workflow_executor
 
+    # Enable OpenTelemetry LLM/tool span capture (OpenInference instruments
+    # langchain/langgraph globally; exports OTLP to the configured backend —
+    # Langfuse today). No-ops if unconfigured. Must run before any langchain
+    # object is constructed so the instrumentation hooks are in place.
+    try:
+        from agentshield_sdk.otel import setup_otel
+        setup_otel()
+    except Exception as exc:  # never let tracing setup break startup
+        logger.warning("OTEL setup skipped: %s", exc)
+
     if cfg.COMPOSITE_WORKFLOW_ID:
         import base64 as _b64
         logger.info(
@@ -263,11 +273,11 @@ async def ready():
         checks["opa"] = "unreachable" if not cfg.DEV_MODE else "mock"
 
     # Langfuse
-    if cfg.AGENTSHIELD_LANGFUSE_KEY:
+    if cfg.LANGFUSE_PUBLIC_KEY and cfg.LANGFUSE_SECRET_KEY:
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(
-                    f"{cfg.AGENTSHIELD_LANGFUSE_HOST}/api/public/health"
+                    f"{cfg.LANGFUSE_HOST}/api/public/health"
                 )
             checks["langfuse"] = "ok" if resp.status_code == 200 else "degraded"
         except Exception:
@@ -289,8 +299,12 @@ async def ready():
     else:
         checks["postgres"] = "memory"
 
+    # Langfuse is observability, not a serving dependency — a trace-backend blip
+    # must never make an agent un-servable. Report its status but don't gate on it.
     is_ready = all(
-        v in ("ok", "mock", "disabled", "memory") for v in checks.values()
+        v in ("ok", "mock", "disabled", "memory")
+        for k, v in checks.items()
+        if k != "langfuse"
     )
     status = "ready" if is_ready else "not_ready"
     return JSONResponse(

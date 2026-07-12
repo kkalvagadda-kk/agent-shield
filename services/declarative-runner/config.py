@@ -42,9 +42,13 @@ PORT: int = int(os.getenv("PORT", "8080"))
 AGENTSHIELD_OPA_URL: str = os.getenv("AGENTSHIELD_OPA_URL", "http://localhost:8181")
 
 # --- Langfuse tracing ---
-AGENTSHIELD_LANGFUSE_KEY: str = os.getenv("AGENTSHIELD_LANGFUSE_KEY", "")
-AGENTSHIELD_LANGFUSE_HOST: str = os.getenv(
-    "AGENTSHIELD_LANGFUSE_HOST", "http://langfuse.agentshield-platform:3000"
+# Standard Langfuse env vars — same names deploy-controller injects into the pod
+# and _make_langfuse_handler already reads. Previously AGENTSHIELD_LANGFUSE_KEY/
+# HOST (nothing set them) so the SDK tracer path silently no-op'd.
+LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST: str = os.getenv(
+    "LANGFUSE_HOST", "http://langfuse.agentshield-platform:3000"
 )
 
 # --- Registry API ---
