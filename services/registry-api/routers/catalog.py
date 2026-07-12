@@ -588,6 +588,35 @@ async def patch_production_deployment_status(
     return {"updated": True, "status": dep.status}
 
 
+@router.get("/internal/running-production-deployments")
+async def list_running_production_deployments(
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    """Return running production deployments so the controller can detect drift
+    (a 'running' row whose k8s Deployment no longer exists after a cluster wipe)
+    and re-materialize it. Minimal fields — the controller derives the k8s name."""
+    rows = list((await db.execute(
+        select(ProductionDeployment)
+        .where(ProductionDeployment.status == "running")
+        .order_by(ProductionDeployment.updated_at)
+        .limit(200)
+    )).scalars().all())
+
+    results = []
+    for dep in rows:
+        artifact = (await db.execute(
+            select(PublishedArtifact).where(PublishedArtifact.id == dep.artifact_id)
+        )).scalar_one_or_none()
+        if not artifact:
+            continue
+        results.append({
+            "id": str(dep.id),
+            "artifact_name": artifact.name,
+            "namespace": dep.namespace,
+        })
+    return results
+
+
 @router.post("/internal/verify-members")
 async def verify_member_deployments(
     body: dict,

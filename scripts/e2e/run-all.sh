@@ -98,6 +98,7 @@ run_suite "Suite 48: Feedback Dashboard Panel"      "suite-48-feedback-dashboard
 run_suite "Suite 49: Judge Score -> AgentRun"       "suite-49-judge-agentrun-score.sh"
 run_suite "Suite 50: Version Dedup on Deploy"       "suite-50-version-dedup.sh"
 run_suite "Suite 51: Credential Validation"         "suite-51-credential-validation.sh"
+run_suite "Suite 52: Reconcile Drift Recovery"      "suite-52-reconcile-drift.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

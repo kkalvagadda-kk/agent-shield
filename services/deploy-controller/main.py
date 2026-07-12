@@ -106,6 +106,56 @@ async def _handle_lifecycle_transitions(http: httpx.AsyncClient, k8s: K8sClient)
                 logger.info("Terminated %s/%s (resources deleted)", namespace, k8s_name)
 
 
+async def _handle_sandbox_running_drift(http: httpx.AsyncClient, k8s: K8sClient) -> None:
+    """Detect sandbox deployments the DB says are 'running' but whose k8s
+    Deployment object no longer exists (e.g. a cluster restart wiped all pods).
+
+    Sandbox is developer-facing: we do NOT auto-reprovision (the dev may have
+    moved on). Instead mark the row 'terminated' with a clear message so the
+    fleet UI stops showing "pod unreachable" and the developer can redeploy.
+    Only the absence of the Deployment OBJECT triggers this — a healthy agent
+    mid-rolling-restart still has its Deployment, so it is never touched.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        resp = await http.get(
+            "/api/v1/deployments/",
+            params={"status": "running", "environment": "", "limit": 100},
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("running-drift fetch (sandbox) failed: %s", exc)
+        return
+
+    for dep in items:
+        namespace = dep.get("k8s_namespace")
+        k8s_name = dep.get("k8s_deployment_name")
+        if not namespace or not k8s_name:
+            continue
+        try:
+            obj = await loop.run_in_executor(
+                None, lambda ns=namespace, kn=k8s_name: k8s.get_deployment(ns, kn)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("drift check failed for %s/%s: %s", namespace, k8s_name, exc)
+            continue
+        if obj is None:
+            await _patch_deployment_status(
+                http,
+                dep["id"],
+                "terminated",
+                error_message=(
+                    "k8s Deployment missing (cluster restart?) — sandbox is not "
+                    "auto-reprovisioned; redeploy to restore."
+                ),
+            )
+            logger.info(
+                "Sandbox drift: %s/%s has no Deployment — marked terminated",
+                namespace, k8s_name,
+            )
+
+
 async def poll_loop() -> None:
     """Main reconciliation loop. Polls every POLL_INTERVAL_SECONDS."""
     k8s = K8sClient()
@@ -184,6 +234,10 @@ async def poll_loop() -> None:
 
                 # 6. Handle suspend/terminate transitions (sandbox lifecycle)
                 await _handle_lifecycle_transitions(http, k8s)
+
+                # 7. Detect sandbox 'running' rows whose k8s Deployment vanished
+                #    (cluster wipe) → mark terminated so the dev can redeploy.
+                await _handle_sandbox_running_drift(http, k8s)
 
             except httpx.RequestError as exc:
                 logger.error("Registry API unreachable: %s — will retry next cycle", exc)

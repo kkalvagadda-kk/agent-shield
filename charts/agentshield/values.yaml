@@ -585,7 +585,7 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.149"
+    tag: "0.2.150"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.4"
@@ -647,7 +647,7 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.34"
+    tag: "0.1.35"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)

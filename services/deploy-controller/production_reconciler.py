@@ -271,12 +271,69 @@ async def production_poll_loop(settings: Settings) -> None:
                     # Report final status
                     await _patch_status(http, dep_id, new_status)
 
+                # Detect + re-materialize drifted 'running' production deployments.
+                await _handle_production_running_drift(http, k8s)
+
             except httpx.RequestError as exc:
                 logger.error("Registry API unreachable (production loop): %s", exc)
             except Exception as exc:
                 logger.exception("Production poll loop error: %s", exc)
 
             await asyncio.sleep(settings.poll_interval_seconds)
+
+
+# Cap re-provisions per cycle so a full cluster wipe doesn't spawn a thundering
+# herd that overwhelms a small cluster — the rest recover over later cycles.
+_PROD_DRIFT_REPROVISION_CAP = 3
+
+
+async def _handle_production_running_drift(
+    http: httpx.AsyncClient, k8s: K8sClient
+) -> None:
+    """Detect production deployments the DB says are 'running' but whose k8s
+    Deployment vanished (cluster wipe) and re-materialize them.
+
+    Production is customer-facing, so unlike sandbox it MUST self-heal: flip the
+    drifted row back to 'pending' and the normal reconcile path re-provisions it.
+    Only the absence of the Deployment OBJECT triggers this (never a transient
+    0-replicas), and re-provisions are capped per cycle.
+    """
+    loop = asyncio.get_event_loop()
+    try:
+        resp = await http.get("/api/v1/catalog/internal/running-production-deployments")
+        resp.raise_for_status()
+        rows = resp.json()
+    except Exception as exc:
+        logger.warning("running-drift fetch (production) failed: %s", exc)
+        return
+
+    reprovisioned = 0
+    for dep in rows:
+        if reprovisioned >= _PROD_DRIFT_REPROVISION_CAP:
+            logger.info(
+                "Production drift: cap %d reached this cycle; remaining recover next cycle",
+                _PROD_DRIFT_REPROVISION_CAP,
+            )
+            break
+        agent_name = dep.get("artifact_name")
+        namespace = dep.get("namespace")
+        if not agent_name or not namespace:
+            continue
+        k8s_name = f"{agent_name}-production"
+        try:
+            obj = await loop.run_in_executor(
+                None, lambda ns=namespace, kn=k8s_name: k8s.get_deployment(ns, kn)
+            )
+        except Exception as exc:
+            logger.debug("prod drift check failed for %s/%s: %s", namespace, k8s_name, exc)
+            continue
+        if obj is None:
+            await _patch_status(http, dep["id"], "pending")
+            reprovisioned += 1
+            logger.info(
+                "Production drift: %s/%s has no Deployment — flipped to pending to re-materialize",
+                namespace, k8s_name,
+            )
 
 
 async def _preflight_check_members(
