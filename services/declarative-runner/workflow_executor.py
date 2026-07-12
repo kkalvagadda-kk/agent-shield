@@ -722,7 +722,11 @@ class WorkflowExecutor:
         if lf_handler:
             config["callbacks"] = [lf_handler]
         state = {"messages": history + [HumanMessage(content=safe_message)]}
-        result = await self.graph.ainvoke(state, config)
+        # Bind OpenInference/OTEL spans to a trace id derived from run_id (=trace_id)
+        # so the LLM/tool spans land on the platform's trace, not a separate one.
+        from agentshield_sdk.otel import otel_run_context
+        with otel_run_context(trace_id):
+            result = await self.graph.ainvoke(state, config)
 
         # 4. Extract last AI message.
         messages = result.get("messages", [])
@@ -779,8 +783,11 @@ class WorkflowExecutor:
             config["callbacks"] = [lf_handler]
         state = {"messages": [HumanMessage(content=safe_message)]}
 
-        async for sse_chunk in stream_events(self.graph, state, config):
-            yield sse_chunk
+        # Bind OTEL spans to the run_id-derived trace (see run()).
+        from agentshield_sdk.otel import otel_run_context
+        with otel_run_context(trace_id):
+            async for sse_chunk in stream_events(self.graph, state, config):
+                yield sse_chunk
 
         tracer.end_trace(trace_ctx, output={"streamed": True})
 
@@ -801,9 +808,11 @@ class WorkflowExecutor:
         if lf_handler:
             config["callbacks"] = [lf_handler]
 
-        result = await self.graph.ainvoke(
-            Command(resume=decision), config
-        )
+        from agentshield_sdk.otel import otel_run_context
+        with otel_run_context(trace_id):
+            result = await self.graph.ainvoke(
+                Command(resume=decision), config
+            )
 
         messages = result.get("messages", [])
         last_msg = messages[-1] if messages else None

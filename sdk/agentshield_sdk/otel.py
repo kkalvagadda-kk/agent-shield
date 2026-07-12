@@ -22,12 +22,60 @@ calling ``setup_otel()`` is always safe.
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import os
+import uuid as _uuid
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 _initialized = False
+
+
+@contextmanager
+def otel_run_context(run_id: str | None):
+    """Bind OTEL spans created within this block to a trace whose id is derived
+    deterministically from ``run_id``.
+
+    Without this, OpenInference auto-generates a fresh trace id per langgraph run,
+    so the agent's LLM/tool spans land in a SEPARATE Langfuse trace from the
+    platform's envelope trace (which is keyed by run_id). Deriving the OTEL trace
+    id from run_id (a UUID is 128 bits — a valid W3C trace id) makes the agent's
+    spans land on a trace the platform can reference by run_id. No-ops if tracing
+    is disabled or run_id is absent.
+    """
+    if not run_id or not _initialized:
+        yield
+        return
+    try:
+        from opentelemetry import context as _otel_context
+        from opentelemetry import trace as _otel_trace
+        from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
+
+        try:
+            trace_id_int = _uuid.UUID(str(run_id)).int  # 128-bit → valid OTEL trace id
+        except Exception:
+            trace_id_int = int.from_bytes(
+                hashlib.sha256(str(run_id).encode()).digest()[:16], "big"
+            )
+        span_id_int = (_uuid.uuid4().int & ((1 << 64) - 1)) or 1  # random non-zero 64-bit
+        parent = NonRecordingSpan(
+            SpanContext(
+                trace_id=trace_id_int,
+                span_id=span_id_int,
+                is_remote=True,
+                trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            )
+        )
+        token = _otel_context.attach(_otel_trace.set_span_in_context(parent))
+        try:
+            yield
+        finally:
+            _otel_context.detach(token)
+    except Exception as exc:  # never let trace-context binding break execution
+        logger.debug("otel_run_context failed: %s", exc)
+        yield
 
 
 def _resolve_otlp() -> tuple[str, dict[str, str]] | None:
