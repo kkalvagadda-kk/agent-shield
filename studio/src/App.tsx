@@ -36,6 +36,7 @@ import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
 import ObservabilityTracesPage from "./pages/ObservabilityTracesPage";
 import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
 import ObservabilityComparePage from "./pages/ObservabilityComparePage";
+import CostConsolePage from "./pages/CostConsolePage";
 import CredentialsPage from "./pages/CredentialsPage";
 
 const queryClient = new QueryClient({
@@ -103,6 +104,7 @@ export default function App() {
                 element={<Navigate to="/observability/dashboard/production" replace />}
               />
               <Route path="/observability/compare" element={<ObservabilityComparePage />} />
+              <Route path="/observability/costs" element={<CostConsolePage />} />
             </Routes>
             </ErrorBoundary>
           </main>

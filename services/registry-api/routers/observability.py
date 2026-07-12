@@ -102,6 +102,30 @@ class ToolCallStat(BaseModel):
     avg_latency_ms: float | None = None
 
 
+class CostByModel(BaseModel):
+    model: str
+    cost_usd: float
+    calls: int
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+class CostByAgent(BaseModel):
+    agent_name: str
+    cost_usd: float
+    runs: int
+
+
+class ExpensiveRun(BaseModel):
+    id: str
+    agent_name: str
+    cost_usd: float
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    started_at: datetime
+    trace_id: str | None = None
+
+
 class DashboardData(BaseModel):
     latency_series: list[TimeseriesPoint]
     score_histogram: list[HistogramBucket]
@@ -112,6 +136,28 @@ class DashboardData(BaseModel):
     tool_calls: list[ToolCallStat] = []
     total_runs: int
     total_cost_usd: float
+    # Cost headline metrics (persisted from Langfuse GENERATION spans by the
+    # cost-backfill sweep; model breakdown fetched live from Langfuse).
+    avg_cost_per_run: float | None = None
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    spend_by_model: list[CostByModel] = []
+
+
+class CostConsoleData(BaseModel):
+    """Deep cost workspace — the /observability/costs page."""
+    environment: str
+    total_cost_usd: float
+    total_runs: int
+    runs_with_cost: int
+    avg_cost_per_run: float | None = None
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    projected_monthly_usd: float | None = None
+    daily_series: list[TimeseriesPoint] = []
+    by_model: list[CostByModel] = []
+    by_agent: list[CostByAgent] = []
+    top_runs: list[ExpensiveRun] = []
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +400,79 @@ def _tool_call_stats(
     return stats[:15]
 
 
+def _spend_by_model(
+    trace_ids: set[str], from_date: Optional[datetime]
+) -> list[CostByModel]:
+    """Aggregate LLM spend per model from Langfuse GENERATION observations.
+
+    Same scoping trick as ``_tool_call_stats``: Langfuse has no team filter, so
+    fetch GENERATION spans and keep only those whose trace belongs to this
+    dashboard's run population. Model name lives on the observation (not on
+    agent_runs), so this breakdown must come from Langfuse rather than SQL.
+    Best-effort — returns [] on any error / unconfigured tracing.
+    """
+    if not trace_ids:
+        return []
+    import base64
+    import json as _json
+    import urllib.request as urlreq
+
+    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+    if not (lf_pk and lf_sk):
+        return []
+    creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
+    from_param = ""
+    if from_date:
+        iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        from_param = f"&fromStartTime={iso}"
+
+    agg: dict[str, list] = {}  # model -> [cost, calls, prompt_tok, completion_tok]
+    try:
+        for page in range(1, 6):  # cap 5 pages (500 GENERATIONs) to bound cost
+            url = (
+                f"{lf_host}/api/public/observations"
+                f"?type=GENERATION&limit=100&page={page}{from_param}"
+            )
+            req = urlreq.Request(url, headers={"Authorization": f"Basic {creds}"})
+            with urlreq.urlopen(req, timeout=6) as r:
+                data = _json.loads(r.read()).get("data", [])
+            for o in data:
+                if o.get("traceId") not in trace_ids:
+                    continue
+                model = o.get("model") or "unknown"
+                c = o.get("calculatedTotalCost") or o.get("totalCost") or 0
+                pt = o.get("promptTokens") or 0
+                ct = o.get("completionTokens") or 0
+                slot = agg.setdefault(model, [0.0, 0, 0, 0])
+                if isinstance(c, (int, float)):
+                    slot[0] += c
+                slot[1] += 1
+                if isinstance(pt, int):
+                    slot[2] += pt
+                if isinstance(ct, int):
+                    slot[3] += ct
+            if len(data) < 100:
+                break
+    except Exception as exc:
+        logger.debug("spend_by_model: Langfuse fetch failed: %s", exc)
+        return []
+
+    out = [
+        CostByModel(
+            model=model,
+            cost_usd=round(cost, 6),
+            calls=calls,
+            prompt_tokens=pt,
+            completion_tokens=ct,
+        )
+        for model, (cost, calls, pt, ct) in agg.items()
+    ]
+    out.sort(key=lambda m: m.cost_usd, reverse=True)
+    return out
+
+
 @router.get("/dashboard", response_model=DashboardData)
 async def get_dashboard(
     agent_name: Optional[str] = Query(None),
@@ -479,12 +598,18 @@ async def get_dashboard(
         for r in safety_rows
     ]
 
-    # --- Totals ---
+    # --- Totals (runs, cost, tokens, runs-with-cost for the avg) ---
     totals_q = select(
         func.count().label("total"),
         func.coalesce(func.sum(AgentRun.cost_usd), 0).label("cost"),
+        func.coalesce(func.sum(AgentRun.prompt_tokens), 0).label("ptok"),
+        func.coalesce(func.sum(AgentRun.completion_tokens), 0).label("ctok"),
+        func.count().filter(AgentRun.cost_usd.isnot(None)).label("costed"),
     ).where(*base_filter)
     totals = (await db.execute(totals_q)).one()
+    avg_cost_per_run = (
+        float(totals.cost) / totals.costed if totals.costed else None
+    )
 
     # --- User feedback ratio (thumbs) ---
     # Feedback is written on PlaygroundRun (the only surface with a thumbs
@@ -527,7 +652,9 @@ async def get_dashboard(
         .where(AgentRun.langfuse_trace_id.isnot(None))
         .limit(1000)
     )).scalars().all()
-    tool_calls = _tool_call_stats(set(tid_rows), from_date)
+    trace_id_set = set(tid_rows)
+    tool_calls = _tool_call_stats(trace_id_set, from_date)
+    spend_by_model = _spend_by_model(trace_id_set, from_date)
 
     return DashboardData(
         latency_series=latency_series,
@@ -539,4 +666,152 @@ async def get_dashboard(
         tool_calls=tool_calls,
         total_runs=totals.total,
         total_cost_usd=float(totals.cost),
+        avg_cost_per_run=avg_cost_per_run,
+        total_prompt_tokens=int(totals.ptok),
+        total_completion_tokens=int(totals.ctok),
+        spend_by_model=spend_by_model,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /observability/costs — dedicated cost console
+# ---------------------------------------------------------------------------
+
+@router.get("/costs", response_model=CostConsoleData)
+async def get_costs(
+    period: str = Query("30d", description="7d|30d"),
+    environment: str = Query("production", description="production|sandbox"),
+    from_date: Optional[datetime] = Query(None),
+    to_date: Optional[datetime] = Query(None),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> CostConsoleData:
+    """Deep cost breakdown for the team's runs in one environment: totals,
+    daily trend, per-model + per-agent spend, and the most expensive runs.
+
+    Cost/token columns are persisted onto agent_runs by the cost-backfill sweep;
+    the model breakdown is fetched live from Langfuse (model lives on the span,
+    not the run). Same env-scoping as the dashboard — sandbox never dilutes prod.
+    """
+    x_user_team = await _resolve_team(claims, db)
+    is_production = environment != "sandbox"
+
+    window_days = 30 if period == "30d" else 7
+    if not from_date:
+        from_date = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) - timedelta(days=window_days)
+
+    base_filter = [
+        AgentRun.team == x_user_team,
+        AgentRun.parent_run_id.is_(None),
+    ]
+    if is_production:
+        base_filter.append(AgentRun.production_deployment_id.isnot(None))
+    else:
+        base_filter.append(AgentRun.sandbox_deployment_id.isnot(None))
+    if from_date:
+        base_filter.append(AgentRun.started_at >= from_date)
+    if to_date:
+        base_filter.append(AgentRun.started_at <= to_date)
+
+    # --- Totals ---
+    totals = (await db.execute(
+        select(
+            func.count().label("total"),
+            func.coalesce(func.sum(AgentRun.cost_usd), 0).label("cost"),
+            func.coalesce(func.sum(AgentRun.prompt_tokens), 0).label("ptok"),
+            func.coalesce(func.sum(AgentRun.completion_tokens), 0).label("ctok"),
+            func.count().filter(AgentRun.cost_usd.isnot(None)).label("costed"),
+        ).where(*base_filter)
+    )).one()
+    total_cost = float(totals.cost)
+    avg_cost = total_cost / totals.costed if totals.costed else None
+
+    # --- Daily spend series ---
+    daily_rows = (await db.execute(
+        select(
+            func.date_trunc("day", AgentRun.started_at).label("ts"),
+            func.coalesce(func.sum(AgentRun.cost_usd), 0).label("total_usd"),
+            func.count().filter(AgentRun.cost_usd.isnot(None)).label("cnt"),
+        )
+        .where(*base_filter)
+        .where(AgentRun.cost_usd.isnot(None))
+        .group_by(sa_text("1"))
+        .order_by(sa_text("1"))
+    )).all()
+    daily_series = [
+        TimeseriesPoint(timestamp=r.ts, total_usd=float(r.total_usd), count=r.cnt)
+        for r in daily_rows
+    ]
+
+    # --- Spend by agent ---
+    agent_rows = (await db.execute(
+        select(
+            AgentRun.agent_name,
+            func.coalesce(func.sum(AgentRun.cost_usd), 0).label("cost"),
+            func.count().filter(AgentRun.cost_usd.isnot(None)).label("runs"),
+        )
+        .where(*base_filter)
+        .where(AgentRun.cost_usd.isnot(None))
+        .group_by(AgentRun.agent_name)
+        .order_by(sa_text("2 DESC"))
+        .limit(25)
+    )).all()
+    by_agent = [
+        CostByAgent(agent_name=r.agent_name, cost_usd=round(float(r.cost), 6), runs=r.runs)
+        for r in agent_rows
+    ]
+
+    # --- Most expensive runs ---
+    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
+    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    run_rows = (await db.execute(
+        select(AgentRun)
+        .where(*base_filter)
+        .where(AgentRun.cost_usd.isnot(None))
+        .order_by(AgentRun.cost_usd.desc())
+        .limit(20)
+    )).scalars().all()
+    top_runs = [
+        ExpensiveRun(
+            id=str(r.id),
+            agent_name=r.agent_name,
+            cost_usd=round(float(r.cost_usd), 6),
+            prompt_tokens=r.prompt_tokens,
+            completion_tokens=r.completion_tokens,
+            started_at=r.started_at,
+            trace_id=r.langfuse_trace_id,
+        )
+        for r in run_rows
+    ]
+
+    # --- Spend by model (live from Langfuse GENERATION spans) ---
+    tid_rows = (await db.execute(
+        select(AgentRun.langfuse_trace_id)
+        .where(*base_filter)
+        .where(AgentRun.langfuse_trace_id.isnot(None))
+        .limit(1000)
+    )).scalars().all()
+    by_model = _spend_by_model(set(tid_rows), from_date)
+
+    # --- Projected monthly (extrapolate the window's daily burn to 30 days) ---
+    projected = None
+    if total_cost > 0:
+        span_days = max(1, (datetime.now(timezone.utc) - from_date).days)
+        projected = round((total_cost / span_days) * 30, 4)
+
+    return CostConsoleData(
+        environment="sandbox" if not is_production else "production",
+        total_cost_usd=round(total_cost, 6),
+        total_runs=totals.total,
+        runs_with_cost=totals.costed,
+        avg_cost_per_run=avg_cost,
+        total_prompt_tokens=int(totals.ptok),
+        total_completion_tokens=int(totals.ctok),
+        projected_monthly_usd=projected,
+        daily_series=daily_series,
+        by_model=by_model,
+        by_agent=by_agent,
+        top_runs=top_runs,
     )

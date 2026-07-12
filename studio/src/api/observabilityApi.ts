@@ -63,6 +63,30 @@ export interface ToolCallStat {
   avg_latency_ms: number | null;
 }
 
+export interface CostByModel {
+  model: string;
+  cost_usd: number;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+}
+
+export interface CostByAgent {
+  agent_name: string;
+  cost_usd: number;
+  runs: number;
+}
+
+export interface ExpensiveRun {
+  id: string;
+  agent_name: string;
+  cost_usd: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  started_at: string;
+  trace_id: string | null;
+}
+
 export interface DashboardData {
   latency_series: TimeseriesPoint[];
   score_histogram: HistogramBucket[];
@@ -73,6 +97,25 @@ export interface DashboardData {
   tool_calls: ToolCallStat[];
   total_runs: number;
   total_cost_usd: number;
+  avg_cost_per_run: number | null;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  spend_by_model: CostByModel[];
+}
+
+export interface CostConsoleData {
+  environment: string;
+  total_cost_usd: number;
+  total_runs: number;
+  runs_with_cost: number;
+  avg_cost_per_run: number | null;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  projected_monthly_usd: number | null;
+  daily_series: TimeseriesPoint[];
+  by_model: CostByModel[];
+  by_agent: CostByAgent[];
+  top_runs: ExpensiveRun[];
 }
 
 // ---------------------------------------------------------------------------
@@ -121,5 +164,15 @@ export async function getDashboard(params: {
   to_date?: string;
 } = {}): Promise<DashboardData> {
   const { data } = await http.get<DashboardData>("/observability/dashboard", { params });
+  return data;
+}
+
+export async function getCosts(params: {
+  period?: string;
+  environment?: "production" | "sandbox";
+  from_date?: string;
+  to_date?: string;
+} = {}): Promise<CostConsoleData> {
+  const { data } = await http.get<CostConsoleData>("/observability/costs", { params });
   return data;
 }

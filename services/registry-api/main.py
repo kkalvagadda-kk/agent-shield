@@ -116,10 +116,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover
         logger.warning("registry-api: database warm-up failed: %s", exc)
 
+    # Background cost-backfill sweep: copies Langfuse GENERATION cost/tokens onto
+    # agent_runs so every cost surface (dashboard, traces, catalog) reads real $.
+    import asyncio as _asyncio
+    from cost_backfill import cost_backfill_loop
+    cost_task = _asyncio.create_task(cost_backfill_loop())
+
     yield  # application runs here
 
     # --- shutdown ---
     logger.info("registry-api shutting down — disposing DB connection pool")
+    cost_task.cancel()
+    try:
+        await cost_task
+    except (_asyncio.CancelledError, Exception):
+        pass
     await engine.dispose()
     logger.info("registry-api: shutdown complete")
 

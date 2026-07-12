@@ -1,8 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown, Wrench } from "lucide-react";
+import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown, Wrench, DollarSign, ArrowRight } from "lucide-react";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { getDashboard, DashboardData, FeedbackSummary } from "../api/observabilityApi";
 import { listAgents } from "../api/registryApi";
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n}`;
+}
 
 const PERIOD_OPTIONS = [
   { value: "7d", label: "Last 7 days" },
@@ -155,6 +162,62 @@ export default function ObservabilityDashboardPage({
                   : "no feedback yet"
               }
             />
+          </div>
+
+          {/* Cost — headline cost signal next to quality; deep dive in Cost console */}
+          <div className="bg-white border border-slate-200 rounded-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-medium text-slate-700 flex items-center gap-1.5">
+                <DollarSign size={14} /> LLM Cost
+              </h2>
+              <Link
+                to="/observability/costs"
+                className="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-1"
+              >
+                Cost console <ArrowRight size={12} />
+              </Link>
+            </div>
+            <div className="grid grid-cols-3 gap-4 mb-4">
+              <div>
+                <p className="text-xs text-slate-500 uppercase tracking-wide">Avg / Run</p>
+                <p className="text-lg font-semibold text-slate-800 mt-0.5">
+                  {d.avg_cost_per_run != null ? `$${d.avg_cost_per_run.toFixed(4)}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500 uppercase tracking-wide">Prompt Tokens</p>
+                <p className="text-lg font-semibold text-slate-800 mt-0.5">{fmtTokens(d.total_prompt_tokens)}</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-500 uppercase tracking-wide">Completion Tokens</p>
+                <p className="text-lg font-semibold text-slate-800 mt-0.5">{fmtTokens(d.total_completion_tokens)}</p>
+              </div>
+            </div>
+            <p className="text-xs font-medium text-slate-500 mb-2">Spend by model</p>
+            {!d.spend_by_model || d.spend_by_model.length === 0 ? (
+              <p className="text-sm text-slate-400">No LLM cost recorded in this period.</p>
+            ) : (
+              <div className="space-y-1">
+                {d.spend_by_model.map((m) => {
+                  const max = Math.max(...d.spend_by_model.map((x) => x.cost_usd));
+                  return (
+                    <div key={m.model} className="flex items-center gap-2 text-xs">
+                      <span className="text-slate-600 w-48 truncate font-mono" title={m.model}>
+                        {m.model}
+                      </span>
+                      <div className="flex-1 bg-slate-100 rounded h-4 overflow-hidden">
+                        <div
+                          className="h-full bg-green-400 rounded"
+                          style={{ width: `${Math.min(100, (m.cost_usd / Math.max(0.000001, max)) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-slate-700 w-20 text-right">${m.cost_usd.toFixed(4)}</span>
+                      <span className="text-slate-400 w-12 text-right">{m.calls}×</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Latency chart (simple text-based for now; Recharts added in M2 chart task) */}

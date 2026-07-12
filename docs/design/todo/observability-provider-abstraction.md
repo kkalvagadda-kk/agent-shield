@@ -1,10 +1,23 @@
 # Provider-Agnostic Observability (OpenTelemetry) — Langfuse as the first backend
 
-**Status:** Not started. Supersedes the narrower "Langfuse v2→v4 migration" framing — the platform should be **decoupled from any single observability backend**, with Langfuse as the first (reference) backend rather than a hard dependency. The langfuse-specific v4 details are preserved below as the **Langfuse adapter mechanics**.
-**Drivers:** (1) product goal — swap the observability backend by config, not code (Langfuse today, possibly Datadog / Honeycomb / Arize Phoenix / Grafana Tempo / self-hosted OTEL collector tomorrow); (2) a blocking finding (below) that already forces the emit-path off the langfuse v2 client.
-**Related:** `docs/design/observability-architecture.md` (canonical tracing reference — its §2 pattern and "trace_id == run_id" invariant assume the langfuse v2 client; both change here), `docs/design/todo/cost-tracking.md` (token/cost overlaps the emit path).
+**Status: PARTIALLY SHIPPED — the emit seam is done for the piece that was blocked; the read seam is not started.** Supersedes the narrower "Langfuse v2→v4 migration" framing — the platform should be **decoupled from any single observability backend**, with Langfuse as the first (reference) backend rather than a hard dependency. The langfuse-specific v4 details are preserved below as the **Langfuse adapter mechanics**.
 
-## ⚠️ Blocking finding (2026-07-11): the agent LangChain stack is 1.x, which the langfuse v2 client cannot instrument
+**What is shipped (2026-07-12):**
+- ✅ **Agent-side LLM/tool/generation spans emit via vendor-neutral OpenInference OTEL**, not the langfuse client — `sdk/agentshield_sdk/otel.py` (`otel_run_context(run_id)`), wired in `services/declarative-runner/workflow_executor.py` + `main.py`. This is exactly Seam-1's recommendation and it **resolves the blocking finding below** (langchain-1.x can't be instrumented by the langfuse v2 handler; OpenInference works). `GENERATION`/`AGENT`/`CHAIN`/`TOOL` spans now land in Langfuse via its OTLP endpoint.
+- ✅ **Cost tracking (Path A) rides on that OTEL emit** — because OTEL `GENERATION` spans carry `calculatedTotalCost` + token counts, cost is now summed onto `agent_runs` and surfaced (dashboard + Cost console). See `docs/design/todo/cost-tracking.md`. **But** its reads (`cost_backfill.py` → `tracing.fetch_trace_cost_tokens`, `observability._spend_by_model`/`_tool_call_stats`) hit Langfuse `/api/public/observations` **directly** — new **Seam-2 (read-path) langfuse coupling** that this doc's read-adapter must absorb.
+
+**What remains (the real scope of this doc now):**
+- ❌ **Platform-emitted spans still use the langfuse v2 client** — `registry-api/tracing.py` (`lf.trace()`, the envelope trace) and `safety-orchestrator/orchestrator.py` (scan spans) have NOT moved to the OTEL SDK.
+- ❌ **Read seam not started** — Studio-facing reads still hit langfuse `/api/public/*` directly (playground/observability/catalog routers + the new cost reads); no `ObservabilityBackend`/`NormalizedTrace` interface; `TraceDrawer` still renders langfuse's raw shape.
+- ❌ **Config-driven backend selection** (`OBSERVABILITY_BACKEND`) not built.
+- ⚠️ **Own-your-data partially in place** — `playground_runs.user_feedback` (migration 0057) + `judge_score` (on `PlaygroundRun`/`AgentRun`) already live in Postgres; the *principle* is followed for those, but not yet generalized behind the adapter.
+
+**Drivers:** (1) product goal — swap the observability backend by config, not code (Langfuse today, possibly Datadog / Honeycomb / Arize Phoenix / Grafana Tempo / self-hosted OTEL collector tomorrow); (2) a blocking finding (below, now **resolved for agent spans**) that forced the agent emit-path off the langfuse v2 client.
+**Related:** `docs/design/observability-architecture.md` (canonical tracing reference — its §2 pattern and "trace_id == run_id" invariant still assume the langfuse client for the *platform envelope*; the read seam here changes the read side), `docs/design/todo/cost-tracking.md` (token/cost — **now shipped**, rides on the OTEL emit path; its Langfuse-direct reads are tracked here as Seam-2 debt).
+
+## ✅ RESOLVED (2026-07-12) — Blocking finding: the agent LangChain stack is 1.x, which the langfuse v2 client cannot instrument
+
+**Resolution:** the agent emit-path was moved to **vendor-neutral OpenInference OTEL** (`otel_run_context`), exactly as Seam-1 recommends — sidestepping both the langchain-1.x incompatibility and vendor lock-in. Agent `GENERATION`/`TOOL` spans now land in Langfuse via OTLP. The original finding is preserved below for context.
 
 Phase 2 span-capture tried to "align down" to langfuse v2 (matching registry-api). Verified wrong by introspecting a live agent pod:
 
@@ -39,13 +52,16 @@ Define `ObservabilityBackend` in registry-api:
 get_trace(trace_id) -> NormalizedTrace          # normalized shape, NOT the backend's raw JSON
 list_traces(filters) -> list[NormalizedTraceSummary]
 dashboard(filters) -> DashboardData
+costs(filters) -> CostConsoleData                # NEW: cost/token aggregation (currently langfuse-direct)
+get_run_cost(trace_id) -> {cost_usd, prompt_tokens, completion_tokens, model}  # NEW: per-run, used by the backfill sweep
 build_trace_url(trace_id) -> str | None          # provider-specific deep-link, or None if no UI
 ```
+The **cost methods are new (2026-07-12) and currently unabstracted** — `cost_backfill.py` + `observability._spend_by_model` call Langfuse's observations API directly. Folding them onto this interface is part of the read-seam work: `get_run_cost` becomes the Langfuse adapter's implementation of what `fetch_trace_cost_tokens` does today; `costs` wraps the `_spend_by_model` + SQL aggregation. A backend that doesn't expose per-generation cost returns `None` (the sweep just leaves `cost_usd` null — same graceful-degrade already in place).
 - **`NormalizedTrace` is a stable, provider-neutral shape** (trace meta + nested spans with type/name/timing/io/status). The Langfuse adapter maps langfuse's `/api/public/traces/{id}` response into it. Adding a backend = one adapter class.
 - **`build_trace_url` returns `None`** for backends with no queryable UI or a poor hand-off → Studio hides the deep-link for those and relies purely on the inline drawer.
 
 ### Own your product data (don't store it in the observability backend)
-Judge scores, user feedback, eval results, run metadata are **business data, not spans**. Store them in the platform's **own Postgres** (source of truth) and *optionally* mirror to the backend as span attributes/events. This makes them provider-agnostic by default and removes the dependency on any vendor's scores/evals API (which OTEL does not standardize). The feedback-ratio dashboard panel already wants a local `user_feedback` column — same principle.
+Judge scores, user feedback, eval results, run metadata are **business data, not spans**. Store them in the platform's **own Postgres** (source of truth) and *optionally* mirror to the backend as span attributes/events. This makes them provider-agnostic by default and removes the dependency on any vendor's scores/evals API (which OTEL does not standardize). **Already following this (2026-07-12):** `playground_runs.user_feedback` (migration 0057), `judge_score` on `PlaygroundRun`/`AgentRun`, and now **`agent_runs.cost_usd`/`prompt_tokens`/`completion_tokens`** — cost is persisted to *our* DB (backfilled from the backend), so cost dashboards/console read local SQL and survive a backend swap; only the *source* of the cost figure (langfuse observations) is backend-specific and moves behind the read-adapter. Generalize the remaining reads to the same principle.
 
 ### Config-driven backend selection
 One env/values block picks the backend: `OBSERVABILITY_BACKEND=langfuse|otlp|none`, OTLP endpoint + auth headers, and which read-adapter registry-api loads. `none` disables emit + hides trace UI cleanly (tracing already non-gating for readiness).
@@ -62,19 +78,19 @@ The **deep-link landing experience** — the vendor's own UI on the other side o
 
 ## Current langfuse coupling inventory (what the migration touches)
 
-- **Emit:** `services/registry-api/tracing.py` (`.trace()`/`.span()`/`create_score`), `sdk/agentshield_sdk/tracing.py` (Tracer wraps langfuse client), `services/declarative-runner/workflow_executor.py` (`_make_langfuse_handler`), `services/safety-orchestrator/orchestrator.py` (scan spans).
-- **Read:** `services/registry-api/routers/playground.py` + `observability.py` + `catalog.py` fetch langfuse `/api/public/traces/{id}` (Basic auth) and build langfuse trace URLs.
+- **Emit:** `services/registry-api/tracing.py` (`.trace()`/`.span()`/`create_score` — **still langfuse v2 client**), `sdk/agentshield_sdk/tracing.py` (Tracer wraps langfuse client), `services/declarative-runner/workflow_executor.py` (`_make_langfuse_handler` — **superseded for LLM/tool spans by `otel_run_context` / OpenInference OTEL, ✅ done**), `services/safety-orchestrator/orchestrator.py` (scan spans — **still langfuse client**).
+- **Read:** `services/registry-api/routers/playground.py` + `observability.py` + `catalog.py` fetch langfuse `/api/public/traces/{id}` (Basic auth) and build langfuse trace URLs. **Cost reads added 2026-07-12 (same coupling):** `services/registry-api/cost_backfill.py` → `tracing.fetch_trace_cost_tokens` and `observability._spend_by_model`/`_tool_call_stats` fetch langfuse `/api/public/observations` directly. All of these must move behind the `ObservabilityBackend` read-adapter (`get_run_cost`/`aggregate_cost` belong on the interface).
 - **UI:** `studio/src/components/playground/TraceDrawer.tsx` renders langfuse's response shape; "Open in Langfuse ↗" deep-links.
 - **Data model:** `langfuse_trace_id` column, `trace_id == run_id` invariant, scores written to langfuse.
 - **Deploy:** langfuse bundled as an internal component (Helm + ClickHouse + MinIO + Redis).
 
 ## Migration plan
 
-1. **Emit → OpenTelemetry.**
-   - Add `opentelemetry-sdk` + `opentelemetry-exporter-otlp` to registry-api, SDK, declarative-runner, safety-orchestrator. Configure an OTLP exporter from `OBSERVABILITY_*` env.
-   - Replace `_make_langfuse_handler` with a vendor-neutral GenAI instrumentation (OpenInference/OpenLLMetry) attached to the langgraph invocation — solves the langchain-1.x block.
-   - Rewrite `registry-api/tracing.py`, `sdk/tracing.py`, `safety-orchestrator/orchestrator.py` to emit via the OTEL SDK. Derive trace-id from `run_id`; propagate it via `X-AgentShield-Trace-ID` → OTEL `trace_context` in the agent.
-2. **Read → `ObservabilityBackend` interface.** Extract the existing langfuse read code (playground/observability/catalog routers) behind the interface; return `NormalizedTrace`. Ship the Langfuse adapter as backend #1.
+1. **Emit → OpenTelemetry.** *(agent LLM/tool spans ✅ DONE; platform envelope + safety ❌ remaining)*
+   - Add `opentelemetry-sdk` + `opentelemetry-exporter-otlp` to registry-api, SDK, declarative-runner, safety-orchestrator. Configure an OTLP exporter from `OBSERVABILITY_*` env. *(SDK/declarative side done via OpenInference; registry-api + safety-orchestrator not yet.)*
+   - ✅ **Done:** replaced the langfuse `CallbackHandler` with vendor-neutral OpenInference instrumentation on the langgraph invocation (`otel_run_context`) — solved the langchain-1.x block. `_make_langfuse_handler` remains as dead/fallback code; remove it when the platform envelope also moves to OTEL.
+   - ❌ **Remaining:** rewrite `registry-api/tracing.py` + `safety-orchestrator/orchestrator.py` to emit via the OTEL SDK (they still use the langfuse client). `sdk/tracing.py`'s safety-scan spans similarly. Trace-id is already derived to the 32-hex form (`_lf_trace_id`) and propagated via `X-AgentShield-Trace-ID` → OTEL `trace_context` in the agent — reuse that.
+2. **Read → `ObservabilityBackend` interface.** Extract the existing langfuse read code (playground/observability/catalog routers **+ the cost reads: `cost_backfill.py`, `observability._spend_by_model`/`_tool_call_stats`, `tracing.fetch_trace_cost_tokens`**) behind the interface; return `NormalizedTrace` / `CostConsoleData`. Ship the Langfuse adapter as backend #1.
 3. **TraceDrawer → normalized shape.** Re-point `TraceDrawer.tsx` + `observabilityApi.ts` at `NormalizedTrace`; neutral "Trace ↗" label; hide when `build_trace_url` is `None`.
 4. **Own-your-data.** Add local columns/tables for feedback + scores; write-through on `submit_run_feedback` and judge scoring; treat backend scores as optional mirror.
 5. **Config + deploy.** `OBSERVABILITY_BACKEND` + OTLP endpoint/auth in values.yaml; make bundled-langfuse optional (external-OTLP mode).

@@ -152,7 +152,7 @@ On first boot, `LANGFUSE_INIT_*` env vars (`values.yaml`) create the org, projec
 
 Verified against actual code this session (some checks done live, via `kubectl exec` into a running agent pod — not just static reading).
 
-_Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observability worktree)._
+_Status as of 2026-07-12 (Phase 1 merged to main; Phase 2 + cost tracking in the observability worktree)._
 
 | Capability | Status | Notes |
 |---|---|---|
@@ -172,11 +172,13 @@ _Status as of 2026-07-11 (Phase 1 merged to main; Phase 2 partial, in the observ
 | M4 — Safety scan visibility | ✅ Built | `SafetyDetails.tsx` + `TraceDrawer.tsx` |
 | M5 — Production chat observability | ✅ **Built (Phase 4)** | `catalog.py` runs endpoint; `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User + Score columns |
 | M6 — Trace comparison | ✅ **Built (Phase 4)** | Span/duration diffing + Judge Score (A→B) + Score Delta card, sourced from the trace's `scores[]` |
+| Cost tracking — per-run $ + tokens persisted | ✅ **Built (Path A)** | `cost_backfill.py` background sweep sums each run's Langfuse `GENERATION` cost (`calculatedTotalCost`) + tokens and writes them to `agent_runs.cost_usd`/`prompt_tokens`/`completion_tokens`. Idempotent (`cost_usd IS NULL`), 60s interval, 24h window — one path for all run types, no ingestion race. |
+| Cost tracking — dashboard + Cost console | ✅ **Built (Path A)** | Dashboard **LLM Cost** panel (avg/run, tokens, Spend-by-Model bar). Dedicated **Cost console** (`GET /observability/costs`, `/observability/costs`, DollarSign sidebar) — total/avg/tokens/projected-monthly, daily-spend trend, by-model + by-agent, most-expensive-runs. Env-scoped (prod/sandbox). By-model comes live from Langfuse (model lives on the span); totals/daily/by-agent from persisted SQL. |
 | Frontend defaults to inline `TraceDrawer`, not external Langfuse link | ❌ Inverted | `docs/design/todo/langfuse-trace-single-click.md` — external link is primary in 3 components today, drawer is dead-code fallback |
 | L1 Real-time trace streaming | ❌ Not built | Quarter+ scope, intentionally deferred |
 | L2 Custom dashboards per agent | ❌ Not built | Quarter+ scope, intentionally deferred |
 | L3 Alerting on trace anomalies | ❌ Not built | Quarter+ scope, intentionally deferred |
-| L4 Cost tracking via LLM callback handler | ❌ Not built | Quarter+ scope — this is the same underlying work as Gap 0b (LangChain callback handler), tracked once here instead of twice |
+| L4 Cost tracking | ✅ **Built (Path A)** — see the two Cost rows above | The original "needs a LangChain callback handler" framing is **obsolete**: the OTEL instrumentation already emits `GENERATION` spans carrying `calculatedTotalCost` + token counts, so cost is read from Langfuse and persisted by the backfill sweep — no callback handler, no Portkey required. Portkey stays optional, only for budget *enforcement* + caching (not needed for visibility). |
 | L5 Trace-based regression testing | ❌ Not built | Quarter+ scope, intentionally deferred |
 
 ---
@@ -193,6 +195,7 @@ Full designs for the actionable (non-Quarter+) gaps live in the working plan for
 - **Gap 4 — M2 dashboard missing panels.** ✅ **RESOLVED.** Feedback ratio (`user_feedback` column, migration 0057) + **tool-call frequency/latency** both shipped. The tool-call panel became feasible once OTEL `type=TOOL` spans ingested; team-scoping is solved by filtering observations to the dashboard's own AgentRun trace-ids (no per-trace fetch). The dashboard is now env-scoped (separate Production/Sandbox views, `environment=` filters every panel).
 - **Gap 5 — M5 missing columns.** ✅ **RESOLVED (Phase 4):** `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User (`run_by`/`user_id`) + Score columns.
 - **Gap 6 — M6 missing score delta.** ✅ **RESOLVED (Phase 4):** `ObservabilityComparePage` reads each trace's `scores[]` (name~judge) and renders a Judge Score (A→B) + Score Delta card.
+- **Cost tracking — nothing wrote `agent_runs.cost_usd`.** ✅ **RESOLVED (Path A):** the columns existed but were never populated, so every cost query returned 0. Because the OTEL work made Langfuse `GENERATION` spans carry `calculatedTotalCost` + token counts, the fix is a small backfill sweep (`cost_backfill.py`) that sums those onto each run — no Portkey, no callback handler. Surfaced on the dashboard (LLM Cost panel) and a dedicated Cost console (`GET /observability/costs`). **Known limits (gap ledger):** by-model/tool breakdowns fetch Langfuse observations with a 5-page (500-span) cap per view — best-effort for very high-volume windows; a run whose trace never carries a GENERATION (e.g. a blocked run) is abandoned after 24h and stays `cost_usd = NULL`.
 
 ---
 

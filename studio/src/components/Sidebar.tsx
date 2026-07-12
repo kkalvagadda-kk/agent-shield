@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Cpu,
   Database,
+  DollarSign,
   FlaskConical,
   HandMetal,
   KeyRound,
@@ -59,6 +60,7 @@ const OBSERVE_ITEMS: NavItem[] = [
   { label: "Traces",         to: "/observability/traces",              icon: Activity },
   { label: "Prod Dashboard", to: "/observability/dashboard/production", icon: LayoutDashboard },
   { label: "Sandbox Dashboard", to: "/observability/dashboard/sandbox", icon: LayoutDashboard },
+  { label: "Cost", to: "/observability/costs", icon: DollarSign },
 ];
 
 const SETTINGS_ITEMS: NavItem[] = [

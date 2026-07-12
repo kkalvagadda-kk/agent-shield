@@ -24,6 +24,10 @@ const BASE: DashboardData = {
   tool_calls: [],
   total_runs: 0,
   total_cost_usd: 0,
+  avg_cost_per_run: null,
+  total_prompt_tokens: 0,
+  total_completion_tokens: 0,
+  spend_by_model: [],
 };
 
 function mockDashboard(over: Partial<DashboardData>) {
@@ -73,5 +77,24 @@ describe("ObservabilityDashboardPage — env-scoped dashboard", () => {
     expect(screen.getByText("12×")).toBeInTheDocument();
     expect(screen.getByText("0.86s")).toBeInTheDocument(); // 860ms -> 0.86s
     expect(screen.getByText("calculator")).toBeInTheDocument();
+  });
+
+  it("renders the LLM cost panel with avg/run, tokens, and spend-by-model", async () => {
+    mockDashboard({
+      total_cost_usd: 1.2345,
+      avg_cost_per_run: 0.0102,
+      total_prompt_tokens: 15400,
+      total_completion_tokens: 3800,
+      spend_by_model: [
+        { model: "claude-sonnet-4-6", cost_usd: 1.1, calls: 20, prompt_tokens: 14000, completion_tokens: 3500 },
+        { model: "claude-haiku-4-5", cost_usd: 0.13, calls: 8, prompt_tokens: 1400, completion_tokens: 300 },
+      ],
+    });
+    renderWithProviders(<ObservabilityDashboardPage environment="production" />);
+    await waitFor(() => expect(screen.getByText("claude-sonnet-4-6")).toBeInTheDocument());
+    expect(screen.getByText("$0.0102")).toBeInTheDocument(); // avg/run
+    expect(screen.getByText("15.4K")).toBeInTheDocument(); // prompt tokens
+    expect(screen.getByText("$1.1000")).toBeInTheDocument(); // model spend
+    expect(screen.getByText("claude-haiku-4-5")).toBeInTheDocument();
   });
 });
