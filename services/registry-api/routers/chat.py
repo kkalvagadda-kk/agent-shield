@@ -272,6 +272,10 @@ async def _complete_chat_run(
     from db import AsyncSessionLocal
 
     now = datetime.now(tz=timezone.utc)
+    # Captured for the fire-and-forget judge below (see end of function).
+    judge_input: str | None = None
+    judge_agent_name: str | None = None
+    judge_team: str | None = None
     async with AsyncSessionLocal() as session:
         try:
             parsed = uuid.UUID(run_id)
@@ -284,6 +288,8 @@ async def _complete_chat_run(
                 run.completed_at = now
                 if output_text:
                     run.output_text = output_text
+                judge_input = run.input_message
+                judge_agent_name = run.agent_name
                 await session.commit()
         except Exception as exc:
             logger.warning("_complete_chat_run: %s: %s", run_id, exc)
@@ -302,6 +308,8 @@ async def _complete_chat_run(
                     ar.output = output_text[:4000] if output_text else None
                     if ar.started_at:
                         ar.latency_ms = int((now - ar.started_at).total_seconds() * 1000)
+                    # The agent's own team owns the LLM provider the judge calls.
+                    judge_team = ar.team
                     await session.commit()
             except Exception as exc:
                 logger.warning("_complete_chat_run agent_run: %s: %s", agent_run_id, exc)
@@ -309,6 +317,26 @@ async def _complete_chat_run(
     if trace_id:
         from tracing import trace_complete_run
         trace_complete_run(run_id=trace_id, status="completed", output_text=output_text)
+
+    # Fire-and-forget LLM-as-Judge (same scorer as playground). Scores this turn
+    # and writes judge_score to BOTH the PlaygroundRun and the trace's AgentRun
+    # (via langfuse_trace_id), so the production catalog runs table shows a Score.
+    # Costs one extra LLM call per chat turn — an explicit product decision.
+    if judge_input and output_text and trace_id and judge_team and judge_agent_name:
+        try:
+            from judge import score_run
+            asyncio.create_task(
+                score_run(
+                    run_id=uuid.UUID(run_id),
+                    agent_name=judge_agent_name,
+                    input_text=judge_input,
+                    output_text=output_text,
+                    team=judge_team,
+                    langfuse_trace_id=trace_id,
+                )
+            )
+        except Exception as exc:
+            logger.debug("_complete_chat_run: could not launch judge for %s: %s", run_id, exc)
 
 
 async def _proxy_agent_stream(

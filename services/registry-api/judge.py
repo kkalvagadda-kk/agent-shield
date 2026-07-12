@@ -85,14 +85,17 @@ async def score_run(
             score, reason = await _call_judge(input_text, output_text, team)
     except TimeoutError:
         logger.warning("judge: timeout after %ss for run %s", _JUDGE_TIMEOUT, run_id)
-        await _write_score(run_id, score=None, reason=None, status="timeout")
+        await _write_score(run_id, score=None, reason=None, status="timeout",
+                           langfuse_trace_id=langfuse_trace_id)
         return
     except Exception as exc:
         logger.debug("judge: unexpected error for run %s: %s", run_id, exc)
-        await _write_score(run_id, score=None, reason=None, status="error")
+        await _write_score(run_id, score=None, reason=None, status="error",
+                           langfuse_trace_id=langfuse_trace_id)
         return
 
-    await _write_score(run_id, score=score, reason=reason, status="completed")
+    await _write_score(run_id, score=score, reason=reason, status="completed",
+                       langfuse_trace_id=langfuse_trace_id)
     logger.info("judge: run %s scored %.2f (%s)", run_id, score, reason[:60])
 
     if langfuse_trace_id:
@@ -261,11 +264,21 @@ async def _write_score(
     score: Optional[float],
     reason: Optional[str],
     status: str,
+    langfuse_trace_id: Optional[str] = None,
 ) -> None:
-    """Patch judge_score onto the playground run record directly via DB."""
+    """Patch judge_score onto the run record(s) for this turn.
+
+    A chat turn is represented by a ``PlaygroundRun`` (keyed by ``run_id``) AND,
+    for consumer/deployment chats, an ``AgentRun`` that shares the same
+    ``langfuse_trace_id``. The judge write follows the trace so the score lands
+    on both — the observability dashboard reads ``PlaygroundRun.judge_score``
+    while the production catalog runs table reads ``AgentRun.judge_score``.
+    ``AgentRun`` has no judge_status/reason columns, so only the score is set
+    there.
+    """
     try:
         from db import AsyncSessionLocal
-        from models import PlaygroundRun
+        from models import AgentRun, PlaygroundRun
         from sqlalchemy import select
 
         async with AsyncSessionLocal() as db:
@@ -277,6 +290,14 @@ async def _write_score(
                 run.judge_score = score
                 run.judge_status = status
                 run.judge_reason = reason
-                await db.commit()
+
+            if langfuse_trace_id:
+                ars = (await db.execute(
+                    select(AgentRun).where(AgentRun.langfuse_trace_id == langfuse_trace_id)
+                )).scalars().all()
+                for ar in ars:
+                    ar.judge_score = score
+
+            await db.commit()
     except Exception as exc:
         logger.debug("judge: write_score failed for run %s: %s", run_id, exc)
