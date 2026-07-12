@@ -11,7 +11,7 @@ vi.mock("../api/registryApi", async () => {
   );
   return {
     // Keep the real derivation helpers (expectedCredentialKeys / isValidEnvVarName)
-    // so the test exercises the actual tool -> key linkage, not a stub.
+    // so the tests exercise the actual tool -> key linkage, not a stub.
     ...actual,
     listAuthConfigs: vi.fn(),
     createAuthConfig: vi.fn(),
@@ -20,12 +20,10 @@ vi.mock("../api/registryApi", async () => {
     listTools: vi.fn(),
   };
 });
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-import {
-  listAuthConfigs,
-  createAuthConfig,
-  listTools,
-} from "../api/registryApi";
+import { listAuthConfigs, createAuthConfig, listTools } from "../api/registryApi";
+import { toast } from "sonner";
 
 const mk = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -41,18 +39,24 @@ const SERPER_TOOL: RegistryTool = {
   config: {},
 };
 
+function seedApis() {
+  mk(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
+  mk(listTools).mockResolvedValue({ items: [SERPER_TOOL], total: 1 });
+  mk(createAuthConfig).mockResolvedValue({
+    id: "ac1",
+    name: "serper-dev",
+    type: "api_key",
+    owner_team: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+}
+
+// TODO #18 — tool-driven, env-var-valid Key Name
 describe("CredentialsPage — tool-driven key name", () => {
   beforeEach(() => {
-    mk(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
-    mk(listTools).mockResolvedValue({ items: [SERPER_TOOL], total: 1 });
-    mk(createAuthConfig).mockResolvedValue({
-      id: "ac1",
-      name: "serper-dev",
-      type: "api_key",
-      owner_team: null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
+    vi.clearAllMocks();
+    seedApis();
   });
 
   it("auto-fills and locks Key Name from the selected tool", async () => {
@@ -62,7 +66,6 @@ describe("CredentialsPage — tool-driven key name", () => {
     await user.click((await screen.findAllByRole("button", { name: /new credential/i }))[0]);
 
     const toolSelect = await screen.findByLabelText(/used by tool/i);
-    // Tool options are populated from listTools.
     await user.selectOptions(toolSelect, "tool-serper");
 
     const keyInput = screen.getByLabelText(/key name/i) as HTMLInputElement;
@@ -87,7 +90,6 @@ describe("CredentialsPage — tool-driven key name", () => {
     expect(
       await screen.findByText(/letters, digits, and underscores only/i),
     ).toBeInTheDocument();
-    // Save is blocked by validation.
     expect(createAuthConfig).not.toHaveBeenCalled();
   });
 
@@ -106,5 +108,52 @@ describe("CredentialsPage — tool-driven key name", () => {
     expect(mk(createAuthConfig).mock.calls[0][0]).toMatchObject({
       credentials: { serper_api_key: "sk-123" },
     });
+  });
+});
+
+// TODO #17 — reject error-string / invalid credential VALUES at save time
+describe("CredentialsPage save guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    seedApis();
+  });
+
+  async function openCreateForm() {
+    renderWithProviders(<CredentialsPage />);
+    const buttons = await screen.findAllByRole("button", { name: /New Credential/i });
+    await userEvent.click(buttons[0]);
+    await screen.findByText("New Credential", { selector: "h2" });
+  }
+
+  async function fillForm(keyName: string, secretValue: string) {
+    await userEvent.type(screen.getByPlaceholderText(/serper-api-key/i), "serper-dev");
+    await userEvent.type(screen.getByLabelText(/key name/i), keyName);
+    await userEvent.type(screen.getByPlaceholderText(/paste secret value/i), secretValue);
+    await userEvent.click(screen.getByRole("button", { name: /^Create$/ }));
+  }
+
+  it("saves a valid credential value with the real key in the payload", async () => {
+    await openCreateForm();
+    await fillForm("serper_api_key", "realKey123ABC");
+    await waitFor(() => expect(createAuthConfig).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createAuthConfig).mock.calls[0][0]).toMatchObject({
+      name: "serper-dev",
+      type: "api_key",
+      credentials: { serper_api_key: "realKey123ABC" },
+    });
+  });
+
+  it("rejects an HTTP-error-shaped value and never POSTs it as a credential", async () => {
+    await openCreateForm();
+    await fillForm(
+      "serper_api_key",
+      "Client error '403 Forbidden' for url 'https://google.serper.dev/search'",
+    );
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringContaining("looks like an HTTP error message"),
+      ),
+    );
+    expect(createAuthConfig).not.toHaveBeenCalled();
   });
 });

@@ -50,6 +50,23 @@ const schema = z
 
 type FormValues = z.infer<typeof schema>;
 
+// Fingerprints of HTTP/httpx error strings that must never be saved as a secret
+// value (e.g. a pasted "Client error '403 Forbidden' for url '...'"). Guards the
+// save handler so a wrong clipboard paste is caught before it reaches the API.
+const HTTP_ERROR_FINGERPRINT =
+  /(Client error '|Server error '|' for url '|Traceback \(most recent call last\)|\bForbidden\b|\bUnauthorized\b)/;
+
+function assertLooksLikeCredential(value: string): void {
+  if (HTTP_ERROR_FINGERPRINT.test(value)) {
+    throw new Error(
+      'That value looks like an HTTP error message, not a secret. Paste the actual API key or token.',
+    );
+  }
+  if (value.length > 1024) {
+    throw new Error('Secret value is too long to be a valid API key or token.');
+  }
+}
+
 const TYPE_LABELS: Record<string, string> = {
   api_key: 'API Key',
   oauth2: 'OAuth2',
@@ -246,6 +263,7 @@ function CredentialForm({
         owner_team: values.owner_team || undefined,
       };
       if (values.credential_key && values.credential_value) {
+        assertLooksLikeCredential(values.credential_value);
         payload.credentials = { [values.credential_key]: values.credential_value };
       }
       if (isEdit) {
@@ -258,9 +276,17 @@ function CredentialForm({
       onSaved();
     },
     onError: (err: unknown) => {
-      const msg = (err as { response?: { data?: { detail?: string } } })
+      const detail = (err as { response?: { data?: { detail?: unknown } } })
         ?.response?.data?.detail;
-      toast.error(msg ?? 'Failed to save credential.');
+      let msg: string | undefined;
+      if (typeof detail === 'string') {
+        msg = detail;
+      } else if (Array.isArray(detail)) {
+        // Pydantic 422 validation errors arrive as a list of {msg, loc, ...}.
+        msg = (detail[0] as { msg?: string })?.msg;
+      }
+      // Fall back to a client-side guard Error (assertLooksLikeCredential).
+      toast.error(msg ?? (err as Error)?.message ?? 'Failed to save credential.');
     },
   });
 

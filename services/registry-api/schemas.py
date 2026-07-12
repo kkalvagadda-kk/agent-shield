@@ -15,6 +15,7 @@ Naming convention
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from typing import Any, Generic, Literal, Optional, TypeVar
@@ -691,12 +692,83 @@ class ToolTestResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # AuthConfig
 # ---------------------------------------------------------------------------
+
+# Fingerprints of HTTP/httpx error strings and stack traces that must NEVER be
+# persisted as a secret value. httpx.HTTPStatusError.__str__() renders as e.g.
+#   "Client error '403 Forbidden' for url 'https://google.serper.dev/search'"
+# so if a caller ever feeds a raise_for_status() error (or a JSON error body)
+# into the credential value, we reject it at the API boundary instead of
+# encrypting it and mounting it as X-API-KEY.
+_HTTP_ERROR_FINGERPRINT = re.compile(
+    r"(Client error '|Server error '|' for url '|HTTPStatusError|"
+    r"Traceback \(most recent call last\)|\bForbidden\b|\bUnauthorized\b)"
+)
+
+# Real API keys / bearer tokens / OAuth secrets are single-line and short.
+# Only mTLS material (PEM cert/key) is legitimately long and multi-line, so the
+# single-line + short-length rule is scoped to the inline credential types.
+_MAX_INLINE_CREDENTIAL_LEN = 1024
+_MAX_PEM_CREDENTIAL_LEN = 16384
+_INLINE_CREDENTIAL_TYPES = {"api_key", "bearer", "oauth2"}
+# A credential key becomes an environment variable in the agent pod (injected
+# via `envFrom`). K8s silently drops env vars whose names aren't valid, so a
+# hyphenated key like "serper-dev" would never reach the agent. Enforce a valid
+# env-var name at the boundary — the UI is only one entry path (API/seed bypass).
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def validate_credential_values(
+    credentials: dict[str, str] | None, config_type: str | None
+) -> dict[str, str] | None:
+    """Reject values that are obviously not credentials.
+
+    Makes the illegal state — an HTTP error body / stack trace stored as a
+    secret — unrepresentable at the API boundary, so it can never be encrypted
+    or written to a K8s Secret. Raises ValueError (surfaced as HTTP 422).
+    """
+    if not credentials:
+        return credentials
+    # mTLS PEM material is multi-line and large; every other type is a short,
+    # single-line token. Unknown/None types default to the permissive path so a
+    # partial update (type not resent) never falsely rejects an mTLS rotation —
+    # the error-fingerprint check below still applies to all types.
+    inline = config_type in _INLINE_CREDENTIAL_TYPES
+    max_len = _MAX_INLINE_CREDENTIAL_LEN if inline else _MAX_PEM_CREDENTIAL_LEN
+    for key, value in credentials.items():
+        if not _ENV_VAR_NAME_RE.match(key or ""):
+            raise ValueError(
+                f"credential key '{key}' is not a valid environment variable name "
+                "(letters, digits, underscores; not starting with a digit) — "
+                "it would be silently dropped when injected into the agent"
+            )
+        if not value or not value.strip():
+            raise ValueError(f"credential '{key}' value must not be empty")
+        if _HTTP_ERROR_FINGERPRINT.search(value):
+            raise ValueError(
+                f"credential '{key}' looks like an HTTP error message, not a secret value"
+            )
+        if len(value) > max_len:
+            raise ValueError(
+                f"credential '{key}' value is too long ({len(value)} chars) to be a valid secret"
+            )
+        if inline and ("\n" in value or "\r" in value):
+            raise ValueError(
+                f"credential '{key}' value must be a single line (embedded newline found)"
+            )
+    return credentials
+
+
 class AuthConfigCreate(BaseModel):
     name: str = Field(..., max_length=256)
     type: str = Field(..., pattern="^(api_key|oauth2|bearer|mtls)$")
     credentials: dict[str, str] | None = Field(None, description="Key-value credential pairs; stored as K8s Secret, never in DB")
     k8s_secret_ref: str | None = None
     owner_team: str | None = None
+
+    @model_validator(mode="after")
+    def _reject_invalid_credentials(self) -> "AuthConfigCreate":
+        validate_credential_values(self.credentials, self.type)
+        return self
 
 
 class AuthConfigUpdate(BaseModel):
@@ -705,6 +777,11 @@ class AuthConfigUpdate(BaseModel):
     credentials: dict[str, str] | None = Field(None, description="Key-value credential pairs; updates existing K8s Secret")
     k8s_secret_ref: str | None = None
     owner_team: str | None = None
+
+    @model_validator(mode="after")
+    def _reject_invalid_credentials(self) -> "AuthConfigUpdate":
+        validate_credential_values(self.credentials, self.type)
+        return self
 
 
 class AuthConfigResponse(BaseModel):

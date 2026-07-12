@@ -97,6 +97,7 @@ run_suite "Suite 47: Deployment Chat Tracing"       "suite-47-deployment-chat-tr
 run_suite "Suite 48: Feedback Dashboard Panel"      "suite-48-feedback-dashboard.sh"
 run_suite "Suite 49: Judge Score -> AgentRun"       "suite-49-judge-agentrun-score.sh"
 run_suite "Suite 50: Version Dedup on Deploy"       "suite-50-version-dedup.sh"
+run_suite "Suite 51: Credential Validation"         "suite-51-credential-validation.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
