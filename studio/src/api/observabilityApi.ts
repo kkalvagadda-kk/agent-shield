@@ -50,12 +50,20 @@ export interface AgentBlockRate {
   blocked_runs: number;
 }
 
+export interface FeedbackSummary {
+  up: number;
+  down: number;
+  total: number;
+  ratio: number | null;
+}
+
 export interface DashboardData {
   latency_series: TimeseriesPoint[];
   score_histogram: HistogramBucket[];
   status_counts: StatusCount[];
   cost_series: TimeseriesPoint[];
   safety_blocks: AgentBlockRate[];
+  feedback: FeedbackSummary;
   total_runs: number;
   total_cost_usd: number;
 }

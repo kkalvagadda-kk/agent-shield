@@ -89,12 +89,20 @@ class AgentBlockRate(BaseModel):
     blocked_runs: int
 
 
+class FeedbackSummary(BaseModel):
+    up: int = 0
+    down: int = 0
+    total: int = 0  # runs with any thumbs feedback
+    ratio: float | None = None  # up / (up + down), None when no feedback yet
+
+
 class DashboardData(BaseModel):
     latency_series: list[TimeseriesPoint]
     score_histogram: list[HistogramBucket]
     status_counts: list[StatusCount]
     cost_series: list[TimeseriesPoint]
     safety_blocks: list[AgentBlockRate]
+    feedback: FeedbackSummary = FeedbackSummary()
     total_runs: int
     total_cost_usd: float
 
@@ -393,12 +401,46 @@ async def get_dashboard(
     ).where(*base_filter)
     totals = (await db.execute(totals_q)).one()
 
+    # --- User feedback ratio (thumbs) ---
+    # Feedback is written on PlaygroundRun (the only surface with a thumbs
+    # control). Scope to the team by joining Agent on agent_name, mirror the
+    # dashboard's agent/time filters.
+    fb_filter = [
+        Agent.team == x_user_team,
+        PlaygroundRun.user_feedback.isnot(None),
+    ]
+    if agent_name:
+        fb_filter.append(PlaygroundRun.agent_name == agent_name)
+    if from_date:
+        fb_filter.append(PlaygroundRun.started_at >= from_date)
+    if to_date:
+        fb_filter.append(PlaygroundRun.started_at <= to_date)
+    feedback_q = (
+        select(
+            func.count().filter(PlaygroundRun.user_feedback > 0).label("up"),
+            func.count().filter(PlaygroundRun.user_feedback < 0).label("down"),
+        )
+        .select_from(PlaygroundRun)
+        .join(Agent, Agent.name == PlaygroundRun.agent_name)
+        .where(*fb_filter)
+    )
+    fb = (await db.execute(feedback_q)).one()
+    fb_up, fb_down = int(fb.up or 0), int(fb.down or 0)
+    fb_total = fb_up + fb_down
+    feedback = FeedbackSummary(
+        up=fb_up,
+        down=fb_down,
+        total=fb_total,
+        ratio=(fb_up / fb_total) if fb_total else None,
+    )
+
     return DashboardData(
         latency_series=latency_series,
         score_histogram=score_histogram,
         status_counts=status_counts,
         cost_series=cost_series,
         safety_blocks=safety_blocks,
+        feedback=feedback,
         total_runs=totals.total,
         total_cost_usd=float(totals.cost),
     )

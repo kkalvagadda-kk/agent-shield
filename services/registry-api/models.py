@@ -1349,6 +1349,11 @@ class PlaygroundRun(Base):
     judge_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     judge_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     output_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Human thumbs feedback: 1 = up, -1 = down, NULL = none given. Written by
+    # POST /playground/runs/{id}/feedback (alongside the Langfuse score push) so
+    # the observability dashboard's feedback-ratio panel can aggregate locally
+    # instead of doing a live Langfuse call.
+    user_feedback: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 # ---------------------------------------------------------------------------
