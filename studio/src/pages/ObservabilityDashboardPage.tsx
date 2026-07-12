@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown } from "lucide-react";
+import { BarChart3, TrendingUp, ThumbsUp, ThumbsDown, Wrench } from "lucide-react";
 import { useState } from "react";
 import { getDashboard, DashboardData, FeedbackSummary } from "../api/observabilityApi";
 import { listAgents } from "../api/registryApi";
@@ -241,6 +241,41 @@ export default function ObservabilityDashboardPage({
               label={environment === "production" ? "Production" : "Sandbox"}
               fb={d.feedback}
             />
+          </div>
+
+          {/* Tool calls — frequency + avg latency (from OTEL TOOL spans) */}
+          <div className="bg-white border border-slate-200 rounded-lg p-4">
+            <h2 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
+              <Wrench size={14} /> Tool Calls
+            </h2>
+            {!d.tool_calls || d.tool_calls.length === 0 ? (
+              <p className="text-sm text-slate-400">
+                No tool calls recorded in this period.
+              </p>
+            ) : (
+              <div className="space-y-1">
+                {d.tool_calls.map((t) => {
+                  const max = Math.max(...d.tool_calls.map((x) => x.count));
+                  return (
+                    <div key={t.tool_name} className="flex items-center gap-2 text-xs">
+                      <span className="text-slate-600 w-40 truncate font-mono" title={t.tool_name}>
+                        {t.tool_name}
+                      </span>
+                      <div className="flex-1 bg-slate-100 rounded h-4 overflow-hidden">
+                        <div
+                          className="h-full bg-indigo-400 rounded"
+                          style={{ width: `${Math.min(100, (t.count / Math.max(1, max)) * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-slate-700 w-10 text-right">{t.count}×</span>
+                      <span className="text-slate-400 w-16 text-right">
+                        {t.avg_latency_ms != null ? `${(t.avg_latency_ms / 1000).toFixed(2)}s` : "—"}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Safety blocks */}

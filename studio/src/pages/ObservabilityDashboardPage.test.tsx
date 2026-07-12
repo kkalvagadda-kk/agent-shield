@@ -21,6 +21,7 @@ const BASE: DashboardData = {
   cost_series: [],
   safety_blocks: [],
   feedback: EMPTY,
+  tool_calls: [],
   total_runs: 0,
   total_cost_usd: 0,
 };
@@ -58,5 +59,19 @@ describe("ObservabilityDashboardPage — env-scoped dashboard", () => {
     await waitFor(() =>
       expect(screen.getAllByText(/no feedback yet/i).length).toBeGreaterThan(0)
     );
+  });
+
+  it("renders the tool-call frequency + latency panel", async () => {
+    mockDashboard({
+      tool_calls: [
+        { tool_name: "web_search", count: 12, avg_latency_ms: 860 },
+        { tool_name: "calculator", count: 3, avg_latency_ms: null },
+      ],
+    });
+    renderWithProviders(<ObservabilityDashboardPage environment="production" />);
+    await waitFor(() => expect(screen.getByText("web_search")).toBeInTheDocument());
+    expect(screen.getByText("12×")).toBeInTheDocument();
+    expect(screen.getByText("0.86s")).toBeInTheDocument(); // 860ms -> 0.86s
+    expect(screen.getByText("calculator")).toBeInTheDocument();
   });
 });

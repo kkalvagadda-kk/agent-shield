@@ -96,6 +96,12 @@ class FeedbackSummary(BaseModel):
     ratio: float | None = None  # up / (up + down), None when no feedback yet
 
 
+class ToolCallStat(BaseModel):
+    tool_name: str
+    count: int
+    avg_latency_ms: float | None = None
+
+
 class DashboardData(BaseModel):
     latency_series: list[TimeseriesPoint]
     score_histogram: list[HistogramBucket]
@@ -103,6 +109,7 @@ class DashboardData(BaseModel):
     cost_series: list[TimeseriesPoint]
     safety_blocks: list[AgentBlockRate]
     feedback: FeedbackSummary = FeedbackSummary()
+    tool_calls: list[ToolCallStat] = []
     total_runs: int
     total_cost_usd: float
 
@@ -280,6 +287,73 @@ async def get_trace_detail(
 # GET /observability/dashboard — aggregated metrics
 # ---------------------------------------------------------------------------
 
+def _tool_call_stats(
+    trace_ids: set[str], from_date: Optional[datetime]
+) -> list[ToolCallStat]:
+    """Aggregate TOOL-span frequency + avg latency from Langfuse observations.
+
+    Scoped to ``trace_ids`` — the dashboard's own run population, which already
+    encodes team + environment + window. Langfuse's observations API has no team
+    filter, so we fetch TOOL spans (vendor-neutral OpenInference ``type=TOOL``)
+    and keep only those whose trace belongs to this dashboard's runs. Best-effort:
+    returns [] on any error or when tracing is unconfigured, so a Langfuse blip
+    never breaks the dashboard.
+    """
+    if not trace_ids:
+        return []
+    import base64
+    import json as _json
+    import urllib.request as urlreq
+
+    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
+    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
+    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
+    if not (lf_pk and lf_sk):
+        return []
+    creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
+    from_param = ""
+    if from_date:
+        iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        from_param = f"&fromStartTime={iso}"
+
+    agg: dict[str, list] = {}  # name -> [count, latency_sum_seconds, latency_n]
+    try:
+        for page in range(1, 6):  # cap at 5 pages (500 TOOL spans) to bound cost
+            url = (
+                f"{lf_host}/api/public/observations"
+                f"?type=TOOL&limit=100&page={page}{from_param}"
+            )
+            req = urlreq.Request(url, headers={"Authorization": f"Basic {creds}"})
+            with urlreq.urlopen(req, timeout=6) as r:
+                data = _json.loads(r.read()).get("data", [])
+            for o in data:
+                if o.get("traceId") not in trace_ids:
+                    continue
+                name = o.get("name") or "tool"
+                lat = o.get("latency")  # Langfuse reports latency in SECONDS
+                slot = agg.setdefault(name, [0, 0.0, 0])
+                slot[0] += 1
+                if isinstance(lat, (int, float)):
+                    slot[1] += lat
+                    slot[2] += 1
+            if len(data) < 100:
+                break
+    except Exception as exc:
+        logger.debug("tool_call_stats: Langfuse fetch failed: %s", exc)
+        return []
+
+    stats = [
+        ToolCallStat(
+            tool_name=name,
+            count=cnt,
+            avg_latency_ms=round((lsum / ln) * 1000, 1) if ln else None,
+        )
+        for name, (cnt, lsum, ln) in agg.items()
+    ]
+    stats.sort(key=lambda s: s.count, reverse=True)
+    return stats[:15]
+
+
 @router.get("/dashboard", response_model=DashboardData)
 async def get_dashboard(
     agent_name: Optional[str] = Query(None),
@@ -445,6 +519,16 @@ async def get_dashboard(
         ratio=(fb_up / fb_total) if fb_total else None,
     )
 
+    # --- Tool-call frequency/latency (Langfuse OTEL TOOL spans) ---
+    # Same population as every other panel: the team's runs in this env/window.
+    tid_rows = (await db.execute(
+        select(AgentRun.langfuse_trace_id)
+        .where(*base_filter)
+        .where(AgentRun.langfuse_trace_id.isnot(None))
+        .limit(1000)
+    )).scalars().all()
+    tool_calls = _tool_call_stats(set(tid_rows), from_date)
+
     return DashboardData(
         latency_series=latency_series,
         score_histogram=score_histogram,
@@ -452,6 +536,7 @@ async def get_dashboard(
         cost_series=cost_series,
         safety_blocks=safety_blocks,
         feedback=feedback,
+        tool_calls=tool_calls,
         total_runs=totals.total,
         total_cost_usd=float(totals.cost),
     )

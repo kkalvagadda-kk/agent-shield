@@ -57,6 +57,12 @@ export interface FeedbackSummary {
   ratio: number | null;
 }
 
+export interface ToolCallStat {
+  tool_name: string;
+  count: number;
+  avg_latency_ms: number | null;
+}
+
 export interface DashboardData {
   latency_series: TimeseriesPoint[];
   score_histogram: HistogramBucket[];
@@ -64,6 +70,7 @@ export interface DashboardData {
   cost_series: TimeseriesPoint[];
   safety_blocks: AgentBlockRate[];
   feedback: FeedbackSummary;
+  tool_calls: ToolCallStat[];
   total_runs: number;
   total_cost_usd: number;
 }
