@@ -1,136 +1,112 @@
 # Observability Architecture — Reference Spec
 
-**Status:** Living reference — canonical source for how AgentShield instruments traces/spans/scores. Any new code path that creates a chat run, executes an agent, or renders trace data in Studio MUST follow the contract in this doc.
-**Last updated:** 2026-07-10
-**Related:** `docs/design/langfuse-studio-integration.md` (original roadmap this doc supersedes/consolidates), `docs/design/todo/langfuse-trace-single-click.md` (frontend priority-inversion fix), `docs/bugs/langfuse-clickhouse-oom.md` (infra incident, unrelated to the app-level gaps here), `docs/decisions.md` Decision 9 (database architecture) and Decision 11 (object storage) for why Langfuse's own storage is Postgres+ClickHouse+MinIO.
+**Status:** Living reference — the single canonical doc for how AgentShield instruments traces/spans/scores/cost. Any new code path that creates a chat run, executes an agent, reads trace/cost data, or renders it in Studio MUST follow the contracts here.
+**Last updated:** 2026-07-12
+**Consolidates:** this doc now absorbs the former `langfuse-studio-integration.md` (original roadmap), `todo/cost-tracking.md` (cost research), `todo/observability-provider-abstraction.md` (backend abstraction), and `todo/langfuse-trace-single-click.md` (single-click fix). Their live content lives in §6 (Roadmap) and §7 (Cost). Still separate by genre: `docs/bugs/langfuse-clickhouse-oom.md` (infra incident), `docs/debugging/010-cost-sweep-nameerror-hidden-by-stub.md` (debugging log). See `docs/decisions.md` D9/D11 for why Langfuse storage is Postgres+ClickHouse+MinIO.
 
 ## Why this doc exists
 
-Multiple code paths were built to do the same thing (create a chat run, trace it, complete it) and drifted apart — one endpoint got Langfuse tracing wired in, its near-identical sibling didn't. Separately, the SDK-level tracer has been silently disabled platform-wide since it was written, because it used a different env var naming convention than every other Langfuse integration point in the codebase. Both bugs were invisible for a long time because nothing enforced a single pattern. This doc is that pattern — read it before writing any code that touches runs, traces, or agent execution, and update it when the pattern changes.
+Multiple code paths were built to do the same thing (create a chat run, trace it, complete it) and drifted apart — one endpoint got tracing wired in, its near-identical sibling didn't. Reads were scattered as inline Langfuse REST calls across seven routers. Cost columns existed but nothing wrote them. Each was invisible for a long time because nothing enforced a single pattern. This doc is that pattern — read it before writing any code that touches runs, traces, cost, or agent execution, and update it when the pattern changes.
 
 ---
 
 ## 1. Data model — what a trace actually is
 
-A trace is **not** "one entry per message." It's **one record per conversational turn (run)**, created once and updated once, with **spans** nested inside it for every sub-step:
+A trace is **not** "one entry per message." It's **one record per conversational turn (run)**, created once and updated once, with **spans** nested inside for every sub-step:
 
 ```
 Trace (id = run_id, created once when the user sends a message)
   input = {message}                          ← set at creation
   output = {response}                        ← set at completion (same trace id, upsert)
-  ├─ span: safety_scan_input                 (built, orchestrator.py)
-  ├─ span: <tool call>                       (NOT built — see §6 Gap 0b)
-  ├─ span: <LLM generation>                  (NOT built — see §6 Gap 0b)
-  └─ span: safety_scan_output                (built, orchestrator.py)
+  ├─ span: safety_scan_input                 (orchestrator.py — only when safety-orchestrator enabled)
+  ├─ span: <tool call>          TOOL         (OpenInference OTEL, agent pod)
+  ├─ span: <LLM generation>     GENERATION   (OpenInference OTEL — carries model + calculatedTotalCost + tokens)
+  └─ span: safety_scan_output                (orchestrator.py — only when safety-orchestrator enabled)
   scores:
-    llm-judge (0.0–1.0)                       (built, judge.py)
-    user-feedback (+1/-1)                     (built, playground.py — Langfuse score + local playground_runs.user_feedback col since migration 0057)
+    llm-judge (0.0–1.0)                       (judge.py)
+    user-feedback (+1/-1)                     (playground.py — Langfuse score + local playground_runs.user_feedback col, migration 0057)
 ```
 
-Key invariant: **`trace_id` always equals the platform's own `run_id`** (or `eval_run_id`, `approval_id`). No separate ID mapping table exists or should ever be introduced — direct lookup by UUID is the whole point.
+Key invariant: **`trace_id` always equals the platform's own `run_id`** (or `eval_run_id`, `approval_id`), normalized to the undashed 32-hex OTEL form via `_lf_trace_id`. No separate ID mapping table exists or should ever be introduced.
 
 | Trace type | Name pattern | Created by |
 |---|---|---|
-| Playground/consumer chat | `agent-run.playground` / `agent-run.production` | `registry-api/tracing.py: trace_create_run` |
+| Playground/consumer chat | `{agent_name} · {environment}` | `registry-api/tracing.py: trace_create_run` |
 | Eval run | `eval-run` + `eval-item-{N}` spans | `registry-api/tracing.py: trace_eval_run_*` |
 | Platform actions (HITL) | `platform.approval.{decision}` | `registry-api/tracing.py: trace_platform_action` |
-| Safety scans | (spans, not top-level traces) `safety_scan_input`/`safety_scan_output` | `safety-orchestrator/orchestrator.py: _emit_scanner_span` |
+| Safety scans | (spans) `safety_scan_input`/`safety_scan_output` | `safety-orchestrator/orchestrator.py` |
+| Agent LLM/tool spans | `GENERATION`/`TOOL`/`CHAIN`/`AGENT` | agent pod, OpenInference OTEL via `otel_run_context(run_id)` |
 
 ---
 
 ## 2. The standard integration pattern
 
-Any new endpoint or execution path that starts a run **must** implement all four of these, in this order. Treat this as a checklist for code review — a PR that creates a `PlaygroundRun`/`AgentRun` without doing steps 1–3 is the exact bug class found this session.
+Any new endpoint that starts a run **must** implement steps 1–4, in order. Treat it as a code-review checklist — a PR that creates a `PlaygroundRun`/`AgentRun` without steps 1–3 is the exact bug class this doc exists to prevent.
 
 ### Step 1 — Create the trace at run start (registry-api)
-Call `trace_create_run(run_id, agent_name, user_id, context, input_message)` from `services/registry-api/tracing.py` immediately after the run row is flushed (need the DB-generated `run_id` first). Store the returned `trace_id` on **both** `PlaygroundRun.langfuse_trace_id` and `AgentRun.langfuse_trace_id` if non-null.
-
-- **`user_id` passed to the trace is a human-readable identifier, not the raw JWT `sub`.** Use `caller.get("preferred_username") or user_sub` — the JWT already carries this claim, decoded by `auth_middleware.require_user`. The DB `user_id` columns (FK-facing) stay the UUID; only the Langfuse-facing value changes.
-- **Always include the deployment identity in metadata/tags** — `metadata={"agent_name": ..., "deployment_id": str(deployment.id), "environment": deployment.environment, "context": context}`. An agent can have multiple concurrent sandbox deployments; without this, traces from different instances of the same agent are indistinguishable in Langfuse.
-- If two endpoints need this same logic (e.g. an auto-resolved-deployment chat endpoint and a deployment-pinned one), **extract a shared helper** — do not copy-paste the block. This is precisely how the `start_deployment_chat` gap happened.
+Call `trace_create_run(run_id, agent_name, user_id, context, input_message, deployment_id, environment)` from `tracing.py` immediately after the run row is flushed. Store the returned `trace_id` on **both** `PlaygroundRun.langfuse_trace_id` and `AgentRun.langfuse_trace_id` if non-null.
+- **`user_id` is a human-readable identifier** — `caller.get("preferred_username") or user_sub`. DB `user_id` columns stay the UUID; only the Langfuse-facing value is the username.
+- **Always include deployment identity** (`deployment_id` + `environment`) so traces from different instances of the same agent are distinguishable.
+- If two endpoints share this logic, **extract a shared helper** (`_create_traced_chat_run`) — don't copy-paste.
 
 ### Step 2 — Propagate the trace_id to the agent pod
-Pass `run.langfuse_trace_id` as the `X-AgentShield-Trace-ID` header on every proxied call to the agent pod's `/chat/stream` (see `_proxy_agent_stream(..., trace_id=trace_id)` in `chat.py`). Without this, the agent pod has no way to attach its own spans to the parent trace — it would either create an orphan trace or (correctly, per the SDK's design) do nothing.
+Pass `run.langfuse_trace_id` as the `X-AgentShield-Trace-ID` header on every proxied `/chat/stream` call (`_proxy_agent_stream(..., trace_id=)`). Without it the agent's spans can't attach to the parent trace.
 
 ### Step 3 — Complete the trace at run end
-Call `trace_complete_run(run_id=trace_id, status, output_text, judge_score)` once the run finishes. The helper that marks a run `completed` in the DB and the one that completes the Langfuse trace should be the same function, gated on `trace_id` being non-null (see `_complete_chat_run` in `chat.py` — reuse it, don't reimplement).
+Call `trace_complete_run(run_id=trace_id, status, output_text, judge_score)` once the run finishes. It does a **partial update** (output only) — it must NOT re-send name/tags, or it clobbers the create-time agent identity. The DB-completion helper and the trace-completion call should be the same function (`_complete_chat_run`).
 
-### Step 4 — Emit spans inside agent execution (SDK / declarative-runner)
-Inside the agent pod, use `agentshield_sdk.tracing.tracer` — `start_trace(name, session_id, agent_name, trace_id=<from header>)` attaches to the parent trace created in Step 1 rather than creating a new one. Call `tracer.span(ctx, name, input, output, metadata)` around **every** meaningful sub-step. Today only `safety_scan_input`/`safety_scan_output` do this (`sdk/agentshield_sdk/runner.py`) — wrapping the actual LLM call and each tool call in a span is tracked as a gap, not yet standard (§6, Gap 0b).
+### Step 4 — Emit spans inside agent execution (OpenInference OTEL)
+Inside the agent pod, LLM/tool/chain spans are captured by **vendor-neutral OpenInference OTEL instrumentation**, bound to the run's trace via `otel_run_context(run_id)` (`sdk/agentshield_sdk/otel.py`, wired in `declarative-runner/workflow_executor.py`). `GENERATION` spans carry model + `calculatedTotalCost` + token counts — this is what powers cost tracking (§7). Do **not** reach for langfuse's own langchain `CallbackHandler`: it's v2-only and can't instrument the agent's langchain-1.x stack. Safety-scan spans come separately from safety-orchestrator (when enabled).
+
+### Read contract — go through the backend, never call Langfuse REST directly
+All reads (trace fetch, cost, observation aggregation, deep-link URLs) go through `observability_backend.get_observability_backend()` — see §5. **No router or service module may call Langfuse's `/api/public/*` or build a Langfuse URL inline.** Endpoints return the provider-neutral `NormalizedTrace`, not a raw Langfuse shape.
 
 ### Env var contract (do not introduce a new naming convention)
-Every Langfuse client anywhere in this platform reads exactly these three:
-```
-LANGFUSE_PUBLIC_KEY
-LANGFUSE_SECRET_KEY
-LANGFUSE_HOST
-```
-This is what `deploy-controller` injects into agent pods, what Helm injects into `registry-api`/`safety-orchestrator`, and what `declarative-runner`'s own LangGraph callback handler (`_make_langfuse_handler`) already reads correctly. If you're writing a new service or module that needs a Langfuse client, read these three env vars — do not invent a service-prefixed variant (`AGENTSHIELD_LANGFUSE_KEY` was exactly this mistake, and it silently disabled the SDK's tracer platform-wide; see §6 Gap 0a).
-
-When constructing the client, always pass all three:
-```python
-from langfuse import Langfuse
-client = Langfuse(
-    public_key=os.getenv("LANGFUSE_PUBLIC_KEY", ""),
-    secret_key=os.getenv("LANGFUSE_SECRET_KEY", ""),
-    host=os.getenv("LANGFUSE_HOST") or None,
-)
-```
-Omitting `public_key` (as the SDK's `tracing.py` currently does) produces a client that fails or misbehaves even once the env var name is fixed — both mistakes have to be fixed together.
+Every Langfuse client reads exactly `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST`, and constructs with all three (`public_key=`+`secret_key=`+`host=`). Inventing a service-prefixed variant (`AGENTSHIELD_LANGFUSE_KEY`) is exactly the bug that once silently disabled the SDK tracer platform-wide.
 
 ### Frontend contract — never link to Langfuse's own UI as the primary action
-Studio has a working, credential-free way to show trace data: `GET /api/v1/playground/traces/{trace_id}` (registry-api, using service `pk-lf`/`sk-lf` creds, no user login) rendered by `TraceDrawer.tsx`. Any "View Trace" / "Trace" button in Studio **must** open this inline drawer as the primary action. A secondary "Open in Langfuse ↗" link (already present inside `TraceDrawer.tsx`) is fine for power users who want the full Langfuse UI — that flow goes through Langfuse's own Keycloak SSO chooser page, which cannot be made single-click (verified: NextAuth's provider sign-in route requires a CSRF token obtained from an interactive page load, not deep-linkable). Defaulting to the raw external link, even as a "fallback," is the anti-pattern that made this the *only* path in three separate components — see `docs/design/todo/langfuse-trace-single-click.md`.
+Studio has a credential-free way to show trace data: the read-adapter (§5) → `TraceDrawer.tsx`. Any "Trace" button **must** open this inline drawer as the primary action. A secondary neutral "Trace ↗" deep-link (inside `TraceDrawer`) is fine for power users, but it lands on Langfuse's Keycloak SSO chooser, which cannot be made single-click (NextAuth needs a CSRF token from an interactive page load). **Still-open gap:** three components (`EvalResultsPage`, `ChatPane`, `RunsTab`) still default to the raw external link instead of the drawer — see §6.
 
 ---
 
 ## 3. Langfuse deployment, auth & network topology
 
-Langfuse is an **internal platform component**, not an external SaaS — auto-deployed and auto-bootstrapped by the Helm chart. Its own storage backends are Postgres (metadata, shared cluster instance, db `langfuse`), ClickHouse (trace/span events), Redis (queue), and MinIO (media/exports) — see `docs/decisions.md` D9/D11. There are **two completely separate auth planes**; conflating them is the source of most Langfuse confusion.
+Langfuse is an **internal platform component**, not external SaaS — auto-deployed and auto-bootstrapped by Helm. Storage: Postgres (metadata, db `langfuse`), ClickHouse (trace/span events), Redis (queue), MinIO (media). Two **separate auth planes** — conflating them causes most Langfuse confusion.
 
 ### 3.1 Two auth planes
 
 | Plane | Who | Mechanism | Credentials | Used for |
 |---|---|---|---|---|
-| **Service-to-service** | `registry-api`, `safety-orchestrator` (server-side) | HTTP **Basic auth** to Langfuse's `/api/public/*` REST API | project public key `pk-lf-…` + secret key `sk-lf-…` (`langfuse-api-keys` Secret) | Writing traces/scores, fetching trace data to proxy into Studio. **No user login involved.** |
-| **Human / browser** | A person opening Langfuse's own web UI | **Keycloak SSO** (OIDC) — the same realm that logs into Studio | JWT session from Keycloak; no separate Langfuse password | Only when a user clicks "Open in Langfuse ↗" for the full native UI |
+| **Service-to-service** | `registry-api`, `safety-orchestrator` | HTTP Basic auth to `/api/public/*` | `pk-lf-…` + `sk-lf-…` (`langfuse-api-keys` Secret) | Writing traces/scores, fetching trace/cost data. **No user login.** |
+| **Human / browser** | A person opening Langfuse's web UI | Keycloak SSO (OIDC) | Keycloak JWT session | Only the optional "Trace ↗" deep-link |
 
-The key architectural consequence: **Studio never uses the SSO plane for trace data.** It calls registry-api, which uses the *service* plane (Basic auth) and holds the keys server-side. Users see trace data via `TraceDrawer` without ever authenticating to Langfuse. SSO only matters for the optional deep-link into Langfuse's own UI (§2 frontend contract). This is why "you don't have access to this trace / Sign In" is never hit on the normal path — it only appears if someone follows the external link into the SSO plane without a prior Langfuse session.
+**Studio never uses the SSO plane for trace data.** It calls registry-api (read-adapter, §5), which uses the service plane. SSO only matters for the optional deep-link.
 
-### 3.2 Service-plane specifics (the path Studio actually uses)
-
-- `registry-api` builds Basic-auth creds inline: `base64(f"{pk}:{sk}")` → `Authorization: Basic …` against `{LANGFUSE_HOST}/api/public/traces/{id}` and `/api/public/scores` (`routers/playground.py` ~L758-762, L811-815, L944-955).
-- **Two distinct host vars, do not conflate:**
-  - `LANGFUSE_HOST` = **in-cluster** DNS (`http://agentshield-langfuse-web:3000`) — used for server-side API calls. Plain HTTP, no Gateway, no TLS.
-  - `LANGFUSE_PUBLIC_URL` = **browser-facing** URL (`https://langfuse.127.0.0.1.nip.io:8443`) — only ever used to *construct* the `trace_url` string handed to the browser for the optional external link. Never called server-side.
-  - `LANGFUSE_PROJECT_ID` = the fixed bootstrapped project UUID (`00000000-0000-0000-0001-agentshield01`), needed to build the full trace path.
-- **Full-path construction is deliberate.** `trace_url` is built as `{LANGFUSE_PUBLIC_URL}/project/{project_id}/traces/{trace_id}` — the *complete* path, **not** Langfuse's `/trace/{id}` short-link. The short-link issues a redirect that loses the path/host prefix when behind the Envoy Gateway, landing users on a broken URL. Always build the full project-scoped path (comment enforced at `playground.py:749`, `observability.py`).
+### 3.2 Service-plane specifics
+- The Basic-auth REST calls are now **centralized in `observability_backend.LangfuseBackend`** (`base64(f"{pk}:{sk}")` → `Authorization: Basic …`). Routers no longer build these inline.
+- **Two distinct host vars, don't conflate:**
+  - `LANGFUSE_HOST` = in-cluster DNS (`http://agentshield-langfuse-web:3000`) for server-side API calls. Plain HTTP.
+  - `LANGFUSE_PUBLIC_URL` = browser-facing (`https://langfuse.127.0.0.1.nip.io:8443`), only to *construct* the deep-link string.
+  - `LANGFUSE_PROJECT_ID` = fixed bootstrapped project UUID, needed to build the full trace path.
+- **Full-path construction is deliberate** (`{PUBLIC_URL}/project/{project_id}/traces/{id}`, in `LangfuseBackend.build_trace_url`) — Langfuse's `/trace/{id}` short-link redirect loses the path prefix behind the Gateway.
 
 ### 3.3 Browser-plane specifics (Keycloak SSO for the native UI)
-
-Wired by commit `ae78edd`. Config lives in `charts/agentshield/values.yaml` under `langfuse.langfuse.additionalEnv`:
-- `AUTH_KEYCLOAK_CLIENT_ID=langfuse`, `AUTH_KEYCLOAK_CLIENT_SECRET=…`, `AUTH_KEYCLOAK_ISSUER=https://agentshield.127.0.0.1.nip.io:8443/realms/agentshield`
-- `AUTH_DISABLE_USERNAME_PASSWORD=true` (SSO only — no local Langfuse accounts), `AUTH_KEYCLOAK_ALLOW_ACCOUNT_LINKING=true`
-- `NEXTAUTH_URL` must exactly equal `global.langfuseUrl` (`https://langfuse.127.0.0.1.nip.io:8443`) — hardcoded because the Langfuse subchart is a packaged `.tgz` that can't template against globals. A mismatch breaks OAuth callback cookies.
-- The Keycloak `langfuse` client (created idempotently in `scripts/deploy-cpe2e.sh` ~L297-307) sets `redirectUris=['https://langfuse.127.0.0.1.nip.io:8443/*']` and matching `webOrigins`.
-- **Known ceiling:** even with SSO correctly wired, Langfuse's NextAuth still shows a provider-chooser page ("Sign in → Keycloak" button) that cannot be made truly single-click — its `/api/auth/signin/{provider}` route requires a CSRF token from an interactive page load, so it is not deep-linkable. Verified empirically. This is *why* §2 mandates the inline `TraceDrawer` as the default rather than fighting this flow.
+Config in `values.yaml` under `langfuse.langfuse.additionalEnv`: `AUTH_KEYCLOAK_CLIENT_ID/SECRET/ISSUER`, `AUTH_DISABLE_USERNAME_PASSWORD=true`, `NEXTAUTH_URL` == `global.langfuseUrl` (hardcoded — the subchart can't template globals). Keycloak `langfuse` client created idempotently in `deploy-cpe2e.sh`. **Known ceiling:** even correctly wired, NextAuth's provider-chooser page can't be made single-click — hence §2's inline-drawer mandate.
 
 ### 3.4 Network / routing topology
+- **Subdomain routing** (`langfuse.127.0.0.1.nip.io`, not a path prefix — Next.js `basePath` can't be set at runtime). Envoy Gateway has dedicated `langfuse-http/https` listeners + an HTTPRoute forwarding `/` → `agentshield-langfuse-web:3000`.
+- **`gateway-port-8443` Service** exposes the Gateway's HTTPS on port 8443 in-cluster (Langfuse must reach Keycloak's OIDC at that exact port from inside the cluster).
+- **`hostAliases`** pin `agentshield.127.0.0.1.nip.io` → the gateway ClusterIP (else it resolves to the pod's loopback).
+- **Bitnami naming-gap alias Services** bridge `agentshield-langfuse-clickhouse`→ClickHouse and `-s3`→MinIO. Must exist before Langfuse boots.
 
-- **Subdomain routing, not path-prefix.** Langfuse is served on its own host `langfuse.127.0.0.1.nip.io` (moved off a `/langfuse` path prefix in `30f5a52` because Next.js `basePath` can't be set at runtime). Envoy Gateway has dedicated `langfuse-http`/`langfuse-https` listeners (`charts/agentshield/charts/envoy-gateway/templates/gateway.yaml`) and an `agentshield-langfuse-route` HTTPRoute forwarding `/` → `agentshield-langfuse-web:3000` (`httproute.yaml`). TLS terminates at the Gateway (port 8443 externally via port-forward).
-- **`gateway-port-8443` Service** (`charts/agentshield/charts/envoy-gateway/templates/gateway-port-8443-svc.yaml`, in `envoy-gateway-system`): exposes the Gateway's HTTPS on port **8443 inside the cluster** (maps 8443→targetPort 10443). Needed because `AUTH_KEYCLOAK_ISSUER` includes `:8443`, and the Langfuse pod must reach Keycloak's OIDC endpoints at that exact port from *inside* the cluster — the auto-generated Gateway Service only exposes 80/443.
-- **`hostAliases` on the Langfuse web pod** (`values.yaml`, `langfuse.langfuse.web.hostAliases`): pins `agentshield.127.0.0.1.nip.io` → the gateway ClusterIP (`10.96.203.50`). Without it, that nip.io hostname resolves to `127.0.0.1` = the pod's own loopback (not the Gateway), so in-cluster OIDC calls to Keycloak would fail.
-- **Bitnami naming-gap alias Services** (`infra/langfuse/clickhouse-alias-svc.yaml`): Langfuse derives backend hostnames as `{release}-langfuse-{chart}` but Bitnami subcharts name them `{release}-{chart}` — alias Services bridge `agentshield-langfuse-clickhouse`→ClickHouse and `agentshield-langfuse-s3`→MinIO. Must exist before Langfuse boots.
+### 3.5 Auto-bootstrap
+`LANGFUSE_INIT_*` env vars create the org, project, admin user, and the fixed API keys on first boot — services trace immediately without anyone opening the UI. Org/project IDs are deterministic so `LANGFUSE_PROJECT_ID` can be hardcoded.
 
-### 3.5 Auto-bootstrap (zero manual setup)
-
-On first boot, `LANGFUSE_INIT_*` env vars (`values.yaml`) create the org, project, admin user, and — critically — the **fixed public/secret API keys** from the `langfuse-api-keys` Secret. This is what lets platform services trace immediately without anyone opening the Langfuse UI to generate keys. The org/project IDs are deterministic constants so `LANGFUSE_PROJECT_ID` can be hardcoded in the trace-URL builder.
-
-### 3.6 How identity flows (three distinct hops — don't conflate)
-
-1. **User → registry-api:** Keycloak JWT; `require_user` decodes it. `caller["sub"]` (UUID) is the canonical identity, stored in `PlaygroundRun.user_id`/`AgentRun.user_id` (FK-facing — keep as UUID).
-2. **registry-api → Langfuse trace:** the trace's `user_id` field is a *display* value. It should be the human-readable `preferred_username` claim, **not** the UUID (currently passes UUID — §6 Gap 2). This is Langfuse-display-only and never feeds back into platform FKs.
-3. **registry-api → agent pod:** identity is *not* forwarded; only `X-AgentShield-Trace-ID` (the trace/run UUID) is passed, so the agent's SDK spans attach to the right parent trace. The agent pod authenticates to Langfuse with the *service* keys, not any user identity.
-4. **User → Langfuse native UI (optional):** identity comes from the Keycloak SSO session (browser plane), entirely independent of hops 1-3.
+### 3.6 How identity flows (four distinct hops)
+1. **User → registry-api:** Keycloak JWT; `caller["sub"]` (UUID) is canonical, stored in `*.user_id` (keep UUID).
+2. **registry-api → Langfuse trace:** the trace's `user_id` is a *display* value = `preferred_username`, never a FK.
+3. **registry-api → agent pod:** only `X-AgentShield-Trace-ID` is forwarded; the pod authenticates to Langfuse with service keys.
+4. **User → Langfuse native UI (optional):** Keycloak SSO session, independent of 1–3.
 
 ---
 
@@ -138,76 +114,84 @@ On first boot, `LANGFUSE_INIT_*` env vars (`values.yaml`) create the org, projec
 
 | Component | Owns | Reads env | Key files |
 |---|---|---|---|
-| `registry-api` | Trace creation/completion for chat + eval + platform-action runs; proxying trace data to Studio | `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` | `tracing.py`, `routers/chat.py`, `routers/playground.py`, `routers/observability.py` |
-| `safety-orchestrator` | Safety scan spans (input/output, per-scanner risk score) | `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` (via `config.settings`) | `orchestrator.py` (`_emit_scanner_span`) |
-| `agentshield_sdk` (agent pods) | Attaching child spans to the trace created by registry-api, via the `X-AgentShield-Trace-ID` header | *should be* `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` — currently broken, reads `AGENTSHIELD_LANGFUSE_KEY/HOST` instead (Gap 0a) | `tracing.py`, `runner.py`, `config.py` |
-| `declarative-runner` | Same as SDK, plus a second independent LangGraph callback-handler path | Split-brain today — `workflow_executor.py`'s `_make_langfuse_handler` reads the correct vars directly; its imported SDK `tracer` reads the broken ones (Gap 0a) | `config.py`, `workflow_executor.py` |
-| `deploy-controller` | Injecting Langfuse credentials into agent pod specs | Sources from its own env (correct names already) | `manifest_builder.py:234-242` |
-| Studio | Rendering trace data inline (`TraceDrawer`), never defaulting to Langfuse's own UI | n/a (calls registry-api only) | `TraceDrawer.tsx` and its consumers |
-| Langfuse itself | Trace/span/score storage and (secondary) its own web UI | n/a | Postgres (metadata), ClickHouse (events — see `docs/bugs/langfuse-clickhouse-oom.md` for the system-log-table OOM incident), MinIO (media) |
+| `registry-api` | Trace creation/completion (chat/eval/platform); **all reads via the backend adapter** | `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` | `tracing.py`, `observability_backend.py`, `routers/chat.py`, `routers/observability.py`, `routers/playground.py`, `cost_backfill.py` |
+| `observability_backend.py` | The read seam — `ObservabilityBackend` interface + `LangfuseBackend` (#1) + `NoneBackend`; get_trace/get_run_cost/spend_by_model/tool_call_stats/build_trace_url/push_score | `LANGFUSE_*`, `OBSERVABILITY_BACKEND` | `observability_backend.py` |
+| `safety-orchestrator` | Safety-scan spans (input/output, per-scanner risk) — **only when enabled** | `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` | `orchestrator.py` |
+| `agentshield_sdk` / `declarative-runner` (agent pods) | LLM/tool/chain spans via OpenInference OTEL, bound to the trace via `otel_run_context` | `LANGFUSE_PUBLIC_KEY/SECRET_KEY/HOST` | `otel.py`, `workflow_executor.py`, `config.py` |
+| `deploy-controller` | Injecting Langfuse creds (correct FQN host) into agent pods | own env | `manifest_builder.py` |
+| Studio | Rendering the neutral `NormalizedTrace` inline (`TraceDrawer`); never defaulting to Langfuse's UI | n/a (registry-api only) | `TraceDrawer.tsx`, `ObservabilityComparePage.tsx`, `observabilityApi.ts` |
+| Langfuse itself | Trace/span/score/cost storage + (secondary) its web UI | n/a | Postgres, ClickHouse (see `docs/bugs/langfuse-clickhouse-oom.md`), MinIO |
 
 ---
 
-## 5. Implementation status matrix
+## 5. The read-adapter seam (provider abstraction)
 
-Verified against actual code this session (some checks done live, via `kubectl exec` into a running agent pod — not just static reading).
+**Goal:** decouple the platform from any single observability backend — Langfuse today, possibly Datadog/Honeycomb/Phoenix/Tempo/self-hosted OTLP tomorrow — by config, not code.
 
-_Status as of 2026-07-12 (Phase 1 merged to main; Phase 2 + cost tracking in the observability worktree)._
+Two seams with different stories:
 
-| Capability | Status | Notes |
-|---|---|---|
-| Root trace created on `/agents/{name}/chat` (auto-resolve deployment) | ✅ Built | `chat.py: start_chat` |
-| Root trace created on `/agents/{name}/deployments/{id}/chat` (pinned deployment) | ✅ **Fixed (Phase 1)** | shared `_create_traced_chat_run` helper |
-| Trace_id propagated to agent pod via header | ✅ **Fixed (Phase 1)** | `stream_deployment_chat` + `resume_stream_chat` now pass it |
-| SDK-level tracer actually enabled on agent pods | ✅ **Fixed (Phase 2)** | env-var names + `public_key`; live-confirmed `tracer._enabled=True` |
-| Agent pod can reach Langfuse (cross-namespace) | ✅ **Fixed (Phase 2)** | deploy-controller injects FQN `…-langfuse-web.{ns}:3000` |
-| Spans for safety scans (SDK tracer) | ✅ **Working (Phase 2)** | `safety_scan_*` spans now appear (0→1 observation verified) |
-| Spans for LLM calls / tool calls | ✅ **Working (OTEL)** | vendor-neutral OpenInference OTEL instrumentation → Langfuse OTLP (NOT langfuse's langchain handler, which is v2-only). GENERATION/AGENT/CHAIN spans captured. `sdk/agentshield_sdk/otel.py` |
-| LLM/tool spans unified onto the run's clicked trace | ✅ **Working** | `otel_run_context(run_id)` binds OTEL spans to a run_id-derived trace; registry-api normalizes its trace id to the same undashed 32-hex (`_lf_trace_id`) so envelope + safety + LLM/tool land on one trace |
-| Trace "User" field shows readable name | ✅ **Fixed (Phase 1)** | `preferred_username`; DB FK cols keep UUID |
-| Trace identifies which deployment/instance produced it | ✅ **Fixed (Phase 1)** | `deployment_id` + `environment` in metadata/tags |
-| M1 — Traces list page | ✅ Built | `observability.py` + `ObservabilityTracesPage.tsx` |
-| M2 — Latency/score dashboard | ✅ **Built** | Feedback ratio (migration 0057) + **tool-call frequency/latency** panel both shipped. Env-scoped: SEPARATE Production and Sandbox dashboards (routes `/observability/dashboard/{production,sandbox}`), `get_dashboard?environment=` filters every panel. Tool-calls come from Langfuse `type=TOOL` observations filtered to the dashboard's own AgentRun trace-ids (team+env scoped). |
-| M3 — Eval results deep-linking | ✅ Built | `EvalResultsPage.tsx` |
-| M4 — Safety scan visibility | ✅ Built | `SafetyDetails.tsx` + `TraceDrawer.tsx` |
-| M5 — Production chat observability | ✅ **Built (Phase 4)** | `catalog.py` runs endpoint; `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User + Score columns |
-| M6 — Trace comparison | ✅ **Built (Phase 4)** | Span/duration diffing + Judge Score (A→B) + Score Delta card, sourced from the trace's `scores[]` |
-| Cost tracking — per-run $ + tokens persisted | ✅ **Built (Path A)** | `cost_backfill.py` background sweep sums each run's Langfuse `GENERATION` cost (`calculatedTotalCost`) + tokens and writes them to `agent_runs.cost_usd`/`prompt_tokens`/`completion_tokens`. Idempotent (`cost_usd IS NULL`), 60s interval, 24h window — one path for all run types, no ingestion race. |
-| Cost tracking — dashboard + Cost console | ✅ **Built (Path A)** | Dashboard **LLM Cost** panel (avg/run, tokens, Spend-by-Model bar). Dedicated **Cost console** (`GET /observability/costs`, `/observability/costs`, DollarSign sidebar) — total/avg/tokens/projected-monthly, daily-spend trend, by-model + by-agent, most-expensive-runs. Env-scoped (prod/sandbox). By-model comes live from Langfuse (model lives on the span); totals/daily/by-agent from persisted SQL. |
-| Frontend defaults to inline `TraceDrawer`, not external Langfuse link | ❌ Inverted | `docs/design/todo/langfuse-trace-single-click.md` — external link is primary in 3 components today, drawer is dead-code fallback |
-| L1 Real-time trace streaming | ❌ Not built | Quarter+ scope, intentionally deferred |
-| L2 Custom dashboards per agent | ❌ Not built | Quarter+ scope, intentionally deferred |
-| L3 Alerting on trace anomalies | ❌ Not built | Quarter+ scope, intentionally deferred |
-| L4 Cost tracking | ✅ **Built (Path A)** — see the two Cost rows above | The original "needs a LangChain callback handler" framing is **obsolete**: the OTEL instrumentation already emits `GENERATION` spans carrying `calculatedTotalCost` + token counts, so cost is read from Langfuse and persisted by the backfill sweep — no callback handler, no Portkey required. Portkey stays optional, only for budget *enforcement* + caching (not needed for visibility). |
-| L5 Trace-based regression testing | ❌ Not built | Quarter+ scope, intentionally deferred |
+**Emit (write path) → OpenTelemetry.** Agent LLM/tool spans emit as vendor-neutral OpenInference OTEL (§2 Step 4), landing in Langfuse via its OTLP endpoint. Swapping = pointing the OTLP exporter elsewhere. **Status: done for agent spans; NOT done for platform-emitted spans** (`tracing.py` trace creation, the feedback score POST, safety-orchestrator) — those still use the Langfuse client. See §6.
+
+**Read (query path) → `ObservabilityBackend` interface.** OTEL standardizes emit, not query — every backend has a different read API/shape/UI. That is confined behind one interface in `services/registry-api/observability_backend.py`:
+```
+get_trace(trace_id)                 -> NormalizedTrace | None   # provider-neutral spans + scores
+get_run_cost(trace_id)              -> RunCost | None           # summed GENERATION cost/tokens
+spend_by_model(trace_ids, from)     -> list[CostByModel]
+tool_call_stats(trace_ids, from)    -> list[ToolCallStat]
+build_trace_url(trace_id)           -> str | None               # provider deep-link, or None
+push_score(trace_id, name, value)   -> bool
+```
+- `LangfuseBackend` is backend #1; `NoneBackend` disables reads + hides the trace UI cleanly. `OBSERVABILITY_BACKEND` env selects (default `langfuse`, `none`).
+- `NormalizedTrace` is a stable neutral shape (trace meta + `spans[]` with type/name/timing/io/status + `scores[]`). Studio (`TraceDrawer`, `ObservabilityComparePage`, `observabilityApi`/`playgroundApi`) consumes THIS, never a raw Langfuse shape. Adding a backend = one adapter class.
+- **Own your product data:** judge scores, user feedback, and **cost** are persisted to *our* Postgres (`judge_score`, `playground_runs.user_feedback` migration 0057, `agent_runs.cost_usd`/tokens) and read via SQL — so they survive a backend swap. Only the *source* of the cost figure is backend-specific and lives behind the adapter.
+
+**Status: read seam BUILT and live-verified** — `get_trace` on a real trace returns 38 normalized spans + score; every read call-site (observability/playground/catalog/agent_runs/deployments/eval_runner/composite_workflows routers + `cost_backfill`/`tracing`/`workflow_orchestrator`) goes through the adapter; endpoints return `{trace, trace_id, trace_url}` with no `langfuse` key.
 
 ---
 
-## 6. Open gaps and fix plans
+## 6. Roadmap & open items
 
-Full designs for the actionable (non-Quarter+) gaps live in the working plan for this investigation; summarized here for reference and kept current as each lands:
+Genre-specific docs stay separate (`bugs/`, `debugging/`). Everything forward-looking is here.
 
-- **Gap 0a — SDK env var mismatch + missing `public_key`.** Fix: rename `AGENTSHIELD_LANGFUSE_KEY`/`AGENTSHIELD_LANGFUSE_HOST` → `LANGFUSE_PUBLIC_KEY`+`LANGFUSE_SECRET_KEY`+`LANGFUSE_HOST` in `sdk/agentshield_sdk/config.py`, `tracing.py`, `server.py`, and the duplicate definitions in `services/declarative-runner/config.py`/`main.py`. No `deploy-controller`/Helm changes needed — they're already correct.
-- **Gap 0b — No LLM/tool-call span instrumentation.** Larger effort: add a LangChain/LangGraph callback handler through the SDK's actual execution loop. Same work as roadmap item L4. Track as one item, not two.
-- **Gap 1 — `start_deployment_chat` never creates a trace.** Fix: extract a shared `_create_traced_chat_run(...)` helper in `chat.py` used by both `start_chat` and `start_deployment_chat`; fix `stream_deployment_chat` to propagate `trace_id` the same way `stream_chat` does.
-- **Gap 2 — Trace user field shows a UUID.** Fix: pass `preferred_username` (JWT claim) instead of `sub` to `trace_create_run`'s `user_id` param. DB columns unaffected.
-- **Gap 3 — No deployment/instance identity on traces.** Fix: add `deployment_id`/`environment` to `trace_create_run`'s metadata/tags. Bundle with Gap 1/2 — same call site.
-- **Gap 4 — M2 dashboard missing panels.** ✅ **RESOLVED.** Feedback ratio (`user_feedback` column, migration 0057) + **tool-call frequency/latency** both shipped. The tool-call panel became feasible once OTEL `type=TOOL` spans ingested; team-scoping is solved by filtering observations to the dashboard's own AgentRun trace-ids (no per-trace fetch). The dashboard is now env-scoped (separate Production/Sandbox views, `environment=` filters every panel).
-- **Gap 5 — M5 missing columns.** ✅ **RESOLVED (Phase 4):** `AgentRunResponse.judge_score` added; CatalogDetailPage Runs tab shows User (`run_by`/`user_id`) + Score columns.
-- **Gap 6 — M6 missing score delta.** ✅ **RESOLVED (Phase 4):** `ObservabilityComparePage` reads each trace's `scores[]` (name~judge) and renders a Judge Score (A→B) + Score Delta card.
-- **Cost tracking — nothing wrote `agent_runs.cost_usd`.** ✅ **RESOLVED (Path A):** the columns existed but were never populated, so every cost query returned 0. Because the OTEL work made Langfuse `GENERATION` spans carry `calculatedTotalCost` + token counts, the fix is a small backfill sweep (`cost_backfill.py`) that sums those onto each run — no Portkey, no callback handler. Surfaced on the dashboard (LLM Cost panel) and a dedicated Cost console (`GET /observability/costs`). **Known limits (gap ledger):** by-model/tool breakdowns fetch Langfuse observations with a 5-page (500-span) cap per view — best-effort for very high-volume windows; a run whose trace never carries a GENERATION (e.g. a blocked run) is abandoned after 24h and stays `cost_usd = NULL`.
+**Resolved this effort (for the record):** deployment-pinned chat trace creation, trace_id propagation, SDK tracer enablement + env-var/`public_key` fix, cross-namespace Langfuse host, readable trace user, deployment identity on traces, LLM/tool span capture (OTEL), M2 dashboard panels (feedback + tool-calls), M5 production run columns, M6 score delta, the read-adapter seam, and cost *visibility* (§7). See git history for the detail that used to live in the folded TODO docs.
+
+**Open — emit seam (the remaining Langfuse coupling).** Platform-emitted writes still call the Langfuse client directly: trace creation/completion + `trace_judge_score` (`tracing.py`), the feedback score POST (`playground.py` → `/api/public/scores`), and safety-orchestrator scan spans. Move these to the OTEL SDK / a neutral emit interface so a backend swap carries writes too, not just reads. Highest-risk sub-item: OTEL context is `contextvars`-based and doesn't cross `asyncio.create_task`/detached-SSE boundaries (where `_complete_chat_run` lives) — spike explicit `trace_context` before committing.
+
+**Open — prove the abstraction with a second backend.** The interface + `NoneBackend` exist, but "provider-agnostic" is designed, not demonstrated, until the same chat renders identically through a second backend (e.g. local Jaeger/Grafana Tempo/Arize Phoenix). Build the 2nd adapter when a real need lands.
+
+**Open — cost via LLM proxy + budget enforcement (Portkey).** What shipped is cost *visibility* (§7). It does NOT do what an LLM proxy would: capture cost authoritatively at the source and **reject calls when a team hits a budget (hard cap)**. Langfuse is observe-after-the-fact — it can show overspend, never stop it. The Portkey design (route agent traffic through `OPENAI_BASE_URL=portkey`, provider translation, per-team virtual keys, budget limits) is the pending approach for enforcement/caching. Not started.
+
+**Open — single-click trace viewing.** `EvalResultsPage`, `ChatPane`, `RunsTab` still default to the raw external Langfuse link instead of the inline `TraceDrawer`, sending users through Langfuse's multi-step SSO chooser. The drawer + backing endpoint exist and now consume the neutral shape, so this is a small change: make the drawer the primary click target, demote the external link to the secondary "Trace ↗". (Was `langfuse-trace-single-click.md`.)
+
+**Open — `NormalizedTrace` UI polish.** Spans render as a flat list; no nested waterfall/tree, no per-generation token/cost inline, no inline scores in the drawer.
+
+**Open — safety-orchestrator disabled in this env.** No safety spans exist here, and PII reaches Langfuse unredacted (the scanner does placeholder redaction). Accepted while deferred; revisit when safety-orchestrator lands.
+
+**Open — Langfuse retention/TTL.** The 90-day trace-retention NFR is unenforced; ClickHouse slowly refills. Track a TTL policy.
+
+**Deferred (Quarter+):** L1 real-time trace streaming, L2 per-agent custom dashboards, L3 anomaly alerting, L5 trace-based regression testing.
 
 ---
 
-## 7. Anti-patterns observed (don't repeat these)
+## 7. Cost tracking
 
-1. **Two endpoints doing the same thing, one instrumented and one not.** `start_chat`/`start_deployment_chat` in `chat.py` are near-identical; only one calls `trace_create_run`. Whenever a new "pinned" or "variant" version of an existing traced endpoint is added, extract the tracing logic into a shared helper *before* writing the second endpoint, not after a bug report.
-2. **Inventing a new env var naming convention instead of reusing the existing one.** The SDK's `AGENTSHIELD_LANGFUSE_KEY` silently no-op'd every agent pod's tracer since it was written. Three other integration points already agreed on `LANGFUSE_PUBLIC_KEY`/`SECRET_KEY`/`HOST` — a fourth, differently-named consumer is always wrong; grep for existing usage before adding a new env var.
-3. **A credential-free path built, then not made the default.** `TraceDrawer` + its backing proxy endpoint were built specifically so Studio never has to send users through Langfuse's own login. Three components still default to the raw external link, with the good path as unreachable fallback code. When building an alternative to a broken UX, make it the default, not an opt-in.
-4. **Silent exception swallowing that hides all three of the above.** `services/registry-api/tracing.py`'s helpers catch broad `Exception` and log at `DEBUG` (invisible by default). This is why Gap 1 went unnoticed — the trace call failed with zero operational signal. Any new tracing call should at minimum log failures at `WARNING`.
+**Shipped — cost visibility (Path A / Langfuse-derived).** Because OpenInference OTEL `GENERATION` spans carry `calculatedTotalCost` + token counts, a background sweep (`cost_backfill.py`, via `backend.get_run_cost`) sums each completed run's cost/tokens and persists them onto `agent_runs.cost_usd`/`prompt_tokens`/`completion_tokens` — idempotent (`cost_usd IS NULL`), 60s interval, 24h window, one path for all run types, no ingestion race. Surfaced as: dashboard **LLM Cost** panel (avg/run, tokens, spend-by-model) + a dedicated **Cost console** (`GET /observability/costs`, `/observability/costs`, DollarSign sidebar) with total/avg/tokens/projected-monthly, daily trend, by-model + by-agent, most-expensive-runs; env-scoped (prod/sandbox). Totals/daily/by-agent/top-runs from persisted SQL; by-model live from the backend. No migration (columns pre-existed).
+- **Known limits:** by-model/tool breakdowns cap the backend fetch at 5 pages (500 spans) per view; a run whose trace never carries a GENERATION (e.g. a blocked run) is abandoned after 24h and stays `cost_usd = NULL`.
+
+**NOT shipped — cost via LLM proxy + budget enforcement.** This is what `cost-tracking.md` originally *designed* (Portkey), and it is a distinct, still-open capability (§6): authoritative-at-source capture + hard budget caps + caching/fallback. Cost *visibility* (above) does not provide enforcement. Don't read "cost tracking ✅" as "budgets enforced" — only visibility is done.
 
 ---
 
-## 8. Relationship to `docs/spec.md`
+## 8. Anti-patterns observed (don't repeat these)
 
-`docs/spec.md`'s Component Specifications table lists detailed design docs; this doc is now one of them (added as a row). `docs/spec.md` still owns the high-level requirements (FR-010, FR-015, FR-018, FR-021–026 — trace capture, cost tracking, LLM-as-Judge, Playground trace panel) and the trace retention NFR (90 days). This doc owns *how those requirements get implemented consistently* — the pattern in §2 is the thing every future FR touching traces should be checked against.
+1. **Two endpoints doing the same thing, one instrumented and one not.** Extract the tracing logic into a shared helper *before* writing the second endpoint.
+2. **Inventing a new env var naming convention.** `AGENTSHIELD_LANGFUSE_KEY` silently no-op'd every agent tracer; grep for existing usage before adding an env var.
+3. **A credential-free path built, then not made the default.** `TraceDrawer` exists so Studio never sends users through Langfuse login — yet three components still default to the external link (§6). When building an alternative to a broken UX, make it the default.
+4. **Calling the backend's REST API inline from routers.** Every read must go through `observability_backend`; inline `/api/public/*` calls are how reads scattered and coupled the platform to Langfuse.
+5. **Silent exception swallowing.** Tracing helpers catch broad `Exception` at `DEBUG`. That hid a trace-creation gap and a `NameError` in the cost sweep (`docs/debugging/010`). Log tracing/read failures at `WARNING`, and never let a coding error (`NameError`/`ImportError`) hide behind a background loop's broad `except`.
+
+---
+
+## 9. Relationship to `docs/spec.md`
+
+`docs/spec.md`'s Component Specifications table lists this as the observability reference. `spec.md` owns the high-level requirements (FR-010, FR-015 cost, FR-018, FR-021–026 — trace capture, LLM-as-Judge, Playground trace panel) and the 90-day retention NFR (unenforced — §6). This doc owns *how* those get implemented: §2 is the checklist every future FR touching runs/traces/cost must pass; §5 is the seam every read must go through.

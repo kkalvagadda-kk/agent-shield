@@ -14,7 +14,7 @@ This makes the eval pipeline feel incomplete despite working mechanically.
 
 ## Design Reference
 
-`docs/design/langfuse-studio-integration.md` covers trace visibility in detail. Relevant sections:
+`docs/design/observability-architecture.md` covers trace visibility in detail (it consolidated the former `langfuse-studio-integration.md`). Relevant sections:
 - **Short-term:** TraceDrawer component (inline span tree, replaces broken external Langfuse link)
 - **M3:** Eval results → "View Trace" per row using `langfuse_trace_id` (already stored in EvalRunResult)
 - **M1:** Traces List Page (`/observability/traces`) for browsing all runs
