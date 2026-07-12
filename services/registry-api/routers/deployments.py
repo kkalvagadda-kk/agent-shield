@@ -12,6 +12,7 @@ Endpoints
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -413,15 +414,18 @@ async def deploy_agent(
                 ),
             )
     else:
-        # Auto-create a new version that snapshots current agent metadata
-        max_result = await db.execute(
-            select(AgentVersion.version_number)
+        # No explicit version — snapshot the current agent config, but only mint a
+        # NEW version when that snapshot actually differs from the latest one.
+        # A no-op redeploy must reuse the existing version, not bump the number
+        # (applies to all environments). Previously every deploy created a version,
+        # inflating the history with byte-identical duplicates.
+        latest_result = await db.execute(
+            select(AgentVersion)
             .where(AgentVersion.agent_id == agent.id)
             .order_by(AgentVersion.version_number.desc())
             .limit(1)
         )
-        max_version = max_result.scalar_one_or_none()
-        next_version = (max_version or 0) + 1
+        latest_version = latest_result.scalar_one_or_none()
 
         metadata = agent.metadata_ or {}
         config_snapshot = {
@@ -442,20 +446,44 @@ async def deploy_agent(
             for t in bound_tools
         ]
 
-        version = AgentVersion(
-            agent_id=agent.id,
-            version_number=next_version,
-            image_tag=None,
-            config=config_snapshot,
-            tools=tools_snapshot,
-        )
-        db.add(version)
-        await db.flush()
-        await db.refresh(version)
-        logger.info(
-            "deploy_agent: auto-created version %d for agent '%s' with config snapshot",
-            version.version_number, name,
-        )
+        def _canonical(cfg: dict | None, tools: list | None) -> str:
+            # Canonical form for change-detection: sort dict keys AND the tools
+            # list (its DB query order is non-deterministic) so only real content
+            # changes register as a diff, not ordering noise.
+            return json.dumps(
+                {
+                    "config": cfg or {},
+                    "tools": sorted((tools or []), key=lambda t: t.get("name", "")),
+                },
+                sort_keys=True,
+                default=str,
+            )
+
+        if latest_version is not None and _canonical(config_snapshot, tools_snapshot) == _canonical(
+            latest_version.config, latest_version.tools
+        ):
+            # Unchanged — reuse the latest version, no new row, no version bump.
+            version = latest_version
+            logger.info(
+                "deploy_agent: reusing version %d for agent '%s' (config unchanged)",
+                version.version_number, name,
+            )
+        else:
+            next_version = (latest_version.version_number if latest_version else 0) + 1
+            version = AgentVersion(
+                agent_id=agent.id,
+                version_number=next_version,
+                image_tag=None,
+                config=config_snapshot,
+                tools=tools_snapshot,
+            )
+            db.add(version)
+            await db.flush()
+            await db.refresh(version)
+            logger.info(
+                "deploy_agent: auto-created version %d for agent '%s' (config changed)",
+                version.version_number, name,
+            )
 
     # ── Pre-flight gate 1: deployer team check ────────────────────────────────
     deployer_team = x_user_team or agent.team  # fallback keeps backwards compat
