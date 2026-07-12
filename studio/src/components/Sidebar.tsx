@@ -56,8 +56,9 @@ const CATALOG_ITEMS: NavItem[] = [
 ];
 
 const OBSERVE_ITEMS: NavItem[] = [
-  { label: "Traces",    to: "/observability/traces",    icon: Activity },
-  { label: "Dashboard", to: "/observability/dashboard", icon: LayoutDashboard },
+  { label: "Traces",         to: "/observability/traces",              icon: Activity },
+  { label: "Prod Dashboard", to: "/observability/dashboard/production", icon: LayoutDashboard },
+  { label: "Sandbox Dashboard", to: "/observability/dashboard/sandbox", icon: LayoutDashboard },
 ];
 
 const SETTINGS_ITEMS: NavItem[] = [

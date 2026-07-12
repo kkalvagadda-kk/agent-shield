@@ -57,18 +57,13 @@ export interface FeedbackSummary {
   ratio: number | null;
 }
 
-export interface FeedbackBreakdown {
-  production: FeedbackSummary;
-  sandbox: FeedbackSummary;
-}
-
 export interface DashboardData {
   latency_series: TimeseriesPoint[];
   score_histogram: HistogramBucket[];
   status_counts: StatusCount[];
   cost_series: TimeseriesPoint[];
   safety_blocks: AgentBlockRate[];
-  feedback: FeedbackBreakdown;
+  feedback: FeedbackSummary;
   total_runs: number;
   total_cost_usd: number;
 }
@@ -114,6 +109,7 @@ export async function getTraceDetail(traceId: string): Promise<{
 export async function getDashboard(params: {
   agent_name?: string;
   period?: string;
+  environment?: "production" | "sandbox";
   from_date?: string;
   to_date?: string;
 } = {}): Promise<DashboardData> {

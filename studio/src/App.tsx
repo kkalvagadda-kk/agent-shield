@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "sonner";
 import ErrorBoundary from "./components/ErrorBoundary";
 import RequireRole from "./components/RequireRole";
@@ -89,7 +89,19 @@ export default function App() {
               <Route path="/playground/datasets" element={<DatasetsPage />} />
               <Route path="/playground/eval-runs/:evalRunId" element={<EvalResultsPage />} />
               <Route path="/observability/traces" element={<ObservabilityTracesPage />} />
-              <Route path="/observability/dashboard" element={<ObservabilityDashboardPage />} />
+              <Route
+                path="/observability/dashboard/production"
+                element={<ObservabilityDashboardPage environment="production" />}
+              />
+              <Route
+                path="/observability/dashboard/sandbox"
+                element={<ObservabilityDashboardPage environment="sandbox" />}
+              />
+              {/* Legacy path → production (the admin's default view). */}
+              <Route
+                path="/observability/dashboard"
+                element={<Navigate to="/observability/dashboard/production" replace />}
+              />
               <Route path="/observability/compare" element={<ObservabilityComparePage />} />
             </Routes>
             </ErrorBoundary>

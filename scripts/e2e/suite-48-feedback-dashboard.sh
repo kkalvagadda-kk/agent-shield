@@ -79,10 +79,13 @@ async def m():
         await db.refresh(f0)
         t1 = (f0.user_feedback == 1)
 
-        # T-S48-002: dashboard SPLIT — production vs sandbox reported separately
-        dash = await get_dashboard(agent_name=AG, period='7d', from_date=None,
-                                   to_date=None, claims={'sub': SUB}, db=db)
-        prod, sand = dash.feedback.production, dash.feedback.sandbox
+        # T-S48-002: dashboard is ENV-SCOPED — production and sandbox are
+        # separate dashboards (environment param), never blended.
+        dprod = await get_dashboard(agent_name=AG, period='7d', environment='production',
+                                    from_date=None, to_date=None, claims={'sub': SUB}, db=db)
+        dsand = await get_dashboard(agent_name=AG, period='7d', environment='sandbox',
+                                    from_date=None, to_date=None, claims={'sub': SUB}, db=db)
+        prod, sand = dprod.feedback, dsand.feedback
         t2 = (sand.up==2 and sand.down==1 and abs((sand.ratio or 0)-2/3) < 0.01
               and prod.up==2 and prod.down==0 and abs((prod.ratio or 0)-1.0) < 0.01)
 
@@ -103,7 +106,7 @@ PASS=0; FAIL=0
 case "$RESULT" in
   *"T1=True T2=True"*)
     echo "  PASS: T-S48-001 user_feedback persisted on PlaygroundRun"
-    echo "  PASS: T-S48-002 dashboard SPLIT — production(2up) vs sandbox(2up/1down) reported separately"
+    echo "  PASS: T-S48-002 env-scoped dashboards — production(2up) and sandbox(2up/1down) never blended"
     PASS=2 ;;
   *) echo "  FAIL: $RESULT"; FAIL=1 ;;
 esac

@@ -96,21 +96,13 @@ class FeedbackSummary(BaseModel):
     ratio: float | None = None  # up / (up + down), None when no feedback yet
 
 
-class FeedbackBreakdown(BaseModel):
-    """Feedback split by environment. Production is the signal that matters most
-    (real users), so it is reported separately from sandbox/playground eval
-    feedback rather than blended into one ratio."""
-    production: FeedbackSummary = FeedbackSummary()
-    sandbox: FeedbackSummary = FeedbackSummary()
-
-
 class DashboardData(BaseModel):
     latency_series: list[TimeseriesPoint]
     score_histogram: list[HistogramBucket]
     status_counts: list[StatusCount]
     cost_series: list[TimeseriesPoint]
     safety_blocks: list[AgentBlockRate]
-    feedback: FeedbackBreakdown = FeedbackBreakdown()
+    feedback: FeedbackSummary = FeedbackSummary()
     total_runs: int
     total_cost_usd: float
 
@@ -292,13 +284,18 @@ async def get_trace_detail(
 async def get_dashboard(
     agent_name: Optional[str] = Query(None),
     period: str = Query("7d", description="7d|30d|custom"),
+    environment: str = Query("production", description="production|sandbox"),
     from_date: Optional[datetime] = Query(None),
     to_date: Optional[datetime] = Query(None),
     claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardData:
-    """Aggregated observability metrics for the team's runs."""
+    """Aggregated observability metrics for the team's runs, scoped to one
+    environment. Sandbox agents are experimental, so their runs must NOT dilute
+    production metrics — every panel is filtered to the selected environment.
+    """
     x_user_team = await _resolve_team(claims, db)
+    is_production = environment != "sandbox"  # default/anything-else = production
 
     # Determine time window
     if period == "7d" and not from_date:
@@ -310,6 +307,12 @@ async def get_dashboard(
         AgentRun.team == x_user_team,
         AgentRun.parent_run_id.is_(None),
     ]
+    # Environment scope: an AgentRun is production iff it targeted a production
+    # deployment, sandbox iff it targeted a sandbox deployment.
+    if is_production:
+        base_filter.append(AgentRun.production_deployment_id.isnot(None))
+    else:
+        base_filter.append(AgentRun.sandbox_deployment_id.isnot(None))
     if from_date:
         base_filter.append(AgentRun.started_at >= from_date)
     if to_date:
@@ -416,6 +419,8 @@ async def get_dashboard(
     fb_filter = [
         Agent.team == x_user_team,
         PlaygroundRun.user_feedback.isnot(None),
+        # Same environment scope as the run metrics: sandbox=False is production.
+        PlaygroundRun.sandbox.is_(not is_production),
     ]
     if agent_name:
         fb_filter.append(PlaygroundRun.agent_name == agent_name)
@@ -423,36 +428,21 @@ async def get_dashboard(
         fb_filter.append(PlaygroundRun.started_at >= from_date)
     if to_date:
         fb_filter.append(PlaygroundRun.started_at <= to_date)
-    # Split by environment: PlaygroundRun.sandbox is False for production consumer
-    # chat, True for playground/sandbox. Production feedback is reported on its own.
     feedback_q = (
         select(
-            PlaygroundRun.sandbox.label("is_sandbox"),
             func.count().filter(PlaygroundRun.user_feedback > 0).label("up"),
             func.count().filter(PlaygroundRun.user_feedback < 0).label("down"),
         )
         .select_from(PlaygroundRun)
         .join(Agent, Agent.name == PlaygroundRun.agent_name)
         .where(*fb_filter)
-        .group_by(PlaygroundRun.sandbox)
     )
-
-    def _summary(up: int, down: int) -> FeedbackSummary:
-        total = up + down
-        return FeedbackSummary(
-            up=up, down=down, total=total,
-            ratio=(up / total) if total else None,
-        )
-
-    prod_up = prod_down = sand_up = sand_down = 0
-    for r in (await db.execute(feedback_q)).all():
-        if r.is_sandbox:
-            sand_up, sand_down = int(r.up or 0), int(r.down or 0)
-        else:
-            prod_up, prod_down = int(r.up or 0), int(r.down or 0)
-    feedback = FeedbackBreakdown(
-        production=_summary(prod_up, prod_down),
-        sandbox=_summary(sand_up, sand_down),
+    fb = (await db.execute(feedback_q)).one()
+    fb_up, fb_down = int(fb.up or 0), int(fb.down or 0)
+    fb_total = fb_up + fb_down
+    feedback = FeedbackSummary(
+        up=fb_up, down=fb_down, total=fb_total,
+        ratio=(fb_up / fb_total) if fb_total else None,
     )
 
     return DashboardData(

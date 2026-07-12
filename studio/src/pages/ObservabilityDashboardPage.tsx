@@ -19,13 +19,13 @@ function MetricCard({ label, value, sub }: { label: string; value: string; sub?:
   );
 }
 
-function FeedbackRow({ label, fb, muted }: { label: string; fb?: FeedbackSummary; muted?: boolean }) {
+function FeedbackRow({ label, fb }: { label: string; fb?: FeedbackSummary }) {
   const total = fb?.total ?? 0;
   const ratio = fb?.ratio ?? 0;
   return (
     <div>
       <div className="flex items-center justify-between text-xs mb-1">
-        <span className={muted ? "text-slate-400" : "font-medium text-slate-600"}>{label}</span>
+        <span className="font-medium text-slate-600">{label}</span>
         {total === 0 ? (
           <span className="text-slate-300">no feedback yet</span>
         ) : (
@@ -52,13 +52,17 @@ function FeedbackRow({ label, fb, muted }: { label: string; fb?: FeedbackSummary
   );
 }
 
-export default function ObservabilityDashboardPage() {
+export default function ObservabilityDashboardPage({
+  environment = "production",
+}: {
+  environment?: "production" | "sandbox";
+}) {
   const [period, setPeriod] = useState("7d");
   const [agentName, setAgentName] = useState("");
 
   const { data, isLoading } = useQuery({
-    queryKey: ["observability-dashboard", period, agentName],
-    queryFn: () => getDashboard({ period, agent_name: agentName || undefined }),
+    queryKey: ["observability-dashboard", environment, period, agentName],
+    queryFn: () => getDashboard({ environment, period, agent_name: agentName || undefined }),
     staleTime: 30_000,
   });
 
@@ -76,8 +80,22 @@ export default function ObservabilityDashboardPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <BarChart3 size={20} className="text-blue-500" />
-          <h1 className="text-xl font-semibold text-slate-800">Dashboard</h1>
+          <BarChart3
+            size={20}
+            className={environment === "production" ? "text-emerald-500" : "text-amber-500"}
+          />
+          <h1 className="text-xl font-semibold text-slate-800">
+            {environment === "production" ? "Production" : "Sandbox"} Dashboard
+          </h1>
+          <span
+            className={`text-[11px] px-1.5 py-0.5 rounded font-medium ${
+              environment === "production"
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-amber-50 text-amber-700"
+            }`}
+          >
+            {environment}
+          </span>
         </div>
         <div className="flex gap-2">
           <select
@@ -125,16 +143,16 @@ export default function ObservabilityDashboardPage() {
               }
             />
             <MetricCard
-              label="Prod Satisfaction"
+              label="Satisfaction"
               value={
-                d.feedback?.production?.ratio != null
-                  ? `${Math.round(d.feedback.production.ratio * 100)}%`
+                d.feedback?.ratio != null
+                  ? `${Math.round(d.feedback.ratio * 100)}%`
                   : "—"
               }
               sub={
-                d.feedback?.production?.total
-                  ? `${d.feedback.production.up}👍 / ${d.feedback.production.down}👎 (prod)`
-                  : "no production feedback yet"
+                d.feedback?.total
+                  ? `${d.feedback.up}👍 / ${d.feedback.down}👎`
+                  : "no feedback yet"
               }
             />
           </div>
@@ -219,10 +237,10 @@ export default function ObservabilityDashboardPage() {
             <h2 className="text-sm font-medium text-slate-700 mb-3 flex items-center gap-1.5">
               <ThumbsUp size={14} /> User Feedback
             </h2>
-            <div className="space-y-4">
-              <FeedbackRow label="Production" fb={d.feedback?.production} />
-              <FeedbackRow label="Sandbox / Playground" fb={d.feedback?.sandbox} muted />
-            </div>
+            <FeedbackRow
+              label={environment === "production" ? "Production" : "Sandbox"}
+              fb={d.feedback}
+            />
           </div>
 
           {/* Safety blocks */}

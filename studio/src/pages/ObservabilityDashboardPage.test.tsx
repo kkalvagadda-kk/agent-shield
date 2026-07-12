@@ -20,7 +20,7 @@ const BASE: DashboardData = {
   status_counts: [],
   cost_series: [],
   safety_blocks: [],
-  feedback: { production: EMPTY, sandbox: EMPTY },
+  feedback: EMPTY,
   total_runs: 0,
   total_cost_usd: 0,
 };
@@ -32,37 +32,31 @@ function mockDashboard(over: Partial<DashboardData>) {
   });
 }
 
-describe("ObservabilityDashboardPage — user feedback panel", () => {
+describe("ObservabilityDashboardPage — env-scoped dashboard", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("leads with production satisfaction and splits prod vs sandbox", async () => {
-    mockDashboard({
-      feedback: {
-        production: { up: 3, down: 1, total: 4, ratio: 0.75 },
-        sandbox: { up: 1, down: 1, total: 2, ratio: 0.5 },
-      },
-    });
-    renderWithProviders(<ObservabilityDashboardPage />);
-    // Prod Satisfaction card shows the PRODUCTION ratio (75%), not sandbox.
-    await waitFor(() =>
-      expect(screen.getAllByText(/75% positive/).length).toBeGreaterThan(0)
+  it("renders a Production dashboard and requests the production environment", async () => {
+    mockDashboard({ feedback: { up: 3, down: 1, total: 4, ratio: 0.75 } });
+    renderWithProviders(<ObservabilityDashboardPage environment="production" />);
+    expect(screen.getByText("Production Dashboard")).toBeInTheDocument();
+    // The whole page is scoped to production via the API param.
+    expect(getDashboard).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: "production" })
     );
-    // Both environment rows render.
-    expect(screen.getByText("Production")).toBeInTheDocument();
-    expect(screen.getByText(/Sandbox \/ Playground/)).toBeInTheDocument();
-    expect(screen.getByText(/50% positive/)).toBeInTheDocument(); // sandbox row
+    // Data loads → the Satisfaction card shows the ratio (single-node value).
+    await waitFor(() => expect(screen.getByText("75%")).toBeInTheDocument());
   });
 
-  it("shows production empty state when only sandbox has feedback", async () => {
-    mockDashboard({
-      feedback: {
-        production: EMPTY,
-        sandbox: { up: 2, down: 0, total: 2, ratio: 1 },
-      },
-    });
-    renderWithProviders(<ObservabilityDashboardPage />);
-    await waitFor(() => expect(screen.getByText("Production")).toBeInTheDocument());
-    // Production card + row both signal no production feedback yet.
-    expect(screen.getByText(/no production feedback yet/i)).toBeInTheDocument();
+  it("renders a Sandbox dashboard scoped to the sandbox environment", async () => {
+    mockDashboard({ feedback: EMPTY });
+    renderWithProviders(<ObservabilityDashboardPage environment="sandbox" />);
+    expect(screen.getByText("Sandbox Dashboard")).toBeInTheDocument();
+    expect(getDashboard).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: "sandbox" })
+    );
+    // Empty feedback → the hint appears (Satisfaction card sub + panel row).
+    await waitFor(() =>
+      expect(screen.getAllByText(/no feedback yet/i).length).toBeGreaterThan(0)
+    );
   });
 });
