@@ -125,10 +125,53 @@ export interface RegistryTool {
   // HTTP tool fields (top-level in ToolResponse)
   http_method?: string;
   http_url?: string;
+  // Header templates like {"X-API-KEY": "{{serper_api_key}}"}. The {{...}}
+  // placeholders name the env vars the tool reads at runtime — see
+  // sdk/agentshield_sdk/tool_executor.py, which substitutes header placeholders
+  // from os.environ. Those env vars are injected from the credential Secret via
+  // the pod's envFrom, so each placeholder name IS the exact credential key the
+  // tool expects. Read-only here; surfaced so the UI can drive the key name.
+  http_headers?: Record<string, string> | null;
   // Python tool fields
   python_code?: string;
   config: Record<string, unknown>;
 }
+
+/**
+ * Valid Kubernetes/POSIX environment-variable name: a letter or underscore
+ * followed by letters, digits, or underscores. Hyphenated names (e.g.
+ * "serper-dev") are INVALID env vars and are silently dropped by K8s `envFrom`,
+ * so a credential keyed that way never reaches the agent.
+ */
+export const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export const isValidEnvVarName = (key: string): boolean =>
+  ENV_VAR_NAME_RE.test(key);
+
+/**
+ * The credential keys a tool expects, derived from the {{...}} placeholders in
+ * its HTTP header templates. This mirrors the runtime contract in
+ * tool_executor.py (header placeholders are resolved from the pod env). A tool
+ * with no credential-bearing headers returns []. Names are de-duplicated and
+ * returned in first-seen order.
+ */
+export const expectedCredentialKeys = (tool: RegistryTool): string[] => {
+  const headers = tool.http_headers;
+  if (!headers) return [];
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const value of Object.values(headers)) {
+    if (typeof value !== 'string') continue;
+    for (const m of value.matchAll(/\{\{(\w+)\}\}/g)) {
+      const name = m[1];
+      if (!seen.has(name)) {
+        seen.add(name);
+        keys.push(name);
+      }
+    }
+  }
+  return keys;
+};
 
 export interface Skill {
   id: string;

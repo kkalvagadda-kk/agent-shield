@@ -8,19 +8,45 @@ import { z } from 'zod';
 import {
   createAuthConfig,
   deleteAuthConfig,
+  expectedCredentialKeys,
+  isValidEnvVarName,
   listAuthConfigs,
+  listTools,
   updateAuthConfig,
   type AuthConfig,
   type CreateAuthConfigPayload,
+  type RegistryTool,
 } from '../api/registryApi';
 
-const schema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  type: z.enum(['api_key', 'oauth2', 'bearer', 'mtls']),
-  credential_key: z.string().optional(),
-  credential_value: z.string().optional(),
-  owner_team: z.string().optional(),
-});
+const schema = z
+  .object({
+    name: z.string().min(1, 'Name is required'),
+    type: z.enum(['api_key', 'oauth2', 'bearer', 'mtls']),
+    credential_key: z.string().optional(),
+    credential_value: z.string().optional(),
+    owner_team: z.string().optional(),
+  })
+  .superRefine((v, ctx) => {
+    const key = v.credential_key?.trim() ?? '';
+    // A secret value with no key would be silently dropped on save.
+    if (v.credential_value && !key) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['credential_key'],
+        message: 'Key Name is required when a secret value is set.',
+      });
+    }
+    // The key becomes an env var in the agent pod; hyphens / leading digits are
+    // invalid env-var names and get silently dropped by Kubernetes envFrom.
+    if (key && !isValidEnvVarName(key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['credential_key'],
+        message:
+          'Invalid key. Use letters, digits, and underscores only (no hyphens), not starting with a digit.',
+      });
+    }
+  });
 
 type FormValues = z.infer<typeof schema>;
 
@@ -175,7 +201,7 @@ function CredentialForm({
 }) {
   const isEdit = config !== null;
 
-  const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({
+  const { register, handleSubmit, setValue, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: {
       name: config?.name ?? '',
@@ -185,6 +211,32 @@ function CredentialForm({
       owner_team: config?.owner_team ?? '',
     },
   });
+
+  // Tool that consumes this credential. Selecting a tool drives the Key Name so
+  // it exactly matches the env var the tool reads — users don't free-type it.
+  const [selectedToolId, setSelectedToolId] = useState<string>('');
+
+  const { data: toolsData } = useQuery({
+    queryKey: ['tools', 'credential-picker'],
+    queryFn: () => listTools(200, 0),
+  });
+  // Only HTTP tools carry credential-bearing header placeholders.
+  const tools: RegistryTool[] = (toolsData?.items ?? []).filter(
+    (t) => expectedCredentialKeys(t).length > 0,
+  );
+
+  const selectedTool = tools.find((t) => t.id === selectedToolId) ?? null;
+  const toolKeys = selectedTool ? expectedCredentialKeys(selectedTool) : [];
+  // When a tool is selected we lock the Key Name to what the tool expects.
+  const keyLocked = toolKeys.length > 0;
+
+  const applyToolKey = (toolId: string) => {
+    setSelectedToolId(toolId);
+    const tool = tools.find((t) => t.id === toolId) ?? null;
+    const keys = tool ? expectedCredentialKeys(tool) : [];
+    // Auto-fill the first expected key; a multi-key tool lets the user pick.
+    setValue('credential_key', keys[0] ?? '', { shouldValidate: true });
+  };
 
   const mutation = useMutation({
     mutationFn: async (values: FormValues) => {
@@ -250,14 +302,58 @@ function CredentialForm({
           <p className="text-xs text-slate-400 mb-3">
             Stored as a Kubernetes Secret. Values are write-only — they cannot be retrieved after saving.
           </p>
+
+          <div className="mb-4">
+            <label className="label">Used by tool</label>
+            <select
+              className="input"
+              aria-label="Used by tool"
+              value={selectedToolId}
+              onChange={(e) => applyToolKey(e.target.value)}
+            >
+              <option value="">— Not linked to a tool (advanced) —</option>
+              {tools.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.display_name ?? t.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-slate-400 mt-1">
+              Pick the tool that reads this secret. The tool sets the exact Key Name below.
+            </p>
+          </div>
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="label">Key Name</label>
-              <input
-                {...register('credential_key')}
-                className="input"
-                placeholder="e.g. serper_api_key"
-              />
+              {toolKeys.length > 1 ? (
+                <select {...register('credential_key')} className="input" aria-label="Key Name">
+                  {toolKeys.map((k) => (
+                    <option key={k} value={k}>{k}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  {...register('credential_key')}
+                  className="input"
+                  aria-label="Key Name"
+                  placeholder="e.g. serper_api_key"
+                  readOnly={keyLocked}
+                  aria-readonly={keyLocked}
+                />
+              )}
+              {keyLocked ? (
+                <p className="text-xs text-slate-400 mt-1">
+                  Set by <span className="font-medium">{selectedTool?.display_name ?? selectedTool?.name}</span>. The agent reads this as an env var.
+                </p>
+              ) : (
+                <p className="text-xs text-slate-400 mt-1">
+                  Env-var name: letters, digits, underscores only (no hyphens).
+                </p>
+              )}
+              {errors.credential_key && (
+                <p className="text-xs text-red-500 mt-1">{errors.credential_key.message}</p>
+              )}
             </div>
             <div>
               <label className="label">Secret Value</label>
