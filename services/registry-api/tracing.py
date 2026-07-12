@@ -147,9 +147,13 @@ def trace_create_run(
             metadata["environment"] = environment
             tags.append(f"env:{environment}")
         lf_id = _lf_trace_id(run_id)
+        # The trace's DISPLAY NAME is the agent instance's identity — a deployment
+        # has no human name, so it's the agent name + environment (e.g.
+        # "serper-agent-4 · sandbox"). context stays in metadata/tags for filtering.
+        trace_name = f"{agent_name} · {environment}" if environment else agent_name
         lf.trace(
             id=lf_id,
-            name=f"agent-run.{context}",
+            name=trace_name,
             user_id=user_id,
             input={"message": input_message} if input_message else None,
             metadata=metadata,
@@ -180,11 +184,14 @@ def trace_complete_run(
             output["response"] = output_text[:2000]
         if judge_score is not None:
             output["judge_score"] = judge_score
+        # Partial update — only set output. Do NOT pass name/tags: Langfuse
+        # preserves omitted fields, so the create-time display name (the agent
+        # identity) and tags (agent_name/deployment/env) survive. Previously this
+        # passed name="agent-run" + tags=[status], which clobbered both — the
+        # reason every completed trace showed up as just "agent-run".
         lf.trace(
             id=_lf_trace_id(run_id),
-            name="agent-run",
             output=output,
-            tags=[f"status:{status}"],
         )
         lf.flush()
     except Exception as exc:
