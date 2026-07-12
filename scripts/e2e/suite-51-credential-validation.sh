@@ -5,11 +5,11 @@
 # the API key) while still persisting a real credential's value.
 set -euo pipefail
 
-POD=$(kubectl get pod -n agentshield-platform -l app=registry-api \
-  -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl get pods -n agentshield-platform -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
 run() {
-  kubectl exec -n agentshield-platform "$POD" -- python3 -c "$1"
+  kubectl exec -n agentshield-platform "$POD" -c registry-api -- python3 -c "$1"
 }
 
 echo "=== Suite 51: Credential Validation ==="
@@ -82,7 +82,8 @@ name = "s49-mtls-" + uuid.uuid4().hex[:8]
 pem = "-----BEGIN CERTIFICATE-----\n" + ("MIIB" + "a"*300) + "\n-----END CERTIFICATE-----"
 r = c.post("/auth-configs/", json={"name":name,"type":"mtls","credentials":{"tls_cert":pem}})
 assert r.status_code == 201, f"Expected 201, got {r.status_code}: {r.text}"
-c.delete(f"/auth-configs/{r.json()[\"id\"]}")
+cid = r.json()["id"]
+c.delete(f"/auth-configs/{cid}")
 print("PASS: T-S51-004")
 '
 
@@ -125,7 +126,7 @@ name = "s51-badkey-" + uuid.uuid4().hex[:8]
 # envFrom would silently drop it, so the agent never gets the credential.
 r = c.post("/auth-configs/", json={"name":name,"type":"api_key","credentials":{"serper-dev":"realkey123"}})
 assert r.status_code == 422, f"Expected 422, got {r.status_code}: {r.text}"
-lst = c.get("/auth-configs/").json()
+lst = c.get("/auth-configs/", params={"limit":200}).json()["items"]
 assert not any(a["name"] == name for a in lst), "Rejected config must not persist"
 print("PASS: T-S51-006")
 '
