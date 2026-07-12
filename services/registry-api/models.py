@@ -895,8 +895,14 @@ class AuthConfig(Base):
     )
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     type: Mapped[str] = mapped_column(String(32), nullable=False)
-    # Reference to K8s Secret; never echoed in API responses
+    # Reference to K8s Secret; never echoed in API responses. The K8s secret is a
+    # runtime materialization — the DURABLE source of truth is credentials_encrypted
+    # below, so a Postgres backup captures the credential (K8s secrets are NOT in
+    # the backup and are wiped on cluster loss). Mirrors LLMProvider.credentials_encrypted.
     k8s_secret_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Fernet-encrypted credentials dict (AGENTSHIELD_ENCRYPTION_KEY). Nullable for
+    # legacy rows created before this column existed. Never echoed in API responses.
+    credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     owner_team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
