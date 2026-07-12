@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -28,6 +29,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse  # type: ignore[import]
 
 from . import config
+from .otel import setup_otel
 from .safety_client import SafetyBlockedError
 
 logger = logging.getLogger(__name__)
@@ -49,11 +51,33 @@ SAFETY_BLOCKS = Counter(
 )
 
 # --- App ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Process startup: enable OpenTelemetry LLM/tool span capture.
+
+    OpenInference instruments langchain/langgraph globally and exports OTLP to
+    the configured backend (Langfuse today); ``setup_otel()`` no-ops when
+    unconfigured. Mirrors the declarative-runner's lifespan wiring
+    (services/declarative-runner/main.py) so SDK-container agents emit the same
+    LLM/tool generation spans. Runs before any request is served, so the
+    instrumentation is in place before the first graph invocation. Must never
+    raise — ``setup_otel`` already swallows its own errors, but we guard here
+    too so a tracing misconfig can never stop the agent from serving.
+    """
+    try:
+        enabled = setup_otel()
+        logger.info("SDK agent OTEL span capture enabled=%s", enabled)
+    except Exception as exc:  # never let tracing setup break startup
+        logger.warning("OTEL setup skipped: %s", exc)
+    yield
+
+
 app = FastAPI(
     title="AgentShield Agent",
     version="0.1.0",
     docs_url="/docs",
     redoc_url=None,
+    lifespan=lifespan,
 )
 
 # Set by cli.py before uvicorn starts.
@@ -209,16 +233,17 @@ async def chat_stream(req: ChatRequest, request: Request):
 
 
 @app.post("/resume/{thread_id}")
-async def resume_thread(thread_id: str, req: ResumeRequest):
+async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    trace_id = request.headers.get("x-agentshield-trace-id")
     try:
         decision = {
             "decision": req.decision,
             "reviewer_id": req.reviewer_id,
             "reason": req.reason,
         }
-        result = await runner.resume(thread_id, decision)
+        result = await runner.resume(thread_id, decision, trace_id=trace_id)
         return result
     except Exception as exc:
         logger.exception("Error resuming thread %s", thread_id)

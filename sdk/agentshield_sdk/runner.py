@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage  # type: ignore[import]
 from .agent import Agent
 from .checkpointer import get_checkpointer
 from .graph_builder import build_graph, resolve_agent_tools, _current_thread_id
+from .otel import otel_run_context
 from .safety_client import scan_input, scan_output, SafetyBlockedError
 from .streaming import stream_events
 from .tracing import tracer
@@ -118,7 +119,12 @@ class Runner:
 
         token = _current_thread_id.set(thread_id)
         try:
-            result = await self._graph.ainvoke(state, graph_config)
+            # Bind OpenInference/OTEL LLM+tool spans to a trace id derived from
+            # trace_id (=run_id) so the agent's generation spans land on the
+            # platform's trace, not a separate auto-generated one. Mirrors the
+            # declarative-runner's workflow_executor.run() wrap site.
+            with otel_run_context(trace_id):
+                result = await self._graph.ainvoke(state, graph_config)
         finally:
             _current_thread_id.reset(token)
 
@@ -191,13 +197,18 @@ class Runner:
 
         token = _current_thread_id.set(thread_id)
         try:
-            async for sse_chunk in stream_events(self._graph, state, graph_config):
-                yield sse_chunk
+            # Same OTEL trace binding as run() — mirrors the declarative-runner's
+            # workflow_executor.run_streamed() wrap site.
+            with otel_run_context(trace_id):
+                async for sse_chunk in stream_events(self._graph, state, graph_config):
+                    yield sse_chunk
         finally:
             _current_thread_id.reset(token)
             tracer.end_trace(trace_ctx, output={"streamed": True})
 
-    async def resume(self, thread_id: str, decision: dict) -> dict:
+    async def resume(
+        self, thread_id: str, decision: dict, trace_id: str | None = None
+    ) -> dict:
         """Resume a paused graph after a HITL decision.
 
         The graph was paused by ``interrupt()``; passing *decision* as the resume
@@ -207,6 +218,8 @@ class Runner:
         Args:
             thread_id: The thread to resume.
             decision:  Reviewer decision dict, e.g. ``{"decision": "approved"}``.
+            trace_id:  Optional trace ID (from X-AgentShield-Trace-ID) so the
+                       resumed run's LLM/tool spans land on the same trace.
 
         Returns:
             dict with ``response`` and ``thread_id``.
@@ -216,10 +229,13 @@ class Runner:
 
         token = _current_thread_id.set(thread_id)
         try:
-            # Provide None as input (graph continues from checkpoint).
-            result = await self._graph.ainvoke(
-                {"messages": [], "resume": decision}, graph_config
-            )
+            # Bind resumed-run spans to the same trace — mirrors the
+            # declarative-runner's workflow_executor.resume() wrap site.
+            with otel_run_context(trace_id):
+                # Provide None as input (graph continues from checkpoint).
+                result = await self._graph.ainvoke(
+                    {"messages": [], "resume": decision}, graph_config
+                )
         finally:
             _current_thread_id.reset(token)
 
