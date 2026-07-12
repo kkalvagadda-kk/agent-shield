@@ -20,6 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import require_user
 from db import get_db
 from models import Agent, AgentRun, PlaygroundRun
+from observability_backend import (
+    CostByModel,
+    ToolCallStat,
+    get_observability_backend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,20 +101,6 @@ class FeedbackSummary(BaseModel):
     ratio: float | None = None  # up / (up + down), None when no feedback yet
 
 
-class ToolCallStat(BaseModel):
-    tool_name: str
-    count: int
-    avg_latency_ms: float | None = None
-
-
-class CostByModel(BaseModel):
-    model: str
-    cost_usd: float
-    calls: int
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-
-
 class CostByAgent(BaseModel):
     agent_name: str
     cost_usd: float
@@ -180,8 +171,7 @@ async def list_traces(
     """List traces across playground and agent runs, team-scoped."""
     x_user_team = await _resolve_team(claims, db)
 
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
 
     items: list[TraceSummary] = []
 
@@ -206,9 +196,7 @@ async def list_traces(
         agent_rows = list((await db.execute(aq)).scalars().all())
 
         for r in agent_rows:
-            trace_url = None
-            if r.langfuse_trace_id and lf_public_url and lf_project_id:
-                trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+            trace_url = obs.build_trace_url(r.langfuse_trace_id)
             items.append(TraceSummary(
                 id=str(r.id),
                 agent_name=r.agent_name,
@@ -242,9 +230,7 @@ async def list_traces(
         pg_rows = list((await db.execute(pq)).scalars().all())
 
         for r in pg_rows:
-            trace_url = None
-            if r.langfuse_trace_id and lf_public_url and lf_project_id:
-                trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+            trace_url = obs.build_trace_url(r.langfuse_trace_id)
             latency_ms = None
             if r.started_at and r.completed_at:
                 latency_ms = int((r.completed_at - r.started_at).total_seconds() * 1000)
@@ -274,8 +260,7 @@ async def list_traces(
 
 
 # ---------------------------------------------------------------------------
-# GET /observability/traces/{trace_id} — fetch full trace from Langfuse
-# Same pattern as GET /api/v1/playground/traces/{trace_id}
+# GET /observability/traces/{trace_id} — fetch full trace via the backend
 # ---------------------------------------------------------------------------
 
 @router.get("/traces/{trace_id}")
@@ -283,194 +268,22 @@ async def get_trace_detail(
     trace_id: str,
     claims: dict = Depends(require_user),
 ):
-    """Fetch full trace (observations/spans) from Langfuse via service creds.
+    """Fetch a full trace (spans/scores) as the provider-neutral NormalizedTrace.
 
-    Follows the same urllib+Basic-auth pattern as playground.get_trace_by_id.
+    Reads go through the observability backend — no direct Langfuse REST here.
     """
-    import base64
-    import json as _json
-    import urllib.error
-    import urllib.request as urlreq
-
-    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
-    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
-
-    if lf_public_url and lf_project_id:
-        trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{trace_id}"
-    else:
-        trace_url = None
-
-    trace_data: dict = {}
-
-    if lf_pk and lf_sk:
-        creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
-        try:
-            req = urlreq.Request(
-                f"{lf_host}/api/public/traces/{trace_id}",
-                headers={"Authorization": f"Basic {creds}"},
-            )
-            with urlreq.urlopen(req, timeout=5) as r:
-                trace_data = _json.loads(r.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                trace_data = {"warning": "trace not yet ingested by Langfuse"}
-            else:
-                logger.debug("Langfuse trace fetch error %s: %s", exc.code, exc)
-        except Exception as exc:
-            logger.debug("Langfuse trace fetch failed: %s", exc)
-
+    obs = get_observability_backend()
+    trace = obs.get_trace(trace_id)
     return {
         "trace_id": trace_id,
-        "trace_url": trace_url,
-        "langfuse": trace_data,
+        "trace_url": obs.build_trace_url(trace_id),
+        "trace": trace.model_dump() if trace else None,
     }
 
 
 # ---------------------------------------------------------------------------
 # GET /observability/dashboard — aggregated metrics
 # ---------------------------------------------------------------------------
-
-def _tool_call_stats(
-    trace_ids: set[str], from_date: Optional[datetime]
-) -> list[ToolCallStat]:
-    """Aggregate TOOL-span frequency + avg latency from Langfuse observations.
-
-    Scoped to ``trace_ids`` — the dashboard's own run population, which already
-    encodes team + environment + window. Langfuse's observations API has no team
-    filter, so we fetch TOOL spans (vendor-neutral OpenInference ``type=TOOL``)
-    and keep only those whose trace belongs to this dashboard's runs. Best-effort:
-    returns [] on any error or when tracing is unconfigured, so a Langfuse blip
-    never breaks the dashboard.
-    """
-    if not trace_ids:
-        return []
-    import base64
-    import json as _json
-    import urllib.request as urlreq
-
-    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
-    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
-    if not (lf_pk and lf_sk):
-        return []
-    creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
-    from_param = ""
-    if from_date:
-        iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        from_param = f"&fromStartTime={iso}"
-
-    agg: dict[str, list] = {}  # name -> [count, latency_sum_seconds, latency_n]
-    try:
-        for page in range(1, 6):  # cap at 5 pages (500 TOOL spans) to bound cost
-            url = (
-                f"{lf_host}/api/public/observations"
-                f"?type=TOOL&limit=100&page={page}{from_param}"
-            )
-            req = urlreq.Request(url, headers={"Authorization": f"Basic {creds}"})
-            with urlreq.urlopen(req, timeout=6) as r:
-                data = _json.loads(r.read()).get("data", [])
-            for o in data:
-                if o.get("traceId") not in trace_ids:
-                    continue
-                name = o.get("name") or "tool"
-                lat = o.get("latency")  # Langfuse reports latency in SECONDS
-                slot = agg.setdefault(name, [0, 0.0, 0])
-                slot[0] += 1
-                if isinstance(lat, (int, float)):
-                    slot[1] += lat
-                    slot[2] += 1
-            if len(data) < 100:
-                break
-    except Exception as exc:
-        logger.debug("tool_call_stats: Langfuse fetch failed: %s", exc)
-        return []
-
-    stats = [
-        ToolCallStat(
-            tool_name=name,
-            count=cnt,
-            avg_latency_ms=round((lsum / ln) * 1000, 1) if ln else None,
-        )
-        for name, (cnt, lsum, ln) in agg.items()
-    ]
-    stats.sort(key=lambda s: s.count, reverse=True)
-    return stats[:15]
-
-
-def _spend_by_model(
-    trace_ids: set[str], from_date: Optional[datetime]
-) -> list[CostByModel]:
-    """Aggregate LLM spend per model from Langfuse GENERATION observations.
-
-    Same scoping trick as ``_tool_call_stats``: Langfuse has no team filter, so
-    fetch GENERATION spans and keep only those whose trace belongs to this
-    dashboard's run population. Model name lives on the observation (not on
-    agent_runs), so this breakdown must come from Langfuse rather than SQL.
-    Best-effort — returns [] on any error / unconfigured tracing.
-    """
-    if not trace_ids:
-        return []
-    import base64
-    import json as _json
-    import urllib.request as urlreq
-
-    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
-    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
-    if not (lf_pk and lf_sk):
-        return []
-    creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
-    from_param = ""
-    if from_date:
-        iso = from_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        from_param = f"&fromStartTime={iso}"
-
-    agg: dict[str, list] = {}  # model -> [cost, calls, prompt_tok, completion_tok]
-    try:
-        for page in range(1, 6):  # cap 5 pages (500 GENERATIONs) to bound cost
-            url = (
-                f"{lf_host}/api/public/observations"
-                f"?type=GENERATION&limit=100&page={page}{from_param}"
-            )
-            req = urlreq.Request(url, headers={"Authorization": f"Basic {creds}"})
-            with urlreq.urlopen(req, timeout=6) as r:
-                data = _json.loads(r.read()).get("data", [])
-            for o in data:
-                if o.get("traceId") not in trace_ids:
-                    continue
-                model = o.get("model") or "unknown"
-                c = o.get("calculatedTotalCost") or o.get("totalCost") or 0
-                pt = o.get("promptTokens") or 0
-                ct = o.get("completionTokens") or 0
-                slot = agg.setdefault(model, [0.0, 0, 0, 0])
-                if isinstance(c, (int, float)):
-                    slot[0] += c
-                slot[1] += 1
-                if isinstance(pt, int):
-                    slot[2] += pt
-                if isinstance(ct, int):
-                    slot[3] += ct
-            if len(data) < 100:
-                break
-    except Exception as exc:
-        logger.debug("spend_by_model: Langfuse fetch failed: %s", exc)
-        return []
-
-    out = [
-        CostByModel(
-            model=model,
-            cost_usd=round(cost, 6),
-            calls=calls,
-            prompt_tokens=pt,
-            completion_tokens=ct,
-        )
-        for model, (cost, calls, pt, ct) in agg.items()
-    ]
-    out.sort(key=lambda m: m.cost_usd, reverse=True)
-    return out
 
 
 @router.get("/dashboard", response_model=DashboardData)
@@ -653,8 +466,9 @@ async def get_dashboard(
         .limit(1000)
     )).scalars().all()
     trace_id_set = set(tid_rows)
-    tool_calls = _tool_call_stats(trace_id_set, from_date)
-    spend_by_model = _spend_by_model(trace_id_set, from_date)
+    obs = get_observability_backend()
+    tool_calls = obs.tool_call_stats(trace_id_set, from_date)
+    spend_by_model = obs.spend_by_model(trace_id_set, from_date)
 
     return DashboardData(
         latency_series=latency_series,
@@ -764,8 +578,6 @@ async def get_costs(
     ]
 
     # --- Most expensive runs ---
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
     run_rows = (await db.execute(
         select(AgentRun)
         .where(*base_filter)
@@ -793,7 +605,7 @@ async def get_costs(
         .where(AgentRun.langfuse_trace_id.isnot(None))
         .limit(1000)
     )).scalars().all()
-    by_model = _spend_by_model(set(tid_rows), from_date)
+    by_model = get_observability_backend().spend_by_model(set(tid_rows), from_date)
 
     # --- Projected monthly (extrapolate the window's daily burn to 30 days) ---
     projected = None

@@ -752,10 +752,8 @@ async def get_playground_run_trace(
     run_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Return the Langfuse trace URL and trace ID for a completed playground run."""
-    import os
-    import urllib.error
-    import urllib.request as urlreq
+    """Return the provider-neutral trace (spans/scores) for a completed run."""
+    from observability_backend import get_observability_backend
 
     try:
         parsed_id = uuid.UUID(run_id)
@@ -775,46 +773,17 @@ async def get_playground_run_trace(
             "trace_id": None,
             "trace_url": None,
             "status": run.status,
-            "message": "No Langfuse trace associated with this run yet",
+            "message": "No trace associated with this run yet",
         }
 
-    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
-    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
-
-    # Full path avoids Langfuse /trace short-link redirect (loses path prefix behind Gateway)
-    if lf_public_url and lf_project_id:
-        trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{run.langfuse_trace_id}"
-    else:
-        trace_url = None
-    trace_data: dict[str, Any] = {}
-
-    if lf_pk and lf_sk:
-        import base64
-        creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
-        try:
-            req = urlreq.Request(
-                f"{lf_host}/api/public/traces/{run.langfuse_trace_id}",
-                headers={"Authorization": f"Basic {creds}"},
-            )
-            with urlreq.urlopen(req, timeout=5) as r:
-                trace_data = json.loads(r.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                trace_data = {"warning": "trace not yet ingested by Langfuse"}
-            else:
-                logger.debug("Langfuse trace fetch error %s: %s", exc.code, exc)
-        except Exception as exc:
-            logger.debug("Langfuse trace fetch failed: %s", exc)
-
+    obs = get_observability_backend()
+    trace = obs.get_trace(run.langfuse_trace_id)
     return {
         "run_id": run_id,
         "trace_id": run.langfuse_trace_id,
-        "trace_url": trace_url,
+        "trace_url": obs.build_trace_url(run.langfuse_trace_id),
         "status": run.status,
-        "langfuse": trace_data,
+        "trace": trace.model_dump() if trace else None,
     }
 
 
@@ -826,46 +795,15 @@ async def get_playground_run_trace(
     summary="Fetch Langfuse trace data by trace ID",
 )
 async def get_trace_by_id(trace_id: str) -> dict[str, Any]:
-    """Return Langfuse trace data directly by trace_id (used by eval result View Trace)."""
-    import os
-    import urllib.error
-    import urllib.request as urlreq
+    """Return the provider-neutral trace by trace_id (used by eval result View Trace)."""
+    from observability_backend import get_observability_backend
 
-    lf_host = os.getenv("LANGFUSE_HOST", "http://agentshield-langfuse-web:3000")
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
-    lf_pk = os.getenv("LANGFUSE_PUBLIC_KEY", "")
-    lf_sk = os.getenv("LANGFUSE_SECRET_KEY", "")
-
-    # Full path avoids Langfuse /trace short-link redirect (loses path prefix behind Gateway)
-    if lf_public_url and lf_project_id:
-        trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{trace_id}"
-    else:
-        trace_url = None
-    trace_data: dict[str, Any] = {}
-
-    if lf_pk and lf_sk:
-        import base64
-        creds = base64.b64encode(f"{lf_pk}:{lf_sk}".encode()).decode()
-        try:
-            req = urlreq.Request(
-                f"{lf_host}/api/public/traces/{trace_id}",
-                headers={"Authorization": f"Basic {creds}"},
-            )
-            with urlreq.urlopen(req, timeout=5) as r:
-                trace_data = json.loads(r.read())
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                trace_data = {"warning": "trace not yet ingested by Langfuse"}
-            else:
-                logger.debug("Langfuse trace fetch error %s: %s", exc.code, exc)
-        except Exception as exc:
-            logger.debug("Langfuse trace fetch failed: %s", exc)
-
+    obs = get_observability_backend()
+    trace = obs.get_trace(trace_id)
     return {
         "trace_id": trace_id,
-        "trace_url": trace_url,
-        "langfuse": trace_data,
+        "trace_url": obs.build_trace_url(trace_id),
+        "trace": trace.model_dump() if trace else None,
     }
 
 

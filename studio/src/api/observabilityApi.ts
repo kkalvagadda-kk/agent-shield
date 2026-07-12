@@ -63,6 +63,45 @@ export interface ToolCallStat {
   avg_latency_ms: number | null;
 }
 
+// Provider-neutral trace shape returned by the observability backend read-adapter.
+// Studio consumes THIS, never a backend-specific (Langfuse) raw shape.
+export interface NormalizedSpan {
+  id: string;
+  name: string;
+  type: string;
+  start_time: string | null;
+  end_time: string | null;
+  input?: unknown;
+  output?: unknown;
+  metadata?: Record<string, unknown> | null;
+  status_message?: string | null;
+  level?: string | null;
+}
+
+export interface NormalizedScore {
+  name: string;
+  value: number | null;
+  comment: string | null;
+}
+
+export interface NormalizedTrace {
+  trace_id: string;
+  name: string | null;
+  user: string | null;
+  started_at: string | null;
+  tags: string[];
+  total_cost: number | null;
+  warning: string | null;
+  spans: NormalizedSpan[];
+  scores: NormalizedScore[];
+}
+
+export interface TraceDetail {
+  trace_id: string;
+  trace_url: string | null;
+  trace: NormalizedTrace | null;
+}
+
 export interface CostByModel {
   model: string;
   cost_usd: number;
@@ -147,12 +186,8 @@ export async function listTraces(filters: TracesFilter = {}): Promise<TracesList
   return data;
 }
 
-export async function getTraceDetail(traceId: string): Promise<{
-  trace_id: string;
-  trace_url: string | null;
-  langfuse: Record<string, unknown>;
-}> {
-  const { data } = await http.get(`/observability/traces/${traceId}`);
+export async function getTraceDetail(traceId: string): Promise<TraceDetail> {
+  const { data } = await http.get<TraceDetail>(`/observability/traces/${traceId}`);
   return data;
 }
 

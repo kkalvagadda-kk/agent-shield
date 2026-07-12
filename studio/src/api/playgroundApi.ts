@@ -1,4 +1,5 @@
 import { http } from "./registryApi";
+import type { TraceDetail } from "./observabilityApi";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -141,12 +142,8 @@ export async function submitRunFeedback(
   return data;
 }
 
-export async function getTraceById(traceId: string): Promise<{
-  trace_id: string;
-  trace_url: string;
-  langfuse: Record<string, unknown>;
-}> {
-  const { data } = await http.get(`/playground/traces/${traceId}`);
+export async function getTraceById(traceId: string): Promise<TraceDetail> {
+  const { data } = await http.get<TraceDetail>(`/playground/traces/${traceId}`);
   return data;
 }
 

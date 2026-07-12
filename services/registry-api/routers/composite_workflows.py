@@ -31,6 +31,7 @@ import asyncio
 
 from auth_middleware import get_optional_user
 from db import get_db
+from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
 from models import Agent, AgentRun, AgentTrigger, AgentVersion, CompositeWorkflow, WorkflowEdge, WorkflowMember
 from schemas import (
@@ -419,14 +420,11 @@ async def list_workflow_runs(
     q = q.order_by(AgentRun.started_at.desc()).limit(limit).offset(offset)
     rows = list((await db.execute(q)).scalars().all())
 
-    import os
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
     items: list[AgentRunResponse] = []
     for r in rows:
         resp = AgentRunResponse.model_validate(r)
-        if r.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(r.langfuse_trace_id)
         items.append(resp)
     return items
 
@@ -442,14 +440,11 @@ async def get_workflow_run_tree(
         select(AgentRun).where(AgentRun.parent_run_id == run_id).order_by(AgentRun.started_at)
     )).scalars().all())
 
-    import os
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
 
     def _with_trace_url(run: AgentRun) -> AgentRunResponse:
         resp = AgentRunResponse.model_validate(run)
-        if run.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{run.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(run.langfuse_trace_id)
         return resp
 
     return WorkflowRunTreeResponse(
@@ -1133,12 +1128,10 @@ async def list_workflow_deployment_runs(
         q = q.where(AgentRun.status == status_filter)
     rows = list((await db.execute(q)).scalars().all())
 
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
     items: list[AgentRunResponse] = []
     for r in rows:
         resp = AgentRunResponse.model_validate(r)
-        if r.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(r.langfuse_trace_id)
         items.append(resp)
     return items

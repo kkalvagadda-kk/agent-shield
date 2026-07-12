@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
+from observability_backend import get_observability_backend
 from k8s import create_eval_job
 from models import Agent, AgentVersion, CompositeWorkflow, Deployment as DeploymentModel, EvalRun, EvalRunResult, PlaygroundDataset, WorkflowDeployment, WorkflowVersion
 from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
@@ -348,19 +349,16 @@ async def list_eval_run_results(
     eval_run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> list[EvalRunResultResponse]:
-    import os
     await _resolve_eval_run(eval_run_id, db)  # 404 guard
     result = await db.execute(
         select(EvalRunResult)
         .where(EvalRunResult.eval_run_id == eval_run_id)
         .order_by(EvalRunResult.dataset_item_idx)
     )
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
     results = []
     for r in result.scalars().all():
         resp = EvalRunResultResponse.model_validate(r)
-        if resp.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{resp.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(resp.langfuse_trace_id)
         results.append(resp)
     return results

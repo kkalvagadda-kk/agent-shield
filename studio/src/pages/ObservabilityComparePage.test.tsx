@@ -16,9 +16,16 @@ function mockTraces() {
       return Promise.resolve({
         trace_id: id,
         trace_url: null,
-        langfuse: {
-          observations: [{ name: "agent", startTime: "2026-07-11T00:00:00Z", endTime: "2026-07-11T00:00:01Z" }],
-          scores: [{ name: "llm-judge", value }],
+        trace: {
+          trace_id: id,
+          name: "agent",
+          user: null,
+          started_at: null,
+          tags: [],
+          total_cost: null,
+          warning: null,
+          spans: [{ id: "s1", name: "agent", type: "AGENT", start_time: "2026-07-11T00:00:00Z", end_time: "2026-07-11T00:00:01Z" }],
+          scores: [{ name: "llm-judge", value, comment: null }],
         },
       });
     }
@@ -46,7 +53,10 @@ describe("ObservabilityComparePage — judge score delta", () => {
     (getTraceDetail as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       trace_id: "x",
       trace_url: null,
-      langfuse: { observations: [], scores: [] },
+      trace: {
+        trace_id: "x", name: null, user: null, started_at: null, tags: [],
+        total_cost: null, warning: null, spans: [], scores: [],
+      },
     });
     render();
     await waitFor(() => expect(screen.getByText("Score Delta")).toBeInTheDocument());

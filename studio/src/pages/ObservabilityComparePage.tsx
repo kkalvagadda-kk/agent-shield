@@ -2,41 +2,22 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Clock, Loader2, ShieldAlert } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import { getTraceDetail } from "../api/observabilityApi";
+import type { TraceDetail, NormalizedSpan } from "../api/observabilityApi";
 
-interface Observation {
-  id?: string;
-  name: string;
-  type?: string;
-  start_time?: string;
-  end_time?: string;
-  startTime?: string;
-  endTime?: string;
-  input?: unknown;
-  output?: unknown;
-  metadata?: Record<string, unknown>;
-  model?: string;
-  usage?: Record<string, unknown>;
-}
+type Observation = NormalizedSpan;
 
 function getDuration(obs: Observation): number | null {
-  const start = obs.start_time || obs.startTime;
-  const end = obs.end_time || obs.endTime;
-  if (!start || !end) return null;
-  return Math.round(new Date(end).getTime() - new Date(start).getTime());
+  if (!obs.start_time || !obs.end_time) return null;
+  return Math.round(new Date(obs.end_time).getTime() - new Date(obs.start_time).getTime());
 }
 
 function isSafety(name: string) {
   return name.startsWith("safety_scan") || name.startsWith("safety-scan");
 }
 
-interface LangfuseScore {
-  name?: string;
-  value?: number;
-}
-
-/** Pull the judge score off a fetched Langfuse trace (scores[] with name ~ judge). */
-function judgeScore(detail: { langfuse?: unknown } | undefined): number | null {
-  const scores = (detail?.langfuse as { scores?: LangfuseScore[] })?.scores;
+/** Pull the judge score off a fetched trace (scores[] with name ~ judge). */
+function judgeScore(detail: TraceDetail | undefined): number | null {
+  const scores = detail?.trace?.scores;
   if (!Array.isArray(scores)) return null;
   const s = scores.find(
     (x) => typeof x.name === "string" && x.name.toLowerCase().includes("judge")
@@ -130,8 +111,8 @@ export default function ObservabilityComparePage() {
 
   const isLoading = loadingA || loadingB;
 
-  const obsA: Observation[] = (dataA?.langfuse as { observations?: Observation[] })?.observations ?? [];
-  const obsB: Observation[] = (dataB?.langfuse as { observations?: Observation[] })?.observations ?? [];
+  const obsA: Observation[] = dataA?.trace?.spans ?? [];
+  const obsB: Observation[] = dataB?.trace?.spans ?? [];
   const diffRows = !isLoading ? buildDiff(obsA, obsB) : [];
 
   // Summary metrics

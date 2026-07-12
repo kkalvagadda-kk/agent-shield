@@ -3,21 +3,9 @@ import { ChevronDown, ChevronRight, Clock, ExternalLink, Loader2, ShieldAlert, X
 import { useState } from "react";
 import { getTraceById } from "../../api/playgroundApi";
 import { getTraceDetail } from "../../api/observabilityApi";
+import type { TraceDetail, NormalizedSpan } from "../../api/observabilityApi";
 
-type TraceFetchFn = (id: string) => Promise<{ trace_id: string; trace_url: string | null; langfuse: Record<string, unknown> }>;
-
-interface Observation {
-  id: string;
-  name: string;
-  type: string;
-  startTime: string;
-  endTime?: string;
-  input?: unknown;
-  output?: unknown;
-  metadata?: Record<string, unknown>;
-  statusMessage?: string;
-  level?: string;
-}
+type TraceFetchFn = (id: string) => Promise<TraceDetail>;
 
 export default function TraceDrawer({
   traceId,
@@ -35,8 +23,8 @@ export default function TraceDrawer({
     enabled: !!traceId,
   });
 
-  const observations: Observation[] =
-    (data?.langfuse as { observations?: Observation[] })?.observations ?? [];
+  const trace = data?.trace ?? null;
+  const observations: NormalizedSpan[] = trace?.spans ?? [];
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -52,15 +40,15 @@ export default function TraceDrawer({
               <p className="text-xs text-slate-400 font-mono">
                 {traceId.slice(0, 12)}…
               </p>
-              {(data as { trace_url?: string })?.trace_url && (
+              {data?.trace_url && (
                 <a
-                  href={(data as { trace_url?: string }).trace_url!}
+                  href={data.trace_url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-0.5 text-xs text-blue-600 hover:text-blue-800 font-medium"
                 >
                   <ExternalLink size={10} />
-                  Langfuse
+                  Trace
                 </a>
               )}
             </div>
@@ -89,30 +77,30 @@ export default function TraceDrawer({
           {data && !isLoading && (
             <>
               {/* Trace-level metadata */}
-              {data.langfuse && !(data.langfuse as { warning?: string }).warning && (
+              {trace && !trace.warning && (
                 <div className="mb-4 space-y-2 text-xs border border-slate-100 rounded-md p-3 bg-slate-50">
-                  {(data.langfuse as { name?: string }).name && (
+                  {trace.name && (
                     <div className="flex justify-between">
                       <span className="text-slate-500">Name</span>
-                      <span className="font-medium text-slate-700">{(data.langfuse as { name?: string }).name}</span>
+                      <span className="font-medium text-slate-700">{trace.name}</span>
                     </div>
                   )}
-                  {(data.langfuse as { userId?: string }).userId && (
+                  {trace.user && (
                     <div className="flex justify-between">
                       <span className="text-slate-500">User</span>
-                      <span className="font-medium text-slate-700">{(data.langfuse as { userId?: string }).userId}</span>
+                      <span className="font-medium text-slate-700">{trace.user}</span>
                     </div>
                   )}
-                  {(data.langfuse as { timestamp?: string }).timestamp && (
+                  {trace.started_at && (
                     <div className="flex justify-between">
                       <span className="text-slate-500">Started</span>
-                      <span className="text-slate-700">{new Date((data.langfuse as { timestamp: string }).timestamp).toLocaleString()}</span>
+                      <span className="text-slate-700">{new Date(trace.started_at).toLocaleString()}</span>
                     </div>
                   )}
-                  {(data.langfuse as { tags?: string[] }).tags?.length ? (
+                  {trace.tags?.length ? (
                     <div className="flex justify-between">
                       <span className="text-slate-500">Tags</span>
-                      <span className="text-slate-700">{(data.langfuse as { tags: string[] }).tags.join(", ")}</span>
+                      <span className="text-slate-700">{trace.tags.join(", ")}</span>
                     </div>
                   ) : null}
                 </div>
@@ -120,8 +108,8 @@ export default function TraceDrawer({
 
               {observations.length === 0 && (
                 <p className="text-sm text-slate-400 text-center py-8">
-                  {(data.langfuse as { warning?: string })?.warning ??
-                    "No span-level observations recorded. LLM callback handler not wired into agent execution."}
+                  {trace?.warning ??
+                    "No span-level observations recorded for this trace."}
                 </p>
               )}
 
@@ -140,13 +128,13 @@ export default function TraceDrawer({
   );
 }
 
-function SpanRow({ observation: obs }: { observation: Observation }) {
+function SpanRow({ observation: obs }: { observation: NormalizedSpan }) {
   const [expanded, setExpanded] = useState(false);
 
   const duration =
-    obs.startTime && obs.endTime
+    obs.start_time && obs.end_time
       ? Math.round(
-          new Date(obs.endTime).getTime() - new Date(obs.startTime).getTime()
+          new Date(obs.end_time).getTime() - new Date(obs.start_time).getTime()
         )
       : null;
 
@@ -206,8 +194,8 @@ function SpanRow({ observation: obs }: { observation: Observation }) {
               </pre>
             </div>
           )}
-          {obs.statusMessage && (
-            <p className="text-red-500">{obs.statusMessage}</p>
+          {obs.status_message && (
+            <p className="text-red-500">{obs.status_message}</p>
           )}
         </div>
       )}

@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto import decrypt_json
 from db import get_db
+from observability_backend import get_observability_backend
 from k8s import upsert_secret
 from models import (
     Agent,
@@ -336,13 +337,11 @@ async def list_deployment_runs(
         q = q.where(AgentRun.status == status_filter)
     rows = list((await db.execute(q)).scalars().all())
 
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
     items: list[AgentRunResponse] = []
     for r in rows:
         resp = AgentRunResponse.model_validate(r)
-        if r.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(r.langfuse_trace_id)
         items.append(resp)
     return items
 

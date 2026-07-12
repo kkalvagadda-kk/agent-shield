@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import AsyncSessionLocal
+from observability_backend import get_observability_backend
 from models import AgentRun, RunStep
 from schemas import AgentRunCreate, AgentRunResponse, AgentRunUpdate, RunStepCreate, RunStepResponse
 
@@ -88,7 +89,6 @@ async def list_agent_runs(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> list[AgentRunResponse]:
-    import os
     q = select(AgentRun).order_by(AgentRun.started_at.desc()).limit(limit).offset(offset)
     if agent_name:
         q = q.where(AgentRun.agent_name == agent_name)
@@ -105,13 +105,11 @@ async def list_agent_runs(
     result = await db.execute(q)
     rows = list(result.scalars().all())
 
-    lf_public_url = os.getenv("LANGFUSE_PUBLIC_URL", "")
-    lf_project_id = os.getenv("LANGFUSE_PROJECT_ID", "")
+    obs = get_observability_backend()
     items: list[AgentRunResponse] = []
     for r in rows:
         resp = AgentRunResponse.model_validate(r)
-        if r.langfuse_trace_id and lf_public_url and lf_project_id:
-            resp.trace_url = f"{lf_public_url}/project/{lf_project_id}/traces/{r.langfuse_trace_id}"
+        resp.trace_url = obs.build_trace_url(r.langfuse_trace_id)
         items.append(resp)
     return items
 

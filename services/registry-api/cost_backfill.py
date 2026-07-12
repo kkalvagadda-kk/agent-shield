@@ -40,8 +40,9 @@ async def _sweep_once() -> int:
     """Backfill one batch of uncosted runs. Returns count updated."""
     from db import AsyncSessionLocal
     from models import AgentRun
-    from tracing import fetch_trace_cost_tokens
+    from observability_backend import get_observability_backend
 
+    backend = get_observability_backend()
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
     updated = 0
     async with AsyncSessionLocal() as session:
@@ -58,15 +59,15 @@ async def _sweep_once() -> int:
         )).scalars().all()
 
         for run in rows:
-            # urllib call is blocking — keep it off the event loop.
-            usage = await asyncio.to_thread(fetch_trace_cost_tokens, run.langfuse_trace_id)
-            if not usage or usage.get("cost_usd") is None:
+            # Backend read is blocking (urllib) — keep it off the event loop.
+            usage = await asyncio.to_thread(backend.get_run_cost, run.langfuse_trace_id)
+            if not usage or usage.cost_usd is None:
                 continue  # not ingested yet, or no LLM cost on this trace
-            run.cost_usd = usage["cost_usd"]
-            if usage.get("prompt_tokens") is not None:
-                run.prompt_tokens = usage["prompt_tokens"]
-            if usage.get("completion_tokens") is not None:
-                run.completion_tokens = usage["completion_tokens"]
+            run.cost_usd = usage.cost_usd
+            if usage.prompt_tokens is not None:
+                run.prompt_tokens = usage.prompt_tokens
+            if usage.completion_tokens is not None:
+                run.completion_tokens = usage.completion_tokens
             updated += 1
 
         if updated:

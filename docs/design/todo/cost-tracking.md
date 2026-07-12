@@ -1,5 +1,7 @@
 # Cost Tracking — Research & Design
 
+> **STATUS (2026-07-12): SHIPPED via Path A — this doc's original Portkey plan was NOT the route taken.** Because the OTEL span work made Langfuse `GENERATION` observations carry `calculatedTotalCost` + token counts, cost is now read from the observability backend and persisted onto `agent_runs`, then surfaced on the dashboard (LLM Cost panel) + a dedicated Cost console. Implementation shipped in `registry-api:0.2.152`–`0.2.154` / `studio:0.1.124`–`0.1.125`. The cost READS go through the provider-neutral observability backend (`observability_backend.LangfuseBackend.get_run_cost`/`spend_by_model`) — see **[observability-provider-abstraction.md](./observability-provider-abstraction.md)** for that read-adapter seam and how the current cost work plugs into it. Portkey remains optional (budget *enforcement* + caching only, not needed for visibility). The sections below are the original research and are kept for historical context.
+
 ## Problem
 
 `agent_runs` has `cost_usd`, `prompt_tokens`, `completion_tokens` columns. Nothing writes them. Stats endpoints return 0. No visibility into LLM spend per agent, team, or model.

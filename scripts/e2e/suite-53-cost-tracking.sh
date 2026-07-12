@@ -71,15 +71,23 @@ async def main():
         db.add(r2); await db.flush()
         await db.commit()
 
-    # --- T-S53-001: stub Langfuse fetch, run the sweep, assert writeback ---
-    # Scope the stub to OUR seeded trace only — _sweep_once() sweeps EVERY
-    # uncosted run in the window, so an unconditional stub would write the fake
-    # cost onto real runs cluster-wide. Real runs get None -> skipped.
-    import tracing
-    tracing.fetch_trace_cost_tokens = lambda t: (
-        {'cost_usd':0.0125,'prompt_tokens':1546,'completion_tokens':401,'model':'claude-sonnet-4-6'}
-        if t == tid else None
-    )
+    # --- T-S53-001: stub the observability backend, run the sweep, assert writeback ---
+    # Reads now go through get_observability_backend() (the read-adapter seam), so
+    # we swap the cached singleton for a stub. Scope get_run_cost to OUR seeded
+    # trace only — _sweep_once() sweeps EVERY uncosted run in the window, so an
+    # unconditional stub would write the fake cost onto real runs cluster-wide.
+    import observability_backend as obk
+    class _StubBackend:
+        def get_run_cost(self, t):
+            if t == tid:
+                return obk.RunCost(cost_usd=0.0125, prompt_tokens=1546, completion_tokens=401, model='claude-sonnet-4-6')
+            return None
+        def spend_by_model(self, ids, frm): return []
+        def tool_call_stats(self, ids, frm): return []
+        def build_trace_url(self, t): return None
+        def get_trace(self, t): return None
+        def push_score(self, t, n, v, c=None): return False
+    obk._backend = _StubBackend()
     import cost_backfill
     await cost_backfill._sweep_once()
     async with AsyncSessionLocal() as db:
@@ -89,10 +97,10 @@ async def main():
         out['t1_ctok']=r.completion_tokens
 
     # --- T-S53-002: sandbox cost console = swept run only; run 2 excluded ---
+    # backend stub (above) already makes spend_by_model return []; just fake team.
     import routers.observability as obs
     async def fake_team(claims, db): return TEAM
     obs._resolve_team=fake_team
-    obs._spend_by_model=lambda ids, frm: []
     async with AsyncSessionLocal() as db:
         data=await obs.get_costs(period='30d', environment='sandbox', from_date=None, to_date=None, claims={'sub':SUB}, db=db)
     out['t2_total']=round(data.total_cost_usd,4)
