@@ -1497,6 +1497,10 @@ class CatalogVersionResponse(BaseModel):
     version_label: str
     config_snapshot: dict[str, Any] = {}
     source_version_id: uuid.UUID | None = None
+    # The source agent's version_number this publish came from (v2 in the catalog
+    # may be "from agent v16"). Populated by the catalog detail endpoint; the
+    # published label is a per-artifact publish counter, decoupled from this.
+    source_version_number: int | None = None
     promoted_at: datetime
     promoted_by: str | None = None
     notes: str | None = None

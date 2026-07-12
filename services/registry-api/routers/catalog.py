@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db import get_db
 from models import (
     AgentRun,
+    AgentVersion,
     AssetGrant,
     PublishedArtifact,
     PublishedVersion,
@@ -169,6 +170,18 @@ async def get_catalog_detail(
     # Build version label lookup
     ver_map = {v.id: v.version_label for v in versions}
 
+    # Map each published version's source_version_id -> source agent version_number
+    # so the UI can show "v2 (from agent v16)" — the published label is a
+    # per-artifact publish counter, decoupled from the source agent version.
+    src_ids = [v.source_version_id for v in versions if v.source_version_id]
+    src_ver_map: dict = {}
+    if src_ids:
+        src_rows = (await db.execute(
+            select(AgentVersion.id, AgentVersion.version_number)
+            .where(AgentVersion.id.in_(src_ids))
+        )).all()
+        src_ver_map = {r.id: r.version_number for r in src_rows}
+
     deployment_items = []
     for d in deployments_raw:
         resp = CatalogDeploymentResponse.model_validate(d)
@@ -218,9 +231,15 @@ async def get_catalog_detail(
                 has_production_deployment=has_dep,
             ))
 
+    version_items = []
+    for v in versions:
+        vr = CatalogVersionResponse.model_validate(v)
+        vr.source_version_number = src_ver_map.get(v.source_version_id)
+        version_items.append(vr)
+
     return CatalogDetailResponse(
         artifact=art_resp,
-        versions=[CatalogVersionResponse.model_validate(v) for v in versions],
+        versions=version_items,
         deployments=deployment_items,
         granted_teams=list(set(grants)),
         member_topology=member_topology,

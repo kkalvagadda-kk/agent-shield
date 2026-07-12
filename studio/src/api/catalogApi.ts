@@ -22,6 +22,7 @@ export interface CatalogVersion {
   version_label: string;
   config_snapshot: Record<string, unknown>;
   source_version_id: string | null;
+  source_version_number: number | null;
   promoted_at: string;
   promoted_by: string | null;
   notes: string | null;

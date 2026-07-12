@@ -752,6 +752,11 @@ function VersionsTab({
         <div key={v.id} className="card flex items-center justify-between">
           <div>
             <span className="font-semibold text-slate-900">{v.version_label}</span>
+            {v.source_version_number != null && (
+              <span className="text-xs text-slate-500 ml-2">
+                (from agent v{v.source_version_number})
+              </span>
+            )}
             <span className="text-xs text-slate-400 ml-3">
               Promoted {new Date(v.promoted_at).toLocaleDateString()}
               {v.promoted_by && ` by ${v.promoted_by}`}
