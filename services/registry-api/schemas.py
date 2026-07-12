@@ -1156,6 +1156,7 @@ class AgentRunResponse(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: int | None = None
+    judge_score: float | None = None
     status: str
     context: str
     input: str | None = None

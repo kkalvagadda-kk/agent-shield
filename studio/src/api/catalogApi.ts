@@ -104,10 +104,12 @@ export interface CatalogRun {
   context: string;
   trigger_type: string | null;
   run_by: string | null;
+  user_id: string | null;
   input: string | null;
   output: string | null;
   error_message: string | null;
   latency_ms: number | null;
+  judge_score: number | null;
   cost_usd: number | null;
   started_at: string;
   completed_at: string | null;

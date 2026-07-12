@@ -29,6 +29,21 @@ function isSafety(name: string) {
   return name.startsWith("safety_scan") || name.startsWith("safety-scan");
 }
 
+interface LangfuseScore {
+  name?: string;
+  value?: number;
+}
+
+/** Pull the judge score off a fetched Langfuse trace (scores[] with name ~ judge). */
+function judgeScore(detail: { langfuse?: unknown } | undefined): number | null {
+  const scores = (detail?.langfuse as { scores?: LangfuseScore[] })?.scores;
+  if (!Array.isArray(scores)) return null;
+  const s = scores.find(
+    (x) => typeof x.name === "string" && x.name.toLowerCase().includes("judge")
+  );
+  return s && typeof s.value === "number" ? s.value : null;
+}
+
 type DiffStatus = "same" | "added" | "removed" | "changed";
 
 interface DiffRow {
@@ -124,6 +139,10 @@ export default function ObservabilityComparePage() {
   const totalDurB = obsB.reduce((s, o) => s + (getDuration(o) ?? 0), 0);
   const durDelta = totalDurA > 0 ? ((totalDurB - totalDurA) / totalDurA) * 100 : 0;
 
+  const scoreA = judgeScore(dataA);
+  const scoreB = judgeScore(dataB);
+  const scoreDelta = scoreA != null && scoreB != null ? scoreB - scoreA : null;
+
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-4">
       {/* Header */}
@@ -168,6 +187,22 @@ export default function ObservabilityComparePage() {
               <p className="text-xs text-slate-500">Delta</p>
               <p className={`text-sm font-medium ${durDelta < 0 ? "text-green-600" : durDelta > 0 ? "text-red-600" : "text-slate-600"}`}>
                 {durDelta > 0 ? "+" : ""}{durDelta.toFixed(1)}%
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Judge Score</p>
+              <p className="text-sm font-medium text-slate-800">
+                {scoreA != null ? scoreA.toFixed(2) : "—"} → {scoreB != null ? scoreB.toFixed(2) : "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs text-slate-500">Score Delta</p>
+              <p className={`text-sm font-medium ${
+                scoreDelta == null ? "text-slate-400" :
+                scoreDelta > 0 ? "text-green-600" :
+                scoreDelta < 0 ? "text-red-600" : "text-slate-600"
+              }`}>
+                {scoreDelta == null ? "—" : `${scoreDelta > 0 ? "+" : ""}${scoreDelta.toFixed(2)}`}
               </p>
             </div>
             <div>
