@@ -122,6 +122,53 @@ test.describe("workflow builder", () => {
     ).toBeVisible();
   });
 
+  // WS-0/D1: the Save modal exposes an Authority (class) selector; a daemon workflow
+  // create → POST carries agent_class=daemon and it persists (backend reload). Drives
+  // the real journey (inline-create a member → Save modal → pick Daemon → save).
+  test("save modal: create daemon workflow → POST carries agent_class → persisted", async ({ page, request }) => {
+    const suffix = String(Date.now());
+    const wfName = `wfb-daemon-${suffix}`;
+    const memberName = `wfb-mem-${suffix}`;
+    await page.goto("/workflows/new");
+    await page.waitForLoadState("networkidle");
+
+    // Add one member via inline create (self-contained; also sets the workflow team).
+    await page.getByRole("button", { name: /Add Agent/i }).click();
+    await page.getByRole("button", { name: /Create New Agent/i }).click();
+    await page.getByPlaceholder("my-agent").fill(memberName);
+    const memberCreated = page.waitForResponse(
+      (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
+      { timeout: 20_000 }
+    );
+    await page.getByRole("button", { name: /Create & Add/i }).click();
+    await memberCreated;
+
+    // Open the Save modal, choose Daemon authority, name it, save.
+    await page.getByRole("button", { name: /^Save$/i }).click();
+    await page.getByPlaceholder("my-workflow").fill(wfName);
+    await page.getByLabel(/Authority/i).selectOption("daemon");
+    const wfCreated = page.waitForResponse(
+      (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/workflows"),
+      { timeout: 20_000 }
+    );
+    await page.getByRole("button", { name: /Save Workflow/i }).click();
+    const resp = await wfCreated;
+    expect(resp.status()).toBe(201);
+    const body = await resp.json();
+    expect(body.agent_class).toBe("daemon");
+    const wid = body.id;
+
+    try {
+      // Reload from the backend: the persisted workflow still carries daemon.
+      const check = await request.get(`/api/v1/workflows/${wid}`, { headers: SYS });
+      expect(check.ok()).toBeTruthy();
+      expect((await check.json()).agent_class).toBe("daemon");
+    } finally {
+      await request.delete(`/api/v1/workflows/${wid}`, { headers: SYS }).catch(() => {});
+      await request.delete(`/api/v1/agents/${memberName}`, { headers: SYS }).catch(() => {});
+    }
+  });
+
   // G-10: Triggers button appears on a saved workflow and opens the triggers panel.
   test("Triggers button opens workflow triggers panel", async ({ page, request }) => {
     const suffix = `trig-${Date.now()}`;

@@ -212,6 +212,7 @@ export const createAgent = async (body: {
   team: string;
   description?: string;
   agent_type?: string;
+  agent_class?: "user_delegated" | "daemon";
   execution_shape?: "reactive" | "durable";
   memory_enabled?: boolean;
   metadata?: Record<string, unknown>;
@@ -227,6 +228,7 @@ export const updateAgent = async (
     description?: string;
     status?: string;
     execution_shape?: "reactive" | "durable";
+    agent_class?: "user_delegated" | "daemon";
     memory_enabled?: boolean;
     metadata?: Record<string, unknown>;
   }
@@ -530,10 +532,12 @@ export interface CompositeWorkflow {
   description: string | null;
   execution_shape: 'reactive' | 'durable';
   orchestration: WorkflowOrchestration;
+  agent_class: 'user_delegated' | 'daemon';
   memory_enabled: boolean;
   status: 'draft' | 'published' | 'archived';
   publish_status: string;
   member_count: number;
+  warnings?: string[];
   created_at: string;
   updated_at: string;
   created_by: string | null;
@@ -572,6 +576,7 @@ export interface CreateCompositeWorkflowRequest {
   description?: string;
   execution_shape?: 'reactive' | 'durable';
   orchestration?: WorkflowOrchestration;
+  agent_class?: 'user_delegated' | 'daemon';
   memory_enabled?: boolean;
 }
 

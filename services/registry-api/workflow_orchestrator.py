@@ -259,6 +259,21 @@ async def _halt_for_approval(parent_run_id: str, mode: str, team: str, workflow_
                 parent_run_id, mode)
 
 
+async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: str, shape: str) -> None:
+    """Single decision point for an approval gate (S2). Durable → checkpoint + park
+    (existing behavior). Reactive → fail-closed with a clear message: a reactive workflow
+    cannot durably park for async approval (D2). Never swallows the gate and proceeds —
+    a reactive run can never silently run a tool that should have been approved."""
+    if shape == "reactive":
+        await _fail_parent(
+            parent_run_id,
+            "approval gate hit in a reactive workflow — set shape=durable to allow approvals",
+        )
+        logger.info("workflow %s (%s, reactive): approval gate → fail-closed", parent_run_id, mode)
+        return
+    await _halt_for_approval(parent_run_id, mode, team, workflow_id)
+
+
 async def _run_step(parent_run_id: str, team: str, agent_name: str, current_input: str) -> tuple[str, str | None, str | None]:
     """Create a child run, dispatch to the member, record the outcome. Returns (status, output, err).
 
@@ -370,7 +385,8 @@ def _compute_sequential_order(member_names: list[str], graph: dict[str, list[tup
 
 
 async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
-                               order: list[str], start_index: int, current_input: str) -> None:
+                               order: list[str], start_index: int, current_input: str,
+                               shape: str = "durable") -> None:
     """Run members order[start_index:] in sequence. Pausable + resumable.
 
     On a member pausing for approval, checkpoints {next_index=i+1} and halts the
@@ -381,6 +397,13 @@ async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
         agent_name = order[i]
         status_val, output, _err = await _run_step(parent_run_id, team, agent_name, current_input)
         if status_val == "awaiting_approval":
+            if shape == "reactive":
+                await _fail_parent(
+                    parent_run_id,
+                    "approval gate hit in a reactive workflow — set shape=durable to allow approvals",
+                )
+                logger.info("workflow %s (sequential, reactive): approval gate → fail-closed", parent_run_id)
+                return
             await _save_checkpoint(parent_run_id, {
                 "mode": "sequential",
                 "order": order,
@@ -402,14 +425,15 @@ async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
     logger.info("workflow run %s (sequential) finished: completed", parent_run_id)
 
 
-async def orchestrate_graph_sequential(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
+async def orchestrate_graph_sequential(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                                       shape: str = "durable") -> None:
     """Walk the edge chain (default/first outgoing edge) or member order if no edges. Fail-fast."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
     order = _compute_sequential_order(member_names, graph)
-    await _run_sequential_from(parent_run_id, team, workflow_id, order, 0, input_message or "")
+    await _run_sequential_from(parent_run_id, team, workflow_id, order, 0, input_message or "", shape)
 
 
 async def resume_orchestration(parent_run_id: str, member_output: str, member_status: str) -> None:
@@ -448,7 +472,8 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
     )
 
 
-async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
+async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                                  shape: str = "durable") -> None:
     """At each node, take the first outgoing edge whose condition matches the output."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
@@ -464,7 +489,7 @@ async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: st
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
         if status_val == "awaiting_approval":
-            await _halt_for_approval(parent_run_id, "conditional", team, workflow_id)
+            await _park_or_fail(parent_run_id, "conditional", team, workflow_id, shape)
             return
         if status_val == "failed":
             failed = True
@@ -494,7 +519,8 @@ async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: st
     logger.info("workflow run %s (conditional) finished: %s", parent_run_id, "failed" if failed else "completed")
 
 
-async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
+async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                              shape: str = "durable") -> None:
     """Follow the handoff signal in each agent's output; else its sole outgoing edge."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
@@ -510,7 +536,7 @@ async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, i
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
         if status_val == "awaiting_approval":
-            await _halt_for_approval(parent_run_id, "handoff", team, workflow_id)
+            await _park_or_fail(parent_run_id, "handoff", team, workflow_id, shape)
             return
         if status_val == "failed":
             failed = True
@@ -538,7 +564,8 @@ async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, i
     logger.info("workflow run %s (handoff) finished: %s", parent_run_id, "failed" if failed else "completed")
 
 
-async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str, input_message: str) -> None:
+async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                                 shape: str = "durable") -> None:
     """A coordinator (role='supervisor') routes to workers each turn until DONE / max_iterations."""
     async with AsyncSessionLocal() as s:
         members = await resolve_members(s, workflow_id)
@@ -561,7 +588,7 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
         # 1. supervisor decides
         s_status, s_out, _e = await _run_step(parent_run_id, team, supervisor["name"], current_input)
         if s_status == "awaiting_approval":
-            await _halt_for_approval(parent_run_id, "supervisor", team, workflow_id)
+            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape)
             return
         if s_status == "failed":
             failed = True
@@ -574,7 +601,7 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
         # 2. dispatch to the chosen worker; thread its output back to the supervisor
         w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
         if w_status == "awaiting_approval":
-            await _halt_for_approval(parent_run_id, "supervisor", team, workflow_id)
+            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape)
             return
         if w_status == "failed":
             failed = True
@@ -597,17 +624,22 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
 # ---------------------------------------------------------------------------
 # Dispatcher + backward-compat entry point
 # ---------------------------------------------------------------------------
-async def orchestrate(parent_run_id: str, team: str, workflow_id: str, input_message: str, mode: str) -> None:
-    """Route to the orchestration implementation for `mode`. Fail-safe (never raises)."""
+async def orchestrate(parent_run_id: str, team: str, workflow_id: str, input_message: str, mode: str,
+                      shape: str = "durable") -> None:
+    """Route to the orchestration implementation for `mode`. Fail-safe (never raises).
+
+    `shape` ('durable' default | 'reactive') controls approval-gate handling: durable
+    parks + resumes; reactive fails-closed (D2/S2). Existing callers keep the durable
+    default, so their behavior is byte-for-byte unchanged."""
     try:
         if mode == "conditional":
-            await orchestrate_conditional(parent_run_id, team, workflow_id, input_message)
+            await orchestrate_conditional(parent_run_id, team, workflow_id, input_message, shape)
         elif mode == "supervisor":
-            await orchestrate_supervisor(parent_run_id, team, workflow_id, input_message)
+            await orchestrate_supervisor(parent_run_id, team, workflow_id, input_message, shape)
         elif mode == "handoff":
-            await orchestrate_handoff(parent_run_id, team, workflow_id, input_message)
+            await orchestrate_handoff(parent_run_id, team, workflow_id, input_message, shape)
         else:  # sequential (default)
-            await orchestrate_graph_sequential(parent_run_id, team, workflow_id, input_message)
+            await orchestrate_graph_sequential(parent_run_id, team, workflow_id, input_message, shape)
     except Exception as exc:  # never leave a run stuck in 'running'
         logger.exception("workflow run %s (%s) crashed: %s", parent_run_id, mode, exc)
         await _mark_parent(parent_run_id, "failed")

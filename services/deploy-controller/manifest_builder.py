@@ -125,7 +125,10 @@ def build_deployment(
     team = agent.get("team", "platform")
     namespace = deployment["k8s_namespace"]
     replicas = deployment.get("replicas", 1)
-    agent_class = agent.get("agent_class") or "user_delegated"
+    # agent_class is NOT NULL on the agents table and required in AgentResponse (WS-0 M3),
+    # so it is always present — direct index (a KeyError would loudly signal a real
+    # contract break rather than silently coalescing a daemon down to user_delegated).
+    agent_class = agent["agent_class"]
 
     k8s_name = f"{agent_name}-{environment}"
     image_tag = version["image_tag"]

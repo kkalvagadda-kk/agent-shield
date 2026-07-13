@@ -12,6 +12,20 @@
 
 ---
 
+## Known gaps — Execution Models v2 WS-0 (agent_class authoring + shape-aware dispatch)
+
+**Landed in this slice** (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127; migration 0058; suite-54): `agent_class` NOT NULL + CHECK on agents **and** workflows; create wizard split into Shape · Trigger · Class (R1); Settings + Workflow Save-modal Class selectors + save-time high-risk warnings (S2); shared `durable_dispatch.py` (single `/run` POST, parity); shape-aware production dispatch + `POST /internal/runs/{id}/step-update` callback writing `run_steps`; reactive workflow synchronous + wall-clock capped (M6/D2); reactive approval gate fail-closed via `_park_or_fail` (S2).
+
+**deferred (intentional) — land in a later workstream:**
+- **Real durable per-node steps + HITL park emit.** WS-0 wires the durable dispatch branch + step-update callback so `run_steps` appear for a production durable run, but the declarative-runner still emits its 2-step skeleton and does not yet emit an HITL park. Real per-node steps + park land in **WS-1** (shared durable harness).
+- **Daemon identity / async approver routing.** A daemon agent is now authorable and deploys as `daemon`, but the OPA `user_identity_ok` rule + service-identity `run_by` + async reviewer routing land in **WS-2**.
+
+**not-yet-wired (verify at deploy time):**
+- **Deploy → pod env `AGENTSHIELD_AGENT_CLASS=daemon`.** The coalesce removal makes deploy read the column directly; suite-54 proves the DB/router invariants, but the live-pod env assertion is agent-image-gated (few agent pods deployed — the boundary the bash suites accept). **Manual check:** deploy a `daemon` agent → `kubectl exec` its pod → `env | grep AGENTSHIELD_AGENT_CLASS` should print `daemon`.
+- **Playwright authoring specs** (`create-agent-wizard`, `agent-detail-modes`, `workflow-builder`) are written + compile-verified (18 tests) but their green run is deploy-gated — run `bash scripts/studio-e2e.sh` against the freshly-deployed Studio.
+
+---
+
 ## 0. Before you start
 
 ### 0.1 Access Studio

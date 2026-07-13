@@ -103,6 +103,7 @@ export default function WorkflowBuilderPage() {
   const [saveName, setSaveName] = useState('');
   const [saveOrchestration, setSaveOrchestration] = useState<WorkflowOrchestration>('sequential');
   const [saveShape, setSaveShape] = useState<'reactive' | 'durable'>('reactive');
+  const [saveClass, setSaveClass] = useState<'user_delegated' | 'daemon'>('user_delegated');
   const [isSaving, setIsSaving] = useState(false);
   const qc = useQueryClient();
 
@@ -150,6 +151,8 @@ export default function WorkflowBuilderPage() {
       store.markCompositeWorkflowSaved(workflow.id, workflow.name, workflow.team);
       setCurrentTeam(workflow.team);
       setSaveOrchestration(workflow.orchestration);
+      setSaveShape(workflow.execution_shape);
+      setSaveClass(workflow.agent_class);
       const loadedNodes = workflow.members.map((m, idx) => ({
         id: m.agent_id,
         type: 'workflow_member' as const,
@@ -269,6 +272,7 @@ export default function WorkflowBuilderPage() {
         team: currentTeam,
         orchestration: saveOrchestration,
         execution_shape: saveShape,
+        agent_class: saveClass,
       });
       for (let i = 0; i < store.nodes.length; i++) {
         const node = store.nodes[i];
@@ -281,6 +285,9 @@ export default function WorkflowBuilderPage() {
         });
       }
       await persistEdges(wf.id);
+      // Members now exist — re-fetch to surface any save-time approval-gate warnings (S2).
+      const saved = await getCompositeWorkflow(wf.id);
+      saved.warnings?.forEach((w) => toast.warning(w));
       store.markCompositeWorkflowSaved(wf.id, wf.name, wf.team);
       setShowSaveModal(false);
       setSaveName('');
@@ -311,10 +318,12 @@ export default function WorkflowBuilderPage() {
     if (!compositeWorkflowId) return;
     setIsSaving(true);
     try {
-      // Keep orchestration mode in sync with the toolbar selection.
-      if (workflow && workflow.orchestration !== saveOrchestration) {
-        await updateCompositeWorkflowApi(compositeWorkflowId, { orchestration: saveOrchestration });
-      }
+      // Persist orchestration + class (idempotent PATCH); surface any save-time warnings (S2).
+      const updated = await updateCompositeWorkflowApi(compositeWorkflowId, {
+        orchestration: saveOrchestration,
+        agent_class: saveClass,
+      });
+      updated.warnings?.forEach((w) => toast.warning(w));
       // Replace members: remove existing, re-add current canvas nodes (with role/routing).
       for (const m of workflow?.members ?? []) {
         await removeWorkflowMember(compositeWorkflowId, m.agent_id);
@@ -811,8 +820,22 @@ export default function WorkflowBuilderPage() {
                   value={saveShape}
                   onChange={(e) => setSaveShape(e.target.value as 'reactive' | 'durable')}
                 >
-                  <option value="reactive">Reactive (fast, stateless request/response)</option>
+                  <option value="reactive">Ephemeral (fast, stateless request/response)</option>
                   <option value="durable">Durable (long-running, resumable, HITL)</option>
+                </select>
+              </div>
+
+              {/* Authority (class) */}
+              <div>
+                <label className="label" htmlFor="wfb-class">Authority (class)</label>
+                <select
+                  id="wfb-class"
+                  className="input"
+                  value={saveClass}
+                  onChange={(e) => setSaveClass(e.target.value as 'user_delegated' | 'daemon')}
+                >
+                  <option value="user_delegated">User-delegated (runs under the invoking user)</option>
+                  <option value="daemon">Daemon (service identity, no live user)</option>
                 </select>
               </div>
 

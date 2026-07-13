@@ -21,7 +21,7 @@ vi.mock("../api/registryApi", () => ({
   updateAgentMemory: vi.fn(),
 }));
 
-import { getAgent, getDeployments, listVersions, deleteAgentVersion } from "../api/registryApi";
+import { getAgent, getDeployments, listVersions, deleteAgentVersion, updateAgent, listTriggers } from "../api/registryApi";
 
 const NOW = new Date().toISOString();
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -160,5 +160,40 @@ describe("AgentDetailPage — Versions tab", () => {
     renderVersionsTab();
     await userEvent.click(await screen.findByRole("button", { name: "versions" }));
     expect(await screen.findByText("initial")).toBeInTheDocument();
+  });
+});
+
+describe("AgentDetailPage — Settings tab (agent_class)", () => {
+  beforeEach(() => {
+    mock(getAgent).mockResolvedValue({
+      name: "my-agent",
+      team: "default",
+      agent_type: "declarative",
+      status: "active",
+      publish_status: "private",
+      execution_shape: "reactive",
+      agent_class: "user_delegated",
+      created_at: NOW,
+      updated_at: NOW,
+      created_by: "dev",
+      memory_enabled: false,
+      metadata: {},
+    });
+    mock(getDeployments).mockResolvedValue([]);
+    mock(listVersions).mockResolvedValue([]);
+    mock(listTriggers).mockResolvedValue([]);
+    mock(updateAgent).mockResolvedValue({ name: "my-agent" });
+  });
+
+  it("changing the Authority class to daemon and saving PATCHes agent_class", async () => {
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "settings" }));
+    const classSelect = await screen.findByLabelText(/Authority/i);
+    await userEvent.selectOptions(classSelect, "daemon");
+    await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    await waitFor(() => expect(updateAgent).toHaveBeenCalled());
+    expect(mock(updateAgent).mock.calls[0][1]).toEqual(
+      expect.objectContaining({ agent_class: "daemon" })
+    );
   });
 });

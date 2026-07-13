@@ -75,7 +75,9 @@ class AgentCreate(BaseModel):
     team: str = Field(..., max_length=128)
     description: str | None = None
     agent_type: str = Field("sdk", pattern="^(sdk|declarative)$")
-    agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
+    # Defaulted-required (not Optional): a missing value persists an explicit default,
+    # never NULL — so the deploy-time coalesce is deletable (WS-0 M3).
+    agent_class: str = Field("user_delegated", pattern="^(daemon|user_delegated)$")
     execution_shape: str = Field("reactive", pattern="^(reactive|durable)$")
     memory_enabled: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -98,7 +100,7 @@ class AgentResponse(BaseModel):
     description: str | None
     status: str
     agent_type: str
-    agent_class: str | None
+    agent_class: str
     execution_shape: str
     memory_enabled: bool
     publish_status: str
@@ -440,6 +442,7 @@ class CompositeWorkflowCreate(BaseModel):
     description: str | None = None
     execution_shape: str = Field("durable", pattern="^(reactive|durable)$")
     orchestration: str = Field("sequential", pattern="^(sequential|supervisor|handoff|conditional)$")
+    agent_class: str = Field("user_delegated", pattern="^(daemon|user_delegated)$")
     memory_enabled: bool = False
 
 
@@ -447,6 +450,7 @@ class CompositeWorkflowUpdate(BaseModel):
     description: str | None = None
     execution_shape: str | None = Field(None, pattern="^(reactive|durable)$")
     orchestration: str | None = Field(None, pattern="^(sequential|supervisor|handoff|conditional)$")
+    agent_class: str | None = Field(None, pattern="^(daemon|user_delegated)$")
     memory_enabled: bool | None = None
     status: str | None = Field(None, pattern="^(draft|published|archived)$")
 
@@ -467,6 +471,9 @@ class CompositeWorkflowResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     member_count: int = 0
+    agent_class: str
+    # S2 save-time author warning (best-effort, non-blocking). [] for durable workflows.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WorkflowMemberCreate(BaseModel):

@@ -33,7 +33,7 @@ from auth_middleware import get_optional_user
 from db import get_db
 from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
-from models import Agent, AgentRun, AgentTrigger, AgentVersion, CompositeWorkflow, WorkflowEdge, WorkflowMember
+from models import Agent, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
     AgentRunResponse,
     AgentTriggerCreate,
@@ -76,14 +76,48 @@ async def _member_count(db: AsyncSession, workflow_id: uuid.UUID) -> int:
     )
 
 
-def _to_response(wf: CompositeWorkflow, member_count: int) -> CompositeWorkflowResponse:
+def _to_response(
+    wf: CompositeWorkflow, member_count: int, warnings: list[str] | None = None
+) -> CompositeWorkflowResponse:
     return CompositeWorkflowResponse(
         id=wf.id, name=wf.name, team=wf.team, description=wf.description,
         execution_shape=wf.execution_shape, orchestration=wf.orchestration,
+        agent_class=wf.agent_class,
         memory_enabled=wf.memory_enabled, status=wf.status, publish_status=wf.publish_status,
         created_by=wf.created_by, created_at=wf.created_at, updated_at=wf.updated_at,
-        member_count=member_count,
+        member_count=member_count, warnings=warnings or [],
     )
+
+
+async def compute_reactive_approval_warnings(
+    db: AsyncSession, workflow_id: uuid.UUID, execution_shape: str
+) -> list[str]:
+    """Non-blocking author warning (best-effort half of S2): a reactive workflow with a
+    statically high-risk-tool member will FAIL at runtime if that tool trips an approval
+    gate (a reactive workflow can't durably park — the authoritative S2 seam is the runtime
+    fail-closed in workflow_orchestrator). Returns [] for durable workflows or when no
+    member carries a high-/critical-risk tool."""
+    if execution_shape != "reactive":
+        return []
+    rows = (await db.execute(
+        select(Agent.name)
+        .select_from(WorkflowMember)
+        .join(Agent, Agent.id == WorkflowMember.agent_id)
+        .join(AgentTool, AgentTool.agent_id == Agent.id)
+        .join(Tool, Tool.id == AgentTool.tool_id)
+        .where(
+            WorkflowMember.workflow_id == workflow_id,
+            Tool.risk_level.in_(["high", "critical"]),
+        )
+    )).all()
+    if not rows:
+        return []
+    members = sorted({name for (name,) in rows})
+    return [
+        f"Reactive workflow has high-risk-tool member(s): {', '.join(members)}. "
+        f"If a tool trips an approval gate this run will FAIL (reactive can't park). "
+        f"Set shape=durable to allow approvals."
+    ]
 
 
 @router.get("", response_model=list[CompositeWorkflowResponse])
@@ -127,6 +161,7 @@ async def create_workflow(
     wf = CompositeWorkflow(
         name=body.name, team=body.team, description=body.description,
         execution_shape=body.execution_shape, orchestration=body.orchestration,
+        agent_class=body.agent_class,
         memory_enabled=body.memory_enabled, created_by=caller,
     )
     db.add(wf)
@@ -160,7 +195,8 @@ async def get_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db
         .order_by(WorkflowEdge.position.nulls_last(), WorkflowEdge.created_at)
     )).scalars().all()
     edges = [WorkflowEdgeResponse.model_validate(e) for e in edge_rows]
-    base = _to_response(wf, len(members))
+    warnings = await compute_reactive_approval_warnings(db, workflow_id, wf.execution_shape)
+    base = _to_response(wf, len(members), warnings)
     return CompositeWorkflowWithMembersResponse(**base.model_dump(), members=members, edges=edges)
 
 
@@ -174,7 +210,8 @@ async def update_workflow(
     wf.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(wf)
-    return _to_response(wf, await _member_count(db, wf.id))
+    warnings = await compute_reactive_approval_warnings(db, workflow_id, wf.execution_shape)
+    return _to_response(wf, await _member_count(db, wf.id), warnings)
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)

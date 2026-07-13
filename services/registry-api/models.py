@@ -86,6 +86,10 @@ class Agent(Base):
             "agent_type IN ('sdk','declarative')",
             name="ck_agents_type",
         ),
+        CheckConstraint(
+            "agent_class IN ('user_delegated','daemon')",
+            name="ck_agents_agent_class",
+        ),
         Index("idx_agents_team", "team"),
         Index("idx_agents_status", "status"),
         Index("idx_agents_name", "name"),
@@ -152,7 +156,8 @@ class Agent(Base):
         "LLMProvider", back_populates="agents", foreign_keys=[llm_provider_id]
     )
 
-    # Execution shape: reactive (single-shot) or durable (checkpointed, multi-step)
+    # Execution shape: reactive (ephemeral, in-request, synchronous — no cross-time
+    # persistence) or durable (checkpointed — parks + resumes across time, survives restart).
     execution_shape: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'reactive'")
     )
@@ -162,9 +167,11 @@ class Agent(Base):
     )
 
     # Authorization model fields (Phase 9.1)
-    # agent_class determines which OPA flow applies at runtime
-    agent_class: Mapped[str | None] = mapped_column(
-        String(32), nullable=True
+    # agent_class determines which OPA flow applies at runtime.
+    # NOT NULL + server_default + CHECK: an executable's class can never be absent or garbage,
+    # so the deploy-time coalesce is deletable (WS-0 M3) and OPA's class-based flow can trust it.
+    agent_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'user_delegated'")
     )
     # publish_status tracks authoring lifecycle; separate from operational status
     publish_status: Mapped[str] = mapped_column(
@@ -321,6 +328,10 @@ class CompositeWorkflow(Base):
             name="ck_workflows_execution_shape",
         ),
         CheckConstraint(
+            "agent_class IN ('user_delegated','daemon')",
+            name="ck_workflows_agent_class",
+        ),
+        CheckConstraint(
             "orchestration IN ('sequential','supervisor','handoff','conditional')",
             name="ck_workflows_orchestration",
         ),
@@ -341,6 +352,11 @@ class CompositeWorkflow(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_shape: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'durable'")
+    )
+    # agent_class: the workflow run's authority (D1). user_delegated → invoking user;
+    # daemon → the workflow's service identity. Members inherit via actor_chain (WS-2).
+    agent_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'user_delegated'")
     )
     memory_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")

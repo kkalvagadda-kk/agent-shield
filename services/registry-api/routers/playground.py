@@ -228,57 +228,32 @@ async def _dispatch_durable_run(
     input_payload: dict | None,
     db: AsyncSession,
 ) -> None:
-    """Dispatch a durable run to the declarative-runner pod's /run endpoint."""
+    """Dispatch a durable playground run to the declarative-runner /run endpoint.
+
+    Thin wrapper over the shared ``durable_dispatch.dispatch_durable_run`` — the ONE
+    place the /run POST lives (parity with the production internal path; the
+    2026-07-11 HITL retro root cause was exactly a sandbox/production copy). On a
+    dispatch failure, mark THIS PlaygroundRun failed (fail-closed)."""
     from db import AsyncSessionLocal
-    from models import AgentRun, RunStep
+    from durable_dispatch import dispatch_durable_run, registry_internal_base
 
-    async with AsyncSessionLocal() as session:
-        agent_result = await session.execute(
-            select(Agent).where(Agent.name == agent_name)
-        )
-        agent = agent_result.scalar_one_or_none()
-        if not agent:
-            logger.error("_dispatch_durable_run: agent '%s' not found", agent_name)
-            return
-
-        dep_result = await session.execute(
-            select(Deployment).where(
-                Deployment.agent_name == agent_name,
-                Deployment.status == "running",
-            ).order_by(Deployment.created_at.desc()).limit(1)
-        )
-        deployment = dep_result.scalar_one_or_none()
-
-        runner_url = os.getenv("DECLARATIVE_RUNNER_URL", "http://declarative-runner.agentshield-platform.svc.cluster.local:8080")
-        callback_url = os.getenv("REGISTRY_API_INTERNAL_URL", "http://registry-api.agentshield-platform.svc.cluster.local:8000")
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    f"{runner_url}/run",
-                    json={
-                        "agent_name": agent_name,
-                        "run_id": run_id,
-                        "input_payload": input_payload or {},
-                        "callback_url": f"{callback_url}/api/v1/playground/runs/{run_id}/step-update",
-                    },
-                )
-                if resp.status_code not in (200, 201, 202):
-                    logger.warning(
-                        "_dispatch_durable_run: runner returned %d: %s",
-                        resp.status_code, resp.text[:200],
-                    )
-        except Exception as exc:
-            logger.error("_dispatch_durable_run: failed to dispatch run %s: %s", run_id, exc)
-            async with AsyncSessionLocal() as err_session:
-                result = await err_session.execute(
-                    select(PlaygroundRun).where(PlaygroundRun.id == uuid.UUID(run_id))
-                )
-                run = result.scalar_one_or_none()
-                if run:
-                    run.status = "failed"
-                    run.completed_at = datetime.now(tz=timezone.utc)
-                    await err_session.commit()
+    callback = f"{registry_internal_base()}/api/v1/playground/runs/{run_id}/step-update"
+    ok, err = await dispatch_durable_run(
+        run_id=run_id,
+        agent_name=agent_name,
+        input_payload=input_payload,
+        callback_url=callback,
+    )
+    if not ok:
+        logger.warning("_dispatch_durable_run: marking playground run %s failed: %s", run_id, err)
+        async with AsyncSessionLocal() as session:
+            run = (await session.execute(
+                select(PlaygroundRun).where(PlaygroundRun.id == uuid.UUID(run_id))
+            )).scalar_one_or_none()
+            if run:
+                run.status = "failed"
+                run.completed_at = datetime.now(tz=timezone.utc)
+                await session.commit()
 
 
 @router.post(

@@ -976,9 +976,12 @@ You write a natural-language condition on the edge (e.g., "the user mentioned a 
 
 A Monaco editor embedded in Studio allows users to write `agent.py` directly in the browser. A Kaniko build service compiles it into a Docker image without requiring a local toolchain. Users never need to clone the repo, install Python, or run Docker locally to create SDK agents. The platform handles the full build-push-deploy loop from a browser tab.
 
-### Execution-Mode Runtime + Memory (Phase 3 design, deferred)
+### Execution-Mode Runtime + Memory (Execution Models v2 — WS-0 in progress)
 
-Four first-class execution modes (reactive / durable / scheduled / event-driven) plus layered agent memory are designed but not yet implemented. Specs:
+Execution is a **three-axis cube**, not four flat "modes." `execution_shape` {reactive, durable} — *how a run behaves* — is orthogonal to its `trigger` {manual/api, schedule, webhook} — *what starts it* — and to its `agent_class` {user_delegated, daemon} — *whose authority the run carries*. **Reactive** (stored value `reactive`; shown in the UI as **Ephemeral** — the true antonym of Durable) = ephemeral, in-request, synchronous, no cross-time persistence; **durable** = checkpointed, parks + resumes across time, survives restart. "Scheduled" and "event-driven" are *triggers, not shapes* — a scheduled run can be reactive **or** durable. The cube applies to both executables (atomic **Agent** and composite **Workflow**, per Decision 22).
+
+`agent_class` is a **NOT NULL** column on **both** `agents` and `workflows` (migration `0058`, WS-0) with a CHECK constraint `IN ('user_delegated','daemon')` — an executable's authority can never be absent or garbage (the deploy-time coalesce is removed). The v2 rollout (WS-0 → WS-6) makes the full cube reachable, real, and honest end-to-end. Specs:
+- `docs/design/todo/execution-models-v2-e2e.md` — the v2 end-to-end plan (durable engine, daemon identity, trigger dispatch, webhook signing) — agents **and** workflows
 - `docs/design/execution-models-and-memory.md` — backend/data model (revised by Decisions 20–21)
 - `docs/design/playground-execution-modes.md` — pre-publish evaluate surface (all modes)
 - `docs/design/execution-modes-production.md` — production runtime + operations (all modes)

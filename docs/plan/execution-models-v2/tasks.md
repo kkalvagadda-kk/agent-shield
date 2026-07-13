@@ -19,7 +19,7 @@
 
 ## Phase A — Authoring vertical (UI → API → DB → read back). Prove save→reload BEFORE Phase B.
 
-### [ ] T1 — Migration `0058` + ORM `agent_class` NOT NULL on both executables
+### [X] T1 — Migration `0058` + ORM `agent_class` NOT NULL on both executables
 - **Files:** `services/registry-api/alembic/versions/0058_agent_class_not_null_and_workflows_agent_class.py` (**C**);
   `services/registry-api/models.py` (M).
 - **Do:** migration `revision="0058"`, `down_revision="0057"`, upgrade/downgrade exactly per `data-model.md`
@@ -31,7 +31,7 @@
 - **Deps:** none (do PREFLIGHT first).
 - **Verify:** `cd services/registry-api && python3 -c "import ast; ast.parse(open('alembic/versions/0058_agent_class_not_null_and_workflows_agent_class.py').read())" && python3 -c "import models, sqlalchemy.orm as o; o.configure_mappers(); print('ok')"`
 
-### [ ] T2 — Schemas + routers: `agent_class` on create/update/response (agents + workflows), wire the orphan
+### [X] T2 — Schemas + routers: `agent_class` on create/update/response (agents + workflows), wire the orphan
 - **Files:** `services/registry-api/schemas.py` (M); `services/registry-api/routers/agents.py` (M);
   `services/registry-api/routers/composite_workflows.py` (M).
 - **Do:** exactly per `contracts/create-patch-api.md` — `AgentCreate.agent_class` defaulted-required;
@@ -44,7 +44,7 @@
 - **Deps:** T1.
 - **Verify:** `cd services/registry-api && for f in schemas.py routers/agents.py routers/composite_workflows.py; do python3 -c "import ast; ast.parse(open('$f').read())"; done && python3 -c "import models, sqlalchemy.orm as o; o.configure_mappers(); print('ok')"`
 
-### [ ] T3 — Deploy reads the column directly — remove the coalesce (M3, closes Slice A backend)
+### [X] T3 — Deploy reads the column directly — remove the coalesce (M3, closes Slice A backend)
 - **Files:** `services/deploy-controller/manifest_builder.py` (M).
 - **Do:** `:128` → `agent_class = agent["agent_class"]` (direct index; no `.get`, no `or "user_delegated"`). The
   NOT NULL column (T1) makes the coalesce dead — delete it (No-Bandaid: illegal state now unrepresentable).
@@ -53,7 +53,7 @@
 - **Deps:** T1, T2.
 - **Verify:** `python3 -c "import ast; ast.parse(open('services/deploy-controller/manifest_builder.py').read())" && ! grep -n 'or "user_delegated"' services/deploy-controller/manifest_builder.py`
 
-### [ ] T6a [P] — Studio API client: `agent_class` on create/update/workflow bodies
+### [X] T6a [P] — Studio API client: `agent_class` on create/update/workflow bodies
 - **Files:** `studio/src/api/registryApi.ts` (M).
 - **Do:** add `agent_class` to `createAgent`/`updateAgent` bodies + `CreateCompositeWorkflowRequest`; add
   `agent_class` + `warnings` to the `CompositeWorkflow` type (types per `contracts/create-patch-api.md`).
@@ -61,7 +61,7 @@
 - **Deps:** T2 (backend contract). **Parallel with T6b/T6c** (different files).
 - **Verify:** `cd studio && npm run typecheck && grep -n "agent_class" src/api/registryApi.ts`
 
-### [ ] T6b — Studio wizard: split the 4-way picker into Shape · Trigger · Class (R1)
+### [X] T6b — Studio wizard: split the 4-way picker into Shape · Trigger · Class (R1)
 - **Files:** `studio/src/pages/CreateAgentPage.tsx` (M).
 - **Do:** replace the 4-way `AgentTypePicker` with **three independent selectors** — Shape (`reactive|durable`),
   Trigger (`manual/api · schedule · webhook`, reusing existing ScheduleFields/FilterConditionsEditor), Class
@@ -71,7 +71,7 @@
 - **Deps:** T6a.
 - **Verify:** `cd studio && npm run typecheck && grep -n "agent_class\|execution_shape" src/pages/CreateAgentPage.tsx`
 
-### [ ] T6c [P] — Studio Settings + Workflow Save-modal Class selectors + spec reword
+### [X] T6c [P] — Studio Settings + Workflow Save-modal Class selectors + spec reword
 - **Files:** `studio/src/pages/AgentDetailPage.tsx` (M); `studio/src/pages/WorkflowBuilderPage.tsx` (M);
   `docs/spec.md` (M).
 - **Do:** `AgentDetailPage.SettingsContent` — Class `<select>` beside Execution Shape, included in the
@@ -82,7 +82,7 @@
 - **Deps:** T6a. **Parallel with T6b** (different files).
 - **Verify:** `cd studio && npm run typecheck && grep -n "agent_class" src/pages/AgentDetailPage.tsx src/pages/WorkflowBuilderPage.tsx`
 
-### [ ] T7a [P] — Vitest: authoring surfaces
+### [X] T7a [P] — Vitest: authoring surfaces
 - **Files:** `studio/src/pages/CreateAgentPage.test.tsx` (M); `studio/src/pages/AgentDetailPage.test.tsx` (M);
   `studio/src/pages/WorkflowBuilderPage.test.tsx` (**C**).
 - **Do:** mock `../api/registryApi`, render via `renderWithProviders`; assert three selectors render, create
@@ -92,7 +92,7 @@
 - **Deps:** T6b, T6c. **Parallel with T7b** (Vitest vs Playwright).
 - **Verify:** `cd studio && npm run test`
 
-### [ ] T7b [P] — Playwright: authoring persistence (save→reload→assert)
+### [X] T7b [P] — Playwright: authoring persistence (save→reload→assert)
 - **Files:** `studio/e2e/create-agent-wizard.spec.ts` (M); `studio/e2e/agent-detail-modes.spec.ts` (M);
   `studio/e2e/workflow-builder.spec.ts` (M).
 - **Do:** drive the real browser, `waitForResponse` on the create/PATCH, reload, assert `agent_class` persisted
@@ -106,7 +106,7 @@
 
 ## Phase B — Dispatch vertical (trigger → dispatch → `/run` vs `/chat` → run_steps). Start AFTER Phase A proves save→reload.
 
-### [ ] T4 — Shared durable-dispatch helper + shape-aware production dispatch + production step-update (parity core)
+### [X] T4 — Shared durable-dispatch helper + shape-aware production dispatch + production step-update (parity core)
 - **Files:** `services/registry-api/durable_dispatch.py` (**C**); `services/registry-api/routers/playground.py` (M);
   `services/registry-api/routers/internal.py` (M).
 - **Do:** `durable_dispatch.dispatch_durable_run(...)` exactly per `contracts/shared-dispatch-helper.md` — the
@@ -121,7 +121,7 @@
 - **Deps:** T2 (logically). **Parity gate:** the `/run` POST literal lives ONLY in `durable_dispatch.py`.
 - **Verify:** `cd services/registry-api && for f in durable_dispatch.py routers/playground.py routers/internal.py; do python3 -c "import ast; ast.parse(open('$f').read())"; done && python3 -c "import models, sqlalchemy.orm as o; o.configure_mappers(); print('ok')" && grep -rn "dispatch_durable_run" routers/playground.py routers/internal.py && ! grep -rn '"/run"' routers/playground.py routers/internal.py`
 
-### [ ] T5 — Reactive workflow = awaited+capped (M6) + approval-gate fail-closed + save-time warn (S2)
+### [X] T5 — Reactive workflow = awaited+capped (M6) + approval-gate fail-closed + save-time warn (S2)
 - **Files:** `services/registry-api/routers/internal.py` (M, `_start_workflow_run`);
   `services/registry-api/workflow_orchestrator.py` (M). (`compute_reactive_approval_warnings` already added in T2.)
 - **Do:** `_start_workflow_run` branches on `wf.execution_shape` — reactive →
@@ -140,7 +140,7 @@
 
 ## Phase C — Golden-path e2e + parity assertion
 
-### [ ] T8 — Backend e2e suite-54 + register (Slice A+B golden path, parity grep)
+### [X] T8 — Backend e2e suite-54 + register (Slice A+B golden path, parity grep)
 - **Files:** `scripts/e2e/suite-54-agent-class-shape-dispatch.sh` (**C**); `scripts/e2e/run-all.sh` (M).
 - **Do:** `kubectl exec` into registry-api, `python3`/`httpx` against `http://localhost:8000`; IDs
   `T-S54-001..010`; `set -euo pipefail`; **`exit 1` (fail, not skip) on any missing fixture**; cleanup trap.
@@ -158,7 +158,7 @@
 
 ## Phase D — Ship
 
-### [ ] T9 — Image-tag bumps (BOTH files) + deploy + gap-ledger note
+### [X] T9 — Image-tag bumps (BOTH files) + deploy + gap-ledger note
 - **Files:** `scripts/deploy-cpe2e.sh` (M); `charts/agentshield/values.yaml` (M);
   `docs/testing/manual-ui-e2e-test-plan.md` (M).
 - **Do:** `REGISTRY_API_TAG 0.2.155→0.2.156`, `DEPLOY_CONTROLLER_TAG 0.1.35→0.1.36`, `STUDIO_TAG 0.1.126→0.1.127`
@@ -196,9 +196,16 @@ PREFLIGHT (confirm head=0057)
 - **Do not** parallelize anything that edits `services/registry-api/routers/internal.py` (T4 + T5) — sequence them.
 
 ## Definition-of-Done gate (from plan §4 — confirm before reporting WS-0 done)
-- [ ] Real user journey proven: Playwright T7b drives wizard/Settings/Save-modal create → reload → class persisted.
-- [ ] Save→reload→assert: T7b (UI) + suite-54 T-S54-003/004 (API re-GET).
-- [ ] No orphan: `dispatch_durable_run`, `/step-update`, `_park_or_fail`, `compute_reactive_approval_warnings`,
-      `update_agent.agent_class` each have a live caller shipped here (T8 greps).
-- [ ] Parity: single `/run` POST (T8-010 grep); reactive fail-closed asserted (T8-009).
-- [ ] Gap ledger updated (T9); image tags in BOTH files (T9); declarative-runner tag NOT bumped.
+- [X] Real user journey proven: Playwright T7b drives wizard/Settings/Save-modal create → reload → class persisted. **18/18 green vs deployed Studio 0.1.127.**
+- [X] Save→reload→assert: T7b (UI: create-agent-wizard `daemon` reload; agent-detail Settings PATCH reload; workflow-builder daemon backend re-GET) + suite-54 T-S54-003/004 (API re-GET). **All green.**
+- [X] No orphan: `dispatch_durable_run` (both routers call it), `/step-update` (T-S54-006), `_park_or_fail` (T-S54-009), `compute_reactive_approval_warnings` (T-S54-005 + workflow Save-modal toast), `update_agent.agent_class` (T-S54-003) each have a live caller shipped here.
+- [X] Parity: single `/run` POST (T-S54-010 grep green); reactive fail-closed asserted (T-S54-009 green).
+- [X] Gap ledger updated (T9, manual plan); image tags in BOTH files (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127); declarative-runner tag NOT bumped (0.1.37).
+
+## Deployed-cluster verification (2026-07-13)
+- Deploy: `scripts/deploy-cpe2e.sh` green — migration **0058 applied** (`alembic_version=0058`; `agents.agent_class` NOT NULL; `workflows.agent_class` present); new registry-api/deploy-controller/studio pods rolled out.
+- **suite-54: 14/14 PASS** against the deployed cluster (all T-S54-001..010).
+- **Playwright authoring: 18/18 PASS** vs deployed Studio (create-agent-wizard 5, agent-detail-modes 6, workflow-builder 7).
+- Regression: **suite-36 (durable workflow HITL) 4/0** — orchestrator `shape` threading preserved existing durable park/resume.
+- Frontend: `npm run typecheck` clean; **Vitest 181/181** (incl. new WorkflowBuilderPage.test.tsx + rewritten CreateAgentPage/AgentDetailPage tests).
+- Fixes made during deploy verification: added `studio/.dockerignore` (node_modules symlink broke `COPY . .`); copied vendored helm subchart tarballs into the worktree; suite-54 needed explicit `db.commit()` after direct `create_agent`/`update_agent` calls; tightened Playwright Schedule/Webhook checkbox locators (collided with a seeded tool's description); updated a stale pre-existing agent-detail versions-tab assertion (DoD #6).

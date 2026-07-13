@@ -43,7 +43,9 @@ async function createAgentViaUI(
     );
     await page.getByRole("button", { name: /Create Agent/i }).click();
     await createDone;
-    await page.waitForURL(`**/agents/${agentName}`, { timeout: 15_000 });
+    // The wizard navigates to the agents list (not the detail page) after create;
+    // just wait until we've left the /new wizard route — the 201 already confirms creation.
+    await page.waitForURL((u) => !u.pathname.endsWith("/new"), { timeout: 15_000 });
   } finally {
     await ctx.close();
   }
@@ -83,7 +85,7 @@ test.describe("artifact page (Level 2)", () => {
     await page.goto(`/agents/${REACTIVE_AGENT}`);
     await page.waitForLoadState("networkidle");
 
-    await expect(page.getByText("Reactive")).toBeVisible();
+    await expect(page.getByText("Ephemeral")).toBeVisible();
 
     const tabNav = page.locator("main nav");
     await expect(tabNav.getByRole("button", { name: "deployments" })).toBeVisible();
@@ -103,11 +105,14 @@ test.describe("artifact page (Level 2)", () => {
     await expect(page.getByText(/No sandbox deployments yet/i)).toBeVisible();
   });
 
-  test("versions tab shows Agent Details", async ({ page }) => {
+  test("versions tab shows the versions table", async ({ page }) => {
     await page.goto(`/agents/${REACTIVE_AGENT}`);
     await page.waitForLoadState("networkidle");
     await page.locator("main nav").getByRole("button", { name: "versions" }).click();
-    await expect(page.getByRole("heading", { name: "Agent Details" })).toBeVisible();
+    // A freshly-created agent has no versions (they come from the deploy/publish flow),
+    // so the versions tab renders its empty state — assert that (the old "Agent Details"
+    // heading was removed in an earlier restructure).
+    await expect(page.getByText(/No versions yet/i)).toBeVisible();
   });
 
   test("settings tab shows trigger config sections", async ({ page }) => {
@@ -123,5 +128,27 @@ test.describe("artifact page (Level 2)", () => {
     await page.goto(`/agents/${DURABLE_AGENT}`);
     await page.waitForLoadState("networkidle");
     await expect(page.getByText("Durable")).toBeVisible();
+  });
+
+  // Save → reload → assert (DoD #2): editing the Authority (class) in Settings PATCHes
+  // agent_class and survives a reload from the backend (the update_agent orphan is wired).
+  test("settings: change Authority class to daemon → save → reload → persisted", async ({ page }) => {
+    await page.goto(`/agents/${DURABLE_AGENT}`);
+    await page.waitForLoadState("networkidle");
+    await page.locator("main nav").getByRole("button", { name: "settings" }).click();
+
+    await page.getByLabel(/Authority/i).selectOption("daemon");
+    const patchDone = page.waitForResponse(
+      (r) =>
+        r.request().method() === "PUT" &&
+        new URL(r.url()).pathname.endsWith(`/agents/${DURABLE_AGENT}`),
+      { timeout: 15_000 }
+    );
+    await page.getByRole("button", { name: /Save Changes/i }).click();
+    await patchDone;
+
+    await page.reload();
+    await page.locator("main nav").getByRole("button", { name: "settings" }).click();
+    await expect(page.getByLabel(/Authority/i)).toHaveValue("daemon");
   });
 });
