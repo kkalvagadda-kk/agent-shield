@@ -3,6 +3,11 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - declarative-runner:0.1.43 (rebase reconcile — folds e59cc4d's governed-tool graph-build KeyError fix
+#     (python & arg-less HTTP tools: __annotations__ derived from the signature, typed params from input_schema,
+#     InjectedState injected before **kwargs; sdk/tests/test_tool_executor_schema.py + suite-62-tool-schema-build)
+#     ON TOP OF 0.1.42's durable._exc_reason change. Both SDK fixes now coexist in one image — rebuild +
+#     re-materialize agents to pick up the combined SDK.)
 #   - declarative-runner:0.1.42 (never emit an empty failure reason — httpx.ReadTimeout/ConnectTimeout
 #     stringify to "" so a tool timeout surfaced as a bare "run crashed:" with no cause. SDK durable._exc_reason
 #     now prefixes the exception TYPE (→ "run crashed: ReadTimeout"); applied to the drive-loop crash + the
@@ -155,7 +160,7 @@ SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.133"
 EVAL_RUNNER_TAG="0.1.5"
-DECLARATIVE_RUNNER_TAG="0.1.42"
+DECLARATIVE_RUNNER_TAG="0.1.43"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
