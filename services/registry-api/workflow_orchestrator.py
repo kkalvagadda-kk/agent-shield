@@ -24,6 +24,7 @@ module mirrors this as the future extraction target.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -92,6 +93,81 @@ async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | N
         )
     except Exception as exc:  # network / timeout / bad JSON
         return "failed", None, f"dispatch failed: {exc}"
+
+
+async def _resolve_agent_shape(agent_name: str) -> str:
+    """Look up a member agent's execution_shape ('durable' | 'reactive').
+
+    Defaults to 'reactive' (the synchronous /chat path) when unknown — a member we
+    can't classify keeps the existing, safe behavior rather than being forced durable.
+    """
+    from models import Agent
+    try:
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                select(Agent.execution_shape).where(Agent.name == agent_name)
+            )).scalar_one_or_none()
+            return row or "reactive"
+    except Exception:
+        return "reactive"
+
+
+async def _dispatch_durable_member(
+    agent_name: str, team: str, message: str, child_id: str
+) -> tuple[str, str | None, str | None]:
+    """Dispatch a DURABLE member via the pod's `/run` (D4 "+ Visibility"), then poll the
+    child AgentRun to a terminal state.
+
+    Unlike `/chat` (which returns the final answer inline and writes no per-node rows),
+    `/run` drives the shared durable harness and POSTs one `run_steps` row per node/tool
+    boundary to the child's step-update callback — so the member's internal steps appear
+    under `child_id` in the run tree (StepTracker zoom). `run_id` == `child_id` == the
+    member's thread_id, so a SDK-created Approval (thread_id=run_id) and the console
+    resume correlate back to this child (see `_run_step` + approvals._resume_and_advance).
+
+    Returns (status, output, error) where status is 'completed' | 'failed' |
+    'awaiting_approval'. The callback is what writes the child's terminal status/output;
+    this polls for it. **Documented limitation (gap ledger):** a within-member crash
+    mid-execution is not resumed here — the orchestrator only re-dispatches after an
+    approval decision, not after a member-pod crash.
+    """
+    environment = await _resolve_agent_environment(agent_name)
+    from durable_dispatch import registry_internal_base
+    base = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080"
+    callback_url = f"{registry_internal_base()}/api/v1/internal/runs/{child_id}/step-update"
+    body = {
+        "agent_name": agent_name,
+        "run_id": str(child_id),
+        "input_payload": {"message": message},
+        "callback_url": callback_url,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{base}/run", json=body)
+        if resp.status_code not in (200, 201, 202):
+            return "failed", None, f"member /run returned {resp.status_code}: {resp.text[:300]}"
+    except httpx.ConnectError:
+        return "failed", None, (
+            f"agent '{agent_name}' appears undeployed (no pod at {base}/run). "
+            f"Deploy the agent before running the workflow."
+        )
+    except Exception as exc:
+        return "failed", None, f"member /run dispatch failed: {exc}"
+
+    # Poll the child run — the step-update callback writes its terminal status + output.
+    deadline = time.monotonic() + 120.0
+    while time.monotonic() < deadline:
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                select(AgentRun.status, AgentRun.output, AgentRun.error_message)
+                .where(AgentRun.id == child_id)
+            )).first()
+        if row is not None:
+            st, out, errm = row
+            if st in ("completed", "failed", "awaiting_approval"):
+                return st, out, errm
+        await asyncio.sleep(1.0)
+    return "failed", None, "durable member timed out (no terminal callback within 120s)"
 
 
 # ---------------------------------------------------------------------------
@@ -246,22 +322,29 @@ async def _clear_checkpoint(parent_run_id: str) -> None:
             await s.commit()
 
 
-async def _halt_for_approval(parent_run_id: str, mode: str, team: str, workflow_id: str) -> None:
+async def _halt_for_approval(parent_run_id: str, mode: str, team: str, workflow_id: str,
+                             cursor: dict | None = None) -> None:
     """Checkpoint + park a non-sequential run at 'awaiting_approval'.
 
-    These modes now halt correctly (instead of silently mis-advancing on a paused
-    member), but automatic resume-advance is deferred — resume_orchestration
-    completes them with the member's output. See gap ledger.
+    `cursor` carries the mode-specific traversal position so `resume_orchestration` can
+    re-enter and advance (D3): the current node (+visited_count) for conditional/handoff,
+    or the supervisor accumulator (phase/iteration/current_input/worker_outputs) for
+    supervisor. The base `{mode,team,workflow_id}` is always written so the resume path
+    knows how to dispatch.
     """
-    await _save_checkpoint(parent_run_id, {"mode": mode, "team": team, "workflow_id": workflow_id})
+    state = {"mode": mode, "team": team, "workflow_id": workflow_id}
+    if cursor:
+        state.update(cursor)
+    await _save_checkpoint(parent_run_id, state)
     await _mark_parent(parent_run_id, "awaiting_approval")
-    logger.info("workflow %s (%s): paused — awaiting approval (auto-advance deferred for this mode)",
-                parent_run_id, mode)
+    logger.info("workflow %s (%s): paused — awaiting approval (cursor=%s)",
+                parent_run_id, mode, {k: cursor[k] for k in (cursor or {})})
 
 
-async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: str, shape: str) -> None:
-    """Single decision point for an approval gate (S2). Durable → checkpoint + park
-    (existing behavior). Reactive → fail-closed with a clear message: a reactive workflow
+async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: str, shape: str,
+                        cursor: dict | None = None) -> None:
+    """Single decision point for an approval gate (S2). Durable → checkpoint the cursor +
+    park (D3 resumable). Reactive → fail-closed with a clear message: a reactive workflow
     cannot durably park for async approval (D2). Never swallows the gate and proceeds —
     a reactive run can never silently run a tool that should have been approved."""
     if shape == "reactive":
@@ -271,7 +354,7 @@ async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: s
         )
         logger.info("workflow %s (%s, reactive): approval gate → fail-closed", parent_run_id, mode)
         return
-    await _halt_for_approval(parent_run_id, mode, team, workflow_id)
+    await _halt_for_approval(parent_run_id, mode, team, workflow_id, cursor)
 
 
 async def _run_step(parent_run_id: str, team: str, agent_name: str, current_input: str) -> tuple[str, str | None, str | None]:
@@ -284,6 +367,7 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
     pause signal (a member's sync /chat returns 200 with empty output on interrupt).
     """
     start = time.perf_counter()
+    member_shape = await _resolve_agent_shape(agent_name)
     thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(
@@ -305,11 +389,25 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
         await s.refresh(child)
         child_id = str(child.id)
 
-    status_val, output, err = await _dispatch(agent_name, team, current_input, thread_id)
+    if member_shape == "durable":
+        # D4 "+ Visibility": a durable member runs via `/run` so its per-node run_steps
+        # land under child_id. thread_id must equal child_id so the member's Approval
+        # (SDK sets thread_id=run_id) and the console resume correlate to this child.
+        thread_id = child_id
+        async with AsyncSessionLocal() as s:
+            child = (await s.execute(select(AgentRun).where(AgentRun.id == child_id))).scalar_one_or_none()
+            if child:
+                child.thread_id = child_id
+                await s.commit()
+        status_val, output, err = await _dispatch_durable_member(agent_name, team, current_input, child_id)
+    else:
+        status_val, output, err = await _dispatch(agent_name, team, current_input, thread_id)
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
-    # Authoritative pause detection: a member that hit interrupt() will have POSTed
-    # a pending Approval under this thread_id before suspending.
+    # Authoritative pause detection (reactive /chat members only — a durable member's
+    # pause already surfaces as status='awaiting_approval' from the poll above): a member
+    # that hit interrupt() will have POSTed a pending Approval under this thread_id before
+    # suspending.
     if status_val == "completed":
         async with AsyncSessionLocal() as s:
             pending = (await s.execute(
@@ -360,6 +458,41 @@ def _parse_next_agent(output: str, candidate_names: list[str]) -> str | None:
     for name in candidate_names:
         if name and name in text:
             return name
+    return None
+
+
+def _conditional_next(graph: dict[str, list[tuple[str, str | None]]], node: str, current_input: str) -> str | None:
+    """The next node from `node` given its output: first matching conditional edge, else
+    the default (blank) edge. None → terminal / no route (the run completes). Shared by
+    the forward loop and the resume re-entry so both route identically (D3)."""
+    outs = graph.get(node, [])
+    if not outs:
+        return None
+    nxt = None
+    for (target, cond) in outs:
+        if cond and cond.strip() and evaluate_condition(cond, current_input):
+            nxt = target
+            break
+    if nxt is None:
+        nxt = next((t for (t, c) in outs if not (c and c.strip())), None)
+    return nxt
+
+
+def _handoff_next(graph: dict[str, list[tuple[str, str | None]]], node: str, current_input: str) -> str | None:
+    """The next node from `node` given its handoff signal: the signalled target, else the
+    sole outgoing edge. None → DONE / no route (the run completes). Shared by the forward
+    loop and the resume re-entry (D3)."""
+    outs = graph.get(node, [])
+    if not outs:
+        return None
+    targets = [t for (t, _c) in outs]
+    signal = _parse_next_agent(current_input, targets)
+    if signal == _DONE_SENTINEL:
+        return None
+    if signal in targets:
+        return signal
+    if len(outs) == 1:
+        return outs[0][0]  # deterministic single handoff
     return None
 
 
@@ -440,8 +573,8 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
     """Re-enter a paused workflow run after its blocked member's approval is decided.
 
     Called (fire-and-forget) from approvals.decide_approval once the member pod has
-    resumed and produced its final output. Only 'sequential' mode auto-advances; other
-    modes halt correctly but complete on resume (auto-advance deferred — see gaps).
+    resumed and produced its final output. All four modes now auto-advance (D3): the
+    checkpoint carries the mode-specific cursor and we dispatch per mode.
     """
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
@@ -455,41 +588,67 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
         return
 
     mode = state.get("mode")
-    if mode != "sequential":
-        # Detection halted this mode correctly; auto resume-advance isn't wired for
-        # conditional/supervisor/handoff yet. Complete with the member's output.
-        await _clear_checkpoint(parent_run_id)
-        await _mark_parent(parent_run_id, "completed", member_output or "")
-        logger.info("resume_orchestration: mode '%s' not auto-advanced (deferred) — parent %s completed",
-                    mode, parent_run_id)
-        return
+    team = state["team"]
+    workflow_id = state["workflow_id"]
+    out = member_output or ""
 
     await _clear_checkpoint(parent_run_id)
     await _mark_parent(parent_run_id, "running")
-    await _run_sequential_from(
-        parent_run_id, state["team"], state["workflow_id"],
-        state["order"], int(state["next_index"]), member_output or "",
-    )
+
+    if mode == "sequential":
+        await _run_sequential_from(
+            parent_run_id, team, workflow_id,
+            state["order"], int(state["next_index"]), out,
+        )
+    elif mode in ("conditional", "handoff"):
+        # Markovian re-entry: the parked node completed with `out`; compute its next hop
+        # and resume the walk from there (re-resolve the graph from workflow_id — the
+        # checkpoint carries only the cursor, not the graph).
+        async with AsyncSessionLocal() as s:
+            graph = await resolve_edge_graph(s, workflow_id)
+        node = state.get("node")
+        visited_count = int(state.get("visited_count", 0))
+        nxt = (_conditional_next if mode == "conditional" else _handoff_next)(graph, node, out)
+        if nxt is None:
+            await _mark_parent(parent_run_id, "completed", out)
+            logger.info("resume_orchestration (%s): terminal after resume — parent %s completed",
+                        mode, parent_run_id)
+            return
+        runner = _run_conditional_from if mode == "conditional" else _run_handoff_from
+        await runner(parent_run_id, team, workflow_id, graph, nxt, visited_count, out)
+    elif mode == "supervisor":
+        await _run_supervisor_from(
+            parent_run_id, team, workflow_id,
+            state["supervisor"], list(state.get("workers") or []), int(state["max_iters"]),
+            iteration=int(state.get("iteration", 0)),
+            current_input=state.get("current_input", ""),
+            worker_outputs=list(state.get("worker_outputs") or []),
+            resumed_phase=state.get("phase"), resumed_output=out,
+        )
+    else:
+        # Unknown mode — safe fallback: complete with the member's output rather than hang.
+        await _mark_parent(parent_run_id, "completed", out)
+        logger.warning("resume_orchestration: unknown mode '%s' — parent %s completed with member output",
+                       mode, parent_run_id)
 
 
-async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                                  shape: str = "durable") -> None:
-    """At each node, take the first outgoing edge whose condition matches the output."""
-    async with AsyncSessionLocal() as s:
-        member_names = await resolve_member_names(s, workflow_id)
-        graph = await resolve_edge_graph(s, workflow_id)
-    await _mark_parent(parent_run_id, "running")
+async def _run_conditional_from(parent_run_id: str, team: str, workflow_id: str,
+                                graph: dict[str, list[tuple[str, str | None]]],
+                                node: str | None, visited_count: int, current_input: str,
+                                shape: str = "durable") -> None:
+    """Run the conditional graph from `node`. Pausable + resumable (D3).
 
-    current_input = input_message or ""
-    node = find_start_node(graph, member_names)
-    visited_count = 0
+    On a member pausing for approval, checkpoints the current node + visited_count and
+    halts; `resume_orchestration` computes the next node from the resumed member's output
+    (Markovian: next = f(node, output)) and re-enters here from that next node.
+    """
     failed = False
-
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
         if status_val == "awaiting_approval":
-            await _park_or_fail(parent_run_id, "conditional", team, workflow_id, shape)
+            await _park_or_fail(parent_run_id, "conditional", team, workflow_id, shape,
+                                cursor={"node": node, "visited_count": visited_count})
             return
         if status_val == "failed":
             failed = True
@@ -497,18 +656,7 @@ async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: st
             break
         current_input = output or ""
 
-        outs = graph.get(node, [])
-        if not outs:
-            break  # terminal node → complete
-        # First conditional edge that matches, else the default (blank) edge.
-        nxt = None
-        for (target, cond) in outs:
-            if cond and cond.strip():
-                if evaluate_condition(cond, current_input):
-                    nxt = target
-                    break
-        if nxt is None:
-            nxt = next((t for (t, c) in outs if not (c and c.strip())), None)
+        nxt = _conditional_next(graph, node, current_input)
         if nxt is None:
             logger.info("workflow %s: no matching/default edge from '%s' — complete", parent_run_id, node)
             break
@@ -519,24 +667,34 @@ async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: st
     logger.info("workflow run %s (conditional) finished: %s", parent_run_id, "failed" if failed else "completed")
 
 
-async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                              shape: str = "durable") -> None:
-    """Follow the handoff signal in each agent's output; else its sole outgoing edge."""
+async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                                  shape: str = "durable") -> None:
+    """At each node, take the first outgoing edge whose condition matches the output."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
-
-    current_input = input_message or ""
     node = find_start_node(graph, member_names)
-    visited_count = 0
-    failed = False
+    await _run_conditional_from(parent_run_id, team, workflow_id, graph, node, 0, input_message or "", shape)
 
+
+async def _run_handoff_from(parent_run_id: str, team: str, workflow_id: str,
+                            graph: dict[str, list[tuple[str, str | None]]],
+                            node: str | None, visited_count: int, current_input: str,
+                            shape: str = "durable") -> None:
+    """Run the handoff graph from `node`. Pausable + resumable (D3).
+
+    On a member pausing for approval, checkpoints the current node + visited_count and
+    halts; `resume_orchestration` computes the next hop from the resumed member's output
+    (Markovian) and re-enters here from that next node.
+    """
+    failed = False
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
         status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
         if status_val == "awaiting_approval":
-            await _park_or_fail(parent_run_id, "handoff", team, workflow_id, shape)
+            await _park_or_fail(parent_run_id, "handoff", team, workflow_id, shape,
+                                cursor={"node": node, "visited_count": visited_count})
             return
         if status_val == "failed":
             failed = True
@@ -546,22 +704,119 @@ async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, i
         outs = graph.get(node, [])
         if not outs:
             break
-        targets = [t for (t, _c) in outs]
-        signal = _parse_next_agent(current_input, targets)
-        if signal == _DONE_SENTINEL:
+        nxt = _handoff_next(graph, node, current_input)
+        if nxt is None:
+            if _parse_next_agent(current_input, [t for (t, _c) in outs]) != _DONE_SENTINEL:
+                logger.info("workflow %s: no handoff signal from '%s' and %d edges — stop",
+                            parent_run_id, node, len(outs))
             break
-        if signal in targets:
-            node = signal
-        elif len(outs) == 1:
-            node = outs[0][0]  # deterministic single handoff
-        else:
-            logger.info("workflow %s: no handoff signal from '%s' and %d edges — stop",
-                        parent_run_id, node, len(outs))
-            break
+        node = nxt
 
     await _mark_parent(parent_run_id, "failed" if failed else "completed",
                        None if failed else current_input)
     logger.info("workflow run %s (handoff) finished: %s", parent_run_id, "failed" if failed else "completed")
+
+
+async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, input_message: str,
+                              shape: str = "durable") -> None:
+    """Follow the handoff signal in each agent's output; else its sole outgoing edge."""
+    async with AsyncSessionLocal() as s:
+        member_names = await resolve_member_names(s, workflow_id)
+        graph = await resolve_edge_graph(s, workflow_id)
+    await _mark_parent(parent_run_id, "running")
+    node = find_start_node(graph, member_names)
+    await _run_handoff_from(parent_run_id, team, workflow_id, graph, node, 0, input_message or "", shape)
+
+
+async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
+                               supervisor: str, workers: list[str], max_iters: int,
+                               *, iteration: int, current_input: str, worker_outputs: list[str],
+                               resumed_phase: str | None = None, resumed_output: str | None = None,
+                               shape: str = "durable") -> None:
+    """Re-entrant supervisor loop. Pausable + resumable (D3).
+
+    The accumulator (`worker_outputs` + `iteration` + `current_input`) is what survives a
+    pause: it is checkpointed on park and reconstructed on resume. A pause can land at two
+    sub-steps within a turn — the supervisor decision (`phase='supervisor'`) or the worker
+    dispatch (`phase='worker'`); the resume preamble finishes whichever parked, then the
+    normal loop continues. `worker_outputs` records each completed worker's output so the
+    accumulated progress is provably preserved across the pause (suite-56).
+    """
+    def _cursor(phase: str, it: int, ci: str) -> dict:
+        return {
+            "phase": phase, "iteration": it, "current_input": ci,
+            "worker_outputs": list(worker_outputs), "supervisor": supervisor,
+            "workers": list(workers), "max_iters": max_iters,
+        }
+
+    # --- resume preamble: finish the sub-step that had parked ---
+    if resumed_phase == "supervisor":
+        # The supervisor's decision was gated; resumed_output is its decision output.
+        s_out = resumed_output or ""
+        decision = _parse_next_agent(s_out, workers)
+        if decision == _DONE_SENTINEL or decision is None:
+            await _mark_parent(parent_run_id, "completed", s_out or current_input)
+            logger.info("workflow run %s (supervisor) finished: completed (resumed at supervisor)", parent_run_id)
+            return
+        w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
+        if w_status == "awaiting_approval":
+            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
+                                cursor=_cursor("worker", iteration, current_input))
+            return
+        if w_status == "failed":
+            await _fail_parent(parent_run_id, "supervisor or worker step failed during dispatch")
+            return
+        worker_outputs.append(w_out or "")
+        current_input = w_out or ""
+        iteration += 1
+    elif resumed_phase == "worker":
+        # The worker dispatch was gated; resumed_output is the worker's output.
+        worker_outputs.append(resumed_output or "")
+        current_input = resumed_output or ""
+        iteration += 1
+
+    # --- normal loop from `iteration` ---
+    failed = False
+    hit_cap = True
+    while iteration < max_iters:
+        # 1. supervisor decides
+        s_status, s_out, _e = await _run_step(parent_run_id, team, supervisor, current_input)
+        if s_status == "awaiting_approval":
+            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
+                                cursor=_cursor("supervisor", iteration, current_input))
+            return
+        if s_status == "failed":
+            failed = True
+            break
+        decision = _parse_next_agent(s_out or "", workers)
+        if decision == _DONE_SENTINEL or decision is None:
+            hit_cap = False
+            current_input = s_out or current_input
+            break
+        # 2. dispatch to the chosen worker; thread its output back to the supervisor
+        w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
+        if w_status == "awaiting_approval":
+            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
+                                cursor=_cursor("worker", iteration, current_input))
+            return
+        if w_status == "failed":
+            failed = True
+            break
+        worker_outputs.append(w_out or "")
+        current_input = w_out or ""
+        iteration += 1
+    else:
+        hit_cap = True
+
+    if failed:
+        await _fail_parent(parent_run_id, "supervisor or worker step failed during dispatch")
+    elif hit_cap:
+        await _fail_parent(parent_run_id, f"supervisor reached max_iterations ({max_iters}) without completing")
+        logger.warning("workflow %s (supervisor) hit max_iterations=%d", parent_run_id, max_iters)
+    else:
+        await _mark_parent(parent_run_id, "completed", current_input)
+    logger.info("workflow run %s (supervisor) finished: %s", parent_run_id,
+                "failed" if (failed or hit_cap) else "completed")
 
 
 async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str, input_message: str,
@@ -579,46 +834,10 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
     workers = [m["name"] for m in members if m["name"] != supervisor["name"]]
     max_iters = int(supervisor["routing"].get("max_iterations", 10) or 10)
     await _mark_parent(parent_run_id, "running")
-
-    current_input = input_message or ""
-    failed = False
-    hit_cap = True
-
-    for _ in range(max_iters):
-        # 1. supervisor decides
-        s_status, s_out, _e = await _run_step(parent_run_id, team, supervisor["name"], current_input)
-        if s_status == "awaiting_approval":
-            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape)
-            return
-        if s_status == "failed":
-            failed = True
-            break
-        decision = _parse_next_agent(s_out or "", workers)
-        if decision == _DONE_SENTINEL or decision is None:
-            hit_cap = False
-            current_input = s_out or current_input
-            break
-        # 2. dispatch to the chosen worker; thread its output back to the supervisor
-        w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
-        if w_status == "awaiting_approval":
-            await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape)
-            return
-        if w_status == "failed":
-            failed = True
-            break
-        current_input = w_out or ""
-    else:
-        hit_cap = True
-
-    if failed:
-        await _fail_parent(parent_run_id, "supervisor or worker step failed during dispatch")
-    elif hit_cap:
-        await _fail_parent(parent_run_id, f"supervisor reached max_iterations ({max_iters}) without completing")
-        logger.warning("workflow %s (supervisor) hit max_iterations=%d", parent_run_id, max_iters)
-    else:
-        await _mark_parent(parent_run_id, "completed", current_input)
-    logger.info("workflow run %s (supervisor) finished: %s", parent_run_id,
-                "failed" if (failed or hit_cap) else "completed")
+    await _run_supervisor_from(
+        parent_run_id, team, workflow_id, supervisor["name"], workers, max_iters,
+        iteration=0, current_input=input_message or "", worker_outputs=[], shape=shape,
+    )
 
 
 # ---------------------------------------------------------------------------
