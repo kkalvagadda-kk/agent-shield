@@ -89,7 +89,7 @@ The user sees an error entry in the trace panel and the spinner stops. Nothing h
 
 **6. HITL overlay**
 
-When `approval_requested` fires, `HitlPanel` renders over everything with the tool name, risk level, and (redacted) args. The user clicks Approve or Deny. The frontend POSTs to `POST /api/v1/playground/approvals/{id}/decide` — no authority check in playground context (sandbox self-approval). The overlay closes and streaming resumes.
+When `approval_requested` fires, `HitlPanel` renders over everything with the tool name, risk level, and (redacted) args. `HitlPanel` mounts the shared `components/approvals/ApprovalCard.tsx` for the approval body (WS-1 M1) — the same presentational card the sandbox chat panel (`ConversationApprovalPanel`) and the global Approvals Inbox (`ApprovalsInboxPage`) use, so a new approval field is added in one place. The user clicks Approve or Deny. The frontend POSTs to `POST /api/v1/playground/approvals/{id}/decide` — no authority check in playground context (sandbox self-approval). The overlay closes and streaming resumes.
 
 **7. After the run**
 

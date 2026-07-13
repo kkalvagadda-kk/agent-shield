@@ -29,6 +29,20 @@
 - **[WS-1, deployed] durable park→approve→resume routing** proven by suite-55 (5/5) + suite-36 (4/0, workflow HITL) + suite-54 (14/14). The full **live-pod** park→approve→resume→complete through a real durable agent pod (and kill-pod→resume) is covered by the `durable.py` unit tests + this manual step — it needs a deployed durable agent with a genuinely high-risk tool. **not-yet-wired (fixture).**
 - **[pre-existing, NOT a WS-1 regression] suite-45 HITL-trigger cases fail** because the seed sets `web_search` at `risk=medium`, so no HITL ever fires (001 `WRONG_RISK`; 003/004/007–010 cascade from "no approval created"). Upstream of WS-1 (approval *creation*, not resume). Fix = seed `web_search` at `high` OR relax the suite's risk expectation; tracked as test-data debt.
 
+## Known gaps — WS-1 T5–T7 (workflow durable completion + approval UI parity)
+
+**Landed in this slice** (registry-api 0.2.158 / studio 0.1.129; no migration; suite-56):
+- **T5 (D3) — all four modes durably resume.** conditional/handoff/supervisor now park→resume→advance→complete (previously only sequential; the others "halted correctly but completed with member output"). The mode-specific cursor is checkpointed on park (node+visited_count for conditional/handoff; the supervisor accumulator worker_outputs+iteration+phase for supervisor) and `resume_orchestration` re-enters per mode. Proven by suite-56 (6/6, faked `_run_step`/`resolve_edge_graph`, same no-pod boundary as suite-36/55). Reactive fail-closed + sequential paths byte-for-byte unchanged (suite-36/54/55 regression).
+- **T6 (D4 "+ Visibility") — durable members via `/run`.** A durable member (`Agent.execution_shape='durable'`) is dispatched to the member pod's `/run` (with `run_id=child_id` + step-update callback, `thread_id=child_id` for approval correlation) and the orchestrator polls the child run to terminal — so the member's per-node `run_steps` appear under the child in the run tree. Reactive members stay `/chat`.
+- **T7 (M1) — one `<ApprovalCard>`.** `studio/src/components/approvals/ApprovalCard.tsx` is mounted by all three renderers (`HitlPanel`, `ConversationApprovalPanel`, `ApprovalsInboxPage`); a new approval field is added in one place. Vitest 186 + `ApprovalCard.test.tsx`.
+
+**deferred (intentional) — later workstream:**
+- **Within-member crash-restart** (a member pod crashing mid-execution, not at an approval gate). The orchestrator re-dispatches a durable member only after an approval decision, not after a crash — a mid-member crash loses that member's in-flight progress. This is the "full nested" durability tier (spec §9), a D4 documented limitation.
+
+**not-yet-wired (fixture / verify at deploy time):**
+- **Live-pod durable-workflow leg.** suite-56 proves the orchestrator-level invariant with faked member dispatch (no durable member pods are deployed — the same fixture boundary suite-36/55 accept). The full journey — a real durable workflow member parking on an OPA gate, a reviewer deciding in the console, the member pod re-driving via `/run`, and the child's per-node `run_steps` appearing in the run tree — needs a deployed durable agent with a genuinely high-risk tool. **Manual check:** build a durable workflow (conditional/handoff/supervisor) whose member calls a high-risk tool → run it → confirm the parent parks at `awaiting_approval` → approve in `/approvals` → confirm the parent advances to the next member and completes.
+- **Playwright `approvals-inbox.spec.ts`** drives the inbox render + Approve decide wiring against a route-stubbed pending item (deterministic, no pod). Its green run is deploy-gated — run `bash scripts/studio-e2e.sh`.
+
 ---
 
 ## 0. Before you start

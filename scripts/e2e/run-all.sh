@@ -102,6 +102,7 @@ run_suite "Suite 52: Reconcile Drift Recovery"      "suite-52-reconcile-drift.sh
 run_suite "Suite 53: Cost Tracking"                 "suite-53-cost-tracking.sh"
 run_suite "Suite 54: agent_class + shape dispatch"  "suite-54-agent-class-shape-dispatch.sh"
 run_suite "Suite 55: Durable engine (park/resume)"   "suite-55-durable-engine.sh"
+run_suite "Suite 56: Workflow durable modes (D3)"    "suite-56-workflow-durable-modes.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
