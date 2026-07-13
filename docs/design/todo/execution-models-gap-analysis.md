@@ -10,6 +10,24 @@
 
 The three design docs define a comprehensive execution models system. Most of the backend + playground surface is built. The primary gaps are in the **production operate surface** and **cross-cutting platform features** (alerting, role-based access, auto-eval-gate).
 
+> **See also `execution-models-v2-e2e.md`** — the durable execution engine + daemon identity + trigger dispatch + webhook client-auth gaps (which this doc does not cover) live there.
+
+---
+
+## Acceptance bar (applies to EVERY TODO below)
+
+Adopted from the **2026-07-11 production-HITL-parity retro** — its pre-flight checklist is the **canonical acceptance bar** (also referenced by `execution-models-v2-e2e.md` §0). The bug chain 006–009 was hours of one-at-a-time discovery caused by **parallel sandbox/prod code** + **layer-not-journey testing**. No TODO is "done" until it clears:
+
+1. **Parity = shared code, not mirrored.** A capability with a sandbox and a production variant (`playground.py`↔`chat.py`/`internal.py`, sandbox↔production reconciler) lives in **one shared helper both call** — per [`sandbox-production-parity-architecture.md`](../sandbox-production-parity-architecture.md) (anti-drift rule, parity matrix, two-column FK). Every edit to one path greps its sibling. Copies **are** the 006–009 root cause.
+2. **Golden-path e2e per environment** (sandbox AND production) through the real door (browser/gateway → pod); **fails — not skips — when its fixture is missing.** `kubectl exec` / API pokes are progress, not done.
+3. **Ship every gate's producer in the same change** (the `adversarial_eval_passed` orphan-gate lesson).
+4. **Governance/safety paths fail loud + fail closed** — never swallow-and-proceed.
+5. **"Done" = observed user-visible end state, proven adversarially.**
+
+Each TODO below carries a **Parity** and a **Golden-path** line stating how it clears this bar.
+
+**Related:** [`sandbox-production-parity-architecture.md`](../sandbox-production-parity-architecture.md), [`../introspections/2026-07-11-production-hitl-parity-retro.md`](../../introspections/2026-07-11-production-hitl-parity-retro.md).
+
 ---
 
 ## What's DONE (aligned with design)
@@ -57,17 +75,7 @@ The three design docs define a comprehensive execution models system. Most of th
 
 ### TODO-1: Global Approvals Inbox Badge (Production doc §8.1)
 
-**Design says:** Nav-level inbox with badge count of pending approvals across all agents for the reviewer's teams. Authority-checked (`agent:reviewer`).
-
-**Current state:** `Approvals` link in Sidebar is a plain nav link — no badge, no pending count, no real-time indicator.
-
-**What to implement:**
-- Add a `useQuery` in `Sidebar.tsx` that polls `GET /api/v1/approvals?status=pending&limit=0` (return count only)
-- Show a red badge circle with the count next to "Approvals" nav item
-- Refetch every 30s
-- Backend: add a `GET /api/v1/approvals/count?status=pending` lightweight endpoint if the list endpoint is too heavy
-
-**Files:** `studio/src/components/Sidebar.tsx`, potentially `services/registry-api/routers/approvals.py`
+➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — sequenced there because it pairs with that plan's WS-1 Global Approvals Inbox. Full detail (impl, parity, golden-path) lives in WS-6.
 
 ---
 
@@ -94,56 +102,20 @@ The three design docs define a comprehensive execution models system. Most of th
 - `services/event-gateway/main.py` (same)
 - `studio/src/pages/AgentDetailPage.tsx` Settings tab (add alert_email field)
 
+**Parity:** Scheduler and event-gateway both send the alert — put the failure→alert logic in **one shared helper** (`alerting.dispatch_failure_alert` already exists) both call; don't duplicate per service.
+**Golden-path:** bash suite — force a scheduled run to fail → assert the alert transport was invoked with the trigger's `alert_email`.
+
 ---
 
-### TODO-3: Auto-set `eval_passed` from Passing EvalRun (T-4)
+### TODO-3: Auto-set `eval_passed` from Passing EvalRun (T-4) — ✅ RESOLVED
 
-**Design says:** A passing batch eval should auto-flip `eval_passed=true` on the agent version, removing the manual rubber stamp that currently gates publish.
-
-**Current state:** `eval_passed` is set only via manual `PATCH /api/v1/agents/{name}/versions/{id}`. Batch eval runs and produces scores but doesn't auto-promote.
-
-**What to implement:**
-
-1. In `services/eval-runner/` (or the eval completion handler in registry-api), after all eval_run_results are scored:
-   - Compute pass/fail: `overall_score >= threshold` (threshold = 0.7 default, configurable per agent)
-   - If pass: `PATCH /api/v1/agents/{name}/versions/{version_id}` with `eval_passed=true`
-   - Write a `notes` field: "Auto-promoted by eval run {eval_run_id}, score={score}"
-2. Add `eval_threshold FLOAT DEFAULT 0.7` to agent settings (or `metadata_` JSONB)
-3. Studio: show "Auto-promoted" badge on versions that were eval-gated
-
-**Files:**
-- `services/registry-api/routers/eval_runner.py` (completion handler)
-- `services/registry-api/models.py` (optional: threshold setting)
-- `studio/src/components/agent-detail/VersionsTab.tsx` (badge)
+**Shipped.** `eval_passed` is auto-set on a passing EvalRun (score ≥ threshold) — see `services/registry-api/routers/eval_runner.py:309,326` and `slice-implementation-assessment.md`. Tracked in `execution-models-v2-e2e.md` WS-6 as a **done dependency** of the v2 publish gate.
 
 ---
 
 ### TODO-4: CatalogDetailPage — Reuse Mode-Aware Overviews (Gap #3)
 
-**Design says:** One Agent Detail page with mode-aware Overview (reactive: latency/error/endpoint; durable: active runs + step tracker; scheduled: schedule health + next fires; event: match rate + event log).
-
-**Current state:** Two separate systems:
-- `AgentDetailPage` at `/agents/:name` — has mode-aware Overviews (`OverviewReactive`, `OverviewDurable`, `OverviewScheduled`, `OverviewEventDriven`)
-- `CatalogDetailPage` at `/catalog/:artifactId` — production-focused but uses its own ad-hoc overview (metrics cards + deployment card + endpoints)
-
-The existing mode-aware Overviews (built for AgentDetailPage) read from sandbox `agent_runs`. They need a production equivalent that reads from catalog/production runs.
-
-**What to implement:**
-
-Option A (recommended): Make the CatalogDetailPage overview render the SAME mode-aware Overview components but pointed at production data:
-- `OverviewReactive` → uses `getCatalogStats()` (already built) + production runs
-- `OverviewDurable` → shows active production runs with step tracker
-- `OverviewScheduled` → shows schedule health from `agent_triggers`
-- `OverviewEventDriven` → shows event log from `agent_events`
-
-This means parameterizing the existing Overview components to accept either sandbox or production data source.
-
-Option B: Keep CatalogDetailPage as the production-only view and accept the split. The current metrics + deployment card + Production Chat card is close enough for reactive agents. Build durable/scheduled/event overviews when those agent types are actually published to production.
-
-**Files:**
-- `studio/src/components/agent-detail/OverviewReactive.tsx` (parameterize data source)
-- `studio/src/pages/CatalogDetailPage.tsx` (render mode-aware overview)
-- `studio/src/api/catalogApi.ts` (may need catalog-scoped runs/events/schedule endpoints)
+➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — it's a parity fix (shared, parameterized Overview components for sandbox + production; former "Option B: accept the split" rejected). Full detail lives in WS-6.
 
 ---
 
@@ -166,6 +138,10 @@ Option B: Keep CatalogDetailPage as the production-only view and accept the spli
 - `services/registry-api/routers/agent_runs.py` (add user filter)
 - `services/registry-api/routers/memory.py` (add user filter)
 - Keycloak config (add roles to agentshield realm)
+
+**⚠️ Orphan-gate risk:** the roles (`agent:reviewer`, etc.) are a **gate** — ship their **producer** (the Keycloak role assignment + `auth_middleware` extraction) in the **same change** as the filtering that reads them. A required role with nothing that grants it = the `adversarial_eval_passed` dead-end.
+**Parity:** the user-scoping filter is the same on the runs and memory endpoints — put it in one shared dependency both routers use, not copied per router.
+**Golden-path:** bash suite — user A cannot read user B's runs/memory; a reviewer can. Assert on the real endpoints with real JWTs, not a simulated header.
 
 ---
 
@@ -191,56 +167,31 @@ Option B: Keep CatalogDetailPage as the production-only view and accept the spli
 
 **Priority:** Low — PG is fine for current scale. Implement when latency matters.
 
+**Parity:** the read-through cache wraps the memory read path used by **both** sandbox and production runs — one code path, no fork.
+**Golden-path:** integration test — a warm Redis hit and a cold PG miss both return the same message history for a thread.
+
 ---
 
 ### TODO-7: Sandbox Run TTL / Auto-Cancel (Playground doc T-11)
 
-**Design says:** Durable sandbox runs auto-cancel after configurable wall-clock TTL (default 10 min). Reuses `approval_timeout_worker.py` pattern.
-
-**Current state:** No TTL enforcement. A stuck durable run in sandbox hangs indefinitely.
-
-**What to implement:**
-
-1. Add a background task (or extend existing `approval_timeout_worker.py`) that:
-   - Queries `playground_runs WHERE status IN ('running', 'awaiting_approval') AND started_at < NOW() - interval '10 min'`
-   - Sets `status = 'cancelled'`, writes `error_message = 'Auto-cancelled: exceeded sandbox TTL'`
-2. Make TTL configurable per agent (in `metadata_` JSONB or a new column)
-3. Studio: show "Cancelled (timeout)" status in playground
-
-**Files:**
-- `services/registry-api/` — background worker or cron endpoint
-- `services/registry-api/models.py` (if adding config)
-
-**Priority:** Low — only matters when durable agents are actively tested in playground.
+➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — shares the timeout worker with the production run-timeout (`approval_timeout_worker.py`, one worker parameterized by scope). Full detail in WS-6.
 
 ---
 
 ## Current UI Bug: Browser Cache
 
-**Symptom:** User sees old "API Endpoints" card instead of new "Production Chat" + "Internal API (cluster only)" cards.
-
-**Root cause:** Browser caching old JS bundle. The deployed Studio 0.1.73 bundle (`index-Dktl29Bc.js`) correctly contains "Production Chat" and has NO "API Endpoints" text. Verified via:
-```
-kubectl exec deploy/agentshield-studio -- grep -c "Production Chat" /usr/share/nginx/html/assets/index-Dktl29Bc.js
-# Output: 1
-kubectl exec deploy/agentshield-studio -- grep -c "API Endpoints" /usr/share/nginx/html/assets/index-Dktl29Bc.js  
-# Output: 0
-```
-
-**Fix:** Hard refresh the browser (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows/Linux).
-
-**Prevention:** The nginx config serves `/assets/` with `Cache-Control: public, immutable` and `expires 1y`. When Vite produces the same content hash across builds, the browser never re-fetches. We now include a `window.__STUDIO_BUILD` marker in `main.tsx` to force unique hashes on every build.
+➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — the `window.__STUDIO_BUILD` cache-bust marker + "ensure every Studio image bump carries a unique hash" prevention is tracked there. (Immediate workaround for a stale bundle: hard refresh — Cmd+Shift+R / Ctrl+Shift+R.)
 
 ---
 
 ## Build Priority Order
 
+Remaining in this doc (the 5 moved items — TODO-1, TODO-3, TODO-4, TODO-7, Browser Cache — are now in `execution-models-v2-e2e.md` WS-6):
+
 ```
-TODO-1 (Approvals badge)     — small, high visibility, half-day
-TODO-3 (Auto eval_passed)    — closes the publish automation loop, 1 day  
-TODO-4 (Mode-aware catalog)  — aligns production UX with design, 2 days
 TODO-2 (Alerting)            — production safety net, 1-2 days
-TODO-5 (Role-based access)   — privacy/compliance, 2 days
+TODO-5 (Role-based access)   — privacy/compliance, 2 days (ship role producer with the gate)
 TODO-6 (Redis hot path)      — performance, defer until needed
-TODO-7 (Sandbox TTL)         — safety net, defer until durable agents tested
 ```
+
+Every item above must clear the **Acceptance bar** (top of this doc) — golden-path e2e per environment + shared-code parity — before it counts as done.
