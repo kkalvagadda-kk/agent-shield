@@ -206,6 +206,11 @@ Three small, additive migrations (`data-model.md` §5), numbers **indicative** (
 
 Phasing mirrors §8 (sequencing vs WS-1…WS-6). Each task: Files · Contract · Acceptance · Deps · Verify.
 
+> **Per-phase detail moved.** The authoritative, expanded per-phase plans now live in their own
+> directories — `e0/`, `e1/`, `e2/`, `e3/`, `e4/`, `e5/`, `e6/` (see `README.md`), each with the
+> design-stable banner, a hard depends-on line, and full Tasks/data-model/contracts. The summaries below are
+> kept as the original seed; when building a phase, use its `eN/plan.md` (re-grounded at `tasks.md` mint).
+
 ### Phase E-0 — Reactive parity + composite plumbing (no behavior change) — **ships now, no WS dep**
 
 **T0.1 — Discriminator + composite schema (migrations 1–2 + models/schemas).**
