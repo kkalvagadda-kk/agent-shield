@@ -178,7 +178,42 @@ Genre-specific docs stay separate (`bugs/`, `debugging/`). Everything forward-lo
 **Shipped — cost visibility (Path A / Langfuse-derived).** Because OpenInference OTEL `GENERATION` spans carry `calculatedTotalCost` + token counts, a background sweep (`cost_backfill.py`, via `backend.get_run_cost`) sums each completed run's cost/tokens and persists them onto `agent_runs.cost_usd`/`prompt_tokens`/`completion_tokens` — idempotent (`cost_usd IS NULL`), 60s interval, 24h window, one path for all run types, no ingestion race. Surfaced as: dashboard **LLM Cost** panel (avg/run, tokens, spend-by-model) + a dedicated **Cost console** (`GET /observability/costs`, `/observability/costs`, DollarSign sidebar) with total/avg/tokens/projected-monthly, daily trend, by-model + by-agent, most-expensive-runs; env-scoped (prod/sandbox). Totals/daily/by-agent/top-runs from persisted SQL; by-model live from the backend. No migration (columns pre-existed).
 - **Known limits:** by-model/tool breakdowns cap the backend fetch at 5 pages (500 spans) per view; a run whose trace never carries a GENERATION (e.g. a blocked run) is abandoned after 24h and stays `cost_usd = NULL`.
 
-**NOT shipped — cost via LLM proxy + budget enforcement.** This is what `cost-tracking.md` originally *designed* (Portkey), and it is a distinct, still-open capability (§6): authoritative-at-source capture + hard budget caps + caching/fallback. Cost *visibility* (above) does not provide enforcement. Don't read "cost tracking ✅" as "budgets enforced" — only visibility is done.
+**NOT shipped — cost via LLM proxy + budget enforcement.** This is what `cost-tracking.md` originally *designed* (Portkey), and it is a distinct, still-open capability: authoritative-at-source capture + hard budget caps + caching/fallback. Cost *visibility* (above) does not provide enforcement. Don't read "cost tracking ✅" as "budgets enforced" — only visibility is done. The full pending design (preserved from the folded `cost-tracking.md`) follows.
+
+### 7.1 Pending design — Portkey as authoritative cost source + budget enforcement
+
+**Why this is still wanted despite Path A:** Path A reads cost *after the fact* from Langfuse spans (best-effort, can miss runs, cannot stop spend). An LLM proxy captures cost *at the source* for every call and can **reject a request when a team is over budget** — the one thing Langfuse fundamentally can't do.
+
+**Architecture:**
+```
+Agent Pod  → OPENAI_BASE_URL=http://portkey:8787/v1
+           → Portkey Gateway (in-cluster)
+           → LLM provider (Anthropic / Bedrock / OpenAI)
+Portkey captures per request: prompt/completion/thinking tokens,
+  cost_usd (built-in pricing tables), latency_ms, cache_status.
+```
+Portkey is **already fully charted** (`charts/agentshield/charts/portkey/`, network policies ready) but `portkey.enabled: false`. SDK `OPENAI_BASE_URL` is reserved/unused.
+
+**Why Portkey over alternatives:** auto cost tables + free caching/fallback/retry + multi-provider, at the cost of one in-cluster network hop. Langfuse `generation()` needs callback wiring everywhere and has no caching/enforcement; LiteLLM would duplicate Portkey's role; manual token counting is fragile per-provider.
+
+**Product gaps to close (the ones NOT already handled by Path A):**
+1. **Portkey disabled** → flip `portkey.enabled: true`, configure provider virtual keys.
+2. **Agent pods bypass the proxy** → `deploy-controller/manifest_builder.py` injects `OPENAI_BASE_URL=http://portkey:8787/v1`.
+3. **SDK uses the native Anthropic client** (`sdk/agentshield_sdk/llm.py` `ChatAnthropic`) which ignores `OPENAI_BASE_URL` → use Portkey's Anthropic pass-through (`x-portkey-provider: anthropic`) or `ChatOpenAI` pointed at Portkey (one client format, swap providers without SDK changes).
+4. **Cost writeback from Portkey** → on run completion read cost from Portkey's logs API by request/trace id and PATCH `agent_runs` (or a Portkey webhook → registry-api). *Note: Path A already writes `agent_runs.cost_usd` from Langfuse — with Portkey the source of truth shifts to the proxy; reconcile so only one writer wins.*
+5. **UI** → already largely delivered by Path A (per-run badge, Cost console, by-model/agent). Portkey adds budget UI (below).
+6. ~~Agent pods missing Langfuse env vars~~ → **already resolved** (deploy-controller injects `LANGFUSE_*`).
+
+**Budget enforcement (the net-new capability, phased):**
+- `team_budgets` table: `team_id`, `monthly_limit_usd`, `alert_threshold_pct`.
+- Alert at 80% / 100%; optional **hard-stop** — Portkey rejects LLM requests once a team is over budget.
+- Studio: budget progress bar per team (`$142 / $500 this month`), chargeback breakdown.
+
+**Open questions (unresolved, carried from the original research):**
+1. Portkey **virtual keys** — one per team (for attribution) or one global key?
+2. **Bedrock pricing** — Portkey supports it but on-demand vs provisioned-throughput tables may differ; verify.
+3. **Cache-savings attribution** — when Portkey serves from cache, cost = 0; do we surface "saved $X from cache"?
+4. **Multi-call runs** — an agent run makes several LLM calls (tool loops); sum into one `cost_usd` (Path A does) or show per-call breakdown?
 
 ---
 
