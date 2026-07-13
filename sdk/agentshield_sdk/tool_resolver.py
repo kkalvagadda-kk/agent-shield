@@ -72,6 +72,7 @@ def _build_executor(tool_def: dict) -> Any:
             python_code=tool_def.get("python_code", ""),
             description=tool_def.get("description"),
             timeout_ms=tool_def.get("timeout_ms", 10_000),
+            input_schema=tool_def.get("input_schema"),
         )
     else:
         executor = HttpToolExecutor(

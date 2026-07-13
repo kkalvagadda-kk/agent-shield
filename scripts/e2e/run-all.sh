@@ -100,6 +100,7 @@ run_suite "Suite 50: Version Dedup on Deploy"       "suite-50-version-dedup.sh"
 run_suite "Suite 51: Credential Validation"         "suite-51-credential-validation.sh"
 run_suite "Suite 52: Reconcile Drift Recovery"      "suite-52-reconcile-drift.sh"
 run_suite "Suite 53: Cost Tracking"                 "suite-53-cost-tracking.sh"
+run_suite "Suite 54: Tool Schema Build"             "suite-54-tool-schema-build.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

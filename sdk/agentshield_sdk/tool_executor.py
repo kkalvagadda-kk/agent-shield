@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -20,6 +20,68 @@ logger = logging.getLogger(__name__)
 PYTHON_EXECUTOR_URL: str = os.getenv(
     "AGENTSHIELD_PYTHON_EXECUTOR_URL", "http://python-executor:8080"
 )
+
+# JSON-Schema primitive types -> Python annotations, for deriving a tool's
+# model-facing parameters from its registered ``input_schema``.
+_JSON_TYPE_TO_PY: dict[str, Any] = {
+    "string": str,
+    "number": float,
+    "integer": int,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+}
+
+
+def _params_from_input_schema(
+    input_schema: Any,
+) -> tuple[list[inspect.Parameter], dict[str, Any]] | None:
+    """Build named keyword-only parameters from a JSON-Schema ``input_schema``.
+
+    Returns ``(params, annotations)`` when the schema declares an object with
+    ``properties``; ``None`` when it is absent/empty so the caller can fall back
+    to a permissive signature. Required properties become mandatory params;
+    optional ones get ``default=None`` and an ``Optional[...]`` annotation.
+    """
+    if not isinstance(input_schema, dict):
+        return None
+    props = input_schema.get("properties")
+    if not isinstance(props, dict) or not props:
+        return None
+    required = set(input_schema.get("required") or [])
+    params: list[inspect.Parameter] = []
+    for name, defn in props.items():
+        pytype = _JSON_TYPE_TO_PY.get((defn or {}).get("type"), str)
+        if name in required:
+            params.append(
+                inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=pytype)
+            )
+        else:
+            params.append(
+                inspect.Parameter(
+                    name,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=None,
+                    annotation=Optional[pytype],
+                )
+            )
+    return params, _annotations_from_params(params)
+
+
+def _annotations_from_params(params: list[inspect.Parameter]) -> dict[str, Any]:
+    """Derive ``__annotations__`` from a parameter list so the two can never drift.
+
+    LangChain 1.x introspection (``create_schema_from_function`` -> pydantic
+    ``validate_arguments``) does ``type_hints[name]`` for EVERY parameter and
+    raises ``KeyError`` if any parameter — including ``**kwargs`` or a ``params``
+    catch-all — has no annotation. Building annotations straight from the params
+    makes that inconsistency structurally impossible.
+    """
+    return {
+        p.name: p.annotation
+        for p in params
+        if p.annotation is not inspect.Parameter.empty
+    }
 
 
 class HttpToolExecutor:
@@ -117,11 +179,16 @@ class HttpToolExecutor:
                     "params",
                     inspect.Parameter.KEYWORD_ONLY,
                     default=None,
-                    annotation="str | None",
+                    annotation=Optional[str],
                 )
             ]
         http_tool_fn.__signature__ = inspect.Signature(params, return_annotation=str)
-        http_tool_fn.__annotations__ = {v: str for v in all_vars}
+        # Annotations MUST cover every signature param (incl. the no-vars `params`
+        # catch-all) or LangChain schema introspection raises KeyError.
+        http_tool_fn.__annotations__ = {
+            **_annotations_from_params(params),
+            "return": str,
+        }
 
         return http_tool_fn
 
@@ -136,12 +203,14 @@ class PythonToolExecutor:
         python_code: str,
         description: str | None = None,
         timeout_ms: int = 10_000,
+        input_schema: dict | None = None,
     ) -> None:
         self.name = name
         self.risk = risk
         self.python_code = python_code
         self.description = description
         self.timeout_ms = timeout_ms
+        self.input_schema = input_schema
 
     def as_tool_callable(self) -> Any:
         """Return an async callable that invokes the python-executor."""
@@ -173,14 +242,21 @@ class PythonToolExecutor:
         python_tool_fn.risk = self.risk
         python_tool_fn.tool_name = self.name
 
-        params = [
-            inspect.Parameter(
-                "kwargs",
-                inspect.Parameter.VAR_KEYWORD,
-                annotation=str,
-            )
-        ]
+        # Prefer named parameters derived from the tool's registered input_schema
+        # (gives the model a real, typed arg schema — the same treatment HTTP tools
+        # get from their {{template}} variables). Fall back to an arbitrary-kwargs
+        # signature when no input_schema is declared; the annotation on `kwargs` is
+        # what keeps LangChain introspection from raising KeyError('kwargs').
+        derived = _params_from_input_schema(self.input_schema)
+        if derived is not None:
+            params, annotations = derived
+        else:
+            params = [
+                inspect.Parameter("kwargs", inspect.Parameter.VAR_KEYWORD, annotation=str)
+            ]
+            annotations = _annotations_from_params(params)
+
         python_tool_fn.__signature__ = inspect.Signature(params, return_annotation=str)
-        python_tool_fn.__annotations__ = {"return": str}
+        python_tool_fn.__annotations__ = {**annotations, "return": str}
 
         return python_tool_fn

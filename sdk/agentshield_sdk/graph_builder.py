@@ -224,9 +224,18 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
             kind=inspect.Parameter.KEYWORD_ONLY,
             annotation=Annotated[dict, InjectedState],
         )
-        governed_tool.__signature__ = base_sig.replace(
-            parameters=[*base_sig.parameters.values(), injected]
+        # Insert the injected keyword-only param BEFORE any VAR_KEYWORD (**kwargs),
+        # since a keyword-only parameter cannot legally follow **kwargs. Tools with a
+        # bare **kwargs signature (python tools with no input_schema) would otherwise
+        # raise ValueError here, silently skipping injection (reasoning capture lost).
+        sig_params = list(base_sig.parameters.values())
+        vk_idx = next(
+            (i for i, p in enumerate(sig_params)
+             if p.kind is inspect.Parameter.VAR_KEYWORD),
+            len(sig_params),
         )
+        sig_params.insert(vk_idx, injected)
+        governed_tool.__signature__ = base_sig.replace(parameters=sig_params)
         # The annotation MUST also be present, or langchain's schema builder
         # raises KeyError('graph_state'). InjectedState is still excluded from the
         # model-facing tool_call_schema (verified), so the LLM never sees it.
