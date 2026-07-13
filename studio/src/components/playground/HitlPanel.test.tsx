@@ -38,7 +38,9 @@ describe("HitlPanel", () => {
 
   it("shows the tool name and risk level when request is provided", () => {
     renderWithProviders(<HitlPanel request={REQUEST} onDecided={vi.fn()} />);
-    expect(screen.getByText(/approval required — send_email/i)).toBeInTheDocument();
+    // "Approval Required" header + the shared ApprovalCard rendering tool + risk.
+    expect(screen.getByText(/approval required/i)).toBeInTheDocument();
+    expect(screen.getByText("send_email")).toBeInTheDocument();
     expect(screen.getByText("high")).toBeInTheDocument();
   });
 
