@@ -195,3 +195,14 @@ TODO-6 (Redis hot path)      — performance, defer until needed
 ```
 
 Every item above must clear the **Acceptance bar** (top of this doc) — golden-path e2e per environment + shared-code parity — before it counts as done.
+
+---
+
+## Eval v2 — mode-aware evaluation (NEW 2026-07-13)
+
+Today's eval is **reactive-shaped**: dataset items are `{input_message, expected_output}` (text) and `judge.py` scores `input_text → output_text` via LLM-as-judge. Two gaps, to be closed by a dedicated **Eval v2** workstream (comprehensive plan being authored at `docs/plan/execution-models-v2/eval-v2/plan.md`):
+
+- **Gap 1 — per-mode dataset schemas (batch eval).** Scheduled/webhook agents need `{trigger_payload, expected_output}` items (design decision OQ-C, `playground-execution-modes.md`); batch eval must interpret items by the agent's mode. Only text-message datasets + a text judge exist today.
+- **Gap 2 — trajectory / tool-call / side-effect judging.** The judge scores only the final output text. It does not evaluate the step trajectory (right tools, right order), tool-call correctness, or verify side-effects (e.g., an email actually sent) — which is what matters for durable/scheduled/webhook agents.
+
+**Sequencing (eval depends on the mode being REAL):** trajectory eval (Gap 2, durable) is meaningful only once durable runs write real `run_steps` (**WS-1**); payload-based batch eval (Gap 1, scheduled/webhook) only once those triggers are real (**WS-3/WS-4**). So Eval v2 lands **after the execution spine** — phased: durable trajectory eval after WS-1, per-mode batch eval after WS-3/WS-4. The single-run test-fire + judge surface already works, so this is a coverage/quality upgrade, not a blocker. Must clear the Acceptance bar.

@@ -115,46 +115,54 @@ async def lifespan(app: FastAPI):
 
 
 async def _resume_interrupted_runs() -> None:
-    """On startup, find runs stuck in 'running' and resume from checkpoint."""
-    from checkpoint import list_interrupted_runs, load_checkpoint
-    from run_executor import RunExecutor
+    """On startup, re-enter runs stuck in 'running' from the LangGraph PostgresSaver
+    checkpoint — the SINGLE checkpoint-of-record (B3). resume_durable(decision=None)
+    continues the graph from where the pod crashed (node boundary), emitting steps via
+    the same harness the live path uses. A run with no checkpoint state is marked failed
+    (lost state) rather than re-run from scratch (which would double-execute)."""
+    from checkpoint import list_interrupted_runs
+
+    from agentshield_sdk.durable import Bookmark, StepEmitter, resume_durable  # type: ignore[import]
+    from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
 
     try:
         interrupted = await list_interrupted_runs(cfg.AGENT_NAME)
-        for run_id in interrupted:
-            cp = await load_checkpoint(run_id)
-            if cp and cp.last_completed_step > 0:
-                logger.info(
-                    "Resuming interrupted run %s from step %d",
-                    run_id, cp.last_completed_step,
-                )
-                executor = RunExecutor(run_id=run_id, agent_name=cfg.AGENT_NAME)
-                next_step = cp.last_completed_step + 1
-                await executor.begin_step(next_step, "resumed_execution")
-                try:
-                    input_msg = cp.state.get("last_input", "")
-                    result = await workflow_executor.run(
-                        input_msg, thread_id=run_id, trace_id=run_id
-                    )
-                    output = result.get("output", str(result)) if isinstance(result, dict) else str(result)
-                    await executor.complete_step(next_step, {"response": output[:2000]})
-                    await executor.complete_run("completed", output)
-                except Exception as exc:
-                    logger.warning("Resume failed for run %s: %s", run_id, exc)
-                    await executor.fail_step(next_step, str(exc)[:500])
-                    await executor.complete_run("failed")
-            else:
-                logger.info("Run %s has no checkpoint — marking as failed (lost state)", run_id)
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
-                        await client.patch(
-                            f"{cfg.REGISTRY_API_URL}/api/v1/agent-runs/{run_id}",
-                            json={"status": "failed", "error_message": "Pod restarted without checkpoint"},
-                        )
-                except Exception:
-                    pass
     except Exception as exc:
-        logger.warning("_resume_interrupted_runs error: %s", exc)
+        logger.warning("_resume_interrupted_runs: list failed: %s", exc)
+        return
+
+    for run_id in interrupted:
+        config = {"configurable": {"thread_id": run_id}}
+        try:
+            snapshot = workflow_executor.graph.get_state(config)
+            has_state = bool(getattr(snapshot, "next", None)) or bool(getattr(snapshot, "values", None))
+        except Exception:
+            has_state = False
+
+        if not has_state:
+            logger.info("Run %s has no checkpoint state — marking failed (lost state)", run_id)
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    await client.patch(
+                        f"{cfg.REGISTRY_API_URL}/api/v1/agent-runs/{run_id}",
+                        json={"status": "failed", "error_message": "Pod restarted without checkpoint"},
+                    )
+            except Exception:
+                pass
+            continue
+
+        logger.info("Resuming interrupted run %s from PostgresSaver checkpoint", run_id)
+        callback = f"{cfg.REGISTRY_API_URL}/api/v1/internal/runs/{run_id}/step-update"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                emitter = StepEmitter(callback, client, bookmark=Bookmark(run_id))
+                with otel_run_context(run_id):
+                    await resume_durable(
+                        workflow_executor.graph, thread_id=run_id, decision=None,
+                        callback_url=callback, emitter=emitter,
+                    )
+        except Exception as exc:
+            logger.warning("crash-resume failed for run %s: %s", run_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -552,77 +560,48 @@ async def durable_run(req: DurableRunRequest, request: Request):
 
 
 async def _execute_durable_run(req: DurableRunRequest) -> None:
-    """Execute a durable run, posting step updates to the callback URL."""
+    """Execute a durable run via the shared harness (WS-1) — real per-node/tool steps
+    + HITL park, replacing the old 2-step `input_processing`/`agent_execution` skeleton.
+
+    Mirrors WorkflowExecutor.run()'s input safety-scan + OTEL trace binding (safety
+    lives OUTSIDE the graph); the streamed output is not re-scanned mid-run, same as
+    run_streamed(). run_durable owns the drive loop, step emission, and fail-closed
+    park — this consumer differs from the SDK's only by the callback_url."""
     import json as _json
 
-    async def post_step(step_data: dict[str, Any]) -> None:
+    from langchain_core.messages import HumanMessage  # type: ignore[import]
+
+    from agentshield_sdk.durable import Bookmark, StepEmitter, run_durable  # type: ignore[import]
+    from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
+    from agentshield_sdk.safety_client import scan_input  # type: ignore[import]
+
+    async def post_fail(step_name: str, error_message: str) -> None:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(req.callback_url, json=step_data)
-        except Exception as exc:
-            logger.warning("Failed to post step update for run %s: %s", req.run_id, exc)
+                await client.post(req.callback_url, json={
+                    "step_number": 1, "step_name": step_name, "status": "failed",
+                    "error_message": error_message, "run_completed": True,
+                })
+        except Exception as exc:  # a failed fail-post must not raise
+            logger.warning("post_fail failed for run %s: %s", req.run_id, exc)
 
+    input_msg = req.input_payload.get("message") or _json.dumps(req.input_payload)
     try:
-        # Step 1: Input processing
-        await post_step({
-            "step_number": 1,
-            "step_name": "input_processing",
-            "status": "running",
-        })
-
-        trace_id = req.run_id
-        input_msg = req.input_payload.get("message", _json.dumps(req.input_payload))
-
-        await post_step({
-            "step_number": 1,
-            "step_name": "input_processing",
-            "status": "completed",
-            "output": {"message": "Input processed"},
-        })
-
-        # Step 2: Agent execution
-        await post_step({
-            "step_number": 2,
-            "step_name": "agent_execution",
-            "status": "running",
-        })
-
-        result = await workflow_executor.run(
-            input_msg, thread_id=req.run_id, trace_id=trace_id
-        )
-
-        output_text = ""
-        if isinstance(result, dict):
-            output_text = result.get("output", result.get("response", str(result)))
-        elif isinstance(result, str):
-            output_text = result
-        else:
-            output_text = str(result)
-
-        await post_step({
-            "step_number": 2,
-            "step_name": "agent_execution",
-            "status": "completed",
-            "output": {"response": output_text[:2000]},
-            "run_completed": True,
-            "output_text": output_text,
-        })
-
+        scan = await scan_input(input_msg, agent_name=cfg.AGENT_NAME, session_id=req.run_id)
+        state = {"messages": [HumanMessage(content=scan.sanitized_text)]}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            emitter = StepEmitter(req.callback_url, client, bookmark=Bookmark(req.run_id))
+            # trace_id = run_id so the durable run's LLM/tool spans land on the platform trace.
+            with otel_run_context(req.run_id):
+                result = await run_durable(
+                    workflow_executor.graph, state,
+                    thread_id=req.run_id, callback_url=req.callback_url, emitter=emitter,
+                )
+        logger.info("durable run %s finished status=%s steps=%d",
+                    req.run_id, result.status, result.steps_emitted)
     except SafetyBlockedError as exc:
         SAFETY_BLOCKS.inc()
-        await post_step({
-            "step_number": 2,
-            "step_name": "agent_execution",
-            "status": "failed",
-            "error_message": f"Safety block: {exc.reason}",
-            "run_completed": True,
-        })
-    except Exception as exc:
+        await post_fail("safety_scan_input", f"Safety block: {exc.reason}")
+    except Exception as exc:  # never leave the run hanging — fail loud
         logger.exception("Durable run %s failed", req.run_id)
-        await post_step({
-            "step_number": 2,
-            "step_name": "agent_execution",
-            "status": "failed",
-            "error_message": str(exc)[:500],
-            "run_completed": True,
-        })
+        await post_fail("agent", str(exc)[:500])
