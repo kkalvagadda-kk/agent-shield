@@ -24,6 +24,11 @@
 - **Deploy → pod env `AGENTSHIELD_AGENT_CLASS=daemon`.** The coalesce removal makes deploy read the column directly; suite-54 proves the DB/router invariants, but the live-pod env assertion is agent-image-gated (few agent pods deployed — the boundary the bash suites accept). **Manual check:** deploy a `daemon` agent → `kubectl exec` its pod → `env | grep AGENTSHIELD_AGENT_CLASS` should print `daemon`.
 - **Playwright authoring specs** (`create-agent-wizard`, `agent-detail-modes`, `workflow-builder`) are written + compile-verified (18 tests) but their green run is deploy-gated — run `bash scripts/studio-e2e.sh` against the freshly-deployed Studio.
 
+## Known gaps — WS-1 (durable engine) + a pre-existing fixture
+
+- **[WS-1, deployed] durable park→approve→resume routing** proven by suite-55 (5/5) + suite-36 (4/0, workflow HITL) + suite-54 (14/14). The full **live-pod** park→approve→resume→complete through a real durable agent pod (and kill-pod→resume) is covered by the `durable.py` unit tests + this manual step — it needs a deployed durable agent with a genuinely high-risk tool. **not-yet-wired (fixture).**
+- **[pre-existing, NOT a WS-1 regression] suite-45 HITL-trigger cases fail** because the seed sets `web_search` at `risk=medium`, so no HITL ever fires (001 `WRONG_RISK`; 003/004/007–010 cascade from "no approval created"). Upstream of WS-1 (approval *creation*, not resume). Fix = seed `web_search` at `high` OR relax the suite's risk expectation; tracked as test-data debt.
+
 ---
 
 ## 0. Before you start

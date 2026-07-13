@@ -192,6 +192,8 @@ class ResumeRequest(BaseModel):
     decision: str  # "approved" | "rejected"
     reviewer_id: str | None = None
     reason: str | None = None
+    run_id: str | None = None        # set for a durable /run resume (WS-1 T4)
+    callback_url: str | None = None  # durable resume re-drives the harness, posting steps here
 
 
 class WorkflowRunRequest(BaseModel):
@@ -505,20 +507,54 @@ async def chat_stream(req: ChatRequest, request: Request):
 
 @app.post("/resume/{thread_id}")
 async def resume_thread(thread_id: str, req: ResumeRequest):
-    """Resume a HITL-paused workflow thread after an approval decision."""
+    """Resume a HITL-paused thread after an approval decision.
+
+    Durable /run resume (callback_url present) re-drives the shared harness so the
+    remaining per-node steps are posted to the callback (the console decide is
+    server-driven — no client stream is listening); fire-and-forget. A chat resume
+    (no callback_url) keeps the existing synchronous path unchanged."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
+    decision = {"decision": req.decision, "reviewer_id": req.reviewer_id, "reason": req.reason}
+
+    if req.callback_url and req.run_id:
+        import asyncio
+        asyncio.create_task(_resume_durable_run(thread_id, decision, req.run_id, req.callback_url))
+        return {"status": "accepted", "thread_id": thread_id}
+
     try:
-        decision = {
-            "decision": req.decision,
-            "reviewer_id": req.reviewer_id,
-            "reason": req.reason,
-        }
         result = await workflow_executor.resume(thread_id, decision)
         return result
     except Exception as exc:
         logger.exception("Error resuming thread %s", thread_id)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callback_url: str) -> None:
+    """Re-enter a parked durable run through the shared harness, emitting the remaining
+    steps to the callback. Fail-loud: on error, post a terminal failed step so the run
+    never hangs."""
+    from agentshield_sdk.durable import Bookmark, StepEmitter, resume_durable  # type: ignore[import]
+    from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
+            with otel_run_context(run_id):
+                await resume_durable(
+                    workflow_executor.graph, thread_id=thread_id, decision=decision,
+                    callback_url=callback_url, emitter=emitter,
+                )
+    except Exception as exc:
+        logger.exception("durable resume failed thread=%s: %s", thread_id, exc)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(callback_url, json={
+                    "step_number": 999, "step_name": "agent", "status": "failed",
+                    "error_message": f"resume failed: {exc}"[:500], "run_completed": True,
+                })
+        except Exception:
+            pass
 
 
 @app.post("/resume/{thread_id}/stream")

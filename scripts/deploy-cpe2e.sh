@@ -3,6 +3,7 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.157 / declarative-runner:0.1.38 (Execution Models v2 WS-1 — durable engine real & resumable. Shared harness agentshield_sdk/durable.py (run_durable/resume_durable: one drive loop over astream_events → real per-node run_steps, interrupt→awaiting_approval park with approval_id, fail-closed) consumed by BOTH the declarative-runner (/run + crash-recovery via PostgresSaver, checkpoint.py slimmed, run_executor.py deleted) and the SDK server (native /run + Runner.run_durable/resume_durable). T4 park→approve→resume: approvals._resume_and_advance resumes a durable /run run THROUGH the harness (passes run_id+callback_url; discriminator = RunStep rows + id==thread_id, no parent) while chat + workflow-member resume stay byte-for-byte unchanged (extend-not-alter). suite-55 + suite-45 regression. studio UNCHANGED.)
 #   - studio:0.1.128 (WS-0 R1 label polish — execution_shape "reactive" is shown in the UI as "Ephemeral" (true antonym of Durable); stored value/API contract unchanged (still 'reactive'). shapeLabel() helper in lib/utils documents the display≠storage mapping. Wizard shape card, Agent Settings dropdown, Workflow Save-modal dropdown, and the Agent Detail badge all read "Ephemeral". No backend/migration change.)
 #   - registry-api:0.2.156 / deploy-controller:0.1.36 / studio:0.1.127 (Execution Models v2 WS-0 — agent_class authoring + shape-aware triggered dispatch. Migration 0058 makes agent_class NOT NULL + CHECK on BOTH agents and workflows (deploy-time coalesce removed). Studio create wizard split into three independent selectors — Shape · Trigger · Class (R1); Settings + Workflow Save-modal gain a Class selector; workflow save-time high-risk-tool warnings (S2). Shared durable_dispatch.py — the ONE /run POST both playground.py (sandbox) and internal.py (production) call (parity); internal.py branches on execution_shape (durable→/run + new /internal/runs/{id}/step-update callback writing run_steps; reactive→/chat) and fails-closed on dispatch failure. Reactive workflow = synchronous + wall-clock capped (M6/D2); a reactive approval gate fails-closed via _park_or_fail (S2). suite-54 (10 cases) + Playwright authoring persistence. declarative-runner UNCHANGED.)
 #   - registry-api:0.2.155 / studio:0.1.126 (TraceDrawer polish — 3 features on the read-adapter seam: (1) nested waterfall/tree: NormalizedSpan gains parent_id (mapped from Langfuse parentObservationId), TraceDrawer builds a tree + renders duration-proportional bars scaled to the trace window, indented by depth; (2) per-generation economics: NormalizedSpan gains model/cost_usd/prompt_tokens/completion_tokens (GENERATION spans), shown inline ($cost) on the row + model/tokens on expand; (3) trace scores rendered as chips + trace total_cost in the metadata block. New TraceDrawer.test.tsx (tree nesting + per-gen cost + scores + not-ingested warning). vitest 176 green. No migration, no agent redeploy.)
@@ -110,12 +111,12 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.156"
+REGISTRY_API_TAG="0.2.157"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.128"
 EVAL_RUNNER_TAG="0.1.4"
-DECLARATIVE_RUNNER_TAG="0.1.37"
+DECLARATIVE_RUNNER_TAG="0.1.38"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

@@ -96,6 +96,8 @@ class ResumeRequest(BaseModel):
     decision: str  # "approved" | "rejected"
     reviewer_id: str | None = None
     reason: str | None = None
+    run_id: str | None = None        # set for a durable /run resume (WS-1 T4)
+    callback_url: str | None = None  # durable resume re-drives the harness, posting steps here
 
 
 # --- Middleware: basic request timing ---
@@ -287,14 +289,30 @@ async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
     trace_id = request.headers.get("x-agentshield-trace-id")
+    decision = {"decision": req.decision, "reviewer_id": req.reviewer_id, "reason": req.reason}
+
+    # Durable /run resume (callback_url present): re-drive the harness fire-and-forget so
+    # the remaining steps reach the callback. Chat resume (no callback_url) is unchanged.
+    if req.callback_url and req.run_id:
+        import asyncio
+        asyncio.create_task(_resume_durable_bg(thread_id, decision, req.run_id, req.callback_url, trace_id))
+        return {"status": "accepted", "thread_id": thread_id}
+
     try:
-        decision = {
-            "decision": req.decision,
-            "reviewer_id": req.reviewer_id,
-            "reason": req.reason,
-        }
         result = await runner.resume(thread_id, decision, trace_id=trace_id)
         return result
     except Exception as exc:
         logger.exception("Error resuming thread %s", thread_id)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def _resume_durable_bg(thread_id: str, decision: dict, run_id: str, callback_url: str,
+                             trace_id: str | None) -> None:
+    try:
+        result = await runner.resume_durable(
+            thread_id, decision, run_id=run_id, callback_url=callback_url, trace_id=trace_id,
+        )
+        logger.info("SDK durable resume %s finished status=%s", run_id, result.status)
+    except Exception as exc:  # fail loud — post a terminal failed step so the run never hangs
+        logger.exception("SDK durable resume %s failed", run_id)
+        await _post_durable_fail(callback_url, "agent", f"resume failed: {exc}"[:500])

@@ -281,3 +281,27 @@ class Runner:
                     )
         finally:
             _current_thread_id.reset(token)
+
+    async def resume_durable(
+        self, thread_id: str, decision: dict, run_id: str, callback_url: str,
+        trace_id: str | None = None,
+    ):
+        """Re-enter a parked durable run after an approval decision via the shared
+        harness, emitting the remaining steps to ``callback_url``. Symmetric with
+        ``run_durable``; used by the SDK server's durable ``/resume`` branch (WS-1 T4)."""
+        self._assert_ready()
+        import httpx
+
+        from .durable import Bookmark, StepEmitter, resume_durable as _resume_durable
+
+        token = _current_thread_id.set(thread_id)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
+                with otel_run_context(trace_id or run_id):
+                    return await _resume_durable(
+                        self._graph, thread_id=thread_id, decision=decision,
+                        callback_url=callback_url, emitter=emitter,
+                    )
+        finally:
+            _current_thread_id.reset(token)

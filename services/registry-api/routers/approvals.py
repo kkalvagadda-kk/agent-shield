@@ -53,13 +53,35 @@ async def _resume_and_advance(
     Best-effort throughout — never raises.
     """
     member_output, member_status = "", "failed"
+
+    # Durable /run runs park their AgentRun at id == thread_id and write RunStep rows
+    # (chat runs do neither). If this thread IS such a run, resume it DURABLY — the pod
+    # re-drives the shared harness and posts the remaining steps to the step-update
+    # callback (a console decide is server-driven; no client stream is listening). The
+    # chat + workflow-member paths below are unchanged (extend-not-alter, WS-1 T4).
+    resume_body = {"decision": decision, "reviewer_id": reviewer_id, "reason": reason}
+    try:
+        tid = uuid.UUID(thread_id)
+        async with AsyncSessionLocal() as s:
+            run = (await s.execute(select(AgentRun).where(AgentRun.id == tid))).scalar_one_or_none()
+            if run is not None and run.parent_run_id is None:
+                from models import RunStep
+                has_steps = (await s.execute(
+                    select(RunStep.id).where(RunStep.run_id == tid).limit(1)
+                )).first() is not None
+                if has_steps:
+                    from durable_dispatch import registry_internal_base
+                    resume_body["run_id"] = str(run.id)
+                    resume_body["callback_url"] = (
+                        f"{registry_internal_base()}/api/v1/internal/runs/{run.id}/step-update"
+                    )
+    except Exception:
+        pass  # thread_id is not a durable run id → fall through to chat/workflow resume
+
     try:
         pod_url = _agent_pod_url(agent_name, team)
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{pod_url}/resume/{thread_id}",
-                json={"decision": decision, "reviewer_id": reviewer_id, "reason": reason},
-            )
+            resp = await client.post(f"{pod_url}/resume/{thread_id}", json=resume_body)
         member_status = "completed" if resp.status_code == 200 else "failed"
         try:
             member_output = (resp.json() or {}).get("response", "") or ""

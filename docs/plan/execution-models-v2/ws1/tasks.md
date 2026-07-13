@@ -33,17 +33,27 @@ post-WS-0 tree (2026-07-13).** Depends on WS-0 (landed, deployed, green).
 - **Deferred to in-cluster (suite-55):** exact LangGraph event names / final-text node — the unit test proves
   structure with a fake graph; real event shape is validated on the cluster in T8.
 
-## [ ] T2 — declarative-runner consumes the harness (replace the 2-step skeleton)
+## [X] T2 — declarative-runner consumes the harness (replace the 2-step skeleton) — DONE (deployed 0.1.38)
 - **Files:** `services/declarative-runner/main.py` (`/run`), `checkpoint.py` (→ step-index bookmark),
   `run_executor.py` (park poster). Replace `input_processing`/`agent_execution` skeleton with
   `run_durable(graph, input, thread_id, callback_url, emitter)`. **Re-ground line numbers first.**
 - **Verify:** `grep -n input_processing services/declarative-runner/main.py` → gone; suite-55 declarative case.
 
-## [ ] T3 — SDK native `/run` (`sdk/agentshield_sdk/server.py`)
+## [X] T3 — SDK native `/run` (`sdk/agentshield_sdk/server.py`) — DONE
 - `POST /run` mounts `run_durable` over `Runner`'s compiled graph; reuse existing `/resume/{thread_id}`.
 - **Verify:** `grep -n '"/run"' sdk/agentshield_sdk/server.py`.
 
-## [ ] T4 — Production HITL park + resume (registry-api) — refined per grounding
+## [X] T4 — Production HITL park + resume (registry-api) — DONE (deployed, suite-55 5/5)
+
+**Verified on cluster:** `_resume_and_advance` resumes a durable `/run` run THROUGH the harness
+(discriminator = RunStep rows + `id==thread_id`, no parent → passes `run_id`+`callback_url`); chat +
+workflow-member resume unchanged (suite-55 T-002/003). Inbox authority already existed
+(ApprovalAuthority + admin-role filter in `list_approvals`). Regression: suite-36 4/0, suite-54 14/14.
+**Pre-existing fixture note:** suite-45 HITL-trigger cases fail because `web_search` is seeded at
+`risk=medium` (no HITL fires) — upstream of WS-1 (approval *creation*, not resume); resume-path
+T-S45-006 passes. Recorded in the gap ledger.
+
+**Original T4 contract (now satisfied):**
 - `routers/internal.py` step-update `status=awaiting_approval` → **park + link** `run_steps.approval_id`
   (Approval already exists from the SDK) — set `AgentRun.status=awaiting_approval` (WS-0 already does the
   status set; T4 adds the `approval_id` link + resume trigger). `routers/approvals.py` decide → dispatch
