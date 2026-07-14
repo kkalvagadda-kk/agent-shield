@@ -363,8 +363,12 @@ async def step_update_callback(
 
 
 def _publish_step_event(run_id: str, event: dict[str, Any]) -> None:
-    """Best-effort publish of step events. Falls back to in-memory store."""
-    _STEP_EVENTS.setdefault(run_id, []).append(event)
+    """No-op. Durable step streaming now reads the shared `run_steps` table
+    (see `_stream_durable`), not this per-replica in-memory buffer — the buffer
+    broke multi-replica ('Connection lost'). Kept as a call-site stub so the
+    step-update callback contract is unchanged; the step is persisted to RunStep
+    by the caller."""
+    return
 
 
 # In-memory step event store (sufficient for single-pod playground; Redis upgrade in Phase 5)
@@ -695,29 +699,57 @@ async def stream_playground_run(
         background_tasks.add_task(_complete_run, run_id, "".join(output_parts))
 
     async def _stream_durable():
-        """Poll in-memory step events for durable runs."""
-        emitted = 0
+        """Stream durable-run steps from the SHARED run_steps table so the stream
+        works regardless of which registry-api replica serves it.
+
+        The step-update callback already persists every step to `RunStep`; it also
+        appended to the in-memory `_STEP_EVENTS` dict, but that buffer is PER-REPLICA
+        — with >1 registry-api replica the pod's callback and this SSE request are
+        load-balanced independently, so this stream saw an empty buffer, no data
+        flowed, and the gateway dropped the idle connection → the client showed
+        'Connection lost'. Polling the DB (shared) fixes it. Emits a step_update
+        whenever a step is new or its status changed (the client dedups by
+        step_number), and 'done' once the run row is terminal."""
+        from db import AsyncSessionLocal
+        from models import RunStep, Approval
+
+        last: dict[int, str] = {}   # step_number -> last emitted status
         max_wait = 600  # 10 minute timeout
         waited = 0.0
         poll_interval = 1.0
 
         while waited < max_wait:
-            events = _STEP_EVENTS.get(run_id, [])
-            while emitted < len(events):
-                ev = events[emitted]
-                yield f"data: {json.dumps(ev)}\n\n"
-                emitted += 1
-                if ev.get("status") in ("completed", "failed"):
-                    from db import AsyncSessionLocal
-                    async with AsyncSessionLocal() as check_session:
-                        check_result = await check_session.execute(
-                            select(PlaygroundRun).where(PlaygroundRun.id == uuid.UUID(run_id))
-                        )
-                        check_run = check_result.scalar_one_or_none()
-                        if check_run and check_run.status in ("completed", "failed"):
-                            yield f"data: {json.dumps({'event': 'done'})}\n\n"
-                            _STEP_EVENTS.pop(run_id, None)
-                            return
+            async with AsyncSessionLocal() as sess:
+                rows = (await sess.execute(
+                    select(RunStep).where(RunStep.run_id == parsed_id).order_by(RunStep.step_number)
+                )).scalars().all()
+                snap = [(r.step_number, r.name, r.status, r.output, r.error_message) for r in rows]
+                prun = (await sess.execute(
+                    select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+                )).scalar_one_or_none()
+                run_status = prun.status if prun else None
+                appr_id = None
+                if any(s[2] == "awaiting_approval" for s in snap):
+                    a = (await sess.execute(
+                        select(Approval).where(Approval.thread_id == run_id, Approval.status == "pending")
+                    )).scalars().first()
+                    appr_id = str(a.id) if a else None
+
+            for sn, name, st, out, err in snap:
+                if last.get(sn) != st:   # new step OR status changed since last emit
+                    yield "data: " + json.dumps({
+                        "event": "step_update",
+                        "step_number": sn,
+                        "step_name": name,
+                        "status": st,
+                        "output": out,
+                        "approval_id": appr_id if st == "awaiting_approval" else None,
+                    }) + "\n\n"
+                    last[sn] = st
+
+            if run_status in ("completed", "failed"):
+                yield f"data: {json.dumps({'event': 'done'})}\n\n"
+                return
 
             await asyncio.sleep(poll_interval)
             waited += poll_interval

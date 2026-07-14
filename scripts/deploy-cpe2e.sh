@@ -3,7 +3,14 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.173 (agent-delete pod-leak FIX. DELETE /agents soft-deprecated the agent + set its
+#   - registry-api:0.2.174 (durable playground step-stream "Connection lost" FIX — multi-replica bug. The SSE
+#     /playground/runs/{id}/stream durable path polled _STEP_EVENTS, a PER-REPLICA in-memory dict fed by
+#     _publish_step_event. With >1 registry-api replica the pod's step-update callback and the SSE request are
+#     load-balanced to DIFFERENT replicas → the stream saw an empty buffer, no data flowed, the gateway dropped
+#     the idle connection → client showed "Connection lost". Fix: _stream_durable now reads the SHARED run_steps
+#     table (the callback already persists there), emitting on new-or-changed status + 'done' when the run row is
+#     terminal; _publish_step_event neutered to a no-op (was leaking). Fixes durable playground/eval Launch Run.)
+#   - registry-api:0.2.173 (agent-delete pod-leak FIX. DELETE /agents soft-deprecated the agent + set its DELETE /agents soft-deprecated the agent + set its
 #     deployments straight to 'terminated' — skipping 'terminating', so the deploy-controller's
 #     terminating→delete_deployment→terminated GC step never ran → orphaned k8s Deployments/pods lingered until
 #     the node filled (31 leaked in one session → 98% mem, blocked new deploys). Fix: delete_agent now sets
@@ -166,7 +173,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.173"
+REGISTRY_API_TAG="0.2.174"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.133"
