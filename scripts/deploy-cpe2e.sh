@@ -3,6 +3,11 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.176 (WORKFLOW COST ROLLUP — a workflow parent run makes no LLM calls of its own, so
+#     reading cost from its own Langfuse trace always yielded NULL and every workflow row showed Cost "—".
+#     The cost-backfill sweep now rolls member (child) costs up onto the parent once the children are costed
+#     (_rollup_workflow_parents; sum of children by parent_run_id, after a settle window). _mark_parent no
+#     longer reads the parent's own trace for cost. Score stays "—" for non-eval runs by design.)
 #   - studio:0.1.134 + declarative-runner:0.1.44 + chart (3 trigger/daemon gaps):
 #     (1) PUBLIC WEBHOOK URL — EVENT_GATEWAY_PUBLIC_URL now defaults to global.publicUrl (the gateway host) and
 #         the Envoy HTTPRoute exposes /hooks/ (was /webhooks/, which never matched the event-gateway's /hooks/
@@ -188,7 +193,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.175"
+REGISTRY_API_TAG="0.2.176"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.134"

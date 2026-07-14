@@ -337,11 +337,11 @@ async def _mark_parent(parent_run_id: str, status_val: str, output: str | None =
                 parent.output = output[:4000]
             if status_val in ("completed", "failed", "cancelled"):
                 parent.completed_at = datetime.now(timezone.utc)
-                if parent.langfuse_trace_id:
-                    from observability_backend import get_observability_backend
-                    usage = get_observability_backend().get_run_cost(parent.langfuse_trace_id)
-                    if usage and usage.cost_usd:
-                        parent.cost_usd = usage.cost_usd
+                # Cost is NOT read from the parent's own trace here: a workflow parent
+                # orchestrates members but makes no LLM calls, so its trace has no
+                # GENERATION cost. Its cost is the sum of its members' costs, rolled up
+                # by the cost-backfill sweep (_rollup_workflow_parents) once the members
+                # are themselves costed from Langfuse (both are async).
             await s.commit()
 
 

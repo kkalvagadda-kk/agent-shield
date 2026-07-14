@@ -73,6 +73,16 @@ registry-api — env/route only).
   now optional. suite-68 provisions a real durable daemon agent and fires an empty-input
   run → completes.
 
+**Workflow cost in Traces** (`suite-69` + `studio/e2e/workflow-cost.spec.ts`; registry-api
+0.2.176): every workflow row showed Cost "—". A workflow parent orchestrates members but
+makes no LLM calls itself, so reading cost from its OWN Langfuse trace (`_mark_parent`, and
+the leaf-only backfill) always yielded NULL — while the members WERE costed. Fix: the
+cost-backfill sweep now rolls member (child) costs up onto the parent
+(`_rollup_workflow_parents`, sum by `parent_run_id`, after a settle window so the sum isn't
+partial). Verified on real data (6 `trigger-demo-flow` parents → $0.000483 = child sum) and
+in the browser (a workflow row renders a `$` cost). **Score stays "—" by design** — score is
+a judge/eval result; trigger/scheduled/playground runs aren't evaluated, so there is no score.
+
 **Known gap (not fixed here) — durable Event Trace sidebar:** the playground Event Trace
 panel is wired only for **reactive** agents (ChatPane → onTraceEvent); **durable** runs
 don't feed it, so the sidebar stays "No events yet" even though the trace exists in

@@ -115,6 +115,7 @@ run_suite "Suite 65: PROD reviewer-console HITL"    "suite-65-production-hitl-co
 run_suite "Suite 66: PROD triggers (webhook+sched)" "suite-66-production-triggers.sh"
 run_suite "Suite 67: Deploy GC + drift reconcile"    "suite-67-deployment-gc-and-drift.sh"
 run_suite "Suite 68: Daemon run, no user input"      "suite-68-daemon-no-input.sh"
+run_suite "Suite 69: Workflow cost rollup"           "suite-69-workflow-cost-rollup.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
