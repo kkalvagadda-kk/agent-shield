@@ -126,7 +126,8 @@ async def _dispatch_and_complete(
         run = result.scalar_one_or_none()
         if run:
             run.status = status_val
-            run.output = (output[:4000] if output else None)
+            _out = _as_text(output)
+            run.output = (_out[:4000] if _out else None)
             run.error_message = err
             run.latency_ms = elapsed_ms
             run.completed_at = datetime.now(timezone.utc)
@@ -364,6 +365,28 @@ async def start_internal_run(
     return run
 
 
+def _as_text(value: object) -> str | None:
+    """Coerce a callback output field to plain text before it hits a text column.
+
+    Defense-in-depth: the SDK normalizes message content to a string, but a callback
+    from an older agent image (or a provider returning content blocks) can send a
+    list like ``[{"type":"text","text":"refund"}]``. Writing that to a text column
+    raises asyncpg DataError → 500 → the run fails at the callback. Join text blocks
+    instead of trusting the wire type.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [
+            b["text"] if isinstance(b, dict) and isinstance(b.get("text"), str)
+            else b if isinstance(b, str) else ""
+            for b in value
+        ]
+        joined = "".join(parts)
+        return joined or None
+    return str(value)
+
+
 @router.post(
     "/runs/{run_id}/step-update",
     status_code=status.HTTP_200_OK,
@@ -408,7 +431,7 @@ async def internal_step_update(
         if step_status in ("completed", "failed"):
             step.completed_at = now
         if body.get("output"):
-            step.output = body["output"]
+            step.output = _as_text(body["output"])
         if body.get("error_message"):
             step.error_message = body["error_message"]
         if approval_id:
@@ -421,7 +444,7 @@ async def internal_step_update(
             status=step_status,
             started_at=now if step_status == "running" else None,
             completed_at=now if step_status in ("completed", "failed") else None,
-            output=body.get("output"),
+            output=_as_text(body.get("output")),
             error_message=body.get("error_message"),
             approval_id=approval_id,
         ))
@@ -432,7 +455,14 @@ async def internal_step_update(
         run.status = step_status
         run.completed_at = now
         if body.get("output_text"):
-            run.output = body["output_text"][:4000]
+            _ot = _as_text(body["output_text"])
+            run.output = _ot[:4000] if _ot else None
+        # Propagate the failing step's error onto the run itself. Without this the
+        # run showed status='failed' with an EMPTY error_message — the real reason
+        # (e.g. a tool 503) lived only on the step row, so a workflow parent could
+        # only report a bare generic failure (docs/debugging/011, issue #2).
+        if step_status == "failed" and body.get("error_message"):
+            run.error_message = str(body["error_message"])[:2000]
 
     await db.commit()
     return {"status": "ok"}

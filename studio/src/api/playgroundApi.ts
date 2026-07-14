@@ -45,10 +45,21 @@ export interface TestEventResponse {
   stream_url?: string;
 }
 
+// Eval v2 E-0 — the five eval families (== playground_datasets.mode / eval_runs.mode).
+// Mirrors backend `DatasetMode` (schemas.py). E-0 only authors `reactive`.
+export type DatasetMode =
+  | "reactive"
+  | "durable"
+  | "scheduled"
+  | "webhook"
+  | "workflow";
+
 export interface PlaygroundDataset {
   id: string;
   owner_user_id: string;
   name: string;
+  mode: DatasetMode;
+  schema_version: number;
   items: DatasetItem[];
   created_at: string;
 }
@@ -90,7 +101,28 @@ export interface EvalRunResult {
   passed: boolean | null;
   langfuse_trace_id: string | null;
   trace_url: string | null;
+  // Eval v2 E-0 — composite-score evidence. Reactive fills only
+  // `dimension_scores = {response: x}` and `composite == judge_score`.
+  dimension_scores: Record<string, number> | null;
+  composite: number | null;
   created_at: string;
+}
+
+// Eval v2 E-0 — one scoring door. Mirrors backend EvalScoreRequest/Response
+// (schemas.py). `mode` selects the scorer branch; reactive returns
+// `dimension_scores = {response: x}` with `composite == x`.
+export interface EvalScoreRequest {
+  mode: DatasetMode;
+  item?: Record<string, unknown>;
+  run_id?: string;
+  input?: string;
+  response?: string;
+}
+
+export interface EvalScoreResponse {
+  composite: number;
+  dimension_scores: Record<string, number>;
+  detail?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +219,8 @@ export async function listDatasets(): Promise<PlaygroundDataset[]> {
 export async function createDataset(body: {
   name: string;
   items: DatasetItem[];
+  mode?: DatasetMode;
+  schema_version?: number;
 }): Promise<PlaygroundDataset> {
   const { data } = await http.post<PlaygroundDataset>("/playground/datasets", body);
   return data;

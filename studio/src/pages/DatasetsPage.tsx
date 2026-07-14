@@ -10,6 +10,7 @@ import {
   listDatasets,
   listEvalRuns,
   type DatasetItem,
+  type DatasetMode,
   type EvalRun,
   type PlaygroundDataset,
 } from "../api/playgroundApi";
@@ -22,6 +23,7 @@ export default function DatasetsPage() {
   // Create dataset modal state
   const [showCreate, setShowCreate] = useState(false);
   const [dsName, setDsName] = useState("");
+  const [dsMode, setDsMode] = useState<DatasetMode>("reactive");
   const [dsItems, setDsItems] = useState("");
 
   // Run eval modal state
@@ -51,11 +53,13 @@ export default function DatasetsPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: (body: { name: string; items: DatasetItem[] }) => createDataset(body),
+    mutationFn: (body: { name: string; items: DatasetItem[]; mode: DatasetMode }) =>
+      createDataset(body),
     onSuccess: () => {
       toast.success("Dataset created.");
       setShowCreate(false);
       setDsName("");
+      setDsMode("reactive");
       setDsItems("");
       qc.invalidateQueries({ queryKey: ["playground-datasets"] });
     },
@@ -89,18 +93,22 @@ export default function DatasetsPage() {
       toast.error("Dataset name is required.");
       return;
     }
+    // E-0: only the reactive item editor is authorable. Other modes create an
+    // empty dataset (their item editors land in E-1+).
     const items: DatasetItem[] = [];
-    for (const line of dsItems.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        items.push(JSON.parse(trimmed) as DatasetItem);
-      } catch {
-        toast.error(`Invalid JSON on line: ${trimmed.slice(0, 40)}`);
-        return;
+    if (dsMode === "reactive") {
+      for (const line of dsItems.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          items.push(JSON.parse(trimmed) as DatasetItem);
+        } catch {
+          toast.error(`Invalid JSON on line: ${trimmed.slice(0, 40)}`);
+          return;
+        }
       }
     }
-    createMutation.mutate({ name: dsName.trim(), items });
+    createMutation.mutate({ name: dsName.trim(), items, mode: dsMode });
   };
 
   const handleRunEval = () => {
@@ -178,7 +186,14 @@ export default function DatasetsPage() {
               <tbody className="divide-y divide-slate-100">
                 {datasets.map((ds) => (
                   <tr key={ds.id} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-4 py-3 font-medium text-slate-800">{ds.name}</td>
+                    <td className="px-4 py-3 font-medium text-slate-800">
+                      {ds.name}
+                      {ds.mode && ds.mode !== "reactive" && (
+                        <span className="ml-2 inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-500 uppercase tracking-wide">
+                          {ds.mode}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-slate-500">
                       {Array.isArray(ds.items) ? ds.items.length : 0} item
                       {(Array.isArray(ds.items) ? ds.items.length : 0) !== 1 ? "s" : ""}
@@ -245,18 +260,57 @@ export default function DatasetsPage() {
                 />
               </div>
               <div>
-                <label className="label text-xs mb-1">Items (one JSON object per line)</label>
-                <textarea
-                  className="input text-xs font-mono h-40 resize-none"
-                  placeholder={`{"input": "What is order 123?", "expected_output": "Order 123 is shipped"}\n{"input": "Cancel order 456", "expected_output": "Order 456 cancelled"}`}
-                  value={dsItems}
-                  onChange={(e) => setDsItems(e.target.value)}
-                />
+                <label htmlFor="dataset-mode" className="label text-xs mb-1">
+                  Mode
+                </label>
+                <select
+                  id="dataset-mode"
+                  aria-label="Dataset mode"
+                  className="input text-sm"
+                  value={dsMode}
+                  onChange={(e) => setDsMode(e.target.value as DatasetMode)}
+                >
+                  <option value="reactive">Reactive (response correctness)</option>
+                  <option value="durable">Durable (trajectory)</option>
+                  <option value="scheduled">Scheduled (side-effects)</option>
+                  <option value="webhook">Webhook (filter + action)</option>
+                  <option value="workflow">Workflow (run-tree)</option>
+                </select>
                 <p className="text-xs text-slate-400 mt-1">
-                  Each line is a JSON object with <code>input</code> and optionally{" "}
-                  <code>expected_output</code>.
+                  The eval family this dataset scores. Defaults to{" "}
+                  <code>reactive</code>.
                 </p>
               </div>
+              {dsMode === "reactive" ? (
+                <div>
+                  <label className="label text-xs mb-1">Items (one JSON object per line)</label>
+                  <textarea
+                    className="input text-xs font-mono h-40 resize-none"
+                    placeholder={`{"input": "What is order 123?", "expected_output": "Order 123 is shipped"}\n{"input": "Cancel order 456", "expected_output": "Order 456 cancelled"}`}
+                    value={dsItems}
+                    onChange={(e) => setDsItems(e.target.value)}
+                  />
+                  <p className="text-xs text-slate-400 mt-1">
+                    Each line is a JSON object with <code>input</code> and optionally{" "}
+                    <code>expected_output</code>.
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <label className="label text-xs mb-1">Items</label>
+                  <textarea
+                    disabled
+                    aria-label="Items editor (disabled)"
+                    className="input text-xs font-mono h-40 resize-none opacity-50 cursor-not-allowed"
+                    placeholder=""
+                    value=""
+                  />
+                  <p className="text-xs text-amber-600 mt-1">
+                    The <code>{dsMode}</code> item editor is coming in E-1. You can
+                    create an empty {dsMode} dataset now and add items later.
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2 mt-5">
               <button onClick={() => setShowCreate(false)} className="btn-secondary text-sm">

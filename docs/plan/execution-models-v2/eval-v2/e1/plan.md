@@ -1,5 +1,13 @@
 # E-1 Implementation Plan — Durable trajectory + tool-call eval
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: create a real durable
+> dataset → run a real `EvalRun` that dispatches a REAL durable agent to a REAL pod (the exact
+> dispatch→pod→callback path that hid 11 bugs — NO faked `_run_step`, NO mocked judge) → assert the real
+> `run_steps`/trajectory + `score_trajectory`/`score_tool_calls` `dimension_scores` persisted (save→reload),
+> plus a real Playwright journey. **Phase-specific:** the trajectory/tool-call scores must come from a real
+> durable run's real `run_steps`, not a hand-built trajectory fixture.
+
 **Slice:** Phase E-1 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-1, §8 sequencing). **Covers E-1 ONLY.**
 **Depends on:** **WS-1 (DONE — real `run_steps` + shared durable harness shipped)** + **E-0 (reactive parity
 + composite plumbing + `/eval/score` skeleton)**. E-1 is the **imminent** phase and the most execution-ready:

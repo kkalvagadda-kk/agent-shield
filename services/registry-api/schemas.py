@@ -18,13 +18,17 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Generic, Literal, Optional, TypeVar
+from typing import Annotated, Any, Generic, Literal, Optional, TypeVar, Union
 
 from pydantic import (
+    AliasChoices,
     AnyHttpUrl,
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
+    Tag,
+    TypeAdapter,
     field_validator,
     model_validator,
 )
@@ -1084,16 +1088,168 @@ class PlaygroundRunResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Playground Dataset  (Phase 10.3)
+# Playground Dataset  (Phase 10.3; Eval v2 E-0 — mode discriminator)
 # ---------------------------------------------------------------------------
+# The five eval families (== playground_datasets.mode / eval_runs.mode). A
+# projection of the execution cube onto the eval-relevant families + workflow.
+DatasetMode = Literal["reactive", "durable", "scheduled", "webhook", "workflow"]
+
+
+class _DatasetItemBase(BaseModel):
+    """Common envelope shared by every DatasetItem variant (data-model §2.0).
+
+    `extra='allow'` keeps forward-compat: variants declared here for E-1..E-5
+    (durable/scheduled/webhook/workflow) may carry mode-specific fields that
+    E-0 does not yet interpret — they must not fail validation today.
+    """
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: Optional[str] = None
+    notes: Optional[str] = None
+    rubric: Optional[str] = None
+    weight: Optional[float] = None
+    tags: Optional[list[str]] = None
+
+
+class ReactiveDatasetItem(_DatasetItemBase):
+    """Response-correctness item — back-compat with today's `{input, expected_output}`.
+
+    `input` (today's key) is accepted as an alias for `input_message`; a missing
+    `kind` defaults to 'reactive'. Storage is NOT rewritten (validate-only), so
+    the existing runner that reads `item["input"]` keeps working unchanged.
+    """
+
+    kind: Literal["reactive"] = "reactive"
+    input_message: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("input_message", "input"),
+    )
+    expected_output: Optional[str] = None  # optional if a rubric is present
+
+
+class DurableDatasetItem(_DatasetItemBase):
+    """Trajectory + tool-call + HITL-arg review (data-model §2.2; scored WS-1)."""
+
+    kind: Literal["durable"] = "durable"
+    input_payload: Optional[dict[str, Any]] = None
+    expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict[str, Any]] = None
+
+
+class ScheduledDatasetItem(_DatasetItemBase):
+    """Job-spec run → side-effect verification (data-model §2.3; scored WS-3)."""
+
+    kind: Literal["scheduled"] = "scheduled"
+    job_spec: Optional[dict[str, Any]] = None
+    expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict[str, Any]] = None
+    expected_side_effects: Optional[list[dict[str, Any]]] = None
+
+
+class WebhookDatasetItem(_DatasetItemBase):
+    """Filter match/miss + action correctness + injection robustness (§2.4; WS-4)."""
+
+    kind: Literal["webhook"] = "webhook"
+    trigger_payload: Optional[dict[str, Any]] = None
+    expected_match: Optional[bool] = None
+    expected_filter_reason: Optional[str] = None
+    expected_output: Optional[str] = None
+    expected_trajectory: Optional[dict[str, Any]] = None
+    expected_side_effects: Optional[list[dict[str, Any]]] = None
+    injection_probe: Optional[dict[str, Any]] = None
+
+
+class WorkflowDatasetItem(_DatasetItemBase):
+    """Run-tree / per-member eval (data-model §2.5; scored WS-5)."""
+
+    kind: Literal["workflow"] = "workflow"
+    input_message: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("input_message", "input"),
+    )
+    input_payload: Optional[dict[str, Any]] = None
+    expected_output: Optional[str] = None
+    expected_member_path: Optional[list[str]] = None
+    per_member: Optional[dict[str, Any]] = None
+
+
+def _dataset_item_discriminator(value: Any) -> str:
+    """Route by `kind`, defaulting a missing/empty discriminator to 'reactive'.
+
+    This is the kind-defaulting validator that makes today's `kind`-less rows
+    read back as reactive (full back-compat).
+    """
+
+    if isinstance(value, dict):
+        return value.get("kind") or "reactive"
+    return getattr(value, "kind", None) or "reactive"
+
+
+# Discriminated union keyed by `kind` (== dataset.mode), with a callable
+# discriminator so a legacy item that omits `kind` still routes to reactive.
+DatasetItem = Annotated[
+    Union[
+        Annotated[ReactiveDatasetItem, Tag("reactive")],
+        Annotated[DurableDatasetItem, Tag("durable")],
+        Annotated[ScheduledDatasetItem, Tag("scheduled")],
+        Annotated[WebhookDatasetItem, Tag("webhook")],
+        Annotated[WorkflowDatasetItem, Tag("workflow")],
+    ],
+    Discriminator(_dataset_item_discriminator),
+]
+
+_DATASET_ITEM_ADAPTER: TypeAdapter = TypeAdapter(DatasetItem)
+
+
+def _validate_dataset_items(items: list[Any], mode: Optional[str]) -> None:
+    """Validate each item against the dataset `mode` (validate-only, no rewrite).
+
+    - A missing per-item `kind` defaults to `mode` (or 'reactive' when `mode`
+      is unknown, e.g. a partial PATCH that doesn't restate the mode).
+    - An explicit per-item `kind` that disagrees with `mode` is rejected — an
+      illegal `{mode, item-kind}` pair is unrepresentable at the door (no
+      runtime key-sniffing later). Raises ValueError on any invalid item.
+    """
+
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"dataset item {idx} must be a JSON object")
+        declared = item.get("kind")
+        if mode is not None and declared and declared != mode:
+            raise ValueError(
+                f"dataset item {idx} kind '{declared}' does not match dataset mode '{mode}'"
+            )
+        effective_kind = declared or mode or "reactive"
+        candidate = {**item, "kind": effective_kind}
+        try:
+            _DATASET_ITEM_ADAPTER.validate_python(candidate)
+        except Exception as exc:  # noqa: BLE001 — re-raise as a clean validation error
+            raise ValueError(f"dataset item {idx} is invalid for mode '{effective_kind}': {exc}")
+
+
 class PlaygroundDatasetCreate(BaseModel):
     name: str = Field(..., max_length=256)
+    mode: DatasetMode = "reactive"
+    schema_version: int = 1
     items: list[Any] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_items(self) -> "PlaygroundDatasetCreate":
+        _validate_dataset_items(self.items, self.mode)
+        return self
 
 
 class PlaygroundDatasetUpdate(BaseModel):
     name: Optional[str] = Field(None, max_length=256)
+    mode: Optional[DatasetMode] = None
     items: Optional[list[Any]] = None
+
+    @model_validator(mode="after")
+    def _check_items(self) -> "PlaygroundDatasetUpdate":
+        if self.items is not None:
+            _validate_dataset_items(self.items, self.mode)
+        return self
 
 
 class PlaygroundDatasetResponse(BaseModel):
@@ -1102,6 +1258,8 @@ class PlaygroundDatasetResponse(BaseModel):
     id: uuid.UUID
     owner_user_id: str
     name: str
+    mode: str = "reactive"
+    schema_version: int = 1
     items: list[Any]
     created_at: datetime
 
@@ -1127,6 +1285,13 @@ class EvalRunResultCreate(BaseModel):
     judge_score: Optional[float] = None
     judge_reasoning: Optional[str] = None
     passed: Optional[bool] = None
+    # Eval v2 E-0: composite-score evidence (all optional; reactive fills only
+    # dimension_scores={"response": x}).
+    dimension_scores: Optional[dict[str, Any]] = None
+    eval_detail: Optional[dict[str, Any]] = None
+    trigger_payload: Optional[dict[str, Any]] = None
+    matched: Optional[bool] = None
+    run_id: Optional[uuid.UUID] = None
 
 
 class EvalRunResultResponse(BaseModel):
@@ -1143,6 +1308,11 @@ class EvalRunResultResponse(BaseModel):
     passed: Optional[bool]
     langfuse_trace_id: Optional[str]
     trace_url: Optional[str] = None
+    dimension_scores: Optional[dict[str, Any]] = None
+    eval_detail: Optional[dict[str, Any]] = None
+    trigger_payload: Optional[dict[str, Any]] = None
+    matched: Optional[bool] = None
+    run_id: Optional[uuid.UUID] = None
     created_at: datetime
 
 
@@ -1174,6 +1344,34 @@ class EvalRunResponse(BaseModel):
     sandbox_deployment_id: Optional[uuid.UUID] = None
     workflow_deployment_id: Optional[uuid.UUID] = None
     workflow_version_id: Optional[uuid.UUID] = None
+    # Eval v2 E-0: interpretation mode + composite inputs.
+    mode: str = "reactive"
+    dimension_weights: Optional[dict[str, Any]] = None
+    pass_threshold: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Eval score door  (Eval v2 E-0 — POST /playground/eval/score)
+# ---------------------------------------------------------------------------
+class EvalScoreRequest(BaseModel):
+    """One scoring door. `mode` selects the scorer branch; E-0 wires reactive.
+
+    The reactive branch scores `response` against the item's expected/rubric and
+    returns `dimension_scores={"response": x}` with `composite == x` — byte
+    identical to today's `judge_for_eval`.
+    """
+
+    mode: DatasetMode = "reactive"
+    item: dict[str, Any] = Field(default_factory=dict)
+    run_id: Optional[uuid.UUID] = None
+    input: Optional[str] = None
+    response: Optional[str] = None
+
+
+class EvalScoreResponse(BaseModel):
+    composite: float
+    dimension_scores: dict[str, float] = Field(default_factory=dict)
+    detail: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1665,16 +1863,25 @@ __all__ = [
     # Playground Run (Phase 10.1)
     "PlaygroundRunCreate",
     "PlaygroundRunResponse",
-    # Playground Dataset (Phase 10.3)
+    # Playground Dataset (Phase 10.3; Eval v2 E-0 discriminated union)
     "PlaygroundDatasetCreate",
     "PlaygroundDatasetUpdate",
     "PlaygroundDatasetResponse",
+    "DatasetItem",
+    "ReactiveDatasetItem",
+    "DurableDatasetItem",
+    "ScheduledDatasetItem",
+    "WebhookDatasetItem",
+    "WorkflowDatasetItem",
     # Eval Run (Phase 10.3)
     "EvalRunCreate",
     "EvalRunResultCreate",
     "EvalRunResultResponse",
     "EvalRunStatusUpdate",
     "EvalRunResponse",
+    # Eval score door (Eval v2 E-0)
+    "EvalScoreRequest",
+    "EvalScoreResponse",
     # Agent Run (observability primitive)
     "AgentRunCreate",
     "AgentRunUpdate",

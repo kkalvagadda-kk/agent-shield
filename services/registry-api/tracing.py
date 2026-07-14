@@ -198,6 +198,60 @@ def trace_complete_run(
         logger.debug("Langfuse trace_complete_run error: %s", exc)
 
 
+def trace_workflow_step(
+    parent_run_id: str,
+    agent_name: str,
+    status: str,
+    input_text: str | None = None,
+    output_text: str | None = None,
+    error_message: str | None = None,
+    child_run_id: str | None = None,
+    latency_ms: int | None = None,
+) -> None:
+    """Author ONE span on the PARENT workflow trace for a member step.
+
+    The parent workflow trace (created by ``trace_create_run``) is an envelope: the
+    member's detailed LLM/tool spans live on the MEMBER's own trace (seeded from the
+    member run_id, which preserves the run_id<->trace_id cost correlation). Without
+    this, opening a workflow run in Langfuse shows "No span-level observations
+    recorded for this trace" — the parent looked trace-less even though members
+    traced fine (see docs/debugging/011).
+
+    The orchestrator owns the workflow's decision/step structure, so it records a
+    span per member step here: the member's I/O, terminal status, latency, and a
+    pointer to the child trace so the reader can drill into the member's detail.
+    Best-effort — a tracing failure must never break orchestration.
+    """
+    lf = get_langfuse()
+    if not lf:
+        return
+    try:
+        trace = lf.trace(id=_lf_trace_id(parent_run_id))
+        metadata: dict[str, Any] = {"agent": agent_name, "status": status}
+        if child_run_id:
+            metadata["child_run_id"] = str(child_run_id)
+            metadata["child_trace_id"] = _lf_trace_id(child_run_id)
+        if latency_ms is not None:
+            metadata["latency_ms"] = latency_ms
+        output: dict[str, Any] = {"status": status}
+        if output_text:
+            output["response"] = output_text[:2000]
+        if error_message:
+            output["error"] = error_message[:500]
+        span = trace.span(
+            name=f"member:{agent_name}",
+            input={"message": input_text} if input_text else None,
+            output=output,
+            metadata=metadata,
+            level="ERROR" if status == "failed" else "DEFAULT",
+            status_message=(error_message[:500] if error_message else None),
+        )
+        span.end()
+        lf.flush()
+    except Exception as exc:
+        logger.debug("Langfuse trace_workflow_step error: %s", exc)
+
+
 def trace_judge_score(
     trace_id: str,
     score: float,

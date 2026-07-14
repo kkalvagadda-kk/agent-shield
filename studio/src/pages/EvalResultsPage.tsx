@@ -44,6 +44,33 @@ function scoreColor(score: number | null): string {
   return "bg-green-50 text-green-700";
 }
 
+// Eval v2 dimensions rendered per result. E-0 only populates `response`; the
+// others render "—" until their scorers land (E-1..E-5).
+const EVAL_DIMENSIONS = ["response", "trajectory", "side_effects", "filter", "member"] as const;
+
+function DimensionScores({ scores }: { scores: Record<string, number> | null }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {EVAL_DIMENSIONS.map((dim) => {
+        const v = scores?.[dim];
+        const has = typeof v === "number";
+        return (
+          <span
+            key={dim}
+            data-testid={`dim-${dim}`}
+            title={dim}
+            className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
+              has ? scoreColor(v as number) : "text-slate-300"
+            }`}
+          >
+            {dim.replace("_", " ")}: {has ? (v as number).toFixed(2) : "—"}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function EvalResultsPage() {
   const { evalRunId } = useParams<{ evalRunId: string }>();
   const navigate = useNavigate();
@@ -300,6 +327,7 @@ export default function EvalResultsPage() {
                   "Response",
                   "Passed",
                   "Score",
+                  "Dimensions",
                   "Trace",
                 ].map((h) => (
                   <th
@@ -353,6 +381,10 @@ function ResultRow({
   onToggle: () => void;
   onViewTrace: () => void;
 }) {
+  // Composite == the overall result score. Reactive: composite == judge_score
+  // (dimension_scores = {response: composite}); prefer an explicit composite
+  // when the backend supplies one.
+  const composite = r.composite ?? r.judge_score;
   return (
     <>
       <tr
@@ -387,10 +419,13 @@ function ResultRow({
         </td>
         <td className="px-3 py-3">
           <span
-            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${scoreColor(r.judge_score)}`}
+            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${scoreColor(composite)}`}
           >
-            {r.judge_score != null ? r.judge_score.toFixed(2) : "—"}
+            {composite != null ? composite.toFixed(2) : "—"}
           </span>
+        </td>
+        <td className="px-3 py-3">
+          <DimensionScores scores={r.dimension_scores} />
         </td>
         <td className="px-3 py-3">
           {r.trace_url ? (
@@ -420,7 +455,7 @@ function ResultRow({
       </tr>
       {expanded && (
         <tr className="bg-slate-25">
-          <td colSpan={8} className="px-6 py-4">
+          <td colSpan={9} className="px-6 py-4">
             <div className="grid grid-cols-1 gap-3 text-xs">
               <div>
                 <p className="font-semibold text-slate-600 mb-1">Input</p>

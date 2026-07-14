@@ -36,6 +36,9 @@ Key invariant: **`trace_id` always equals the platform's own `run_id`** (or `eva
 | Platform actions (HITL) | `platform.approval.{decision}` | `registry-api/tracing.py: trace_platform_action` |
 | Safety scans | (spans) `safety_scan_input`/`safety_scan_output` | `safety-orchestrator/orchestrator.py` |
 | Agent LLM/tool spans | `GENERATION`/`TOOL`/`CHAIN`/`AGENT` | agent pod, OpenInference OTEL via `otel_run_context(run_id)` |
+| Workflow run (parent) | `{workflow_name}` + `member:{agent}` step spans | `registry-api/tracing.py: trace_create_run` (envelope) + `trace_workflow_step` (one span per member step, authored by the orchestrator) |
+
+**Workflow traces are two-level, by design.** The parent trace (`trace_id = parent run_id`) is an envelope the orchestrator decorates with one `member:{agent}` span per step (`trace_workflow_step`, called from `workflow_orchestrator._run_step` forward + `resume_orchestration` for a parked member) carrying the member's I/O, status, latency, and a `child_trace_id` pointer. Each member's *detailed* LLM/tool spans live on the **member's own** trace (`trace_id = child run_id`) — this keeps the run_id↔trace_id cost correlation per member. Do NOT try to nest member OTEL spans under the parent trace; the parent gets step spans, members get detail. (Before this, the parent was an empty envelope → "No span-level observations" — docs/debugging/011.)
 
 ---
 
@@ -85,7 +88,7 @@ Langfuse is an **internal platform component**, not external SaaS — auto-deplo
 ### 3.2 Service-plane specifics
 - The Basic-auth REST calls are now **centralized in `observability_backend.LangfuseBackend`** (`base64(f"{pk}:{sk}")` → `Authorization: Basic …`). Routers no longer build these inline.
 - **Two distinct host vars, don't conflate:**
-  - `LANGFUSE_HOST` = in-cluster DNS (`http://agentshield-langfuse-web:3000`) for server-side API calls. Plain HTTP.
+  - `LANGFUSE_HOST` = in-cluster DNS for server-side API calls / OTLP export. Plain HTTP. **Must be namespace-qualified for anything outside `agentshield-platform`.** Platform services (registry-api, safety-orchestrator) run in `agentshield-platform` and may use the bare `http://agentshield-langfuse-web:3000`. **Agent pods run in `agents-<team>` and MUST use the qualified FQDN `http://agentshield-langfuse-web.agentshield-platform:3000`** — a bare service name only resolves same-namespace, so a bare host makes every agent-side OTLP span export fail with `NameResolutionError`, the member traces 404, and cost reads $0 (see docs/debugging/011). The deploy-controller injects its own `LANGFUSE_HOST` into agent pods verbatim (`manifest_builder`), so its chart value is the qualified FQDN; re-materialize existing agents after changing it.
   - `LANGFUSE_PUBLIC_URL` = browser-facing (`https://langfuse.127.0.0.1.nip.io:8443`), only to *construct* the deep-link string.
   - `LANGFUSE_PROJECT_ID` = fixed bootstrapped project UUID, needed to build the full trace path.
 - **Full-path construction is deliberate** (`{PUBLIC_URL}/project/{project_id}/traces/{id}`, in `LangfuseBackend.build_trace_url`) — Langfuse's `/trace/{id}` short-link redirect loses the path prefix behind the Gateway.

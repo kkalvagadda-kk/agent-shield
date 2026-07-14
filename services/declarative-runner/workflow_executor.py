@@ -279,6 +279,8 @@ class WorkflowExecutor:
             config["auth_config_id"] = tool.get("auth_config_id")
         if "description" not in config:
             config["description"] = tool.get("description")
+        if "input_schema" not in config:
+            config["input_schema"] = tool.get("input_schema")
         return HttpToolNodeExecutor(config)
 
     async def _prefetch_agent_tools(self) -> None:

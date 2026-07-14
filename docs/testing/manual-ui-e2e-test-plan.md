@@ -39,9 +39,37 @@
 **deferred (intentional) — later workstream:**
 - **Within-member crash-restart** (a member pod crashing mid-execution, not at an approval gate). The orchestrator re-dispatches a durable member only after an approval decision, not after a crash — a mid-member crash loses that member's in-flight progress. This is the "full nested" durability tier (spec §9), a D4 documented limitation.
 
+**LANDED (2026-07-13) — the live-pod durable-workflow leg now actually works.** This was
+previously "faked in suite-56". Running it for real surfaced **six** defects on the live
+`dispatch → pod → LLM → callback → route → park → approve → resume → advance` path — all hidden
+because the suites stubbed that seam (see `docs/bugs/durable-workflow-live-path.md`): (1) the
+durable-member callback URL used a non-existent Service name (DNS fail → 120s timeout); (2) the
+builder run was hardcoded `context=production` (approval → console not inline); (3) Bedrock
+content-blocks (a list) 500'd the callback's text-column write; (4) `_derive_context` didn't
+resolve workflow-member `AgentRun`s (approval defaulted to production); (5) resume hit a
+`-production` pod synchronously and never advanced; (6) `resume_durable` fed a state dict
+instead of `Command(resume=…)` so the member re-parked forever (this broke ALL durable HITL
+resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarative-runner
+`0.1.40`. **Now proven by `suite-58` (REAL, no fakes)** and a real park→approve→advance run.
+
 **not-yet-wired (fixture / verify at deploy time):**
-- **Live-pod durable-workflow leg.** suite-56 proves the orchestrator-level invariant with faked member dispatch (no durable member pods are deployed — the same fixture boundary suite-36/55 accept). The full journey — a real durable workflow member parking on an OPA gate, a reviewer deciding in the console, the member pod re-driving via `/run`, and the child's per-node `run_steps` appearing in the run tree — needs a deployed durable agent with a genuinely high-risk tool. **Manual check:** build a durable workflow (conditional/handoff/supervisor) whose member calls a high-risk tool → run it → confirm the parent parks at `awaiting_approval` → approve in `/approvals` → confirm the parent advances to the next member and completes.
+- **suite-58 is the real gate; the faked suites (36/55/56) are logic-only.** suite-58
+  (`scripts/e2e/suite-58-workflow-live-run.sh`) creates its own agents, DEPLOYS real pods, and
+  triggers a real run — asserting real dispatch→callback→completion. Keep the logic suites for
+  fast isolated checks, but the live path is what suite-58 guards. **Manual check (HITL leg):**
+  run `flow-conditional` with "I want a refund of $50…" → routes to wf-payout → parks → the
+  inline card shows in the run panel → Approve → the run advances to completion.
 - **Playwright `approvals-inbox.spec.ts`** drives the inbox render + Approve decide wiring against a route-stubbed pending item (deterministic, no pod). Its green run is deploy-gated — run `bash scripts/studio-e2e.sh`.
+
+## Known gaps — WS-6 (operate parity: inline sandbox/playground workflow approval)
+
+**Landed in this slice** (studio 0.1.130; frontend-only — no backend/migration change): the Workflow builder run panel now decides a **sandbox/playground** workflow's HITL **inline** — the reusable `<ApprovalCard>` renders under the parked member (correlated by `thread_id`, now surfaced on `ApprovalInboxItem` + `AgentRunItem`; both `thread_id`s were already on the wire via `ApprovalResponse`/`AgentRunResponse`). Approve/Deny calls the **console** decide (`PATCH /approvals/{id}` → `_resume_and_advance`, self-service for non-production), so the workflow advances **without** a trip to Catalog → Approvals. **Production** workflow approvals are deliberately never fetched in the run panel — they stay console-only (authority-gated). Proven by vitest `WorkflowBuilderPage.test.tsx` (+2: parked→approve fires the versioned decide; production run fetches nothing) and Playwright `workflow-builder.spec.ts` (route-stubbed parked→approve→PATCH journey).
+
+**latent (by-design, dormant — not triggered today):**
+- **`list_approvals` authority-scoping is not context-discriminated.** `decide_approval` gates reviewer authority on **production only** (sandbox/playground are self-service), but `list_approvals` applies its `X-User-Sub` authority filter for **every** context. This is dormant because Studio authenticates with a `Bearer` JWT and sends **no** `X-User-Sub` header (nothing injects it server-side), so the filter never runs for the inline fetch. If an `X-User-Sub`-bearing caller is ever added, the read path should be made production-only to match the write path (the correct fix: gate the scoping block on `effective_context == "production"`). Tracked here so it isn't a surprise.
+
+**not-yet-wired (verify at deploy time):**
+- **Live-pod inline leg.** The Playwright spec stubs the trigger/tree/approvals/decide endpoints (no durable member pod parks a real sandbox approval on this cluster — same fixture boundary suite-55/56 accept). **Manual check:** run one of the seeded durable workflows (`flow-conditional` / `flow-handoff` / `flow-supervisor`, member `wf-payout` calls high-risk `refund_action`) from the builder run panel → confirm the parent parks at `awaiting_approval` → the inline card appears under the parked step → click Approve → confirm the run advances (no console visit). Its green Playwright run is deploy-gated — `bash scripts/studio-e2e.sh`.
 
 ---
 

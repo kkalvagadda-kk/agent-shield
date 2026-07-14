@@ -22,6 +22,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -1379,6 +1380,10 @@ class PlaygroundDataset(Base):
     __tablename__ = "playground_datasets"
     __table_args__ = (
         Index("idx_playground_datasets_owner", "owner_user_id"),
+        CheckConstraint(
+            "mode IN ('reactive','durable','scheduled','webhook','workflow')",
+            name="ck_playground_datasets_mode",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1388,6 +1393,15 @@ class PlaygroundDataset(Base):
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     items: Mapped[list] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'")
+    )
+    # Eval v2 E-0: authoring discriminator — which per-mode item schema this
+    # dataset's rows follow. Default 'reactive' (back-compat).
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Lets the item schema evolve without a data migration.
+    schema_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("1")
     )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
@@ -1401,6 +1415,10 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
     __table_args__ = (
         Index("idx_eval_runs_user_id", "user_id"),
+        CheckConstraint(
+            "mode IN ('reactive','durable','scheduled','webhook','workflow')",
+            name="ck_eval_runs_mode",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1440,6 +1458,17 @@ class EvalRun(Base):
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("workflow_versions.id", ondelete="SET NULL"), nullable=True
     )
+    # Eval v2 E-0: interpretation discriminator — resolved from the executable
+    # at launch; validated == dataset.mode. Default 'reactive' (back-compat).
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Optional per-dimension weights for the composite score.
+    dimension_weights: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Optional per-run override of the global EVAL_PASS_THRESHOLD.
+    pass_threshold: Mapped[float | None] = mapped_column(
+        Numeric(4, 3), nullable=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1463,6 +1492,14 @@ class EvalRunResult(Base):
     expected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Eval v2 E-0: composite-score evidence store (all nullable; old rows read
+    # as response-only). `judge_score` above stays the composite (gate input).
+    dimension_scores: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    eval_detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    trigger_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Soft FK -> playground_runs.id (no DB constraint): deep-link to the run tree.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )

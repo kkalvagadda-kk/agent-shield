@@ -139,6 +139,39 @@ async def create_eval_run(
     if not agent_name:
         raise HTTPException(status_code=422, detail="Cannot resolve agent_name — provide agent_name, sandbox_deployment_id, or workflow_deployment_id")
 
+    # Eval v2 E-0: resolve the run's interpretation `mode` from the executable.
+    # A `mode` is a projection of the execution cube onto the eval-relevant
+    # families (data-model.md §1): a CompositeWorkflow executable → 'workflow';
+    # an agent → its `execution_shape` ('reactive' | 'durable'). Default
+    # 'reactive' (back-compat) when the shape can't be resolved.
+    if workflow_id is not None:
+        resolved_mode = "workflow"
+    else:
+        shape_result = await db.execute(
+            select(Agent.execution_shape).where(Agent.name == agent_name)
+        )
+        shape = shape_result.scalar_one_or_none()
+        resolved_mode = shape if shape in ("reactive", "durable") else "reactive"
+
+    # E-0 is behavior-neutral: scoring follows the DATASET's authoring `mode`. A
+    # REACTIVE dataset scores ANY executable's response reactively (exactly as before
+    # E-0, where any agent — reactive OR durable OR a workflow — could be evaluated
+    # against a dataset). Only a NON-reactive dataset (E-1+) requires the executable's
+    # interpretation mode to match, because its items need a mode-specific run (e.g. a
+    # durable trajectory). So the mismatch guard fires ONLY for non-reactive datasets —
+    # gating it on all datasets broke durable/workflow evals against the (backfilled)
+    # reactive datasets, which is a regression, not the intended constraint.
+    if dataset.mode != "reactive" and resolved_mode != dataset.mode:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Eval mode mismatch: the executable resolves to mode "
+                f"'{resolved_mode}' but dataset '{dataset.name}' is authored as "
+                f"mode '{dataset.mode}'. Evaluate a '{dataset.mode}'-mode "
+                f"executable, or author a '{resolved_mode}'-mode dataset."
+            ),
+        )
+
     eval_run = EvalRun(
         user_id=caller,
         agent_name=agent_name,
@@ -148,6 +181,10 @@ async def create_eval_run(
         dataset_id=body.dataset_id,
         sandbox_deployment_id=body.sandbox_deployment_id,
         workflow_deployment_id=body.workflow_deployment_id,
+        # The SCORING mode = the dataset's authoring mode (reactive for every dataset
+        # today → reactive scoring, byte-identical to pre-E-0). The executable's
+        # resolved_mode is only used for the non-reactive guard above.
+        mode=dataset.mode,
         status="pending",
         started_at=datetime.now(tz=timezone.utc),
     )
@@ -169,6 +206,7 @@ async def create_eval_run(
             dataset_id=str(body.dataset_id),
             workflow_id=str(workflow_id) if workflow_id else None,
             agent_version_id=str(version_id) if version_id else None,
+            mode=resolved_mode,
         )
         eval_run.status = "running"
     except Exception as exc:
@@ -257,6 +295,14 @@ async def create_eval_run_result(
         judge_reasoning=body.judge_reasoning,
         passed=body.passed,
         langfuse_trace_id=trace_span_id,
+        # Eval v2 E-0: composite-score evidence (all optional; reactive fills
+        # dimension_scores={"response": x}). `judge_score` above stays the
+        # composite gate input — unchanged.
+        dimension_scores=body.dimension_scores,
+        eval_detail=body.eval_detail,
+        trigger_payload=body.trigger_payload,
+        matched=body.matched,
+        run_id=body.run_id,
     )
     db.add(result_row)
     await db.flush()

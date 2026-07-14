@@ -1,5 +1,13 @@
 # E-2 Implementation Plan — Side-effect record/replay seam (`eval_mode` through the governed tool path)
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: a real run through the REAL
+> governed tool path with `eval_mode` on → the high-risk tool call is **recorded, not delivered**, and the
+> suite asserts that recording from the REAL record seam (this seam — the side-effect *delivery* — is the
+> ONLY thing that may be stubbed; the run, the governance wrapper, the judge are all real). **Phase-specific:**
+> prove a real tool call is intercepted+recorded AND that a non-eval run still delivers for real (no
+> record-mode leak into production).
+
 **Slice:** Phase E-2 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-2, §2 Seam 4, `data-model.md` §4).
 **Covers E-2 ONLY.**
 **Depends on:** **WS-1 (DONE — a real durable run carries the flag through the governed tool path)** + the

@@ -1356,6 +1356,9 @@ export interface AgentRunItem {
   agent_name: string;
   status: string;
   context: string;
+  // Durable thread this run executes on; matches Approval.thread_id when a
+  // high-risk tool parks the run (used to correlate the inline approval card).
+  thread_id: string | null;
   trigger_type: string | null;
   run_by: string | null;
   team: string | null;
@@ -1400,14 +1403,26 @@ export interface ApprovalInboxItem {
   created_at: string;
   context: string;
   version: number;
+  // The durable thread the gate parked at. For a workflow run this equals the
+  // paused member run's `thread_id`, so the inline run panel can correlate an
+  // approval to *this* run's step (WorkflowBuilderPage) rather than guessing by
+  // agent_name. Always present (Approval.thread_id is NOT NULL).
+  thread_id: string;
 }
 
+// `context` selects the isolation the approval was raised in. Omit → backend
+// defaults to `production` (the reviewer console). Pass `sandbox`/`playground`
+// to list the self-service approvals surfaced inline in the run panel.
 export const listPendingApprovals = async (
-  team?: string
+  team?: string,
+  context?: "production" | "playground" | "sandbox",
 ): Promise<ApprovalInboxItem[]> => {
   const params: Record<string, string> = { status: "pending" };
   if (team) params.team = team;
-  const { data } = await http.get<{ items: ApprovalInboxItem[] }>("/approvals", { params });
+  if (context) params.context = context;
+  // Trailing slash = the canonical FastAPI path — avoids a 307 redirect that (behind
+  // the TLS-terminating edge) downgrades to http:// and is blocked as mixed content.
+  const { data } = await http.get<{ items: ApprovalInboxItem[] }>("/approvals/", { params });
   return data.items;
 };
 

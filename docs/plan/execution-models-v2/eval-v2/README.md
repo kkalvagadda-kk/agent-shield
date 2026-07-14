@@ -55,5 +55,41 @@ the WS" principle; it's a priority choice (evaluate-what's-shipped vs finish-the
 `data-model.md` (§2 discriminated union, §4 record seam) → the phase you're about to build. Every phase
 plan carries the ⚠️ *design-stable / specifics-indicative* banner and a hard **depends-on** line; treat
 `file:line`/migration numbers as indicative and re-ground at `tasks.md` mint time.
+
+## Verification standard — MANDATORY for every phase (the suite-58/59 bar, no fakes)
+
+The execution-models-v2 build proved (the hard way — 11 live-only bugs, see
+`docs/bugs/durable-workflow-live-path.md`) that **a faked seam hides exactly the bugs that live in
+it**: suites that monkeypatched `_run_step`/`resolve_edge_graph`, mocked `httpx`, or used "no-dispatch"
+paths shipped green while the real dispatch→pod→callback→resume path was broken end to end. Eval is the
+next place that trap will bite (a mocked judge / hand-crafted `eval_run_results` row proves nothing).
+So **every E-phase's acceptance is a REAL, no-fakes e2e that matches how a user runs an eval** — the
+same standard as `scripts/e2e/suite-58-workflow-live-run.sh` (creates its own agents, deploys real pods,
+`POST /workflows/{id}/runs`, asserts the real terminal state) and `suite-59` (all four orchestrations +
+HITL, real park→approve→advance). Concretely, each phase MUST include an e2e suite that:
+
+1. **Creates its own resources up front** — a real `PlaygroundDataset` (of the phase's `mode`) with real
+   items, via the real API. No hand-crafted DB rows, no in-memory fixture standing in for a dataset.
+2. **Runs a REAL `EvalRun`** through the real path — `POST /playground/eval/...` → the real **eval-runner
+   Job** (or the real scoring endpoint) → the real **judge** (`score_*` in `judge.py`) → real
+   `eval_run_results`. NO mocked judge, NO faked runner, NO stubbed `_run_step`; if the mode dispatches a
+   real agent/workflow (durable/scheduled/webhook), the suite drives that real dispatch (the exact class
+   of path that hid the 11 bugs).
+3. **Asserts the persisted, read-back outcome** — `dimension_scores` + `composite` written to the DB and
+   re-read (save→reload), the `eval_passed` gate flips as designed, and — for side-effect modes — the
+   side-effect was **recorded, not delivered** *and that recording is asserted from the real record seam*
+   (E-2 record/replay is the ONLY thing mocked; the eval itself is never mocked).
+4. **Proves the real user journey in the browser** — a Playwright spec against the deployed Studio that
+   authors the dataset, launches the eval, and reads the score back (network `waitForResponse` +
+   save→reload), per CLAUDE.md DoD #1/#2. Route-stubbing the eval API is NOT acceptable (a stubbed browser
+   test is still a fake — it was a `page.route`'d spec that missed the mixed-content bug #7).
+5. **Is registered in `run-all.sh` and named** (`T-SNN-00X`), replacing the `suite-NN` placeholders in the
+   phase plans below with the concrete suite number at mint time.
+
+**The parity gate (E-0) is the load-bearing one and must be a real run:** the reactive composite must equal
+today's judge score to the digit *on a real eval run of a real dataset through the real runner+judge*, not
+a unit fixture. A logic-only unit test may accompany it for speed, but it is NOT the gate — the real suite
+is. Reinforces the `[[feedback_no_fakes_in_e2e]]` rule (create real resources; drive the real path; no
+`_run_step` monkeypatch, no mocked judge, no faked result rows).
 </content>
 </invoke>

@@ -32,7 +32,12 @@ from auth_middleware import get_optional_user
 from db import get_db
 from models import Agent, Deployment, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
-from schemas import PlaygroundRunCreate, PlaygroundRunResponse
+from schemas import (
+    EvalScoreRequest,
+    EvalScoreResponse,
+    PlaygroundRunCreate,
+    PlaygroundRunResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -236,6 +241,23 @@ async def _dispatch_durable_run(
     dispatch failure, mark THIS PlaygroundRun failed (fail-closed)."""
     from db import AsyncSessionLocal
     from durable_dispatch import dispatch_durable_run, registry_internal_base
+    from workflow_orchestrator import _resolve_agent_environment, _team_namespace
+    from models import Agent
+
+    # Target the agent's OWN deployed pod (`{agent}-{env}` in its team namespace) —
+    # the same resolution the workflow path uses. The default shared `declarative-runner`
+    # service is not deployed (agents run as their own pods), so dispatching there
+    # DNS-fails and the run dies before its first step (single-agent durable HITL never
+    # worked for a deployed agent). Fall back to the shared default only if we can't
+    # resolve the agent's team.
+    runner_url = None
+    async with AsyncSessionLocal() as session:
+        team = (await session.execute(
+            select(Agent.team).where(Agent.name == agent_name)
+        )).scalar_one_or_none()
+    if team:
+        env = await _resolve_agent_environment(agent_name)
+        runner_url = f"http://{agent_name}-{env}.{_team_namespace(team)}.svc.cluster.local:8080"
 
     callback = f"{registry_internal_base()}/api/v1/playground/runs/{run_id}/step-update"
     ok, err = await dispatch_durable_run(
@@ -243,6 +265,7 @@ async def _dispatch_durable_run(
         agent_name=agent_name,
         input_payload=input_payload,
         callback_url=callback,
+        runner_url=runner_url,
     )
     if not ok:
         logger.warning("_dispatch_durable_run: marking playground run %s failed: %s", run_id, err)
@@ -977,6 +1000,67 @@ async def judge_eval(body: JudgeRequest) -> JudgeResponse:
         raise HTTPException(status_code=500, detail=f"Judge error: {exc}")
 
     return JudgeResponse(score=score, reason=reason)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/playground/eval/score  (Eval v2 E-0 — the ONE scoring door)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/eval/score",
+    response_model=EvalScoreResponse,
+    summary="Score an eval item by mode (the single scoring door)",
+)
+async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
+    """Single scoring door for batch eval — dispatches by ``mode``.
+
+    E-0 wires the **reactive** branch only: it scores ``response`` against the
+    item's ``expected_output`` (reference-based) via ``score_response`` and
+    reduces to a composite via ``score_composite``. For reactive that is one
+    ``response`` dimension, so ``composite == dimension_scores["response"]`` —
+    numerically identical to the legacy ``judge_for_eval`` path. Other modes
+    (durable/scheduled/webhook/workflow) return 501 until E-1+ adds their
+    scorers behind this same door (no parallel scoring path).
+    """
+    if body.mode != "reactive":
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail=(
+                f"eval scoring for mode '{body.mode}' is not implemented yet "
+                "(E-1+); only 'reactive' is wired in E-0"
+            ),
+        )
+
+    from judge import score_composite, score_response
+
+    item = body.item or {}
+    input_text = body.input if body.input is not None else (item.get("input_message") or item.get("input") or "")
+    response_text = body.response or ""
+    expected_output = item.get("expected_output")
+    rubric = item.get("rubric")
+    team = item.get("team") or "platform"
+
+    try:
+        async with asyncio.timeout(35.0):
+            score, reason = await score_response(
+                input_text=input_text,
+                output_text=response_text,
+                expected_output=expected_output,
+                rubric=rubric,
+                team=team,
+            )
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="Judge timed out (35s)")
+    except Exception as exc:
+        logger.warning("eval/score error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Judge error: {exc}")
+
+    dimension_scores = {"response": score}
+    composite = score_composite(dimension_scores, weights=None)
+    return EvalScoreResponse(
+        composite=composite,
+        dimension_scores=dimension_scores,
+        detail={"response_reason": reason},
+    )
 
 
 # ---------------------------------------------------------------------------

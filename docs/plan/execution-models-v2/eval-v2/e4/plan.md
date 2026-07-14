@@ -1,5 +1,12 @@
 # E-4 Implementation Plan — Webhook eval (filter match/miss + action + prompt-injection robustness)
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: a REAL webhook delivery
+> through the real event-gateway → real `EvalRun` → filter match/miss + action + injection-robustness scored
+> by the real scorers on the real run's output → persisted `dimension_scores` (save→reload), plus a real
+> Playwright journey. **Phase-specific:** drive a real HMAC-signed webhook (mirror `suite-28`) — no
+> hand-fabricated event; assert both a matching and a non-matching filter case on real fires.
+
 **Slice:** Phase E-4 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-4, §8 sequencing, `data-model.md`
 §2.4). **Covers E-4 ONLY.**
 **Depends on:** **WS-4 (NOT built — real filter path + "Test Event" internal endpoint)** + **E-2 (side-effect

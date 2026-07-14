@@ -26,9 +26,15 @@ def default_runner_url() -> str:
 
 
 def registry_internal_base() -> str:
+    # This base is embedded in the callback_url handed to the durable AGENT pod,
+    # which lives in an `agents-*` namespace — so it MUST be a namespace-qualified
+    # FQDN that resolves cross-namespace. The Service is `agentshield-registry-api`
+    # (NOT `registry-api`); the old default silently DNS-failed every callback, so
+    # durable members ran but their terminal callback never landed → the orchestrator
+    # timed out at "no terminal callback within 120s".
     return os.getenv(
         "REGISTRY_API_INTERNAL_URL",
-        "http://registry-api.agentshield-platform.svc.cluster.local:8000",
+        "http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000",
     )
 
 

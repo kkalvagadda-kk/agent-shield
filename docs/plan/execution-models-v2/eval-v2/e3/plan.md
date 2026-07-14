@@ -1,5 +1,13 @@
 # E-3 Implementation Plan — Scheduled eval (job-spec datasets + side-effect assertions)
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: a REAL scheduled fire (the
+> actual scheduler path, NOT a hand-invoked function) → real `EvalRun` per item → the side-effect is
+> **recorded, not delivered**, asserted from the real record seam → `dimension_scores`/`composite`
+> persisted (save→reload), plus a real Playwright journey. **Phase-specific:** the schedule must fire for
+> real (mirror `suite-26` scheduler), and a non-eval scheduled run must still deliver — no fake-schedule
+> gate.
+
 **Slice:** Phase E-3 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-3, §8 sequencing, `data-model.md`
 §2.3). **Covers E-3 ONLY.**
 **Depends on:** **WS-3 (NOT built — scheduled path made real end-to-end)** + **E-2 (side-effect record seam)**

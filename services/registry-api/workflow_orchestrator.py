@@ -170,6 +170,58 @@ async def _dispatch_durable_member(
     return "failed", None, "durable member timed out (no terminal callback within 120s)"
 
 
+async def resume_durable_member(
+    agent_name: str, team: str, child_id: str,
+    decision: str, reviewer_id: str | None, reason: str | None,
+) -> tuple[str, str | None, str | None]:
+    """Resume a parked DURABLE workflow member after an approval decision, then poll
+    its child AgentRun to terminal. The mirror image of `_dispatch_durable_member`:
+    it resolves the member's ACTUAL deployment environment (so it hits the real
+    `{agent}-{env}` pod, not a hardcoded `-production` that DNS-fails), and posts to
+    the pod's `/resume/{id}` with `run_id`+`callback_url` so the pod re-drives the
+    durable harness and posts the remaining steps (incl. completion) to the child's
+    step-update callback — fire-and-forget. Completion arrives via that callback, so
+    we POLL the child rather than trusting the /resume response (which is just
+    'accepted'). Returns (status, output, error)."""
+    environment = await _resolve_agent_environment(agent_name)
+    from durable_dispatch import registry_internal_base
+    base = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080"
+    callback_url = f"{registry_internal_base()}/api/v1/internal/runs/{child_id}/step-update"
+    body = {
+        "decision": decision, "reviewer_id": reviewer_id, "reason": reason,
+        "run_id": str(child_id), "callback_url": callback_url,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(f"{base}/resume/{child_id}", json=body)
+        if resp.status_code not in (200, 201, 202):
+            return "failed", None, f"member /resume returned {resp.status_code}: {resp.text[:300]}"
+    except httpx.ConnectError:
+        return "failed", None, f"member pod unreachable at {base}/resume (env={environment})"
+    except Exception as exc:
+        return "failed", None, f"member /resume failed: {exc}"
+
+    # The child STARTS at 'awaiting_approval' (it was parked) — unlike a forward
+    # dispatch which starts 'running'. So wait for it to LEAVE that state to a true
+    # terminal ('completed'/'failed'). If it lingers at awaiting_approval past the
+    # deadline the member re-parked at a fresh gate (a second high-risk call) — report
+    # that so the caller does NOT advance.
+    deadline = time.monotonic() + 120.0
+    last = ("awaiting_approval", None, None)
+    while time.monotonic() < deadline:
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                select(AgentRun.status, AgentRun.output, AgentRun.error_message)
+                .where(AgentRun.id == child_id)
+            )).first()
+        if row is not None:
+            last = row
+            if row[0] in ("completed", "failed"):
+                return row[0], row[1], row[2]
+        await asyncio.sleep(1.0)
+    return last[0], last[1], last[2]
+
+
 # ---------------------------------------------------------------------------
 # Graph + condition resolution
 # ---------------------------------------------------------------------------
@@ -371,18 +423,24 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
     thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(
-            select(AgentRun.run_by).where(AgentRun.id == parent_run_id)
-        )).scalar_one_or_none()
+            select(AgentRun.run_by, AgentRun.context).where(AgentRun.id == parent_run_id)
+        )).first()
+        parent_run_by = parent[0] if parent else None
+        # Inherit the parent workflow run's context so a playground/test run yields
+        # playground children (→ self-service inline approval), while a production
+        # (triggered) run yields production children (→ reviewer console). Do NOT
+        # hardcode — the two paths must not be conflated.
+        parent_context = (parent[1] if parent else None) or "production"
         child = AgentRun(
             agent_name=agent_name,
             input=current_input[:4000] if current_input else None,
-            context="production",
+            context=parent_context,
             status="running",
             trigger_type="workflow",
             parent_run_id=parent_run_id,
             team=team,
             thread_id=thread_id,
-            run_by=parent,
+            run_by=parent_run_by,
         )
         s.add(child)
         await s.commit()
@@ -398,6 +456,14 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
             child = (await s.execute(select(AgentRun).where(AgentRun.id == child_id))).scalar_one_or_none()
             if child:
                 child.thread_id = child_id
+                # The member pod seeds its OTEL trace id deterministically from its
+                # run_id (== child_id) — agentshield_sdk.otel.otel_run_context uses
+                # uuid(run_id).int. So the member's real LLM/tool spans land on the
+                # Langfuse trace `uuid(child_id).hex`. Stamp it here so the run tree's
+                # per-member "View Trace" link resolves (was NULL → the child looked
+                # trace-less even though its 26-span trace exists). The parent workflow
+                # trace stays a thin envelope — the detail lives on the members.
+                child.langfuse_trace_id = uuid.UUID(child_id).hex
                 await s.commit()
         status_val, output, err = await _dispatch_durable_member(agent_name, team, current_input, child_id)
     else:
@@ -432,6 +498,27 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
                 child.error_message = err
                 child.completed_at = datetime.now(timezone.utc)
             await s.commit()
+
+    # Author a span on the PARENT workflow trace for this member step so the
+    # workflow run's trace shows its decision/step structure (the member's own
+    # detailed spans live on the member trace — see tracing.trace_workflow_step
+    # + docs/debugging/011). A member that parked for approval gets its terminal
+    # span authored on resume (resume_orchestration), not here.
+    if status_val != "awaiting_approval":
+        try:
+            from tracing import trace_workflow_step
+            trace_workflow_step(
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                status=status_val,
+                input_text=current_input,
+                output_text=output,
+                error_message=err,
+                child_run_id=child_id,
+                latency_ms=elapsed_ms,
+            )
+        except Exception:  # tracing must never break orchestration
+            pass
     return status_val, output, err
 
 
@@ -583,8 +670,57 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
         logger.warning("resume_orchestration: no checkpoint for parent %s — nothing to advance", parent_run_id)
         return
 
+    # Resolve which member had parked (for the parent-trace span + a meaningful
+    # failure message). conditional/handoff carry the node in the cursor; sequential
+    # carries order + the next index (the parked member sits one before it).
+    _mode = state.get("mode")
+    parked_node: str | None = state.get("node")
+    if parked_node is None and _mode == "sequential":
+        try:
+            parked_node = state["order"][int(state["next_index"]) - 1]
+        except (KeyError, IndexError, ValueError, TypeError):
+            parked_node = None
+    # Look up the resumed child for its id (drill-down) + captured error text.
+    parked_child_id: str | None = None
+    parked_child_err: str | None = None
+    if parked_node:
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(
+                select(AgentRun.id, AgentRun.error_message)
+                .where(AgentRun.parent_run_id == parent_run_id,
+                       AgentRun.agent_name == parked_node)
+                .order_by(AgentRun.started_at.desc()).limit(1)
+            )).first()
+        if row is not None:
+            parked_child_id = str(row[0])
+            parked_child_err = row[1]
+
+    # Author the resumed member's terminal span on the PARENT workflow trace (the
+    # forward path in _run_step skips a parked member — its terminal status is only
+    # known here). Best-effort; never break the resume.
+    if parked_node:
+        try:
+            from tracing import trace_workflow_step
+            trace_workflow_step(
+                parent_run_id=parent_run_id,
+                agent_name=parked_node,
+                status=member_status,
+                output_text=member_output,
+                error_message=parked_child_err,
+                child_run_id=parked_child_id,
+            )
+        except Exception:
+            pass
+
     if member_status == "failed":
-        await _fail_parent(parent_run_id, "workflow member failed after its approval was decided")
+        # Surface the member's real failure reason (e.g. a tool 503) instead of a
+        # bare generic message — the empty-error gap from docs/debugging/011.
+        detail = "workflow member failed after its approval was decided"
+        if parked_node:
+            detail = f"member '{parked_node}' failed after approval"
+            if parked_child_err:
+                detail += f": {parked_child_err[:300]}"
+        await _fail_parent(parent_run_id, detail)
         return
 
     mode = state.get("mode")

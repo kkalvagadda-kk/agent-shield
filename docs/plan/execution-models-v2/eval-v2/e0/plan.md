@@ -1,5 +1,13 @@
 # E-0 Implementation Plan — Reactive parity + composite plumbing
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: create a real reactive
+> `PlaygroundDataset` via the API → run a real `EvalRun` through the real eval-runner + real `judge.py`
+> → assert the persisted `dimension_scores`/`composite` (save→reload) + that `eval_passed` still auto-sets,
+> plus a real (non-route-stubbed) Playwright author→eval→result journey. **Phase-specific:** the parity
+> gate — composite == today's judge score to the digit — must be asserted on a REAL run of a real dataset,
+> not a unit fixture (a unit parity test may accompany it for speed but is NOT the gate).
+
 **Slice:** Phase E-0 of Eval v2 (consolidated `eval-v2/plan.md` §2/§3, §8 sequencing). **Covers E-0 ONLY.**
 **Depends on:** **WS-0 only (DONE)** — reactive eval already works today. E-0 has **no** durable/scheduled/
 webhook dependency; it is the **foundation** every later E-phase (E-1…E-6) extends and **ships first**.

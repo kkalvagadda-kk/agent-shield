@@ -534,7 +534,7 @@ async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callb
     """Re-enter a parked durable run through the shared harness, emitting the remaining
     steps to the callback. Fail-loud: on error, post a terminal failed step so the run
     never hangs."""
-    from agentshield_sdk.durable import Bookmark, StepEmitter, resume_durable  # type: ignore[import]
+    from agentshield_sdk.durable import Bookmark, StepEmitter, _exc_reason, resume_durable  # type: ignore[import]
     from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
 
     try:
@@ -551,7 +551,7 @@ async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callb
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.post(callback_url, json={
                     "step_number": 999, "step_name": "agent", "status": "failed",
-                    "error_message": f"resume failed: {exc}"[:500], "run_completed": True,
+                    "error_message": f"resume failed: {_exc_reason(exc)}"[:500], "run_completed": True,
                 })
         except Exception:
             pass
@@ -607,7 +607,7 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
 
     from langchain_core.messages import HumanMessage  # type: ignore[import]
 
-    from agentshield_sdk.durable import Bookmark, StepEmitter, run_durable  # type: ignore[import]
+    from agentshield_sdk.durable import Bookmark, StepEmitter, _exc_reason, run_durable  # type: ignore[import]
     from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
     from agentshield_sdk.safety_client import scan_input  # type: ignore[import]
 
@@ -640,4 +640,4 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
         await post_fail("safety_scan_input", f"Safety block: {exc.reason}")
     except Exception as exc:  # never leave the run hanging — fail loud
         logger.exception("Durable run %s failed", req.run_id)
-        await post_fail("agent", str(exc)[:500])
+        await post_fail("agent", _exc_reason(exc)[:500])

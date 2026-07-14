@@ -169,7 +169,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-005a | P0 | De-anonymize PII placeholders in tool call args, gated by OPA allow_deanonymize policy per tool | Tool receives real PII value; LLM context retains placeholder; OPA deny blocks substitution |
 | FR-006 | P0 | Evaluate OPA policy before every tool call | Allow/deny within 5ms |
 | FR-007 | P0 | Route high-risk actions to approval queue; approval rights scoped per-agent/tool/skill | Agent pauses, record created, only authorized reviewers notified — see [authorization-model-spec.md](design/todo/authorization-model-spec.md) §7 |
-| FR-008 | P0 | Approve/reject via ops dashboard; Playground HITL self-approved by asset owner | Decision stored, agent resumes within 5s |
+| FR-008 | P0 | Approve/reject via ops dashboard; sandbox/playground HITL self-approved **inline** by asset owner | Decision stored, agent resumes within 5s. **Routing by context:** production approvals go to the authority-gated reviewer console (Catalog → Approvals); sandbox/playground approvals are self-service and decided **inline** on the surface that raised them — the chat HITL bar for single agents and the Workflow builder run panel for workflows (correlated by `thread_id`; the console decide `PATCH /approvals/{id}` triggers `_resume_and_advance`, so the workflow advances without a console trip). |
 | FR-009 | P0 | Auto-reject on timeout (30min default) | Agent resumes with denial, event logged |
 | FR-010 | P0 | Full trace capture for every request | Trace in Langfuse within 10s of completion |
 | FR-011 | P0 | Run eval suite in CI on every PR | PR blocked if assertions fail |

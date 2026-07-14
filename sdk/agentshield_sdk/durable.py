@@ -100,6 +100,18 @@ class StepEmitter:
             return {}
 
 
+def _exc_reason(exc: BaseException) -> str:
+    """A never-empty failure reason for a caught exception.
+
+    Some exceptions stringify to nothing — notably ``httpx.ReadTimeout`` /
+    ``ConnectTimeout`` (raised with no message). ``f"...: {exc}"`` then yields a
+    bare "run crashed:" with no cause, which is what surfaced in the workflow run
+    panel (docs/debugging/011). Always prefix the exception TYPE so the reason is
+    actionable even when the message is empty."""
+    detail = str(exc).strip()
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
 def _pending_interrupt(graph: Any, config: dict) -> dict | None:
     """The pending interrupt value (a dict with `approval_id`) if the graph is parked
     at an interrupt(), else None. LangGraph v2 does not emit on_interrupt in
@@ -117,15 +129,37 @@ def _pending_interrupt(graph: Any, config: dict) -> dict | None:
     return None
 
 
+def _content_to_text(content: Any) -> str | None:
+    """Normalize a LangChain message `content` to plain text.
+
+    Providers differ: OpenAI returns a str, but Anthropic/Bedrock return a LIST of
+    content blocks — e.g. ``[{"type": "text", "text": "refund", "index": 0}]``.
+    The durable callback's ``output_text`` must be a string (it lands in a text
+    column), so join the text of any text blocks. Returns None when there's no text.
+    """
+    if content is None or isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                t = block.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts) if parts else None
+    return str(content)
+
+
 def _final_text(output: Any) -> str | None:
-    """Last AI message content from a graph/node end output."""
+    """Last AI message content (as plain text) from a graph/node end output."""
     if isinstance(output, dict):
         msgs = output.get("messages") or []
         if msgs:
             last = msgs[-1]
-            if isinstance(last, dict):
-                return last.get("content")
-            return getattr(last, "content", None)
+            content = last.get("content") if isinstance(last, dict) else getattr(last, "content", None)
+            return _content_to_text(content)
     return None
 
 
@@ -169,7 +203,7 @@ async def _drive(
     except Exception as exc:  # any drive crash → fail the run loudly, never hang
         logger.exception("durable: drive loop crashed thread=%s: %s", thread_id, exc)
         await emitter.emit(StepUpdate(
-            step + 1, "agent", "failed", error_message=f"run crashed: {exc}", run_completed=True,
+            step + 1, "agent", "failed", error_message=f"run crashed: {_exc_reason(exc)}", run_completed=True,
         ))
         return RunResult("failed", thread_id, step)
 
@@ -229,5 +263,16 @@ async def resume_durable(
     Same drive loop + fail-closed contract as run_durable."""
     logger.info("resume_durable: thread=%s decided=%s", thread_id, decision is not None)
     config = {"configurable": {"thread_id": thread_id}}
-    resume_input = {"messages": [], "resume": decision} if decision is not None else None
+    # Resuming a parked interrupt() REQUIRES a langgraph Command(resume=value): that is
+    # what makes the parked `interrupt()` call RETURN `value` and the node continue past
+    # the gate. Passing a plain state dict ({"messages":[], "resume":...}) instead re-runs
+    # the interrupted node from scratch → it calls interrupt() again → a NEW approval →
+    # the run re-parks forever. Command is imported lazily to keep this module's import
+    # graph standalone (unit tests mock the graph). crash-recovery (decision is None)
+    # passes no input and just continues from the checkpoint.
+    if decision is not None:
+        from langgraph.types import Command  # lazy: langgraph is a runtime dep of the agent image
+        resume_input = Command(resume=decision)
+    else:
+        resume_input = None
     return await _drive(graph, resume_input, config, thread_id=thread_id, emitter=emitter, start_step=start_step)

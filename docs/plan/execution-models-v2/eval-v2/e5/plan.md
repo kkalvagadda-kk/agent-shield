@@ -1,5 +1,13 @@
 # E-5 Implementation Plan — Workflow run-tree eval (per-member path)
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when a REAL e2e is green in `run-all.sh`: a REAL durable workflow run
+> (the same real dispatch→pod→callback path `suite-59` exercises — NO faked `_run_step`) → the real run
+> tree (parent + per-member children with real `run_steps`) → `score_member_path` scores each member's real
+> path → persisted `dimension_scores` (save→reload), plus a real Playwright journey. **Phase-specific:**
+> the per-member scores must come from a REAL run tree (build on the deployed durable agents like suite-59),
+> not a synthetic tree fixture.
+
 **Slice:** Phase E-5 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-5, §8 sequencing, `data-model.md`
 §2.5). **Covers E-5 ONLY.**
 **Depends on:** **WS-1 D4 (DONE — durable members write child `run_steps` in the run tree via

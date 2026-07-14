@@ -139,29 +139,27 @@ This runs on **every** run — no developer action needed. On timeout `judge_sta
 
 ### Path 2 — Batch evaluation (Datasets → Eval Runs)
 
-**1. Create a dataset.** From the Playground left panel's "Manage Datasets / Eval" link (or `/playground/datasets`), click **New Dataset**. Items are one JSON object per line:
+**1. Create a dataset (mode-aware).** From the Playground left panel's "Manage Datasets / Eval" link (or `/playground/datasets`), click **New Dataset**. The modal has a **mode selector** that defaults to **`reactive`** (response correctness) — the only authorable mode today; the other modes (`durable`/`scheduled`/`webhook`/`workflow`) are reserved for later eval slices (E-1…E-5) and their item editors are disabled. A dataset's `mode` is stored on the row (`playground_datasets.mode`, back-filled to `reactive` for every pre-existing dataset). For reactive, items are one JSON object per line:
 
 ```json
 {"input": "What's the status of order 123?", "expected_output": "Order 123 is shipped."}
 {"input": "Cancel order 456", "expected_output": "Order 456 has been cancelled."}
 ```
 
-`input` is required; `expected_output` is optional but used by the judge for accuracy scoring. Items can also be seeded from saved playground runs (Path 1).
+`input` is required; `expected_output` is optional but used by the judge for accuracy scoring. Items can also be seeded from saved playground runs (Path 1). The create endpoint validates each item against the dataset `mode` via a discriminated union — an item whose explicit `kind` disagrees with the mode is rejected `422` (an illegal `{mode, item-kind}` pair is unrepresentable).
 
-**2. Run Eval.** Click **Run Eval** on a dataset row. A modal asks for a target agent (dropdown from `/agents?status=active`). On confirm, `POST /api/v1/playground/eval-runs` creates an `EvalRun` (`status=pending`), then **synchronously creates a real Kubernetes Batch Job** named `eval-{run_id[:8]}` in the `agentshield-platform` namespace with env vars `EVAL_RUN_ID`, `AGENT_NAME`, `DATASET_ID`, `REGISTRY_API_URL`. On success the run flips to `status=running`; if the Job can't be created the run is marked `failed` and the API returns 500. The UI redirects to `/playground/eval-runs/{id}`.
+**2. Run Eval.** Click **Run Eval** on a dataset row. A modal asks for a target (a running sandbox agent deployment, or a workflow deployment). On confirm, `POST /api/v1/playground/eval-runs` creates an `EvalRun` (`status=pending`), resolves the run's interpretation **`mode`** from the executable (a workflow → `workflow`; an agent → its `execution_shape`, `reactive`|`durable`) and **rejects a `mode` mismatch against `dataset.mode` with `422`**, then **synchronously creates a real Kubernetes Batch Job** named `eval-{run_id[:8]}` in the `agentshield-platform` namespace with env vars `EVAL_RUN_ID`, `AGENT_NAME`, `DATASET_ID`, `MODE`, `REGISTRY_API_URL`. On success the run flips to `status=running`; if the Job can't be created the run is marked `failed` and the API returns 500. The UI redirects to `/playground/eval-runs/{id}`.
 
 > This is a real Job, not a stub — see `k8s.create_eval_job()`. The registry-api ServiceAccount needs RBAC `create`/`get` on Jobs in `agentshield-platform`.
 
 **3. eval-runner Job executes.** For each dataset item the Job (`services/eval-runner/main.py`):
-1. Starts a playground run via `POST /api/v1/playground/runs` (same governed flow as interactive)
+1. Starts a playground run via `POST /api/v1/playground/runs` (same governed flow as interactive) — the eval-runner authenticates as `X-User-Sub: eval-runner`, a service identity that is allowed to run any team's agent
 2. Collects the response by consuming `GET /playground/runs/{run_id}/stream` (`text_delta` until `done`)
-3. **Scores by keyword match, not the LLM judge:** `passed = expected_output.lower() in response.lower()`, giving a binary `judge_score` of `1.0`/`0.0` (`reasoning="keyword match"`). Items with no `expected_output` pass by default. The docstring's "LLM judge" is aspirational — the Haiku judge is not called here.
-4. `POST /api/v1/playground/eval-runs/{id}/results` — records `{ dataset_item_idx, input_message, response, judge_score, judge_reasoning, passed }`
-5. After all items, `PATCH /api/v1/playground/eval-runs/{id}` — sets `total_items`, `passed_count`, `failed_count`, `overall_score = passed/total`, `status=completed`
+3. **Scores through the one scoring door** — `POST /api/v1/playground/eval/score` with `{mode, item, input, response}`. For `mode=reactive` this calls `judge.score_response` (the real LLM-as-Judge, reference-based against `expected_output`) and reduces to a composite via `judge.score_composite`, returning `{composite, dimension_scores: {"response": x}, detail}` where `composite == x` — byte-identical to the pre-E-0 `judge_for_eval`. Keyword matching is a **fallback only** when the door/judge is unavailable (never gated on mode). `passed = composite >= 0.7`.
+4. `POST /api/v1/playground/eval-runs/{id}/results` — records `{ dataset_item_idx, input_message, response, judge_score, judge_reasoning, passed, dimension_scores }` where `judge_score` is the composite (the gate input) and `dimension_scores` carries the per-dimension evidence (reactive → `{"response": composite}`)
+5. After all items, `PATCH /api/v1/playground/eval-runs/{id}` — sets `total_items`, `passed_count`, `failed_count`, `overall_score = passed/total`, `status=completed`. On a passing run (`overall_score >= 0.7`) the associated `AgentVersion.eval_passed` auto-sets `True` (the publish gate opens without a manual PATCH) — unchanged by E-0.
 
-> **Known bug (batch eval is currently non-functional against real agents):** the eval-runner authenticates as `X-User-Sub: eval-runner`, but `create_playground_run` rejects any caller that isn't the agent's `created_by` with a 403. That 403 is unguarded, so the Job crashes and the `EvalRun` stays stuck at `running`. See the note in *Known limitations*.
-
-**4. Review results.** `EvalResultsPage` (`/playground/eval-runs/{id}`) shows the aggregate header (overall score, pass rate, item count) and the per-item breakdown — input, response, judge score, pass/fail badge, and a per-item Langfuse trace link.
+**4. Review results.** `EvalResultsPage` (`/playground/eval-runs/{id}`) shows the aggregate header (overall score, pass rate, item count) and the per-item breakdown — input, response, a **composite score**, a **per-dimension score row** (`response`, `trajectory`, `side_effects`, `filter`, `member` — only `response` is populated in E-0; the others render `—` until their scorers land in E-1…E-5), a pass/fail badge, and a per-item Langfuse trace link.
 
 ### The full loop
 
@@ -189,14 +187,14 @@ Background: _complete_run()
               → EvalRun(status=pending) → create K8s Job (real) → status=running
                         │
                         ▼
-              eval-runner Job (namespace: agentshield-platform)
-              ├── item 0: run agent → keyword-match score → POST /results
-              ├── item 1: run agent → keyword-match score → POST /results
+              eval-runner Job (namespace: agentshield-platform, env MODE=reactive)
+              ├── item 0: run agent → POST /playground/eval/score (real judge) → POST /results
+              ├── item 1: run agent → POST /playground/eval/score (real judge) → POST /results
               └── item N: PATCH /eval-runs/{id} (status=completed, aggregate scores)
-              ⚠ blocked today by X-User-Sub=eval-runner → 403 ownership check
+                          → passing run auto-sets AgentVersion.eval_passed=True
                         │
                         ▼
-              EvalResultsPage  (per-item: score, pass/fail, trace link)
+              EvalResultsPage  (per-item: composite + per-dimension row, pass/fail, trace link)
 ```
 
 ## Error states
@@ -227,7 +225,10 @@ Browser
   POST /api/v1/playground/approvals/{id}/decide
 
   # Batch eval (Path 2)
-  POST /api/v1/playground/eval-runs        → creates EvalRun + real K8s Job
+  POST /api/v1/playground/eval/score       → the ONE scoring door (dispatch by mode;
+                                             reactive → score_response + score_composite;
+                                             returns {composite, dimension_scores, detail})
+  POST /api/v1/playground/eval-runs        → creates EvalRun + real K8s Job (resolves + passes MODE)
   GET  /api/v1/playground/eval-runs/{id}   → aggregate status/scores
   POST /api/v1/playground/eval-runs/{id}/results  → per-item result (called by Job)
   PATCH /api/v1/playground/eval-runs/{id}  → aggregate update (called by Job)
@@ -246,8 +247,9 @@ Browser
 | API client | `studio/src/api/playgroundApi.ts` | HTTP calls to registry-api |
 | Backend router | `services/registry-api/routers/playground.py` | Run create, stream proxy, feedback, trace |
 | SSE source | `sdk/agentshield_sdk/streaming.py` | Named SSE event format emitted by agent pod |
-| Judge | `services/registry-api/judge.py` | Fire-and-forget LLM-as-Judge scorer |
-| Datasets page | `studio/src/pages/DatasetsPage.tsx` | Create dataset, Run Eval modal |
+| Judge / scorer library | `services/registry-api/judge.py` | Fire-and-forget LLM-as-Judge scorer + `score_response`/`score_composite` (the reactive scoring library behind `/eval/score`) |
+| Scoring door | `services/registry-api/routers/playground.py` | `POST /playground/eval/score` — mode dispatch |
+| Datasets page | `studio/src/pages/DatasetsPage.tsx` | Create dataset (mode selector), Run Eval modal |
 | Eval results page | `studio/src/pages/EvalResultsPage.tsx` | Aggregate + per-item eval breakdown |
 | Eval router | `services/registry-api/routers/eval_runner.py` | EvalRun CRUD, launches K8s Job |
 | K8s Job | `services/registry-api/k8s.py` | `create_eval_job()` — real Batch Job |
@@ -259,8 +261,7 @@ Browser
 - HITL resume via the playground overlay posts the decision to the registry-api, which must forward it to the agent pod's `POST /resume/{thread_id}` — this leg is not yet wired end-to-end.
 - `PlaygroundRun.output_text` is captured from `text_delta` events for the judge, but that column is not mapped in the SQLAlchemy model yet (pre-existing). Because of this, saved dataset items store only the `input`, not the response.
 - The eval-runner container image (`eval-runner:0.1.0`) is what actually iterates the dataset, calls the agent, and posts results. The registry-api only creates the Job; if that image is missing or the ServiceAccount lacks Jobs RBAC in `agentshield-platform`, the run is created but never progresses past `running`.
-- **Batch eval is blocked by an ownership 403.** `services/eval-runner/main.py` calls `POST /playground/runs` with `X-User-Sub: eval-runner`, but `create_playground_run` 403s any caller that isn't the agent's `created_by`. The call is unguarded, so the Job crashes and the `EvalRun` never leaves `running`. Fix options: (a) allow a service identity (`eval-runner`) to bypass the owner check, (b) have the eval-runner impersonate the run's owner, or (c) drop the owner check for `context=playground`. Needs a decision before batch eval works end-to-end.
-- **Batch eval uses keyword matching, not the LLM judge.** `expected_output` substring containment gives a binary score. The interactive path's Haiku judge (`judge.py`) is *not* invoked by the eval-runner, even though each run it creates gets a Haiku `judge_score` written to the `PlaygroundRun` row (which the eval results ignore). Unifying these — have the eval-runner read the run's Haiku score, or call the judge directly — is future work.
+- **Batch eval runs end-to-end (service identity + real judge).** The eval-runner authenticates as the `eval-runner` service identity, which is allowed to run any team's agent (the earlier ownership-403 is resolved), and scores each item through the one scoring door (`POST /playground/eval/score` → `judge.score_response`), so the eval results carry the real LLM-as-Judge composite rather than a keyword-match binary. Keyword matching survives only as a fallback when the door/judge is unavailable. For `mode=reactive` the composite is byte-identical to the pre-E-0 `judge_for_eval` (proven no-fakes by `scripts/e2e/suite-61-eval-mode-plumbing.sh`). Mode-specific scorers (trajectory / side-effect / filter / member-path) are deferred to E-1…E-5 behind the same door.
 - **Durable playground runs are now supported (Phase 2).** When a durable agent is selected, the center panel swaps to a RunLauncher (JSON payload editor + "Launch Run" button) and StepTracker (live step list via SSE). The flow: user enters a JSON payload → clicks "Launch Run" → `POST /playground/runs` with `execution_shape=durable` → registry-api dispatches to the declarative-runner's `POST /run` endpoint → runner posts step callbacks to `POST /playground/runs/{id}/step-update` → SSE stream emits `step_update` events → StepTracker renders live progress. HITL steps pause the run (`status=awaiting_approval`) and approval decisions resume via `POST /resume/{thread_id}`. Durable runs that exceed 10 minutes wall-clock or have stale approval windows are auto-cancelled by the timeout worker.
 - **Scheduled agents (Phase 3):** When a scheduled agent is selected (has schedule triggers), the center panel shows a RunNowPanel: cron expression + human-readable parse, timezone, and a "Run Now (Test Fire)" button that creates a playground run immediately. Useful for testing without waiting for the cron to tick.
 - **Event-driven agents (Phase 3):** When a webhook-triggered agent is selected, the center panel shows a TestTriggerPanel: filter configuration display (read-only), JSON payload editor, "Send Test Event" button that calls `POST /playground/test-event`. The endpoint evaluates the payload against configured `filter_conditions`; if matched, creates a run (shows in event log with run link); if filtered, shows reason. The filter engine supports operators: eq, neq, contains, gt, gte, lt, lte, exists, in, regex.

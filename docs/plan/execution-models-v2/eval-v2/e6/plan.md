@@ -1,5 +1,12 @@
 # E-6 Implementation Plan — Regression/CI + eval-gate polish
 
+> ✅ **Verification bar (MANDATORY): the no-fakes suite-58/59 standard** — see the eval-v2 README
+> "Verification standard". DONE only when the REAL per-mode suites from E-0…E-5 (each a real dataset → real
+> `EvalRun` → real judge → persisted score) run green together in CI on `run-all.sh`, and the eval-gate
+> polish (composite threshold / dimension weighting) is proven by a REAL run that flips `eval_passed` both
+> ways. **Phase-specific:** E-6 is the composition gate — it may add NO new fake; if a mode's real suite is
+> flaky (real LLM), stabilize it (deployed agents, generous timeouts) rather than downgrade to a mock.
+
 **Slice:** Phase E-6 of Eval v2 (consolidated `eval-v2/plan.md` §6 Phase E-6, §8 sequencing). **Covers E-6 ONLY.**
 **Depends on:** **E-0…E-5 (all mode scorers + the composite plumbing landed per mode)**. E-6 **composes** the
 finished scorers into a regression/CI harness + threshold configuration; it builds no new scorer.
