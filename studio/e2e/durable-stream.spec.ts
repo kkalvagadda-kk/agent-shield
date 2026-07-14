@@ -121,5 +121,22 @@ test.describe("durable playground step-stream (real SSE)", () => {
       )
       .toBe("streaming");
     await expect(page.getByText(/Connection lost/i)).toHaveCount(0);
+
+    // ---- OUTPUT FIX (registry-api 0.2.175) --------------------------------
+    // The step-update callback now captures `output_text` (the SDK's field) into
+    // RunStep.output, so the SSE step_update carries the real answer and the step
+    // detail <pre> renders it. Before the fix the callback only read `output`
+    // (always None for durable), so clicking a completed step showed a blank
+    // detail. Prove the fix the way the user sees it: wait for the step to
+    // complete, click it, and assert the answer text ("Austin") is on screen.
+    await expect
+      .poll(async () => page.getByText(/^Completed$/i).count(), { timeout: 90000, intervals: [2000] })
+      .toBeGreaterThan(0);
+    // Click the completed step row to open its detail panel.
+    await page.locator("button", { hasText: /Completed/i }).first().click();
+    // The RunLauncher answer surface OR the StepTracker detail <pre> must show the
+    // model's answer — Austin is the capital of Texas. This is the assertion that
+    // was silently green-while-broken before: a durable run with no visible output.
+    await expect(page.getByText(/austin/i).first()).toBeVisible({ timeout: 15000 });
   });
 });
