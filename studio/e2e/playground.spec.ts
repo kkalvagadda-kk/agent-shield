@@ -18,13 +18,13 @@ test.describe("playground page", () => {
     // so scope to the role=heading to avoid strict-mode violation.
     await expect(page.getByRole("heading", { name: "Eval Runs" })).toBeVisible();
 
-    // VersionSelector renders a label and a <select>
-    await expect(page.getByText(/Select Agent/i)).toBeVisible();
-    // The <select> for agent selection is present
-    const agentSelect = page.locator("select").filter({
-      hasText: /pick an agent/i,
+    // The left panel selects a running DEPLOYMENT (SELECT DEPLOYMENT → "-- pick a
+    // deployment --"), not an agent. (Locator was stale — see durable-stream.spec.ts.)
+    await expect(page.getByText(/Select Deployment/i)).toBeVisible();
+    const depSelect = page.locator("select").filter({
+      hasText: /pick a deployment/i,
     });
-    await expect(agentSelect).toBeVisible();
+    await expect(depSelect).toBeVisible();
   });
 
   test("Manage Datasets / Eval link is present", async ({ page }) => {
@@ -55,39 +55,35 @@ test.describe("playground page", () => {
     await expect(page.getByText("Event Trace")).toBeVisible();
   });
 
-  test("selecting an agent updates the center panel header", async ({
+  test("selecting a deployment updates the center panel (leaves the empty state)", async ({
     page,
   }) => {
     await page.goto("/playground");
     await page.waitForLoadState("networkidle");
 
-    // Get all options in the agent selector
-    const agentSelect = page.locator("select").filter({
-      hasText: /pick an agent/i,
+    const depSelect = page.locator("select").filter({
+      hasText: /pick a deployment/i,
     });
-    const options = await agentSelect.locator("option").allTextContents();
-    // options[0] is the placeholder "-- pick an agent --"
-    const realAgents = options.filter(
-      (o) => o.trim() !== "" && !o.includes("pick an agent")
+    // options load async — wait for real deployments to populate before reading.
+    await expect
+      .poll(async () => depSelect.locator("option").count(), { timeout: 15000 })
+      .toBeGreaterThan(1);
+    const options = await depSelect.locator("option").allTextContents();
+    const real = options.filter(
+      (o) => o.trim() !== "" && !/pick a deployment/i.test(o)
     );
-
-    if (realAgents.length === 0) {
-      // No agents in the environment — skip run-dependent assertion
-      // UI still renders correctly (tested above)
+    if (real.length === 0) {
+      // No running deployment in this environment — the empty state (tested above)
+      // still renders correctly.
       test.skip();
       return;
     }
 
-    // Select the first real agent
-    await agentSelect.selectOption({ label: realAgents[0] });
+    // Selecting a deployment must leave the "No agent selected" empty state and
+    // render the interaction surface (RunLauncher for durable, chat for reactive).
+    await depSelect.selectOption({ label: real[0] });
     await page.waitForLoadState("networkidle");
-
-    // Center panel header shows the selected agent name (in a <span>) and sandbox badge.
-    // Use span locator to avoid strict-mode violation with the matching <option> element.
-    const agentName = realAgents[0].trim();
-    await expect(page.locator("span", { hasText: agentName })).toBeVisible();
-    // sandbox badge appears when any agent is selected
-    await expect(page.locator("span").filter({ hasText: /^sandbox$/ })).toBeVisible();
+    await expect(page.getByText(/No agent selected/i)).toHaveCount(0);
   });
 });
 
