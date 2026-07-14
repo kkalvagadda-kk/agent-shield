@@ -110,6 +110,7 @@ run_suite "Suite 60: Single-agent durable HITL"     "suite-60-single-agent-durab
 run_suite "Suite 61: Eval v2 E-0 reactive parity"   "suite-61-eval-mode-plumbing.sh"
 run_suite "Suite 62: Tool Schema Build"             "suite-62-tool-schema-build.sh"
 run_suite "Suite 63: /echo endpoint (httpbin repl)" "suite-63-echo-endpoint.sh"
+run_suite "Suite 64: PROD workflow golden path"     "suite-64-production-workflow-golden-path.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
