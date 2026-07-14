@@ -111,10 +111,10 @@ post('/teams/', {'name': 'platform', 'namespace': 'agents-platform'})
 
 # Create tools at each risk level (idempotent via 409)
 tools = [
-    {'name': 'opa-s18-low-${SUFFIX}', 'display_name': 'S18 Low', 'type': 'http', 'risk_level': 'low', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'https://httpbin.org/get'},
-    {'name': 'opa-s18-med-${SUFFIX}', 'display_name': 'S18 Med', 'type': 'http', 'risk_level': 'medium', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'https://httpbin.org/get'},
-    {'name': 'opa-s18-high-${SUFFIX}', 'display_name': 'S18 High', 'type': 'http', 'risk_level': 'high', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'https://httpbin.org/get'},
-    {'name': 'opa-s18-crit-${SUFFIX}', 'display_name': 'S18 Crit', 'type': 'http', 'risk_level': 'critical', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'https://httpbin.org/get'},
+    {'name': 'opa-s18-low-${SUFFIX}', 'display_name': 'S18 Low', 'type': 'http', 'risk_level': 'low', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo'},
+    {'name': 'opa-s18-med-${SUFFIX}', 'display_name': 'S18 Med', 'type': 'http', 'risk_level': 'medium', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo'},
+    {'name': 'opa-s18-high-${SUFFIX}', 'display_name': 'S18 High', 'type': 'http', 'risk_level': 'high', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo'},
+    {'name': 'opa-s18-crit-${SUFFIX}', 'display_name': 'S18 Crit', 'type': 'http', 'risk_level': 'critical', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo'},
 ]
 tool_ids = {}
 for t in tools:
@@ -130,7 +130,7 @@ for t in tools:
         sys.exit(1)
 
 # Create a tool for team-grant testing (separate from agent's own tools)
-grant_tool = {'name': 'opa-s18-grant-${SUFFIX}', 'display_name': 'S18 Grant', 'type': 'http', 'risk_level': 'low', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'https://httpbin.org/get'}
+grant_tool = {'name': 'opa-s18-grant-${SUFFIX}', 'display_name': 'S18 Grant', 'type': 'http', 'risk_level': 'low', 'owner_team': 'platform', 'http_method': 'GET', 'http_url': 'http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo'}
 resp, code = post('/tools/', grant_tool)
 if code in (200, 201):
     grant_tool_id = resp.get('id', '')

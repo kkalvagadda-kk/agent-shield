@@ -86,9 +86,9 @@ SLACK=$(post_idempotent "/api/v1/tools/" \
   "slack_notify")
 SLACK_ID=$(echo "$SLACK" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
 
-# --- http-echo (HTTP, httpbin.org — for testing) ---
+# --- http-echo (HTTP, in-cluster registry-api /echo — for testing) ---
 ECHO=$(post_idempotent "/api/v1/tools/" \
-  "{\"name\":\"http_echo\",\"display_name\":\"HTTP Echo\",\"description\":\"Echo HTTP requests back via httpbin.org. Useful for testing tool integration.\",\"type\":\"http\",\"risk_level\":\"low\",\"owner_team\":\"${TEAM}\",\"http_method\":\"GET\",\"http_url\":\"https://httpbin.org/anything/{{path}}\"}" \
+  "{\"name\":\"http_echo\",\"display_name\":\"HTTP Echo\",\"description\":\"Echo HTTP requests back via the in-cluster registry-api /echo endpoint (no external dependency). Useful for testing tool integration.\",\"type\":\"http\",\"risk_level\":\"low\",\"owner_team\":\"${TEAM}\",\"http_method\":\"GET\",\"http_url\":\"http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo/{{path}}\"}" \
   "http_echo")
 ECHO_ID=$(echo "$ECHO" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
 

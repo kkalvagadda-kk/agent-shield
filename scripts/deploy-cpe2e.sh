@@ -3,6 +3,11 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.172 (in-cluster /echo endpoint — httpbin.org replacement. New GET/POST/PUT/PATCH/DELETE
+#     /echo (+ /echo/{path}) reflects method/path/query/body (NOT headers), always 200, unauthenticated like
+#     /health. Demo/test HTTP tools (http_echo seed, refund_action, suite-18 OPA tools) repointed off the flaky
+#     external httpbin.org to this in-cluster target so a third-party outage can't fail a governed tool call or
+#     demo workflow. suite-63 covers it. docs/debugging/011.)
 #   - declarative-runner:0.1.43 (rebase reconcile — folds e59cc4d's governed-tool graph-build KeyError fix
 #     (python & arg-less HTTP tools: __annotations__ derived from the signature, typed params from input_schema,
 #     InjectedState injected before **kwargs; sdk/tests/test_tool_executor_schema.py + suite-62-tool-schema-build)
@@ -155,7 +160,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.171"
+REGISTRY_API_TAG="0.2.172"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.133"

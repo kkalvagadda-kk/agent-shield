@@ -249,6 +249,37 @@ def create_app() -> FastAPI:
         """Returns 200 as long as the process is alive."""
         return {"status": "ok", "service": "registry-api", "version": "0.1.0"}
 
+    @app.api_route(
+        "/echo",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        tags=["system"],
+        summary="Request echo (in-cluster test target)",
+    )
+    @app.api_route(
+        "/echo/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        tags=["system"],
+        summary="Request echo (in-cluster test target)",
+    )
+    async def echo(request: Request, path: str = "") -> dict[str, Any]:
+        """Reflect the request back — an in-cluster replacement for httpbin.org so
+        demo/test HTTP tools never depend on an external service that can go down.
+        Always 200; unauthenticated (like /health). Reflects method/path/query/body
+        only — NOT request headers — so no Authorization/cookies are echoed back."""
+        body: Any = None
+        try:
+            body = await request.json()
+        except Exception:
+            raw = (await request.body()).decode("utf-8", "replace")
+            body = raw or None
+        return {
+            "ok": True,
+            "method": request.method,
+            "path": "/" + path if path else str(request.url.path),
+            "args": dict(request.query_params),
+            "json": body,
+        }
+
     @app.get(
         "/ready",
         tags=["system"],
