@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Loader2, ShieldAlert, X } from "lucide-react";
+import { ShieldAlert, X } from "lucide-react";
 import { toast } from "sonner";
 import { SessionApproval, decideSandboxApproval } from "../../api/registryApi";
+import ApprovalCard from "../approvals/ApprovalCard";
 
 interface Props {
   /** Pending approvals for the current conversation (session). */
@@ -79,60 +80,20 @@ export default function ConversationApprovalPanel({
             data-testid="sandbox-approval-row"
             className="rounded-lg border border-amber-200 bg-white p-3"
           >
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm font-medium text-slate-800">
-                {a.tool}
-              </span>
-              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-100 text-red-700 uppercase">
-                {a.risk} risk
-              </span>
-            </div>
-            {/* WHO — who requested the call */}
-            {a.requested_by && (
-              <p className="mt-1 text-[11px] text-slate-500">
-                Requested by <span className="font-medium text-slate-600">{a.requested_by}</span>
-                {a.requested_by_team && ` · ${a.requested_by_team}`}
-              </p>
-            )}
-            {/* WHY — the LLM's stated reason (hidden when empty) */}
-            {a.reasoning && (
-              <p
-                className="mt-2 text-xs italic text-slate-600 border-l-2 border-amber-300 pl-2"
-                data-testid="sandbox-approval-reasoning"
-              >
-                {a.reasoning}
-              </p>
-            )}
-            {/* WHAT — the exact arguments the tool will run with */}
-            {a.args && Object.keys(a.args).length > 0 && (
-              <pre className="mt-2 p-2 rounded bg-slate-50 text-xs text-slate-700 overflow-x-auto max-w-full">
-                {JSON.stringify(a.args, null, 2)}
-              </pre>
-            )}
-            <div className="flex gap-2 mt-3">
-              <button
-                onClick={() => decide(a, "approved")}
-                disabled={deciding === a.approval_id}
-                className="flex-1 px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-md hover:bg-green-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-1"
-              >
-                {deciding === a.approval_id ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : (
-                  "Approve"
-                )}
-              </button>
-              <button
-                onClick={() => decide(a, "denied")}
-                disabled={deciding === a.approval_id}
-                className="flex-1 px-3 py-1.5 bg-red-600 text-white text-xs font-medium rounded-md hover:bg-red-700 disabled:opacity-50 transition-colors inline-flex items-center justify-center gap-1"
-              >
-                {deciding === a.approval_id ? (
-                  <Loader2 size={12} className="animate-spin" />
-                ) : (
-                  "Deny"
-                )}
-              </button>
-            </div>
+            <ApprovalCard
+              data={{
+                toolName: a.tool,
+                riskLevel: a.risk,
+                args: a.args,
+                reasoning: a.reasoning,
+                requestedBy: a.requested_by,
+                requestedByTeam: a.requested_by_team,
+              }}
+              deciding={deciding === a.approval_id}
+              reasoningTestId="sandbox-approval-reasoning"
+              onApprove={() => decide(a, "approved")}
+              onDeny={() => decide(a, "denied")}
+            />
           </div>
         ))}
       </div>

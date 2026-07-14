@@ -10,7 +10,7 @@ vi.mock("../api/registryApi", () => ({
   listProviders: vi.fn(),
   listTools: vi.fn(),
 }));
-vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 import { createAgent, createTrigger, listProviders, listTools } from "../api/registryApi";
 
@@ -21,7 +21,9 @@ async function openNoCode() {
   await userEvent.click(screen.getByRole("button", { name: /no-code/i }));
 }
 
-describe("CreateAgentPage — 4-way type picker", () => {
+// The wizard now exposes three INDEPENDENT axes (R1): Shape · Trigger · Class — not the
+// old flattened 4-way "Agent type" picker.
+describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
   beforeEach(() => {
     mock(listProviders).mockResolvedValue({ items: [], total: 0 });
     mock(listTools).mockResolvedValue({ items: [], total: 0 });
@@ -29,38 +31,57 @@ describe("CreateAgentPage — 4-way type picker", () => {
     mock(createTrigger).mockResolvedValue({ token: "t", webhook_url: "https://x/hooks/wiz-agent/t" });
   });
 
-  it("shows all four agent-type cards on the no-code form", async () => {
+  it("renders all three selectors: shape radios, trigger checkboxes, class radios", async () => {
     await openNoCode();
-    expect(await screen.findByRole("button", { name: /Reactive/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Durable/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Scheduled/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Event-Driven/i })).toBeInTheDocument();
+    // Shape (radiogroup)
+    expect(await screen.findByRole("radio", { name: /Ephemeral/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Durable/i })).toBeInTheDocument();
+    // Trigger (checkboxes)
+    expect(screen.getByRole("checkbox", { name: /Schedule/i })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: /Webhook/i })).toBeInTheDocument();
+    // Class (radiogroup)
+    expect(screen.getByRole("radio", { name: /User-delegated/i })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Daemon/i })).toBeInTheDocument();
   });
 
-  it("reveals cron/timezone fields only when Scheduled is picked", async () => {
+  it("checking Schedule reveals cron fields AND auto-defaults class to daemon", async () => {
     await openNoCode();
-    // not shown for the default (reactive)
     expect(screen.queryByPlaceholderText("0 9 * * 1")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: /Scheduled/i }));
+    expect(screen.getByRole("radio", { name: /User-delegated/i })).toHaveAttribute("aria-checked", "true");
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
     expect(screen.getByPlaceholderText("0 9 * * 1")).toBeInTheDocument();
+    // class auto-defaulted to daemon (trigger present, user hasn't overridden)
+    expect(screen.getByRole("radio", { name: /Daemon/i })).toHaveAttribute("aria-checked", "true");
   });
 
-  it("reveals filter-condition fields when Event-Driven is picked", async () => {
+  it("checking Webhook reveals filter conditions AND auto-defaults class to daemon", async () => {
     await openNoCode();
-    await userEvent.click(screen.getByRole("button", { name: /Event-Driven/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Webhook/i }));
     expect(screen.getByText(/Filter conditions/i)).toBeInTheDocument();
     expect(screen.getByPlaceholderText("event_type")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Daemon/i })).toHaveAttribute("aria-checked", "true");
   });
 
-  it("submitting a Scheduled agent calls createAgent then createTrigger(schedule)", async () => {
+  it("Durable shape with no trigger posts execution_shape=durable + agent_class=user_delegated, no trigger", async () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
-    await userEvent.click(screen.getByRole("button", { name: /Scheduled/i }));
+    await userEvent.click(screen.getByRole("radio", { name: /Durable/i }));
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
-
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     expect(mock(createAgent).mock.calls[0][0]).toEqual(
-      expect.objectContaining({ execution_shape: "reactive", agent_type: "declarative" })
+      expect.objectContaining({ execution_shape: "durable", agent_class: "user_delegated" })
+    );
+    expect(createTrigger).not.toHaveBeenCalled();
+  });
+
+  it("submitting a Scheduled agent posts agent_class=daemon then createTrigger(schedule)", async () => {
+    await openNoCode();
+    await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
+    await waitFor(() => expect(createAgent).toHaveBeenCalled());
+    expect(mock(createAgent).mock.calls[0][0]).toEqual(
+      expect.objectContaining({ execution_shape: "reactive", agent_class: "daemon", agent_type: "declarative" })
     );
     await waitFor(() =>
       expect(createTrigger).toHaveBeenCalledWith(
@@ -70,23 +91,46 @@ describe("CreateAgentPage — 4-way type picker", () => {
     );
   });
 
-  it("swaps the instructions template when the agent type changes", async () => {
+  it("durable + scheduled together is authorable (the cube cell the 4-way picker blocked)", async () => {
+    await openNoCode();
+    await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
+    await userEvent.click(screen.getByRole("radio", { name: /Durable/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
+    await waitFor(() => expect(createAgent).toHaveBeenCalled());
+    expect(mock(createAgent).mock.calls[0][0]).toEqual(
+      expect.objectContaining({ execution_shape: "durable", agent_class: "daemon" })
+    );
+    expect(createTrigger).toHaveBeenCalledWith("wiz-agent", expect.objectContaining({ trigger_type: "schedule" }));
+  });
+
+  it("a manual class override survives the trigger auto-default", async () => {
+    await openNoCode();
+    await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i })); // auto → daemon
+    await userEvent.click(screen.getByRole("radio", { name: /User-delegated/i })); // user overrides back
+    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
+    await waitFor(() => expect(createAgent).toHaveBeenCalled());
+    expect(mock(createAgent).mock.calls[0][0]).toEqual(
+      expect.objectContaining({ agent_class: "user_delegated" })
+    );
+  });
+
+  it("swaps the instructions template as triggers change", async () => {
     await openNoCode();
     const hasArea = (marker: string) =>
       screen.getAllByRole("textbox").some((a) => (a as HTMLTextAreaElement).value.includes(marker));
-    // default (reactive) template
     expect(hasArea("[Expert Profession/Role]")).toBe(true);
-    await userEvent.click(screen.getByRole("button", { name: /Scheduled/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
     expect(hasArea("You run on a schedule")).toBe(true);
-    await userEvent.click(screen.getByRole("button", { name: /Event-Driven/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /Webhook/i })); // webhook has priority
     expect(hasArea("triggered by an external")).toBe(true);
   });
 
   it("Scheduled sends the input_payload to createTrigger", async () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
-    await userEvent.click(screen.getByRole("button", { name: /Scheduled/i }));
-    // set a valid JSON job spec via the payload textarea
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
     fireEvent.change(screen.getByPlaceholderText(/weekly-report/), {
       target: { value: '{"task":"q3-report"}' },
     });
@@ -97,17 +141,5 @@ describe("CreateAgentPage — 4-way type picker", () => {
         expect.objectContaining({ trigger_type: "schedule", input_payload: { task: "q3-report" } })
       )
     );
-  });
-
-  it("Durable maps to execution_shape=durable with no trigger", async () => {
-    await openNoCode();
-    await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
-    await userEvent.click(screen.getByRole("button", { name: /Durable/i }));
-    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
-    await waitFor(() => expect(createAgent).toHaveBeenCalled());
-    expect(mock(createAgent).mock.calls[0][0]).toEqual(
-      expect.objectContaining({ execution_shape: "durable" })
-    );
-    expect(createTrigger).not.toHaveBeenCalled();
   });
 });

@@ -1,18 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle, Loader2, Shield, XCircle } from "lucide-react";
+import { CheckCircle, Loader2, Shield } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { listPendingApprovals, decideApproval, ApprovalInboxItem } from "../api/registryApi";
-
-const RISK_BADGE: Record<string, string> = {
-  critical: "bg-red-100 text-red-700",
-  high: "bg-amber-100 text-amber-700",
-};
+import ApprovalCard from "../components/approvals/ApprovalCard";
 
 export default function ApprovalsInboxPage() {
   const qc = useQueryClient();
   const [teamFilter, setTeamFilter] = useState<string>("");
 
+  // The list is already scoped server-side to what this reviewer may decide
+  // (ApprovalAuthority + admin roles in approvals.list_approvals) — so every row
+  // shown here is one the caller has authority over. The inbox reflects that
+  // authority; it does not re-check it client-side (no rebuild — WS-1 T7).
   const { data: approvals, isLoading } = useQuery({
     queryKey: ["pending-approvals", teamFilter],
     queryFn: () => listPendingApprovals(teamFilter || undefined),
@@ -72,52 +72,22 @@ export default function ApprovalsInboxPage() {
       ) : (
         <div className="space-y-3">
           {approvals.map((item: ApprovalInboxItem) => (
-            <div key={item.id} className="card p-4 flex items-start justify-between">
-              <div className="flex-1">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="font-mono text-sm font-semibold text-slate-800">
-                    {item.agent_name}
-                  </span>
-                  <span className={`badge text-xs ${RISK_BADGE[item.risk_level] || "bg-slate-100 text-slate-600"}`}>
-                    {item.risk_level}
-                  </span>
-                  {item.step_name && (
-                    <span className="text-xs text-slate-400">Step: {item.step_name}</span>
-                  )}
-                </div>
-                <p className="text-sm text-slate-600 mb-1">
-                  <span className="font-medium">Tool:</span>{" "}
-                  <code className="text-xs bg-slate-50 px-1 rounded">{item.tool_name}</code>
-                </p>
-                {item.tool_args && Object.keys(item.tool_args).length > 0 && (
-                  <pre className="text-xs text-slate-500 bg-slate-50 p-2 rounded mt-1 max-h-20 overflow-auto">
-                    {JSON.stringify(item.tool_args, null, 2)}
-                  </pre>
-                )}
-                <div className="flex items-center gap-3 mt-2 text-xs text-slate-400">
-                  <span>Team: {item.team}</span>
-                  <span>SLA: {formatSla(item.sla_remaining_seconds)}</span>
-                  <span>{new Date(item.created_at).toLocaleString()}</span>
-                </div>
-              </div>
-              <div className="flex gap-2 ml-4 shrink-0">
-                <button
-                  onClick={() => decideMutation.mutate({ id: item.id, decision: "approved", version: item.version })}
-                  disabled={decideMutation.isPending}
-                  className="btn-primary text-xs py-1 px-3"
-                >
-                  <CheckCircle size={12} />
-                  Approve
-                </button>
-                <button
-                  onClick={() => decideMutation.mutate({ id: item.id, decision: "rejected", version: item.version })}
-                  disabled={decideMutation.isPending}
-                  className="btn-secondary text-xs py-1 px-3 text-red-600 hover:text-red-700"
-                >
-                  <XCircle size={12} />
-                  Deny
-                </button>
-              </div>
+            <div key={item.id} className="card p-4">
+              <ApprovalCard
+                data={{
+                  toolName: item.tool_name,
+                  riskLevel: item.risk_level,
+                  args: item.tool_args,
+                  agentName: item.agent_name,
+                  stepName: item.step_name,
+                  team: item.team,
+                  slaLabel: formatSla(item.sla_remaining_seconds),
+                  createdAt: item.created_at,
+                }}
+                deciding={decideMutation.isPending}
+                onApprove={() => decideMutation.mutate({ id: item.id, decision: "approved", version: item.version })}
+                onDeny={() => decideMutation.mutate({ id: item.id, decision: "rejected", version: item.version })}
+              />
             </div>
           ))}
         </div>

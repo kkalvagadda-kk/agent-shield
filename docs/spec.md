@@ -15,6 +15,7 @@ This document is the high-level overview. Detailed implementation specs live in 
 | [playground-spec.md](design/playground-spec.md) | Interactive test console, sandbox mode (grant-bypass), per-run trace panel, LLM-as-Judge, dataset curation, eval runner, version comparison, Playground HITL (self-approval), Playground namespace | Draft |
 | [observability-architecture.md](design/observability-architecture.md) | Canonical trace/span/score data model, the standard integration pattern every new run-creating/agent-executing code path must follow (trace creation → propagation → completion → span emission), env var contract, frontend contract, component responsibility map, implementation status matrix, anti-patterns from real bugs | Living reference |
 | [sandbox-production-parity-architecture.md](design/sandbox-production-parity-architecture.md) | The two deploy code paths (sandbox vs production reconciler), the `deployments`/`production_deployments` two-table split + the two-column FK pattern, the identity→OPA-bundle→governance data flow for both envs, the shared-helper anti-drift rule, and a per-pod parity matrix | Living reference |
+| [identity-propagation-architecture.md](design/identity-propagation-architecture.md) | End-user chain-of-custody across every hop (dispatch, agent-to-agent handoff, tool call, HITL pause/resume): the `RunContext` object, the user-delegated vs autonomous (service-driven) identity models, signed Run-Context Token propagation, durable identity anchor + resume re-hydration, verifiable Keycloak service identity for internal callers (closes the `/internal/*` self-asserted-`run_by` hole), OPA Gate 5, HITL requester identity | Proposed |
 
 Requirements that drove these specs:
 - `docs/authorization-model.md` — authorization requirements (REQ-AUTH, REQ-PUB, REQ-DEPLOY, REQ-RT, REQ-AUDIT)
@@ -168,7 +169,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-005a | P0 | De-anonymize PII placeholders in tool call args, gated by OPA allow_deanonymize policy per tool | Tool receives real PII value; LLM context retains placeholder; OPA deny blocks substitution |
 | FR-006 | P0 | Evaluate OPA policy before every tool call | Allow/deny within 5ms |
 | FR-007 | P0 | Route high-risk actions to approval queue; approval rights scoped per-agent/tool/skill | Agent pauses, record created, only authorized reviewers notified — see [authorization-model-spec.md](design/todo/authorization-model-spec.md) §7 |
-| FR-008 | P0 | Approve/reject via ops dashboard; Playground HITL self-approved by asset owner | Decision stored, agent resumes within 5s |
+| FR-008 | P0 | Approve/reject via ops dashboard; sandbox/playground HITL self-approved **inline** by asset owner | Decision stored, agent resumes within 5s. **Routing by context:** production approvals go to the authority-gated reviewer console (Catalog → Approvals); sandbox/playground approvals are self-service and decided **inline** on the surface that raised them — the chat HITL bar for single agents and the Workflow builder run panel for workflows (correlated by `thread_id`; the console decide `PATCH /approvals/{id}` triggers `_resume_and_advance`, so the workflow advances without a console trip). |
 | FR-009 | P0 | Auto-reject on timeout (30min default) | Agent resumes with denial, event logged |
 | FR-010 | P0 | Full trace capture for every request | Trace in Langfuse within 10s of completion |
 | FR-011 | P0 | Run eval suite in CI on every PR | PR blocked if assertions fail |
@@ -975,9 +976,12 @@ You write a natural-language condition on the edge (e.g., "the user mentioned a 
 
 A Monaco editor embedded in Studio allows users to write `agent.py` directly in the browser. A Kaniko build service compiles it into a Docker image without requiring a local toolchain. Users never need to clone the repo, install Python, or run Docker locally to create SDK agents. The platform handles the full build-push-deploy loop from a browser tab.
 
-### Execution-Mode Runtime + Memory (Phase 3 design, deferred)
+### Execution-Mode Runtime + Memory (Execution Models v2 — WS-0 in progress)
 
-Four first-class execution modes (reactive / durable / scheduled / event-driven) plus layered agent memory are designed but not yet implemented. Specs:
+Execution is a **three-axis cube**, not four flat "modes." `execution_shape` {reactive, durable} — *how a run behaves* — is orthogonal to its `trigger` {manual/api, schedule, webhook} — *what starts it* — and to its `agent_class` {user_delegated, daemon} — *whose authority the run carries*. **Reactive** (stored value `reactive`; shown in the UI as **Ephemeral** — the true antonym of Durable) = ephemeral, in-request, synchronous, no cross-time persistence; **durable** = checkpointed, parks + resumes across time, survives restart. "Scheduled" and "event-driven" are *triggers, not shapes* — a scheduled run can be reactive **or** durable. The cube applies to both executables (atomic **Agent** and composite **Workflow**, per Decision 22).
+
+`agent_class` is a **NOT NULL** column on **both** `agents` and `workflows` (migration `0058`, WS-0) with a CHECK constraint `IN ('user_delegated','daemon')` — an executable's authority can never be absent or garbage (the deploy-time coalesce is removed). The v2 rollout (WS-0 → WS-6) makes the full cube reachable, real, and honest end-to-end. Specs:
+- `docs/design/todo/execution-models-v2-e2e.md` — the v2 end-to-end plan (durable engine, daemon identity, trigger dispatch, webhook signing) — agents **and** workflows
 - `docs/design/execution-models-and-memory.md` — backend/data model (revised by Decisions 20–21)
 - `docs/design/playground-execution-modes.md` — pre-publish evaluate surface (all modes)
 - `docs/design/execution-modes-production.md` — production runtime + operations (all modes)
@@ -987,7 +991,7 @@ Scope decisions recorded 2026-07-03 (ship-simple-first, ideal deferred):
 - **Failure alerting** — launches **email-only**; multi-channel (Slack / webhook / PagerDuty), per-agent routing, and digests are future work. _Implemented (Phase 8):_ `agent_triggers.alert_email` + `alert_on_failure` columns; when an internal (scheduled/webhook) run completes `status=failed`, `alerting.dispatch_failure_alert` emails the configured recipient over SMTP (`SMTP_HOST/PORT/FROM` env; log-only fallback when `SMTP_HOST` unset). Configured per-trigger in Studio Settings.
 - **Webhook token rotation** — launches **manual** (button); automatic expiry + dual-token overlap during cutover is future work.
 - **System-run identity** — launches with a service-account name string as the run principal (scheduler/webhook runs); a dedicated managed Keycloak service principal with scoped RBAC + full audit is future work.
-- **Internal-auth on `/api/v1/internal/*`** — the cluster-internal run-start endpoint (called by scheduler + event-gateway) launches protected by **NetworkPolicy only** (Phase 9 decision 2026-07-05). Adding a shared internal token / mTLS between callers and registry-api — so a rogue in-namespace pod can't dispatch runs freely — is a tracked future improvement (see `docs/design/event-gateway-threat-model.md` T-8).
+- **Internal-auth on `/api/v1/internal/*`** — the cluster-internal run-start endpoint (called by scheduler + event-gateway) launches protected by **NetworkPolicy only** (Phase 9 decision 2026-07-05). Adding a shared internal token / mTLS between callers and registry-api — so a rogue in-namespace pod can't dispatch runs freely — is a tracked future improvement (see `docs/design/event-gateway-threat-model.md` T-8). **Design proposed:** [`identity-propagation-architecture.md`](design/identity-propagation-architecture.md) §4.5 resolves this with a verified Keycloak service-account JWT (`is_trusted_service`) that also stops the endpoint trusting a body-supplied `run_by`.
 
 Also resolved 2026-07-03 (v1, not deferred): reviewer approval view is **anonymized** (PII never shown to reviewer/LLM/agents); scheduler runs **2 replicas + distributed lock**; long-running run timeout is a **configurable** per-agent setting.
 

@@ -7,6 +7,7 @@ import { deleteAgentVersion, getAgent, getDeployments, listProviders, listTools,
 import DeployModal from "../components/DeployModal";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
 import SettingsTab from "../components/agent-detail/SettingsTab";
+import { shapeLabel } from "../lib/utils";
 
 const PUBLISH_STATUS: Record<string, { label: string; cls: string }> = {
   private:        { label: "Private",        cls: "bg-slate-100 text-slate-600" },
@@ -126,7 +127,7 @@ export default function AgentDetailPage() {
               <span className={`badge text-xs ${os.cls}`}>{os.label}</span>
               <span className={`badge text-xs ${ps.cls}`}>{ps.label}</span>
               <span className={`badge text-xs ${agent.execution_shape === "durable" ? "bg-purple-100 text-purple-700" : "bg-sky-100 text-sky-700"}`}>
-                {agent.execution_shape === "durable" ? "Durable" : "Reactive"}
+                {shapeLabel(agent.execution_shape)}
               </span>
             </div>
           </div>
@@ -429,6 +430,8 @@ function SettingsContent({ agent }: { agent: Agent }) {
   const [description, setDescription] = useState(agent.description ?? "");
   const [agentStatus, setAgentStatus] = useState(agent.status);
   const [execShape, setExecShape] = useState<"reactive" | "durable">(agent.execution_shape);
+  const currentClass: "user_delegated" | "daemon" = agent.agent_class === "daemon" ? "daemon" : "user_delegated";
+  const [agentClass, setAgentClass] = useState<"user_delegated" | "daemon">(currentClass);
   const [instructions, setInstructions] = useState((meta.instructions as string) ?? "");
   const [selectedProvider, setSelectedProvider] = useState((meta.llm_provider_id as string) ?? "");
   const [selectedTools, setSelectedTools] = useState<string[]>((meta.tools as string[]) ?? []);
@@ -450,6 +453,7 @@ function SettingsContent({ agent }: { agent: Agent }) {
         description: description.trim() || undefined,
         status: agentStatus !== agent.status ? agentStatus : undefined,
         execution_shape: execShape !== agent.execution_shape ? execShape : undefined,
+        agent_class: agentClass !== currentClass ? agentClass : undefined,
         metadata: newMeta,
       });
     },
@@ -521,8 +525,20 @@ function SettingsContent({ agent }: { agent: Agent }) {
             onChange={(e) => { setExecShape(e.target.value as "reactive" | "durable"); markDirty(); }}
             className="mt-1 w-full text-sm border border-slate-300 rounded px-2 py-1.5"
           >
-            <option value="reactive">Reactive</option>
+            <option value="reactive">Ephemeral</option>
             <option value="durable">Durable</option>
+          </select>
+        </label>
+
+        <label className="block">
+          <span className="text-xs text-slate-500 uppercase">Authority (class)</span>
+          <select
+            value={agentClass}
+            onChange={(e) => { setAgentClass(e.target.value as "user_delegated" | "daemon"); markDirty(); }}
+            className="mt-1 w-full text-sm border border-slate-300 rounded px-2 py-1.5"
+          >
+            <option value="user_delegated">User-delegated</option>
+            <option value="daemon">Daemon</option>
           </select>
         </label>
       </div>

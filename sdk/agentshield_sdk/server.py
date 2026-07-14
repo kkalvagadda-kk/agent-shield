@@ -7,6 +7,7 @@ Endpoints:
     GET  /metrics            — Prometheus metrics
     POST /chat               — sync invoke
     POST /chat/stream        — SSE streaming invoke
+    POST /run                — durable fire-and-forget run (real steps + HITL park)
     POST /resume/{thread_id} — resume a HITL-paused thread
 """
 from __future__ import annotations
@@ -95,6 +96,8 @@ class ResumeRequest(BaseModel):
     decision: str  # "approved" | "rejected"
     reviewer_id: str | None = None
     reason: str | None = None
+    run_id: str | None = None        # set for a durable /run resume (WS-1 T4)
+    callback_url: str | None = None  # durable resume re-drives the harness, posting steps here
 
 
 # --- Middleware: basic request timing ---
@@ -232,19 +235,84 @@ async def chat_stream(req: ChatRequest, request: Request):
     return EventSourceResponse(sse_generator())
 
 
+class DurableRunRequest(BaseModel):
+    run_id: str
+    callback_url: str
+    input_payload: dict[str, Any] = {}
+    agent_name: str | None = None  # ignored — this pod IS the agent (accepted for parity with the dispatch body)
+
+
+@app.post("/run")
+async def run_durable_endpoint(req: DurableRunRequest, request: Request):
+    """Durable fire-and-forget run (WS-1). Accepts the same body the registry-api
+    durable dispatch posts; step progress + terminal/park status arrive asynchronously
+    at ``callback_url``. Parity with the declarative-runner ``/run`` — both drive the
+    shared ``agentshield_sdk.durable.run_durable`` harness."""
+    if runner is None:
+        raise HTTPException(status_code=503, detail="Runner not initialised")
+    import asyncio
+    import json
+
+    message = req.input_payload.get("message") or json.dumps(req.input_payload)
+    trace_id = request.headers.get("x-agentshield-trace-id") or req.run_id
+    asyncio.create_task(_execute_durable_run_bg(message, req.run_id, req.callback_url, trace_id))
+    return {"status": "accepted", "run_id": req.run_id}
+
+
+async def _execute_durable_run_bg(message: str, run_id: str, callback_url: str, trace_id: str) -> None:
+    try:
+        result = await runner.run_durable(
+            message, run_id=run_id, callback_url=callback_url, trace_id=trace_id
+        )
+        logger.info("SDK durable run %s finished status=%s", run_id, result.status)
+    except SafetyBlockedError as exc:
+        SAFETY_BLOCKS.inc()
+        await _post_durable_fail(callback_url, "safety_scan_input", f"Safety block: {exc.reason}")
+    except Exception as exc:  # never leave the run hanging — fail loud
+        logger.exception("SDK durable run %s failed", run_id)
+        await _post_durable_fail(callback_url, "agent", str(exc)[:500])
+
+
+async def _post_durable_fail(callback_url: str, step_name: str, error_message: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(callback_url, json={
+                "step_number": 1, "step_name": step_name, "status": "failed",
+                "error_message": error_message, "run_completed": True,
+            })
+    except Exception as exc:
+        logger.warning("durable fail-post failed for run: %s", exc)
+
+
 @app.post("/resume/{thread_id}")
 async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
     trace_id = request.headers.get("x-agentshield-trace-id")
+    decision = {"decision": req.decision, "reviewer_id": req.reviewer_id, "reason": req.reason}
+
+    # Durable /run resume (callback_url present): re-drive the harness fire-and-forget so
+    # the remaining steps reach the callback. Chat resume (no callback_url) is unchanged.
+    if req.callback_url and req.run_id:
+        import asyncio
+        asyncio.create_task(_resume_durable_bg(thread_id, decision, req.run_id, req.callback_url, trace_id))
+        return {"status": "accepted", "thread_id": thread_id}
+
     try:
-        decision = {
-            "decision": req.decision,
-            "reviewer_id": req.reviewer_id,
-            "reason": req.reason,
-        }
         result = await runner.resume(thread_id, decision, trace_id=trace_id)
         return result
     except Exception as exc:
         logger.exception("Error resuming thread %s", thread_id)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+async def _resume_durable_bg(thread_id: str, decision: dict, run_id: str, callback_url: str,
+                             trace_id: str | None) -> None:
+    try:
+        result = await runner.resume_durable(
+            thread_id, decision, run_id=run_id, callback_url=callback_url, trace_id=trace_id,
+        )
+        logger.info("SDK durable resume %s finished status=%s", run_id, result.status)
+    except Exception as exc:  # fail loud — post a terminal failed step so the run never hangs
+        logger.exception("SDK durable resume %s failed", run_id)
+        await _post_durable_fail(callback_url, "agent", f"resume failed: {exc}"[:500])

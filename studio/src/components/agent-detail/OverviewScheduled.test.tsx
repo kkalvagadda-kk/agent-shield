@@ -35,6 +35,7 @@ const completedRun: AgentRunItem = {
   agent_name: "my-agent",
   status: "completed",
   context: "playground",
+  thread_id: null,
   trigger_type: "schedule",
   run_by: null,
   team: null,

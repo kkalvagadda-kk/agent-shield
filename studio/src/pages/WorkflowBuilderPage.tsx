@@ -44,9 +44,14 @@ import {
   triggerWorkflowRun,
   getWorkflowRunTree,
   publishWorkflow,
+  listPendingApprovals,
+  decideApproval,
   type WorkflowRunTree,
   type WorkflowOrchestration,
+  type ApprovalInboxItem,
 } from '../api/registryApi';
+import ApprovalCard from '../components/approvals/ApprovalCard';
+import { computeWorkflowLayout } from '../lib/workflowLayout';
 
 // ---------------------------------------------------------------------------
 // Node types (must be defined outside component to avoid React Flow re-renders)
@@ -103,6 +108,7 @@ export default function WorkflowBuilderPage() {
   const [saveName, setSaveName] = useState('');
   const [saveOrchestration, setSaveOrchestration] = useState<WorkflowOrchestration>('sequential');
   const [saveShape, setSaveShape] = useState<'reactive' | 'durable'>('reactive');
+  const [saveClass, setSaveClass] = useState<'user_delegated' | 'daemon'>('user_delegated');
   const [isSaving, setIsSaving] = useState(false);
   const qc = useQueryClient();
 
@@ -112,9 +118,16 @@ export default function WorkflowBuilderPage() {
   const [runTree, setRunTree] = useState<WorkflowRunTree | null>(null);
   const [isPolling, setIsPolling] = useState(false);
   const [viewTraceId, setViewTraceId] = useState<string | null>(null);
+  // Self-service (sandbox/playground) approvals surfaced inline in the run
+  // panel, keyed for correlation by the paused member's thread_id. Production
+  // approvals are deliberately NOT fetched here — they route to the reviewer
+  // console (Catalog → Approvals), which is authority-gated.
+  const [pendingApprovals, setPendingApprovals] = useState<ApprovalInboxItem[]>([]);
+  const [decidingId, setDecidingId] = useState<string | null>(null);
 
   const pollRef = useRef<number | null>(null);
   const pollCountRef = useRef(0);
+  const runIdRef = useRef<string | null>(null);
 
   // ---------------------------------------------------------------------------
   // Load existing workflow
@@ -150,10 +163,16 @@ export default function WorkflowBuilderPage() {
       store.markCompositeWorkflowSaved(workflow.id, workflow.name, workflow.team);
       setCurrentTeam(workflow.team);
       setSaveOrchestration(workflow.orchestration);
+      setSaveShape(workflow.execution_shape);
+      setSaveClass(workflow.agent_class);
+      // Layered layout keyed on the edge graph so a conditional FORK (one node
+      // with multiple outgoing edges) fans its targets across rows/columns
+      // instead of collapsing onto a single row that reads as a linear chain.
+      const layout = computeWorkflowLayout(workflow.members, workflow.edges ?? []);
       const loadedNodes = workflow.members.map((m, idx) => ({
         id: m.agent_id,
         type: 'workflow_member' as const,
-        position: { x: (m.position ?? idx + 1) * 240, y: 150 },
+        position: layout[m.agent_id] ?? { x: (m.position ?? idx + 1) * 240, y: 150 },
         data: {
           agent_id: m.agent_id,
           agent_name: m.agent_name ?? m.agent_id,
@@ -269,6 +288,7 @@ export default function WorkflowBuilderPage() {
         team: currentTeam,
         orchestration: saveOrchestration,
         execution_shape: saveShape,
+        agent_class: saveClass,
       });
       for (let i = 0; i < store.nodes.length; i++) {
         const node = store.nodes[i];
@@ -281,6 +301,9 @@ export default function WorkflowBuilderPage() {
         });
       }
       await persistEdges(wf.id);
+      // Members now exist — re-fetch to surface any save-time approval-gate warnings (S2).
+      const saved = await getCompositeWorkflow(wf.id);
+      saved.warnings?.forEach((w) => toast.warning(w));
       store.markCompositeWorkflowSaved(wf.id, wf.name, wf.team);
       setShowSaveModal(false);
       setSaveName('');
@@ -311,10 +334,11 @@ export default function WorkflowBuilderPage() {
     if (!compositeWorkflowId) return;
     setIsSaving(true);
     try {
-      // Keep orchestration mode in sync with the toolbar selection.
-      if (workflow && workflow.orchestration !== saveOrchestration) {
-        await updateCompositeWorkflowApi(compositeWorkflowId, { orchestration: saveOrchestration });
-      }
+      // Persist orchestration + class (idempotent PATCH).
+      await updateCompositeWorkflowApi(compositeWorkflowId, {
+        orchestration: saveOrchestration,
+        agent_class: saveClass,
+      });
       // Replace members: remove existing, re-add current canvas nodes (with role/routing).
       for (const m of workflow?.members ?? []) {
         await removeWorkflowMember(compositeWorkflowId, m.agent_id);
@@ -334,6 +358,10 @@ export default function WorkflowBuilderPage() {
         await removeWorkflowEdge(compositeWorkflowId, e.id);
       }
       await persistEdges(compositeWorkflowId);
+      // Members + edges now persisted — re-fetch so warnings (approval-gate S2 +
+      // multiple-start-node) reflect the SAVED graph, not the pre-edit state.
+      const saved = await getCompositeWorkflow(compositeWorkflowId);
+      saved.warnings?.forEach((w) => toast.warning(w));
       toast.success('Workflow saved');
       void refetchWorkflow();
     } catch (err) {
@@ -354,39 +382,103 @@ export default function WorkflowBuilderPage() {
     setIsPolling(false);
   };
 
+  // Pull the self-service (sandbox/playground) approvals so the run panel can
+  // render an inline decision card for a parked member. Production approvals
+  // are intentionally excluded — they belong to the authority-gated console.
+  const refreshPendingApprovals = async () => {
+    try {
+      const [sandbox, playground] = await Promise.all([
+        listPendingApprovals(undefined, 'sandbox'),
+        listPendingApprovals(undefined, 'playground'),
+      ]);
+      setPendingApprovals([...sandbox, ...playground]);
+    } catch {
+      // leave the last-known set in place; the next poll retries
+    }
+  };
+
+  // Single poll loop, reused by the initial run trigger AND the post-decision
+  // resume (so approving a parked step advances the tree even if the initial
+  // poll window had lapsed). Awaiting-approval is NOT a terminal state, so the
+  // loop keeps running through the pause and picks up the resumed run.
+  const startPolling = (runId: string) => {
+    if (!compositeWorkflowId) return;
+    runIdRef.current = runId;
+    if (pollRef.current !== null) clearInterval(pollRef.current);
+    setIsPolling(true);
+    pollCountRef.current = 0;
+    pollRef.current = window.setInterval(async () => {
+      pollCountRef.current++;
+      try {
+        const tree = await getWorkflowRunTree(compositeWorkflowId, runId);
+        setRunTree(tree);
+        // Only self-service (sandbox/playground) runs surface inline approvals.
+        // A production run's gate routes to the reviewer console, so we don't
+        // even fetch here.
+        if (
+          tree.parent.status === 'awaiting_approval' &&
+          tree.parent.context !== 'production'
+        ) {
+          await refreshPendingApprovals();
+        } else {
+          setPendingApprovals([]);
+        }
+        const done =
+          tree.parent.status === 'completed' ||
+          tree.parent.status === 'failed' ||
+          tree.parent.status === 'cancelled';
+        if (done || pollCountRef.current >= 90) {
+          stopPolling();
+        }
+      } catch {
+        if (pollCountRef.current >= 90) {
+          stopPolling();
+        }
+      }
+    }, 3000);
+  };
+
+  // Approve/deny a parked member inline. Uses the console decide endpoint
+  // (PATCH /approvals/{id}) — NOT the playground decide — because only that
+  // path triggers `_resume_and_advance`, which re-enters the workflow member
+  // and advances the run. It is self-service for sandbox/playground contexts
+  // (the backend gates authority on production only).
+  const handleDecideApproval = async (
+    approval: ApprovalInboxItem,
+    decision: 'approved' | 'rejected',
+  ) => {
+    setDecidingId(approval.id);
+    try {
+      await decideApproval(approval.id, decision, approval.version);
+      setPendingApprovals((prev) => prev.filter((a) => a.id !== approval.id));
+      toast.success(
+        decision === 'approved' ? 'Approved — resuming workflow…' : 'Rejected',
+      );
+      // Re-arm polling if the window had lapsed, so the resumed tree surfaces.
+      if (!isPolling && runIdRef.current) {
+        startPolling(runIdRef.current);
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to submit decision',
+      );
+    } finally {
+      setDecidingId(null);
+    }
+  };
+
   const handleTriggerRun = async () => {
     if (!compositeWorkflowId) return;
     setIsTriggering(true);
     setRunTree(null);
+    setPendingApprovals([]);
     try {
       const result = await triggerWorkflowRun(compositeWorkflowId, {
         input_payload: { message: inputMessage },
         run_by: 'studio-user',
       });
       if (result.warning) toast.warning(result.warning);
-      setIsPolling(true);
-      pollCountRef.current = 0;
-      pollRef.current = window.setInterval(async () => {
-        pollCountRef.current++;
-        try {
-          const tree = await getWorkflowRunTree(
-            compositeWorkflowId,
-            result.run_id,
-          );
-          setRunTree(tree);
-          const done =
-            tree.parent.status === 'completed' ||
-            tree.parent.status === 'failed' ||
-            tree.parent.status === 'cancelled';
-          if (done || pollCountRef.current >= 90) {
-            stopPolling();
-          }
-        } catch {
-          if (pollCountRef.current >= 90) {
-            stopPolling();
-          }
-        }
-      }, 3000);
+      startPolling(result.run_id);
     } catch (err) {
       toast.error(`Failed to trigger run: ${String(err)}`);
     } finally {
@@ -639,6 +731,35 @@ export default function WorkflowBuilderPage() {
                       Polling for updates…
                     </div>
                   )}
+                  {/* Orchestrator-parked case: some modes raise the gate on the
+                      parent run itself (no separate member row). Matched by the
+                      parent thread_id; member-parked gates render per-step below. */}
+                  {runTree.parent.status === 'awaiting_approval' &&
+                    runTree.parent.context !== 'production' &&
+                    (() => {
+                      const approval = pendingApprovals.find(
+                        (a) => a.thread_id === runTree.parent.thread_id,
+                      );
+                      if (!approval) return null;
+                      return (
+                        <div
+                          data-testid="workflow-inline-approval"
+                          className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3"
+                        >
+                          <ApprovalCard
+                            data={{
+                              toolName: approval.tool_name,
+                              riskLevel: approval.risk_level,
+                              args: approval.tool_args,
+                              stepName: approval.step_name,
+                            }}
+                            deciding={decidingId === approval.id}
+                            onApprove={() => handleDecideApproval(approval, 'approved')}
+                            onDeny={() => handleDecideApproval(approval, 'rejected')}
+                          />
+                        </div>
+                      );
+                    })()}
                   {runTree.parent.output && !isPolling && (
                     <div className="mt-3">
                       <p className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Final Output</p>
@@ -691,6 +812,41 @@ export default function WorkflowBuilderPage() {
                               {child.status}
                             </span>
                           </div>
+                          {/* Inline self-service approval: a parked member in a
+                              sandbox/playground run is decided right here (no
+                              round-trip to the reviewer console). Production
+                              members carry context='production' and their
+                              approval is never fetched, so no card appears. */}
+                          {child.status === 'awaiting_approval' &&
+                            child.context !== 'production' &&
+                            (() => {
+                              const approval = pendingApprovals.find(
+                                (a) => a.thread_id === child.thread_id,
+                              );
+                              if (!approval) return null;
+                              return (
+                                <div
+                                  data-testid="workflow-inline-approval"
+                                  className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-3"
+                                >
+                                  <ApprovalCard
+                                    data={{
+                                      toolName: approval.tool_name,
+                                      riskLevel: approval.risk_level,
+                                      args: approval.tool_args,
+                                      stepName: approval.step_name,
+                                    }}
+                                    deciding={decidingId === approval.id}
+                                    onApprove={() =>
+                                      handleDecideApproval(approval, 'approved')
+                                    }
+                                    onDeny={() =>
+                                      handleDecideApproval(approval, 'rejected')
+                                    }
+                                  />
+                                </div>
+                              );
+                            })()}
                           {child.output && (
                             <pre className="mt-2 text-xs text-slate-600 bg-white border border-slate-200 rounded p-2 whitespace-pre-wrap max-h-40 overflow-y-auto">
                               {child.output}
@@ -811,8 +967,22 @@ export default function WorkflowBuilderPage() {
                   value={saveShape}
                   onChange={(e) => setSaveShape(e.target.value as 'reactive' | 'durable')}
                 >
-                  <option value="reactive">Reactive (fast, stateless request/response)</option>
+                  <option value="reactive">Ephemeral (fast, stateless request/response)</option>
                   <option value="durable">Durable (long-running, resumable, HITL)</option>
+                </select>
+              </div>
+
+              {/* Authority (class) */}
+              <div>
+                <label className="label" htmlFor="wfb-class">Authority (class)</label>
+                <select
+                  id="wfb-class"
+                  className="input"
+                  value={saveClass}
+                  onChange={(e) => setSaveClass(e.target.value as 'user_delegated' | 'daemon')}
+                >
+                  <option value="user_delegated">User-delegated (runs under the invoking user)</option>
+                  <option value="daemon">Daemon (service identity, no live user)</option>
                 </select>
               </div>
 

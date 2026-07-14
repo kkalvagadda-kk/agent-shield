@@ -32,6 +32,10 @@ AGENT_NAME = os.environ["AGENT_NAME"]
 EVAL_RUN_ID = os.environ["EVAL_RUN_ID"]
 AGENT_VERSION_ID = os.environ.get("AGENT_VERSION_ID")
 WORKFLOW_ID = os.environ.get("WORKFLOW_ID")
+# Eval v2 E-0: interpretation mode (resolved by the API from the executable ==
+# dataset.mode). E-0 wires the reactive scorer; the mode is passed through the
+# single /eval/score door so E-1+ can add mode branches without a new path.
+MODE = os.environ.get("MODE", "reactive")
 
 _JUDGE_POLL_TIMEOUT = float(os.environ.get("JUDGE_POLL_TIMEOUT", "45"))
 _JUDGE_POLL_INTERVAL = float(os.environ.get("JUDGE_POLL_INTERVAL", "3"))
@@ -85,30 +89,45 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
-async def _call_judge_api(
+async def _call_score_api(
     client: httpx.AsyncClient,
+    mode: str,
     input_text: str,
     response_text: str,
     expected_output: str,
-) -> tuple[float, str] | None:
-    """Call POST /playground/judge synchronously. Returns (score, reason) or None."""
+) -> tuple[float, dict[str, float], str] | None:
+    """Score one item via the single scoring door POST /playground/eval/score.
+
+    Returns (composite, dimension_scores, reason) or None when the door is
+    unavailable (non-200 / error / a mode whose scorer isn't wired yet → 501),
+    in which case the caller falls back to keyword matching. For `mode=reactive`
+    the composite is byte-identical to the legacy `judge_for_eval` score.
+    """
     try:
         resp = await client.post(
-            "/api/v1/playground/judge",
+            "/api/v1/playground/eval/score",
             json={
-                "input_message": input_text,
-                "response_text": response_text,
-                "expected_output": expected_output,
+                "mode": mode,
+                "item": {
+                    "input_message": input_text,
+                    "expected_output": expected_output,
+                },
+                "input": input_text,
+                "response": response_text,
             },
             headers={"X-User-Sub": "eval-runner"},
             timeout=40.0,
         )
         if resp.status_code == 200:
             data = resp.json()
-            return float(data["score"]), data.get("reason", "")
-        logger.warning("judge API returned %d: %s", resp.status_code, resp.text[:200])
+            dimension_scores = {
+                k: float(v) for k, v in (data.get("dimension_scores") or {}).items()
+            }
+            reason = (data.get("detail") or {}).get("response_reason", "")
+            return float(data["composite"]), dimension_scores, reason
+        logger.warning("eval/score API returned %d: %s", resp.status_code, resp.text[:200])
     except Exception as exc:
-        logger.warning("judge API call failed: %s", exc)
+        logger.warning("eval/score API call failed: %s", exc)
     return None
 
 
@@ -152,7 +171,10 @@ async def run_eval() -> None:
         results: list[dict[str, Any]] = []
 
         for idx, item in enumerate(items):
-            input_text = item.get("input", "")
+            # Compat shim: today's reactive datasets author `{input}`; the Eval
+            # v2 discriminated-union reactive variant carries `input_message`.
+            # Accept either key so old and new datasets both read.
+            input_text = item.get("input") or item.get("input_message") or ""
             expected = item.get("expected_output", "")
 
             # 2. Execute: workflow mode OR agent playground mode
@@ -270,15 +292,19 @@ async def run_eval() -> None:
                 if not response_text and error_msg:
                     response_text = f"[ERROR] {error_msg}"
 
-            # 4. Score: call eval-mode judge API directly, keyword fallback if unavailable
+            # 4. Score via the single scoring door (/eval/score); keyword
+            #    fallback ONLY when the judge/door is unavailable (never gated on
+            #    mode). `composite` is the gate input; `dimension_scores` are the
+            #    per-dimension evidence (reactive → {"response": composite}).
             score = 0.0
             passed = False
             reasoning = ""
+            dimension_scores: dict[str, float] | None = None
 
             if expected and response_text:
-                judge_result = await _call_judge_api(client, input_text, response_text, expected)
-                if judge_result is not None:
-                    score, reasoning = judge_result
+                score_result = await _call_score_api(client, MODE, input_text, response_text, expected)
+                if score_result is not None:
+                    score, dimension_scores, reasoning = score_result
                     passed = score >= _JUDGE_PASS_THRESHOLD
                     reasoning = f"llm-judge (eval-mode): {reasoning}"
                 else:
@@ -293,12 +319,15 @@ async def run_eval() -> None:
                     else:
                         passed, score = False, 0.0
                         reasoning = "no match (judge unavailable)"
+                    dimension_scores = {"response": score}
             elif expected and not response_text:
                 passed, score = False, 0.0
                 reasoning = "no response text"
+                dimension_scores = {"response": score}
             else:
                 passed, score = True, 1.0
                 reasoning = "no expected output — pass by default"
+                dimension_scores = {"response": score}
 
             results.append({"passed": passed, "score": score})
 
@@ -311,6 +340,7 @@ async def run_eval() -> None:
                 "judge_score": score,
                 "judge_reasoning": reasoning,
                 "passed": passed,
+                "dimension_scores": dimension_scores,
             }
             try:
                 rec_resp = await client.post(

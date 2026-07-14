@@ -33,7 +33,7 @@ from auth_middleware import get_optional_user
 from db import get_db
 from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
-from models import Agent, AgentRun, AgentTrigger, AgentVersion, CompositeWorkflow, WorkflowEdge, WorkflowMember
+from models import Agent, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
     AgentRunResponse,
     AgentTriggerCreate,
@@ -76,13 +76,104 @@ async def _member_count(db: AsyncSession, workflow_id: uuid.UUID) -> int:
     )
 
 
-def _to_response(wf: CompositeWorkflow, member_count: int) -> CompositeWorkflowResponse:
+def _to_response(
+    wf: CompositeWorkflow, member_count: int, warnings: list[str] | None = None
+) -> CompositeWorkflowResponse:
     return CompositeWorkflowResponse(
         id=wf.id, name=wf.name, team=wf.team, description=wf.description,
         execution_shape=wf.execution_shape, orchestration=wf.orchestration,
+        agent_class=wf.agent_class,
         memory_enabled=wf.memory_enabled, status=wf.status, publish_status=wf.publish_status,
         created_by=wf.created_by, created_at=wf.created_at, updated_at=wf.updated_at,
-        member_count=member_count,
+        member_count=member_count, warnings=warnings or [],
+    )
+
+
+async def compute_reactive_approval_warnings(
+    db: AsyncSession, workflow_id: uuid.UUID, execution_shape: str
+) -> list[str]:
+    """Non-blocking author warning (best-effort half of S2): a reactive workflow with a
+    statically high-risk-tool member will FAIL at runtime if that tool trips an approval
+    gate (a reactive workflow can't durably park — the authoritative S2 seam is the runtime
+    fail-closed in workflow_orchestrator). Returns [] for durable workflows or when no
+    member carries a high-/critical-risk tool."""
+    if execution_shape != "reactive":
+        return []
+    rows = (await db.execute(
+        select(Agent.name)
+        .select_from(WorkflowMember)
+        .join(Agent, Agent.id == WorkflowMember.agent_id)
+        .join(AgentTool, AgentTool.agent_id == Agent.id)
+        .join(Tool, Tool.id == AgentTool.tool_id)
+        .where(
+            WorkflowMember.workflow_id == workflow_id,
+            Tool.risk_level.in_(["high", "critical"]),
+        )
+    )).all()
+    if not rows:
+        return []
+    members = sorted({name for (name,) in rows})
+    return [
+        f"Reactive workflow has high-risk-tool member(s): {', '.join(members)}. "
+        f"If a tool trips an approval gate this run will FAIL (reactive can't park). "
+        f"Set shape=durable to allow approvals."
+    ]
+
+
+async def compute_start_node_warnings(
+    db: AsyncSession, workflow_id: uuid.UUID, orchestration: str
+) -> list[str]:
+    """Non-blocking author warning: multiple start nodes are NOT supported.
+
+    The conditional/handoff engine walks a SINGLE cursor from ONE start node
+    (`workflow_orchestrator.find_start_node` = the first member, by position, that
+    is never an edge target). If the edge graph has more than one such root, only
+    that first root runs and every other root is silently unreachable. Surfaced at
+    save time so the author fixes the graph instead of hitting the silent orphan.
+
+    Scope: only conditional/handoff use `find_start_node`. Sequential runs members
+    in position order (no start-node concept) and supervisor routes dynamically by
+    role and ignores edges entirely (all members are indegree-0 there — that's
+    correct, not multiple starts) — so this check does not apply to those modes.
+    """
+    if orchestration not in ("conditional", "handoff"):
+        return []
+    member_rows = (await db.execute(
+        select(Agent.name)
+        .select_from(WorkflowMember)
+        .join(Agent, Agent.id == WorkflowMember.agent_id)
+        .where(WorkflowMember.workflow_id == workflow_id)
+        .order_by(WorkflowMember.position.nulls_last())
+    )).all()
+    if len(member_rows) <= 1:
+        return []
+    tgt = Agent.__table__.alias("tgt")
+    target_rows = (await db.execute(
+        select(tgt.c.name)
+        .select_from(WorkflowEdge)
+        .join(tgt, tgt.c.id == WorkflowEdge.target_agent_id)
+        .where(WorkflowEdge.workflow_id == workflow_id)
+    )).all()
+    targets = {name for (name,) in target_rows}
+    roots = [name for (name,) in member_rows if name not in targets]
+    if len(roots) <= 1:
+        return []
+    entry, orphans = roots[0], roots[1:]
+    return [
+        f"Multiple start nodes are not supported for a {orchestration} workflow: "
+        f"{', '.join(roots)} each have no incoming edge. Only '{entry}' will run — "
+        f"{', '.join(orphans)} would be unreachable. Give the graph a single entry "
+        f"(add an incoming edge to every node except one)."
+    ]
+
+
+async def _workflow_warnings(
+    db: AsyncSession, wf: CompositeWorkflow
+) -> list[str]:
+    """All save-time author warnings for a workflow (composed, non-blocking)."""
+    return (
+        await compute_reactive_approval_warnings(db, wf.id, wf.execution_shape)
+        + await compute_start_node_warnings(db, wf.id, wf.orchestration)
     )
 
 
@@ -127,6 +218,7 @@ async def create_workflow(
     wf = CompositeWorkflow(
         name=body.name, team=body.team, description=body.description,
         execution_shape=body.execution_shape, orchestration=body.orchestration,
+        agent_class=body.agent_class,
         memory_enabled=body.memory_enabled, created_by=caller,
     )
     db.add(wf)
@@ -160,7 +252,8 @@ async def get_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db
         .order_by(WorkflowEdge.position.nulls_last(), WorkflowEdge.created_at)
     )).scalars().all()
     edges = [WorkflowEdgeResponse.model_validate(e) for e in edge_rows]
-    base = _to_response(wf, len(members))
+    warnings = await _workflow_warnings(db, wf)
+    base = _to_response(wf, len(members), warnings)
     return CompositeWorkflowWithMembersResponse(**base.model_dump(), members=members, edges=edges)
 
 
@@ -174,7 +267,8 @@ async def update_workflow(
     wf.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(wf)
-    return _to_response(wf, await _member_count(db, wf.id))
+    warnings = await _workflow_warnings(db, wf)
+    return _to_response(wf, await _member_count(db, wf.id), warnings)
 
 
 @router.delete("/{workflow_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
@@ -331,10 +425,15 @@ async def start_workflow_run(
         ).order_by(WorkflowDeployment.deployed_at.desc()).limit(1)
     )).scalar_one_or_none()
 
+    # This endpoint is the INTERACTIVE builder test-run (production/triggered runs
+    # go through routers/internal.py:_start_workflow_run). So it runs in `playground`
+    # context → any high-risk member parks as a self-service approval decided INLINE
+    # in the builder run panel, not routed to the reviewer console. Children inherit
+    # this context in _run_step.
     parent = AgentRun(
         agent_name=wf.name,
         input=message[:4000] if message else None,
-        context="production",
+        context="playground",
         status="queued",
         trigger_type=body.trigger_type,
         run_by=body.run_by,
@@ -350,7 +449,7 @@ async def start_workflow_run(
         run_id=str(parent.id),
         agent_name=wf.name,
         user_id=body.run_by or "system",
-        context="production",
+        context="playground",
         input_message=message[:4000] if message else "",
     )
     if trace_id:

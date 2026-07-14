@@ -40,7 +40,7 @@ describe("ConversationApprovalPanel", () => {
     expect(screen.getByTestId("sandbox-approval-panel")).toBeInTheDocument();
     const row = screen.getByTestId("sandbox-approval-row");
     expect(row).toHaveTextContent("web_search");
-    expect(row).toHaveTextContent(/high risk/i);
+    expect(row).toHaveTextContent(/high/i);
     expect(row).toHaveTextContent("weather in Austin");
     expect(screen.getByText(/Approvals \(1\)/)).toBeInTheDocument();
   });

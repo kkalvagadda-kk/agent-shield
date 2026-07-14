@@ -70,6 +70,28 @@ Ignore markdown formatting (bold, italic) when comparing.
 
 Reply with ONLY a JSON object: {{"score": <float 0.0-1.0>, "reason": "<one sentence>"}}"""
 
+# Bias-mitigation guardrail appendix (LLM-as-judge best practice: neutralize
+# position/verbosity bias — research.md §LLM-as-judge). OFF by default so the
+# reactive response score stays byte-identical to the pre-E-0 `judge_for_eval`
+# (any prompt change moves a real LLM score). E-1+ can flip this on once it is
+# re-baselined against the real parity gate (suite-61). Do NOT enable it inside
+# E-0's behavior-neutral slice.
+_BIAS_GUARDRAILS = (
+    "\n\nScoring guardrails (do NOT let these bias the score):\n"
+    "- Judge substance against the criteria above, NOT response length: a concise "
+    "correct answer scores exactly the same as a verbose one.\n"
+    "- Ignore answer position, ordering, and markdown formatting; score only content."
+)
+
+
+def _bias_mitigation_enabled() -> bool:
+    """Whether to append the position/verbosity guardrails to judge prompts.
+
+    Default OFF — keeps E-0 reactive scoring byte-identical. Flip via
+    ``JUDGE_BIAS_MITIGATION=1`` (E-1+, once re-baselined).
+    """
+    return os.getenv("JUDGE_BIAS_MITIGATION", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 async def score_run(
     run_id: UUID,
@@ -103,6 +125,70 @@ async def score_run(
         trace_judge_score(trace_id=langfuse_trace_id, score=score, reason=reason)
 
 
+# ---------------------------------------------------------------------------
+# Scorer library (Eval v2 E-0). The single scoring door — POST /playground/eval/score
+# — calls these. Reactive uses `score_response` (reference-based) + `score_composite`
+# and MUST stay byte-identical to the pre-E-0 `judge_for_eval`. Mode-specific
+# scorers (trajectory / tool-call / side-effect / filter / member-path) are E-1+
+# and are deliberately NOT added here.
+# ---------------------------------------------------------------------------
+async def score_response(
+    input_text: str,
+    output_text: str,
+    expected_output: str | None = None,
+    rubric: str | None = None,
+    team: str = "platform",
+) -> tuple[float, str]:
+    """Response-correctness scorer (LLM-as-judge). The `response` dimension.
+
+    Reference-based when ``expected_output`` is present — this is the reactive
+    path and is byte-identical to the pre-E-0 ``judge_for_eval``: it builds the
+    same ``_EVAL_JUDGE_PROMPT`` and calls the same ``_call_judge`` path with the
+    same truncation. Falls back to the reference-free quality prompt when only a
+    rubric / no expected answer is available (rubric-scored items — NOT the
+    reactive parity path).
+
+    Returns ``(score, reason)`` in ``[0.0, 1.0]``.
+    """
+    if expected_output is not None:
+        prompt = _build_eval_prompt(input_text, output_text, expected_output)
+    else:
+        # Reference-free quality prompt. A rubric, when present, is appended so the
+        # judge scores against the author's criteria rather than generic quality.
+        prompt = _build_prompt(input_text, output_text)
+        if rubric:
+            prompt = f"{prompt}\n\nSCORING RUBRIC (apply strictly):\n{rubric[:800]}"
+    return await _call_judge(input_text, output_text, team, prompt=prompt)
+
+
+def score_composite(dimension_scores: dict, weights: dict | None = None) -> float:
+    """Reduce per-dimension scores to a single 0–1 composite (the reducer).
+
+    - **reactive** (a single ``response`` dimension) → composite == the response
+      score, byte-identical to today (the equal-weight mean of one element is that
+      element: ``sum([x]) / 1 == x`` exactly).
+    - ``weights is None`` → equal weight across all present dimensions.
+    - ``weights`` given → weighted mean over the dimensions that carry a weight; a
+      degenerate (all-zero / all-absent) weight set falls back to equal weight so
+      we never divide by zero.
+    """
+    if not dimension_scores:
+        return 0.0
+    if weights:
+        total_w = 0.0
+        acc = 0.0
+        for dim, score in dimension_scores.items():
+            w = weights.get(dim)
+            if w is None:
+                continue
+            acc += float(score) * float(w)
+            total_w += float(w)
+        if total_w > 0:
+            return acc / total_w
+    # equal-weight mean — also the weights-None and degenerate-weights fallback
+    return sum(float(s) for s in dimension_scores.values()) / len(dimension_scores)
+
+
 async def judge_for_eval(
     input_text: str,
     output_text: str,
@@ -111,11 +197,17 @@ async def judge_for_eval(
 ) -> tuple[float, str]:
     """Synchronous eval-mode judge. Returns (score, reason).
 
-    Uses _EVAL_JUDGE_PROMPT which includes the expected answer so the LLM
-    scores correctness, not general quality.
+    Thin back-compat wrapper: delegates to ``score_response`` (reference-based)
+    so every existing caller stays byte-identical while there is a single
+    scoring implementation. New callers should route through the ``/eval/score``
+    door → ``score_response`` directly.
     """
-    prompt = _build_eval_prompt(input_text, output_text, expected_output)
-    return await _call_judge(input_text, output_text, team, prompt=prompt)
+    return await score_response(
+        input_text=input_text,
+        output_text=output_text,
+        expected_output=expected_output,
+        team=team,
+    )
 
 
 async def _call_judge(
@@ -140,18 +232,20 @@ async def _call_judge(
 
 
 def _build_prompt(input_text: str, output_text: str) -> str:
-    return _JUDGE_PROMPT.format(
+    prompt = _JUDGE_PROMPT.format(
         input=input_text[:800],
         output=output_text[:800],
     )
+    return prompt + _BIAS_GUARDRAILS if _bias_mitigation_enabled() else prompt
 
 
 def _build_eval_prompt(input_text: str, output_text: str, expected_output: str) -> str:
-    return _EVAL_JUDGE_PROMPT.format(
+    prompt = _EVAL_JUDGE_PROMPT.format(
         input=input_text[:800],
         expected=expected_output[:800],
         output=output_text[:800],
     )
+    return prompt + _BIAS_GUARDRAILS if _bias_mitigation_enabled() else prompt
 
 
 def _parse_score(body: dict) -> tuple[float, str]:

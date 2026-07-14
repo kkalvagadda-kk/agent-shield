@@ -1,0 +1,10 @@
+# The Dockerfile installs deps itself (COPY package.json + npm install), so the
+# build context must NOT carry node_modules — copying it over the image's own
+# install is wasteful and, when it's a git-worktree symlink, fails the COPY.
+node_modules
+dist
+coverage
+.vite
+playwright-report
+test-results
+e2e/.auth

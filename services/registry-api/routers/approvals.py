@@ -53,13 +53,89 @@ async def _resume_and_advance(
     Best-effort throughout — never raises.
     """
     member_output, member_status = "", "failed"
+
+    # --- Durable WORKFLOW MEMBER (console decide) ------------------------------
+    # A durable member parks its CHILD AgentRun at id == thread_id (parent_run_id set,
+    # RunStep rows written). Resume it through the member pod at its ACTUAL deployment
+    # environment (the legacy path below hits a hardcoded `-production` pod that
+    # DNS-fails for a sandbox/playground member) and poll to terminal, then advance the
+    # parent workflow. Returns early so the legacy chat / top-level-durable paths stay
+    # unchanged (extend-not-alter).
     try:
-        pod_url = _agent_pod_url(agent_name, team)
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
-                f"{pod_url}/resume/{thread_id}",
-                json={"decision": decision, "reviewer_id": reviewer_id, "reason": reason},
+        _tid = uuid.UUID(thread_id)
+    except (ValueError, TypeError):
+        _tid = None
+    if _tid is not None:
+        async with AsyncSessionLocal() as s:
+            _child = (await s.execute(select(AgentRun).where(AgentRun.id == _tid))).scalar_one_or_none()
+            _is_member = _child is not None and _child.parent_run_id is not None
+            _parent_id = str(_child.parent_run_id) if _is_member else None
+            _has_steps = False
+            if _is_member:
+                from models import RunStep
+                _has_steps = (await s.execute(
+                    select(RunStep.id).where(RunStep.run_id == _tid).limit(1)
+                )).first() is not None
+        if _is_member and _has_steps:
+            from workflow_orchestrator import resume_durable_member, resume_orchestration
+            status_val, output, err = await resume_durable_member(
+                agent_name, team, str(_tid), decision, reviewer_id, reason,
             )
+            if status_val == "awaiting_approval":
+                logger.info("workflow member %s re-parked after resume (another gate)", _tid)
+                return
+            logger.info(
+                "workflow member %s resumed (status=%s, err=%s) — advancing parent %s",
+                _tid, status_val, err, _parent_id,
+            )
+            asyncio.create_task(resume_orchestration(_parent_id, output or "", status_val))
+            return
+
+    # Durable /run runs park their AgentRun at id == thread_id and write RunStep rows
+    # (chat runs do neither). If this thread IS such a run, resume it DURABLY — the pod
+    # re-drives the shared harness and posts the remaining steps to the step-update
+    # callback (a console decide is server-driven; no client stream is listening). The
+    # chat + workflow-member paths below are unchanged (extend-not-alter, WS-1 T4).
+    resume_body = {"decision": decision, "reviewer_id": reviewer_id, "reason": reason}
+    is_durable = False
+    try:
+        tid = uuid.UUID(thread_id)
+        from models import RunStep, PlaygroundRun
+        from durable_dispatch import registry_internal_base
+        async with AsyncSessionLocal() as s:
+            has_steps = (await s.execute(
+                select(RunStep.id).where(RunStep.run_id == tid).limit(1)
+            )).first() is not None
+            run = (await s.execute(select(AgentRun).where(AgentRun.id == tid))).scalar_one_or_none()
+            if run is not None and run.parent_run_id is None and has_steps:
+                # top-level durable AgentRun (production internal path).
+                resume_body["run_id"] = str(tid)
+                resume_body["callback_url"] = f"{registry_internal_base()}/api/v1/internal/runs/{tid}/step-update"
+                is_durable = True
+            elif run is None and has_steps:
+                # top-level durable PLAYGROUND run — its thread_id is a PlaygroundRun id,
+                # and its completion arrives at the PLAYGROUND step-update callback (bug #12:
+                # this path used to fall through to a synchronous chat resume against the
+                # -production pod, so single-agent durable HITL never resumed).
+                pr = (await s.execute(select(PlaygroundRun).where(PlaygroundRun.id == tid))).scalar_one_or_none()
+                if pr is not None:
+                    resume_body["run_id"] = str(tid)
+                    resume_body["callback_url"] = f"{registry_internal_base()}/api/v1/playground/runs/{tid}/step-update"
+                    is_durable = True
+    except Exception:
+        pass  # thread_id is not a durable run id → fall through to chat/workflow resume
+
+    try:
+        if is_durable:
+            # Hit the agent's ACTUAL deployed pod (env-aware) — the -production default
+            # DNS-fails for a sandbox/playground agent (same wrong-target as the workflow path).
+            from workflow_orchestrator import _resolve_agent_environment, _team_namespace
+            env = await _resolve_agent_environment(agent_name)
+            pod_url = f"http://{agent_name}-{env}.{_team_namespace(team)}.svc.cluster.local:8080"
+        else:
+            pod_url = _agent_pod_url(agent_name, team)
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(f"{pod_url}/resume/{thread_id}", json=resume_body)
         member_status = "completed" if resp.status_code == 200 else "failed"
         try:
             member_output = (resp.json() or {}).get("response", "") or ""
@@ -159,6 +235,15 @@ async def create_approval(
     # If a PENDING approval already exists for this exact (thread_id, tool, args),
     # return it instead of creating a phantom duplicate that would linger in the
     # panel. (Matches only pending — a decided/expired one shouldn't be reused.)
+    # Idempotency — the SAME interrupt must never mint two approvals. A durable
+    # HITL member re-runs its interrupt node ON RESUME (LangGraph replays the node
+    # from the top), so require_approval POSTs create_approval AGAIN with identical
+    # (thread_id, tool_name, tool_args). If we only matched status='pending' the
+    # original would already be 'approved'/'rejected' by then → we'd mint a DUPLICATE
+    # pending approval and the user gets "prompted twice". Match any ACTIVE status
+    # (pending/approved/rejected) so the re-post reuses the existing decision instead.
+    # thread_id is per-run, so this can only collide with the same interrupt, never a
+    # different run. (timed_out is excluded so a genuinely expired gate can re-open.)
     existing = (
         await db.execute(
             select(Approval)
@@ -166,7 +251,7 @@ async def create_approval(
                 Approval.thread_id == body.thread_id,
                 Approval.tool_name == body.tool_name,
                 Approval.tool_args == body.tool_args,
-                Approval.status == "pending",
+                Approval.status.in_(["pending", "approved", "rejected"]),
             )
             .order_by(Approval.created_at.desc())
             .limit(1)
@@ -174,8 +259,9 @@ async def create_approval(
     ).scalar_one_or_none()
     if existing is not None:
         logger.info(
-            "create_approval: reusing pending approval id=%s (idempotent re-post) thread=%s tool=%s",
-            existing.id, body.thread_id, body.tool_name,
+            "create_approval: reusing %s approval id=%s (idempotent re-post — likely a "
+            "resume replay) thread=%s tool=%s",
+            existing.status, existing.id, body.thread_id, body.tool_name,
         )
         return ApprovalResponse.model_validate(existing)
 
@@ -326,13 +412,18 @@ async def _derive_context(thread_id: str, fallback: str, db: AsyncSession) -> st
     """Decide an approval's context from the run it belongs to (Registry is the
     source of truth — the agent pod's static env var can't distinguish callers).
 
-    thread_id is the PlaygroundRun id. Rules:
-      - run.context == 'production'                          -> 'production'
-      - run on a deployment whose environment == 'sandbox'  -> 'sandbox'
-      - otherwise (Evaluate-tab playground run)              -> 'playground'
-      - no run found                                         -> fallback (pod's claim)
+    thread_id is the run id. It may be a PlaygroundRun (single-agent playground /
+    sandbox chat / Evaluate tab) OR an AgentRun (a WORKFLOW member — a durable
+    member sets thread_id = its child AgentRun.id). Rules:
+      - PlaygroundRun: run.context=='production' -> 'production';
+                       deployment.environment=='sandbox' -> 'sandbox';
+                       else -> 'playground'
+      - AgentRun (workflow member): inherit the member run's context
+                       ('production' or 'playground' — a builder/test run is
+                       'playground', so its high-risk member parks self-service)
+      - no run found  -> fallback (the pod's static claim)
     """
-    from models import Deployment, PlaygroundRun
+    from models import AgentRun, Deployment, PlaygroundRun
 
     try:
         run_id = uuid.UUID(thread_id)
@@ -346,14 +437,24 @@ async def _derive_context(thread_id: str, fallback: str, db: AsyncSession) -> st
             .where(PlaygroundRun.id == run_id)
         )
     ).first()
-    if row is None:
-        return fallback
-    run_context, environment = row
-    if run_context == "production":
-        return "production"
-    if environment == "sandbox":
-        return "sandbox"
-    return "playground"
+    if row is not None:
+        run_context, environment = row
+        if run_context == "production":
+            return "production"
+        if environment == "sandbox":
+            return "sandbox"
+        return "playground"
+
+    # Not a PlaygroundRun — a workflow member's thread_id is its AgentRun id.
+    # Inherit that run's context so a playground/test workflow run yields a
+    # self-service (inline) approval, not a console (production) one.
+    agent_run_context = (
+        await db.execute(select(AgentRun.context).where(AgentRun.id == run_id))
+    ).scalar_one_or_none()
+    if agent_run_context is not None:
+        return agent_run_context
+
+    return fallback
 
 
 async def _load_provenance(

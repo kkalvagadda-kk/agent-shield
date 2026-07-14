@@ -309,6 +309,9 @@ async def update_agent(
     if body.execution_shape is not None:
         agent.execution_shape = body.execution_shape
         changed = True
+    if body.agent_class is not None:
+        agent.agent_class = body.agent_class
+        changed = True
     if body.memory_enabled is not None:
         agent.memory_enabled = body.memory_enabled
         changed = True

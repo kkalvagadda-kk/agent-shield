@@ -4,7 +4,7 @@ import {
   ArrowLeft, Code2, Loader2, MousePointerClick, MessageSquare, ListChecks,
   Clock, Webhook, Copy, Check, Plus, Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -14,27 +14,42 @@ import { useAuth } from "../contexts/AuthContext";
 import { cn } from "../lib/utils";
 
 // ---------------------------------------------------------------------------
-// Agent type (4-way) — maps to execution_shape + an optional trigger
+// Three independent authoring axes (R1): Shape · Trigger · Class.
+// `AgentType` is kept ONLY as an instructions-template key (derivePrimaryType),
+// no longer the authoring axis — that flattening is exactly what R1 removes.
 // ---------------------------------------------------------------------------
 type AgentType = "reactive" | "durable" | "scheduled" | "event-driven";
+type Shape = "reactive" | "durable";
+type AgentClass = "user_delegated" | "daemon";
 
 interface FilterRow { field: string; op: string; value: string; }
 const FILTER_OPS = ["eq", "neq", "contains", "gt", "gte", "lt", "lte", "exists", "in"];
 
-const AGENT_TYPE_CARDS: { value: AgentType; label: string; hint: string; Icon: typeof MessageSquare }[] = [
-  { value: "reactive", label: "Reactive", hint: "Single-shot request → response.", Icon: MessageSquare },
-  { value: "durable", label: "Durable", hint: "Multi-step with checkpoints & approvals.", Icon: ListChecks },
-  { value: "scheduled", label: "Scheduled", hint: "Runs automatically on a cron schedule.", Icon: Clock },
-  { value: "event-driven", label: "Event-Driven", hint: "Triggered by inbound webhook events.", Icon: Webhook },
+const SHAPE_CARDS: { value: Shape; label: string; hint: string; Icon: typeof MessageSquare }[] = [
+  { value: "reactive", label: "Ephemeral", hint: "In-request, synchronous — no cross-time persistence.", Icon: MessageSquare },
+  { value: "durable", label: "Durable", hint: "Checkpointed — parks + resumes across time, survives restart.", Icon: ListChecks },
 ];
 
-function AgentTypePicker({ value, onChange }: { value: AgentType; onChange: (t: AgentType) => void }) {
+const CLASS_CARDS: { value: AgentClass; label: string; hint: string }[] = [
+  { value: "user_delegated", label: "User-delegated", hint: "Runs under the invoking user's authority." },
+  { value: "daemon", label: "Daemon", hint: "Runs under a service identity — no live user. Triggered jobs default here." },
+];
+
+function CardRadioGroup<T extends string>({
+  ariaLabel, cards, value, onChange,
+}: {
+  ariaLabel: string;
+  cards: { value: T; label: string; hint: string; Icon?: typeof MessageSquare }[];
+  value: T; onChange: (v: T) => void;
+}) {
   return (
-    <div className="grid grid-cols-2 gap-3">
-      {AGENT_TYPE_CARDS.map(({ value: v, label, hint, Icon }) => (
+    <div className="grid grid-cols-2 gap-3" role="radiogroup" aria-label={ariaLabel}>
+      {cards.map(({ value: v, label, hint, Icon }) => (
         <button
           key={v}
           type="button"
+          role="radio"
+          aria-checked={value === v}
           onClick={() => onChange(v)}
           className={cn(
             "text-left rounded-lg border p-3 transition-all",
@@ -42,12 +57,41 @@ function AgentTypePicker({ value, onChange }: { value: AgentType; onChange: (t: 
           )}
         >
           <div className="flex items-center gap-2 mb-1">
-            <Icon size={16} className="text-indigo-600" />
+            {Icon && <Icon size={16} className="text-indigo-600" />}
             <span className="font-medium text-slate-800 text-sm">{label}</span>
           </div>
           <p className="text-xs text-slate-500">{hint}</p>
         </button>
       ))}
+    </div>
+  );
+}
+
+function ShapePicker({ value, onChange }: { value: Shape; onChange: (s: Shape) => void }) {
+  return <CardRadioGroup ariaLabel="Execution shape" cards={SHAPE_CARDS} value={value} onChange={onChange} />;
+}
+
+function ClassPicker({ value, onChange }: { value: AgentClass; onChange: (c: AgentClass) => void }) {
+  return <CardRadioGroup ariaLabel="Authority class" cards={CLASS_CARDS} value={value} onChange={onChange} />;
+}
+
+function TriggerPicker({
+  hasSchedule, hasWebhook, toggleSchedule, toggleWebhook,
+}: {
+  hasSchedule: boolean; hasWebhook: boolean;
+  toggleSchedule: (v: boolean) => void; toggleWebhook: (v: boolean) => void;
+}) {
+  return (
+    <div className="space-y-2" role="group" aria-label="Triggers">
+      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+        <input type="checkbox" checked={hasSchedule} onChange={(e) => toggleSchedule(e.target.checked)} className="accent-indigo-600" />
+        <Clock size={14} className="text-indigo-600" /> Schedule (cron)
+      </label>
+      <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
+        <input type="checkbox" checked={hasWebhook} onChange={(e) => toggleWebhook(e.target.checked)} className="accent-indigo-600" />
+        <Webhook size={14} className="text-indigo-600" /> Webhook (inbound events)
+      </label>
+      <p className="text-xs text-slate-400">Manual / API invocation is always available. Add one or more automated triggers above.</p>
     </div>
   );
 }
@@ -156,19 +200,95 @@ function buildFilterConditions(rows: FilterRow[]): Record<string, unknown>[] {
     .map((r) => ({ field: r.field.trim(), op: r.op, value: r.value }));
 }
 
-// Create the agent, then its trigger (scheduled/event-driven). Returns the webhook URL if any.
+// Derive an instructions-template kind from the three axes (template selection only).
+function derivePrimaryType(shape: Shape, hasSchedule: boolean, hasWebhook: boolean): AgentType {
+  if (hasWebhook) return "event-driven";
+  if (hasSchedule) return "scheduled";
+  return shape === "durable" ? "durable" : "reactive";
+}
+
+interface AuthoringAxesState {
+  shape: Shape; setShape: (s: Shape) => void;
+  hasSchedule: boolean; toggleSchedule: (v: boolean) => void;
+  hasWebhook: boolean; toggleWebhook: (v: boolean) => void;
+  agentClass: AgentClass; onClassChange: (c: AgentClass) => void;
+  cron: string; setCron: (v: string) => void;
+  tz: string; setTz: (v: string) => void;
+  alertEmail: string; setAlertEmail: (v: string) => void;
+  filterRows: FilterRow[]; setFilterRows: (r: FilterRow[]) => void;
+  inputPayload: string; setInputPayload: (v: string) => void;
+}
+
+// Shape · Trigger · Class as three independent axes. Class auto-defaults from the
+// trigger choice (schedule/webhook → daemon) until the user overrides it.
+function useAuthoringAxes(): AuthoringAxesState {
+  const [shape, setShape] = useState<Shape>("reactive");
+  const [hasSchedule, setHasSchedule] = useState(false);
+  const [hasWebhook, setHasWebhook] = useState(false);
+  const [agentClass, setAgentClass] = useState<AgentClass>("user_delegated");
+  const [classTouched, setClassTouched] = useState(false);
+  const [cron, setCron] = useState("0 9 * * 1");
+  const [tz, setTz] = useState("UTC");
+  const [alertEmail, setAlertEmail] = useState("");
+  const [filterRows, setFilterRows] = useState<FilterRow[]>([{ field: "event_type", op: "eq", value: "" }]);
+  const [inputPayload, setInputPayload] = useState("");
+
+  const autoDefaultClass = (sched: boolean, web: boolean) => {
+    if (!classTouched) setAgentClass(sched || web ? "daemon" : "user_delegated");
+  };
+  const toggleSchedule = (v: boolean) => { setHasSchedule(v); autoDefaultClass(v, hasWebhook); };
+  const toggleWebhook = (v: boolean) => { setHasWebhook(v); autoDefaultClass(hasSchedule, v); };
+  const onClassChange = (c: AgentClass) => { setAgentClass(c); setClassTouched(true); };
+
+  return {
+    shape, setShape, hasSchedule, toggleSchedule, hasWebhook, toggleWebhook,
+    agentClass, onClassChange, cron, setCron, tz, setTz, alertEmail, setAlertEmail,
+    filterRows, setFilterRows, inputPayload, setInputPayload,
+  };
+}
+
+// Renders the three selectors + the conditional schedule/webhook config blocks.
+function AuthoringAxes({ axes }: { axes: AuthoringAxesState }) {
+  return (
+    <>
+      <Field label="Execution shape">
+        <ShapePicker value={axes.shape} onChange={axes.setShape} />
+        <FieldHint>How each run behaves. Independent of the trigger — a durable run can be manual, scheduled, or webhook-triggered.</FieldHint>
+      </Field>
+      <Field label="Triggers">
+        <TriggerPicker
+          hasSchedule={axes.hasSchedule} hasWebhook={axes.hasWebhook}
+          toggleSchedule={axes.toggleSchedule} toggleWebhook={axes.toggleWebhook}
+        />
+      </Field>
+      {axes.hasSchedule && (
+        <ScheduleFields
+          cron={axes.cron} setCron={axes.setCron} tz={axes.tz} setTz={axes.setTz}
+          alertEmail={axes.alertEmail} setAlertEmail={axes.setAlertEmail}
+          payload={axes.inputPayload} setPayload={axes.setInputPayload}
+        />
+      )}
+      {axes.hasWebhook && <FilterConditionsEditor rows={axes.filterRows} setRows={axes.setFilterRows} />}
+      <Field label="Authority (class)">
+        <ClassPicker value={axes.agentClass} onChange={axes.onClassChange} />
+        <FieldHint>Whose authority the run carries. Scheduled/webhook agents default to daemon (no live user); override if a user is always present.</FieldHint>
+      </Field>
+    </>
+  );
+}
+
+// Create the agent (shape + class), then arm any selected triggers. Returns the webhook URL if any.
 async function createAgentOfType(opts: {
   base: Parameters<typeof createAgent>[0];
-  agentType: AgentType;
+  shape: Shape; agentClass: AgentClass;
+  hasSchedule: boolean; hasWebhook: boolean;
   cron: string; tz: string; alertEmail: string; filterRows: FilterRow[];
   inputPayload: string;
 }): Promise<{ name: string; webhookUrl: string | null }> {
-  const { base, agentType, cron, tz, alertEmail, filterRows, inputPayload } = opts;
-  const agent = await createAgent({
-    ...base,
-    execution_shape: agentType === "durable" ? "durable" : "reactive",
-  });
-  if (agentType === "scheduled") {
+  const { base, shape, agentClass, hasSchedule, hasWebhook, cron, tz, alertEmail, filterRows, inputPayload } = opts;
+  const agent = await createAgent({ ...base, execution_shape: shape, agent_class: agentClass });
+  let webhookUrl: string | null = null;
+  if (hasSchedule) {
     const parsedPayload = inputPayload.trim() ? JSON.parse(inputPayload) : undefined;
     await createTrigger(agent.name, {
       trigger_type: "schedule",
@@ -177,14 +297,15 @@ async function createAgentOfType(opts: {
       alert_email: alertEmail.trim() || null,
       ...(parsedPayload ? { input_payload: parsedPayload } : {}),
     });
-  } else if (agentType === "event-driven") {
+  }
+  if (hasWebhook) {
     const trigger = await createTrigger(agent.name, {
       trigger_type: "webhook",
       filter_conditions: buildFilterConditions(filterRows),
     });
-    return { name: agent.name, webhookUrl: trigger.webhook_url ?? null };
+    webhookUrl = trigger.webhook_url ?? null;
   }
-  return { name: agent.name, webhookUrl: null };
+  return { name: agent.name, webhookUrl };
 }
 
 // ---------------------------------------------------------------------------
@@ -481,27 +602,22 @@ function NoCodeForm({ team }: { team: string | null }) {
 
   const selectedTools = watch("tools") || [];
 
-  // Type + trigger + memory state (independent of react-hook-form).
-  const [agentType, setAgentType] = useState<AgentType>("reactive");
-  const [cron, setCron] = useState("0 9 * * 1");
-  const [tz, setTz] = useState("UTC");
-  const [alertEmail, setAlertEmail] = useState("");
-  const [filterRows, setFilterRows] = useState<FilterRow[]>([{ field: "event_type", op: "eq", value: "" }]);
-  const [inputPayload, setInputPayload] = useState("");
+  // Three authoring axes (shape · trigger · class) + template/memory state.
+  const axes = useAuthoringAxes();
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createdName, setCreatedName] = useState<string | null>(null);
 
-  // Switching agent type swaps the instructions to that type's template —
-  // but only when the user hasn't customized it (still an untouched template),
-  // so we never clobber real edits.
-  const handleTypeChange = (t: AgentType) => {
-    setAgentType(t);
+  // Swap the instructions template to match the derived type — but only while the user
+  // hasn't customized it (still an untouched template), so we never clobber real edits.
+  const primaryType = derivePrimaryType(axes.shape, axes.hasSchedule, axes.hasWebhook);
+  useEffect(() => {
     const current = watch("instructions");
     if (!current || ALL_TEMPLATES.includes(current)) {
-      setValue("instructions", templateForType(t));
+      setValue("instructions", templateForType(primaryType));
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [primaryType]);
 
   const { data: providersData } = useQuery({
     queryKey: ["providers", team],
@@ -528,7 +644,10 @@ function NoCodeForm({ team }: { team: string | null }) {
             tools: values.tools,
           },
         },
-        agentType, cron, tz, alertEmail, filterRows, inputPayload,
+        shape: axes.shape, agentClass: axes.agentClass,
+        hasSchedule: axes.hasSchedule, hasWebhook: axes.hasWebhook,
+        cron: axes.cron, tz: axes.tz, alertEmail: axes.alertEmail,
+        filterRows: axes.filterRows, inputPayload: axes.inputPayload,
       }),
     onSuccess: ({ name, webhookUrl: url }) => {
       toast.success(`Agent "${name}" created.`);
@@ -579,22 +698,8 @@ function NoCodeForm({ team }: { team: string | null }) {
         />
       </Field>
 
-      {/* Agent type (4-way) */}
-      <Field label="Agent type">
-        <AgentTypePicker value={agentType} onChange={handleTypeChange} />
-        <FieldHint>
-          Reactive/Durable set how each run behaves. Scheduled/Event-driven add a trigger (each run
-          is reactive by default — change the shape later in Settings). The instructions template
-          below adapts to the type you pick.
-        </FieldHint>
-      </Field>
-
-      {agentType === "scheduled" && (
-        <ScheduleFields cron={cron} setCron={setCron} tz={tz} setTz={setTz} alertEmail={alertEmail} setAlertEmail={setAlertEmail} payload={inputPayload} setPayload={setInputPayload} />
-      )}
-      {agentType === "event-driven" && (
-        <FilterConditionsEditor rows={filterRows} setRows={setFilterRows} />
-      )}
+      {/* Shape · Trigger · Class (three independent axes, R1) */}
+      <AuthoringAxes axes={axes} />
 
       {/* Memory */}
       <Field label="Memory">
@@ -725,12 +830,7 @@ function CodeForm({ team }: { team: string | null }) {
     },
   });
 
-  const [agentType, setAgentType] = useState<AgentType>("reactive");
-  const [cron, setCron] = useState("0 9 * * 1");
-  const [tz, setTz] = useState("UTC");
-  const [alertEmail, setAlertEmail] = useState("");
-  const [filterRows, setFilterRows] = useState<FilterRow[]>([{ field: "event_type", op: "eq", value: "" }]);
-  const [inputPayload, setInputPayload] = useState("");
+  const axes = useAuthoringAxes();
   const [memoryEnabled, setMemoryEnabled] = useState(false);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createdName, setCreatedName] = useState<string | null>(null);
@@ -746,7 +846,10 @@ function CodeForm({ team }: { team: string | null }) {
           memory_enabled: memoryEnabled,
           metadata: { source_code: values.source_code },
         },
-        agentType, cron, tz, alertEmail, filterRows, inputPayload,
+        shape: axes.shape, agentClass: axes.agentClass,
+        hasSchedule: axes.hasSchedule, hasWebhook: axes.hasWebhook,
+        cron: axes.cron, tz: axes.tz, alertEmail: axes.alertEmail,
+        filterRows: axes.filterRows, inputPayload: axes.inputPayload,
       }),
     onSuccess: ({ name, webhookUrl: url }) => {
       toast.success(`Agent "${name}" created.`);
@@ -775,16 +878,8 @@ function CodeForm({ team }: { team: string | null }) {
         <FieldHint>Lowercase letters, numbers, hyphens. Used as the Kubernetes workload name.</FieldHint>
       </Field>
 
-      {/* Agent type (4-way) */}
-      <Field label="Agent type">
-        <AgentTypePicker value={agentType} onChange={setAgentType} />
-      </Field>
-      {agentType === "scheduled" && (
-        <ScheduleFields cron={cron} setCron={setCron} tz={tz} setTz={setTz} alertEmail={alertEmail} setAlertEmail={setAlertEmail} payload={inputPayload} setPayload={setInputPayload} />
-      )}
-      {agentType === "event-driven" && (
-        <FilterConditionsEditor rows={filterRows} setRows={setFilterRows} />
-      )}
+      {/* Shape · Trigger · Class (three independent axes, R1) */}
+      <AuthoringAxes axes={axes} />
       <Field label="Memory">
         <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
           <input type="checkbox" checked={memoryEnabled} onChange={(e) => setMemoryEnabled(e.target.checked)} className="accent-blue-600" />

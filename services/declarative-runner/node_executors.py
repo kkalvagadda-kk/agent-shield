@@ -42,6 +42,12 @@ class HttpToolNodeExecutor:
         self.headers: dict = node_config.get("headers", {})
         self.body_template: str = node_config.get("body_template", "")
         self.risk: str = node_config.get("risk", "low")
+        # The tool's declared parameter schema (JSON Schema object). When present it
+        # is the AUTHORITATIVE source of the LLM-facing parameter names — see
+        # _build_tool_fn — so a tool exposes structured params (order_id, amount)
+        # even when its URL/body carry no {{placeholders}} (avoids the generic
+        # single-`query` fallback that produced meaningless approval args).
+        self.input_schema: dict | None = node_config.get("input_schema")
         # auth_config_id is stored for future use (Phase 9+); not implemented here.
         self.auth_config_id: str | None = node_config.get("auth_config_id")
 
@@ -140,6 +146,11 @@ class HttpToolNodeExecutor:
                         req_kwargs["json"] = json.loads(body)
                     except json.JSONDecodeError:
                         req_kwargs["content"] = body.encode()
+                elif kwargs and executor.method in ("POST", "PUT", "PATCH"):
+                    # Schema-driven tool with no {{body_template}}: send the structured
+                    # kwargs (order_id, amount, …) as the JSON body directly, so a tool
+                    # authored with only an input_schema still POSTs its real arguments.
+                    req_kwargs["json"] = dict(kwargs)
 
                 http_fn = getattr(client, executor.method.lower())
                 resp = await http_fn(url, **req_kwargs)
@@ -162,7 +173,36 @@ class HttpToolNodeExecutor:
         # Build a typed __signature__ so LangChain introspects the right schema.
         # inspect.signature() follows __wrapped__ chains, so wrapping via
         # functools.wraps in build_graph.py will transparently use this signature.
-        if all_vars:
+        # Parameter source, in priority order:
+        #   1. input_schema.properties  — the tool's DECLARED structured params
+        #   2. {{placeholders}} in the URL/body_template
+        #   3. a single generic `query`  (last resort)
+        # Deriving from input_schema (this class fix) is what makes the LLM — and thus
+        # the HITL approval card — see real fields like order_id/amount, instead of the
+        # meaningless single `query` blob a schema-carrying tool used to fall back to
+        # when it had no {{placeholders}}.
+        _JSON_PY = {"string": str, "number": float, "integer": int,
+                    "boolean": bool, "object": dict, "array": list}
+        schema_props: dict = {}
+        required: set = set()
+        if isinstance(self.input_schema, dict) and self.input_schema.get("type") == "object":
+            schema_props = self.input_schema.get("properties") or {}
+            required = set(self.input_schema.get("required") or [])
+
+        if schema_props:
+            sig_params = []
+            annotations = {}
+            for pname, pspec in schema_props.items():
+                ann = _JSON_PY.get((pspec or {}).get("type"), str)
+                if pname in required:
+                    sig_params.append(inspect.Parameter(
+                        pname, inspect.Parameter.KEYWORD_ONLY, annotation=ann))
+                else:
+                    sig_params.append(inspect.Parameter(
+                        pname, inspect.Parameter.KEYWORD_ONLY, default=None, annotation=ann))
+                annotations[pname] = ann
+            http_tool_fn.__annotations__ = annotations
+        elif all_vars:
             sig_params = [
                 inspect.Parameter(v, inspect.Parameter.KEYWORD_ONLY, annotation=str)
                 for v in all_vars

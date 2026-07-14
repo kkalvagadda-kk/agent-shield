@@ -22,6 +22,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -85,6 +86,10 @@ class Agent(Base):
         CheckConstraint(
             "agent_type IN ('sdk','declarative')",
             name="ck_agents_type",
+        ),
+        CheckConstraint(
+            "agent_class IN ('user_delegated','daemon')",
+            name="ck_agents_agent_class",
         ),
         Index("idx_agents_team", "team"),
         Index("idx_agents_status", "status"),
@@ -152,7 +157,8 @@ class Agent(Base):
         "LLMProvider", back_populates="agents", foreign_keys=[llm_provider_id]
     )
 
-    # Execution shape: reactive (single-shot) or durable (checkpointed, multi-step)
+    # Execution shape: reactive (ephemeral, in-request, synchronous — no cross-time
+    # persistence) or durable (checkpointed — parks + resumes across time, survives restart).
     execution_shape: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'reactive'")
     )
@@ -162,9 +168,11 @@ class Agent(Base):
     )
 
     # Authorization model fields (Phase 9.1)
-    # agent_class determines which OPA flow applies at runtime
-    agent_class: Mapped[str | None] = mapped_column(
-        String(32), nullable=True
+    # agent_class determines which OPA flow applies at runtime.
+    # NOT NULL + server_default + CHECK: an executable's class can never be absent or garbage,
+    # so the deploy-time coalesce is deletable (WS-0 M3) and OPA's class-based flow can trust it.
+    agent_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'user_delegated'")
     )
     # publish_status tracks authoring lifecycle; separate from operational status
     publish_status: Mapped[str] = mapped_column(
@@ -321,6 +329,10 @@ class CompositeWorkflow(Base):
             name="ck_workflows_execution_shape",
         ),
         CheckConstraint(
+            "agent_class IN ('user_delegated','daemon')",
+            name="ck_workflows_agent_class",
+        ),
+        CheckConstraint(
             "orchestration IN ('sequential','supervisor','handoff','conditional')",
             name="ck_workflows_orchestration",
         ),
@@ -341,6 +353,11 @@ class CompositeWorkflow(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_shape: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'durable'")
+    )
+    # agent_class: the workflow run's authority (D1). user_delegated → invoking user;
+    # daemon → the workflow's service identity. Members inherit via actor_chain (WS-2).
+    agent_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'user_delegated'")
     )
     memory_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
@@ -1363,6 +1380,10 @@ class PlaygroundDataset(Base):
     __tablename__ = "playground_datasets"
     __table_args__ = (
         Index("idx_playground_datasets_owner", "owner_user_id"),
+        CheckConstraint(
+            "mode IN ('reactive','durable','scheduled','webhook','workflow')",
+            name="ck_playground_datasets_mode",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1372,6 +1393,15 @@ class PlaygroundDataset(Base):
     name: Mapped[str] = mapped_column(String(256), nullable=False)
     items: Mapped[list] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'")
+    )
+    # Eval v2 E-0: authoring discriminator — which per-mode item schema this
+    # dataset's rows follow. Default 'reactive' (back-compat).
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Lets the item schema evolve without a data migration.
+    schema_version: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("1")
     )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
@@ -1385,6 +1415,10 @@ class EvalRun(Base):
     __tablename__ = "eval_runs"
     __table_args__ = (
         Index("idx_eval_runs_user_id", "user_id"),
+        CheckConstraint(
+            "mode IN ('reactive','durable','scheduled','webhook','workflow')",
+            name="ck_eval_runs_mode",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1424,6 +1458,17 @@ class EvalRun(Base):
     workflow_version_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("workflow_versions.id", ondelete="SET NULL"), nullable=True
     )
+    # Eval v2 E-0: interpretation discriminator — resolved from the executable
+    # at launch; validated == dataset.mode. Default 'reactive' (back-compat).
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Optional per-dimension weights for the composite score.
+    dimension_weights: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Optional per-run override of the global EVAL_PASS_THRESHOLD.
+    pass_threshold: Mapped[float | None] = mapped_column(
+        Numeric(4, 3), nullable=True
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1447,6 +1492,14 @@ class EvalRunResult(Base):
     expected_output: Mapped[str | None] = mapped_column(Text, nullable=True)
     passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     langfuse_trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Eval v2 E-0: composite-score evidence store (all nullable; old rows read
+    # as response-only). `judge_score` above stays the composite (gate input).
+    dimension_scores: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    eval_detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    trigger_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    matched: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Soft FK -> playground_runs.id (no DB constraint): deep-link to the run tree.
+    run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )

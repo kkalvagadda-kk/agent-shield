@@ -1,12 +1,14 @@
 # Retro — Production HITL parity: why it took hours and multiple false "fixes"
 
-**Date:** 2026-07-11
-**Scope:** The session that took production HITL from broken to working across bugs
-documented in `docs/debugging/006`–`009` (chat FK, tool credentials, OPA identity, empty
-`agent_id`), plus production auto-grant and consumer-chat auto-resume.
-**Why this doc exists:** the bugs weren't hard; the *way I worked* made it slow. This
-captures the failure pattern and the concrete changes that would have collapsed hours into
-one pass — so the next person (or agent) doesn't repeat it.
+**Date:** 2026-07-11 / 12
+**Scope:** The whole multi-hour session — production HITL parity (`docs/debugging/006`–`009`:
+chat FK, tool credentials, OPA identity, empty `agent_id`), the publish/adversarial-eval
+gate (`005`), multi-tool HITL, auto-grant + auto-resume, the doc/gaps clean-up, and building
+the golden-path e2e. It covers mistakes in **design, planning, testing, and
+communication/verification** — not just debugging.
+**Why this doc exists:** the bugs weren't hard; the *way I worked* made it slow. **Use the
+"Mistakes by category" section and the "Pre-flight checklist for a new capability" below as a
+reusable playbook for any new capability** — they generalize past HITL.
 
 ---
 
@@ -209,6 +211,111 @@ and parity, not at diff quality.
 
 **Fix the class, not the instance; prove the journey, not the layer; instrument, don't
 assume.** Every hour lost this session traces to one of those three.
+
+---
+
+## Mistakes by category (generalized for reuse on a new capability)
+
+The four "gaps" above are the debugging story. Here is the *full* set from the session,
+grouped so they transfer to any capability. Each has the antidote.
+
+### Design mistakes
+1. **Parallel code paths instead of shared code.** Sandbox and production were separate
+   files (`reconciler.py`↔`production_reconciler.py`, `playground.py`↔`chat.py`,
+   `deployments.py`↔`catalog.py`). Every capability had to be re-implemented in both, and
+   each miss was a production-only bug (006–009, auto-grant). → **Antidote:** when a concept
+   has two variants (env A/B, sandbox/prod, sync/async), put the shared logic in ONE helper
+   both call; make the variants pass explicit parameters. Only diverge where they *must*.
+2. **Orphan gate — a requirement with no producer.** `adversarial_eval_passed` was required
+   to publish risky agents, but nothing ever set it → risky agents were unpublishable with
+   no way forward (`005`). → **Antidote:** ship every gate/flag/required-field together with
+   the thing that satisfies it, in the same change. A gate with no producer is a dead end.
+3. **Two backing tables for one concept, referenced by a single-target FK.** `deployments`
+   vs `production_deployments` with columns FK'd to only one → FK violations for the other
+   (006, and `agent_identities` in 008). → **Antidote:** two explicit FK columns (one per
+   table), never a polymorphic id or a dropped FK. Readers coalesce.
+4. **Silent-swallow / fail-open on a governance path.** The SDK caught the approval-creation
+   error, logged only a status, and interrupted anyway → the chat hung invisibly (009).
+   → **Antidote:** governance/safety writes must **fail loud (log the full signal) and fail
+   closed (deny)**, never swallow-and-proceed.
+5. **Two sources of truth for one fact.** The SDK's local `fn.risk` vs OPA's bundle risk can
+   diverge. → **Antidote:** one source of truth per fact; if two producers exist, have one
+   defer to the other explicitly.
+
+### Planning mistakes
+6. **Reactive symptom-fixing past the point it was a pattern.** I fixed 006, then 007, then
+   008… each as a one-off. The 2nd same-shape bug should have triggered a **systematic audit
+   of the class** (which, when finally run, found all remaining gaps at once). → **Antidote:**
+   after the 2nd bug of the same shape, stop and audit the whole class before the 3rd fix.
+7. **No test strategy in the plan.** The golden-path e2e that would have caught the whole
+   chain was only built *after* the user asked, at the end. → **Antidote:** define the
+   golden-path acceptance test (the real user journey, per surface/environment) as part of
+   the capability plan, up front — ideally write it first.
+8. **"Consider the other path" treated as advice, not a gate.** Being told to fix production
+   alongside sandbox didn't change behavior because nothing enforced it. → **Antidote:**
+   convert cross-cutting intentions into gates: shared code, a checklist item, or a test —
+   not a value to remember.
+
+### Testing mistakes
+9. **Testing layers, not the journey.** `kubectl exec` + API pokes bypassed every seam the
+   bugs lived in (pod env, SDK POST, OPA sidecar, schema, frontend). → **Antidote:** at least
+   one test that enters through the real door (browser/gateway) and drives the whole journey.
+10. **Simulation claimed as verification.** I ran a POST from inside the pod and called it
+    "verified end-to-end." → **Antidote:** a proxy/simulation is *progress*, not *done*.
+    "Done" = the user-observable end state, observed.
+11. **`test.skip` on a missing fixture hides bugs.** Existing specs skip when the agent isn't
+    deployed — an injected bug that breaks deployment would skip, not fail. → **Antidote:**
+    the golden path *fails* (with a clear message) when its fixture is missing.
+12. **Asserting behavior on the wrong component.** While writing the golden-path spec I
+    asserted a denial copy that lives in `AgentChatPage` against `CatalogChatPage` (which has
+    no such copy). → **Antidote:** read the component that renders your assertion target
+    before writing the assertion; don't assume parallel surfaces share copy/behavior.
+13. **(Did right — keep it) Skepticism of a suspiciously-fast green.** A 3.9s "pass" for a
+    real LLM+approval flow was verified against fresh DB rows before trusting it. → **Keep:**
+    when a green looks too easy, confirm it drove real state.
+
+### Communication / verification mistakes
+14. **Blaming the user before checking state.** On the publish gate I said "you must have
+    skipped eval" — the DB showed the eval *had* passed; the real cause was a second gate.
+    → **Antidote:** believe the user, query the actual state, and never assign blame from a
+    hypothesis.
+15. **Asserting facts about the running system without checking.** I stated "Envoy Gateway
+    isn't installed" — it was installed and serving. → **Antidote:** verify claims about the
+    running system (`kubectl get`, logs) before asserting them.
+16. **Premature "done"/"verified" language, repeatedly.** → **Antidote:** reserve "done/
+    verified" for observed end states; otherwise say exactly what was and wasn't checked.
+17. **Doc rot: resolved items and non-gaps left in "gaps" lists.** → **Antidote:** on
+    resolving a gap, remove it from the list and fold the new behavior into the design body;
+    prune things that aren't real gaps. (Now a memory rule.)
+18. **Option presentation as code snippets instead of plain-language tradeoffs.**
+    → **Antidote:** describe what gets built + resulting gaps/tradeoffs in words. (Now a
+    memory rule.)
+
+---
+
+## Pre-flight checklist for a NEW capability (use this next time)
+
+Run through this before/while building, not after:
+
+- [ ] **Write the golden-path acceptance test first** — the real user journey through the
+      real door (browser/gateway), one per surface/environment. It should *fail* if the
+      fixture isn't deployed, and assert the user-observable end state (incl. every UX field).
+- [ ] **List the parallel paths** this capability touches (sandbox/prod, A/B, sync/async).
+      For each, prefer shared code; where you can't, add a parity assertion test + a
+      checklist line. Grep the sibling file every time you edit one.
+- [ ] **For every gate/flag/required field, ship its producer** in the same change.
+- [ ] **One source of truth per fact.** Two backing tables → two explicit FK columns.
+- [ ] **Governance/safety paths fail loud + fail closed.** No swallow-and-proceed.
+- [ ] **Debugging = instrument before hypothesizing.** Capture the real signal (pod log line
+      / DB row / HTTP body / bundle) before proposing any fix.
+- [ ] **"Done" = observed end state.** Drive the real journey adversarially (try to disprove
+      it). Simulations/single-layer checks are progress, not done. Verify a too-easy green.
+- [ ] **2nd bug of the same shape → audit the class**, don't fix the 3rd instance.
+- [ ] **Every service change → auto build+deploy** (bump tag in `deploy-cpe2e.sh` +
+      `values.yaml`, run the deploy script). Un-deployed code = testing the old pod.
+- [ ] **Believe the user; check state before blaming.** Verify running-system claims before
+      asserting them.
+- [ ] **Keep docs honest as you go** — resolved gaps leave the list and land in the body.
 
 ---
 

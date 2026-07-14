@@ -55,3 +55,9 @@ studio/playwright-report/
 studio/test-results/
 studio/playwright/.cache/
 .claude/worktrees/
+
+# Never commit dependency installs or DB backup dumps
+node_modules/
+studio/node_modules/
+backups/
+*.sql.gz

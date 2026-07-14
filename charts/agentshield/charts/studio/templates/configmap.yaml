@@ -72,8 +72,16 @@ data:
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # The edge terminates TLS and this hop is plain http, so FastAPI's
+        # trailing-slash redirect (e.g. /api/v1/approvals -> /api/v1/approvals/)
+        # emits an http:// Location on the gateway host. An https page BLOCKS that
+        # as mixed content, so the request never completes (this silently broke the
+        # inline-approval fetch). Rewrite any http:// redirect Location to https://
+        # — a class fix covering every collection endpoint, not just approvals.
+        proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 60s;
         proxy_redirect http://{{ .Release.Name }}-registry-api:8000/ /;
+        proxy_redirect ~^http://(.+)$ https://$1;
       }
 
       # Hashed assets — cache forever (filenames change on rebuild)

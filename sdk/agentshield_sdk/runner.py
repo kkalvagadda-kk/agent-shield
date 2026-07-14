@@ -251,3 +251,57 @@ class Runner:
             response_text, agent_name=self.agent.name, session_id=thread_id
         )
         return {"response": out_scan.clean_text, "thread_id": thread_id}
+
+    async def run_durable(
+        self, message: str, run_id: str, callback_url: str, trace_id: str | None = None
+    ):
+        """Durable fire-and-forget run: real per-node steps + HITL park via the shared
+        harness (``agentshield_sdk.durable``) — the SAME ``run_durable`` the
+        declarative-runner consumes (parity core, WS-1). Mirrors ``run()``'s input
+        safety-scan + OTEL trace binding (safety lives outside the graph); the streamed
+        output is not re-scanned mid-run, same as ``run_streamed()``. Returns the
+        harness ``RunResult`` (completed | awaiting_approval | failed)."""
+        self._assert_ready()
+        import httpx
+
+        from .durable import Bookmark, StepEmitter, run_durable as _run_durable
+
+        scan_result = await scan_input(
+            message, agent_name=self.agent.name, session_id=run_id
+        )
+        state = {"messages": [HumanMessage(content=scan_result.sanitized_text)]}
+        token = _current_thread_id.set(run_id)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
+                with otel_run_context(trace_id or run_id):
+                    return await _run_durable(
+                        self._graph, state, thread_id=run_id,
+                        callback_url=callback_url, emitter=emitter,
+                    )
+        finally:
+            _current_thread_id.reset(token)
+
+    async def resume_durable(
+        self, thread_id: str, decision: dict, run_id: str, callback_url: str,
+        trace_id: str | None = None,
+    ):
+        """Re-enter a parked durable run after an approval decision via the shared
+        harness, emitting the remaining steps to ``callback_url``. Symmetric with
+        ``run_durable``; used by the SDK server's durable ``/resume`` branch (WS-1 T4)."""
+        self._assert_ready()
+        import httpx
+
+        from .durable import Bookmark, StepEmitter, resume_durable as _resume_durable
+
+        token = _current_thread_id.set(thread_id)
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
+                with otel_run_context(trace_id or run_id):
+                    return await _resume_durable(
+                        self._graph, thread_id=thread_id, decision=decision,
+                        callback_url=callback_url, emitter=emitter,
+                    )
+        finally:
+            _current_thread_id.reset(token)
