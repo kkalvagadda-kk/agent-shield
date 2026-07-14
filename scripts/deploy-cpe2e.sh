@@ -3,6 +3,12 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.175 (durable playground run OUTPUT now shows in the step detail. The durable SDK emits the
+#     agent's answer as `output_text` on the completing step, but the playground step-update callback only read
+#     `body["output"]` → RunStep.output stayed NULL → the StepTracker step detail was blank (the answer only
+#     reached run.output_text). Fix: capture output_text into step.output. KNOWN GAP (not fixed here, frontend):
+#     the Event Trace sidebar is only wired for REACTIVE agents (ChatPane → onTraceEvent); DURABLE runs don't
+#     feed it — the trace exists in Langfuse + is reachable via trace_url, but the panel stays "No events yet".)
 #   - registry-api:0.2.174 (durable playground step-stream "Connection lost" FIX — multi-replica bug. The SSE
 #     /playground/runs/{id}/stream durable path polled _STEP_EVENTS, a PER-REPLICA in-memory dict fed by
 #     _publish_step_event. With >1 registry-api replica the pod's step-update callback and the SSE request are
@@ -173,7 +179,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.174"
+REGISTRY_API_TAG="0.2.175"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.133"

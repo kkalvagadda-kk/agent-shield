@@ -317,13 +317,21 @@ async def step_update_callback(
     step = existing.scalar_one_or_none()
 
     now = datetime.now(tz=timezone.utc)
+    # The durable SDK emits the agent's ANSWER as `output_text` on the completing
+    # step (run.py: StepUpdate(..., output_text=final_text)), while per-node/tool
+    # steps use `output`. Capture BOTH into the step so the StepTracker step detail
+    # actually shows the result — previously only `output` was read, so a durable
+    # agent's step was blank (the answer only reached run.output_text).
+    step_out = body.get("output")
+    if step_out is None:
+        step_out = body.get("output_text")
     if step:
         step.status = step_status
         step.name = step_name
         if step_status in ("completed", "failed"):
             step.completed_at = now
-        if body.get("output"):
-            step.output = body["output"]
+        if step_out is not None:
+            step.output = step_out
         if body.get("error_message"):
             step.error_message = body["error_message"]
     else:
@@ -334,7 +342,7 @@ async def step_update_callback(
             status=step_status,
             started_at=now if step_status == "running" else None,
             completed_at=now if step_status in ("completed", "failed") else None,
-            output=body.get("output"),
+            output=step_out,
             error_message=body.get("error_message"),
         )
         db.add(step)
