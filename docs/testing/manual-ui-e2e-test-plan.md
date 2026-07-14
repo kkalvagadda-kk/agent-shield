@@ -12,6 +12,40 @@
 
 ---
 
+## Production hardening (P1–P4) — execution modes PROVEN in production (2026-07-14)
+
+The execution modes WS-1 delivered were only proven for **sandbox/playground**. This
+pass drove each **production** journey end-to-end (no fakes) and codified them as gates.
+Key finding: the production and playground paths **share** the dispatch/orchestrator/
+trace code (both converge on `orchestrate_* → _run_step → _dispatch_durable_member`;
+only `context` + HITL routing differ), so today's dispatch/trace/error fixes carry to
+production — verified, not assumed. The recent "durable member timed out" prod failures
+were a **stale image**, not a separate broken path.
+
+**Proven + gated (no fakes):**
+- **P1 — durable workflow golden path** (`suite-64`): create → deploy sandbox → REAL
+  eval-runner Jobs (eval_passed gate) → deploy **production** → `POST /internal/runs/start`
+  (`context=production`) → members complete on production pods, no timeout, parent trace
+  obs=2 + member traces obs=9/9.
+- **P2 — reviewer-console HITL** (`suite-65`): high-risk member (both gates — `eval_passed`
+  AND attested `adversarial_eval_passed`) → parks with a `context=production`, `risk=high`
+  approval routed to the **console** (not inline) → a `platform_admin` (authority) sees it
+  via the authority-scoped list and approves → `_resume_and_advance` resumes at the
+  production pod → workflow advances → completed.
+- **P3 — production triggers** (`suite-66`): the **event-gateway** fires a webhook
+  (`/hooks/workflow/{name}/{token}`) and the **scheduler** fires a cron `* * * * *`, each
+  → `POST /internal/runs/start` → a completed production run (`trig=webhook` / `trig=schedule`).
+- **P4 — cleanup + this ledger:** 9 stale `s55-*` parked runs (test litter, parked with no
+  approval) cancelled; today's context-neutral fixes (parent/member traces, `_exc_reason`,
+  `/echo`) confirmed in a production run (P1 assertions).
+
+**deferred (intentional) — NOT execution-mode completeness, separate infra:**
+- **Envoy hardened edge + safety-orchestrator input-scan proxy hop** — the canonical
+  agent ingress TLS/rate-limit + input safety-scan hop. Login + JWT validation work
+  without it; this is edge hardening, tracked separately.
+
+---
+
 ## Known gaps — Execution Models v2 WS-0 (agent_class authoring + shape-aware dispatch)
 
 **Landed in this slice** (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127; migration 0058; suite-54): `agent_class` NOT NULL + CHECK on agents **and** workflows; create wizard split into Shape · Trigger · Class (R1); Settings + Workflow Save-modal Class selectors + save-time high-risk warnings (S2); shared `durable_dispatch.py` (single `/run` POST, parity); shape-aware production dispatch + `POST /internal/runs/{id}/step-update` callback writing `run_steps`; reactive workflow synchronous + wall-clock capped (M6/D2); reactive approval gate fail-closed via `_park_or_fail` (S2).
