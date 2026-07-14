@@ -349,7 +349,12 @@ async def delete_agent(
         )
 
     agent.status = "deprecated"
-    # Cascade: terminate active sandbox deployments
+    # Cascade: terminate active deployments. Set 'terminating' (NOT 'terminated')
+    # so the deploy-controller's terminating→delete_deployment→terminated state
+    # machine runs and GCs the k8s Deployment/pods. Jumping straight to
+    # 'terminated' skips that GC step, orphaning the pods (they linger until the
+    # node fills up). Mirrors the explicit undeploy path (deployments.py /
+    # catalog.py), which already uses 'terminating'.
     from models import Deployment
     await db.execute(
         update(Deployment)
@@ -357,7 +362,7 @@ async def delete_agent(
             Deployment.agent_id == agent.id,
             Deployment.status.in_(["pending", "deploying", "running", "suspended", "suspending"]),
         )
-        .values(status="terminated")
+        .values(status="terminating")
     )
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()

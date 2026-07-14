@@ -3,6 +3,12 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.173 (agent-delete pod-leak FIX. DELETE /agents soft-deprecated the agent + set its
+#     deployments straight to 'terminated' — skipping 'terminating', so the deploy-controller's
+#     terminating→delete_deployment→terminated GC step never ran → orphaned k8s Deployments/pods lingered until
+#     the node filled (31 leaked in one session → 98% mem, blocked new deploys). Fix: delete_agent now sets
+#     'terminating' (mirrors the explicit undeploy path); the controller GCs the pods. Workflow-deployment
+#     termination has the same class of gap + no controller handler — logged in spec Future Improvements.)
 #   - registry-api:0.2.172 (in-cluster /echo endpoint — httpbin.org replacement. New GET/POST/PUT/PATCH/DELETE
 #     /echo (+ /echo/{path}) reflects method/path/query/body (NOT headers), always 200, unauthenticated like
 #     /health. Demo/test HTTP tools (http_echo seed, refund_action, suite-18 OPA tools) repointed off the flaky
@@ -160,7 +166,7 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.172"
+REGISTRY_API_TAG="0.2.173"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.133"

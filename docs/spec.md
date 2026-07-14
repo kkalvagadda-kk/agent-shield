@@ -959,6 +959,34 @@ AgentShield ships with a curated set of default tools, skills, agents, and workf
 
 ## Future Improvements
 
+### Adversarial-eval-runner automation (governance — production gate has no teeth)
+
+Deploying an agent that binds a **high/critical-risk tool** to production requires
+`AgentVersion.adversarial_eval_passed = True`. Unlike the regular eval — where
+`eval_passed` is set **automatically** by a real eval-runner K8s Job (dataset +
+judge) — **there is no adversarial-eval Job.** The flag is only ever set by a manual
+`PATCH /agents/{name}/versions/{id}` `{adversarial_eval_passed:true}`. So the gate is
+a **process control** (forces a human sign-off) but **not a technical control** — a
+reviewer can flip it without running any actual red-team test. For a governance
+platform this is a real hole.
+
+**Improvement:** build an **adversarial-eval-runner** mirroring the eval-runner — an
+adversarial dataset (prompt-injection / jailbreak / tool-misuse cases) + a judge that
+verifies the agent *refused or behaved safely*, auto-setting `adversarial_eval_passed`
+**only on pass** (and blocking otherwise). Same lifecycle plumbing as `eval_passed`
+(auto-set from a passing run), just with a red-team corpus + a safety-oriented judge.
+
+### Workflow-deployment termination GC (deploy-controller)
+
+Agent deployments now terminate cleanly (delete → `terminating` → controller deletes
+the k8s Deployment → `terminated`). **Workflow** deployments do NOT: `reconcile_workflow_production`
+materializes k8s Deployments but has **no `terminating` handler**, and the workflow
+terminate paths (`composite_workflows.py` version-terminate + the `terminate` action)
+set status straight to `terminated`. So terminating a deployed workflow **orphans its
+k8s pods** (same class as the agent-delete pod-leak, fixed 2026-07-14). **Improvement:**
+add a `terminating → delete_deployment → terminated` branch to the workflow reconciler
+and change those two spots to set `terminating`.
+
 ### Conditional Routing Enhancements (Studio Canvas)
 
 The current Phase 8 implementation uses **Option 1** (keyword match). Two stronger alternatives are deferred:
