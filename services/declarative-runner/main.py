@@ -183,7 +183,10 @@ app = FastAPI(
 # ---------------------------------------------------------------------------
 
 class ChatRequest(BaseModel):
-    message: str
+    # Optional: a daemon/scheduled run may dispatch with no user input at all. The
+    # executor substitutes a kickoff (daemon_kickoff_if_empty) so an empty message is
+    # valid rather than a 422 — user input is not required for triggered runs.
+    message: str = ""
     thread_id: str | None = None
     metadata: dict | None = None
 
@@ -621,7 +624,14 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
         except Exception as exc:  # a failed fail-post must not raise
             logger.warning("post_fail failed for run %s: %s", req.run_id, exc)
 
-    input_msg = req.input_payload.get("message") or _json.dumps(req.input_payload)
+    # Resolve the driving turn: an explicit message wins; else the job-spec payload
+    # (the agent parses it); else — a schedule/webhook that fired with no payload at
+    # all — a daemon kickoff, so we never hand the LLM an empty user turn.
+    from workflow_executor import DAEMON_KICKOFF
+    input_msg = (
+        req.input_payload.get("message")
+        or (_json.dumps(req.input_payload) if req.input_payload else DAEMON_KICKOFF)
+    )
     try:
         scan = await scan_input(input_msg, agent_name=cfg.AGENT_NAME, session_id=req.run_id)
         state = {"messages": [HumanMessage(content=scan.sanitized_text)]}

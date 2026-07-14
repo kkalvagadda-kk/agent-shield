@@ -3,6 +3,15 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - studio:0.1.134 + declarative-runner:0.1.44 + chart (3 trigger/daemon gaps):
+#     (1) PUBLIC WEBHOOK URL — EVENT_GATEWAY_PUBLIC_URL now defaults to global.publicUrl (the gateway host) and
+#         the Envoy HTTPRoute exposes /hooks/ (was /webhooks/, which never matched the event-gateway's /hooks/
+#         path), so the URL Studio shows is a real, externally-reachable endpoint.
+#     (2) INSTRUCTION TEMPLATE MATRIX — CreateAgentPage now selects the instructions template from the full
+#         shape × class matrix (daemon vs user_delegated changes the prompt, not just the shape/trigger).
+#     (3) NO USER INPUT FOR DAEMON/SCHEDULED RUNS — a scheduled/webhook run can fire with no input; the runner
+#         never builds an empty user turn now (daemon_kickoff_if_empty), so it no longer fails the provider's
+#         non-empty-content check. ChatRequest.message is optional.
 #   - registry-api:0.2.175 (durable playground run OUTPUT now shows in the step detail. The durable SDK emits the
 #     agent's answer as `output_text` on the completing step, but the playground step-update callback only read
 #     `body["output"]` → RunStep.output stayed NULL → the StepTracker step detail was blank (the answer only
@@ -182,9 +191,9 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 REGISTRY_API_TAG="0.2.175"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.133"
+STUDIO_TAG="0.1.134"
 EVAL_RUNNER_TAG="0.1.5"
-DECLARATIVE_RUNNER_TAG="0.1.43"
+DECLARATIVE_RUNNER_TAG="0.1.44"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

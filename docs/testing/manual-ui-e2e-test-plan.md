@@ -46,6 +46,46 @@ were a **stale image**, not a separate broken path.
 
 ---
 
+## Trigger & daemon UX gaps (2026-07-14) — public webhook URL, template matrix, no-input runs
+
+Three gaps surfaced while validating `trigger-demo-flow`. All fixed + tested this pass
+(studio 0.1.134 / declarative-runner 0.1.44 / chart env + HTTPRoute; no image change to
+registry-api — env/route only).
+
+**Fixed + gated:**
+- **Public webhook URL** (`studio/e2e/webhook-public-url.spec.ts`): the URL Studio shows
+  was unusable — `EVENT_GATEWAY_PUBLIC_URL` defaulted to the in-cluster Service name AND
+  the Envoy route exposed `/webhooks/` while the event-gateway serves `/hooks/` (no
+  rewrite → `/hooks/…` fell through to the Studio SPA → 200 HTML). Fix: default the env
+  to `global.publicUrl` (the gateway host) and route `/hooks/` at the edge. The spec
+  proves, through the https gateway, that a created trigger's URL uses the gateway host
+  and a `/hooks/` POST reaches the event-gateway (uniform 401 for a bad token, not the SPA).
+- **Instruction template matrix** (`CreateAgentPage.test.tsx`): template selection now
+  keys off the full **shape × class** matrix (user_delegated vs daemon changes the prompt,
+  not just shape/trigger) — a daemon gets a "no live user, act on the payload" template.
+  Daemon cells still specialize by trigger (schedule → cron job-spec, webhook → untrusted
+  event payload). Covered by a component test across all four shape×class cells.
+- **No user input for daemon/scheduled runs** (`suite-68`): a schedule/webhook can fire
+  with no job spec — that produced an empty `HumanMessage`, which the LLM provider rejects
+  (non-empty-content), so the run failed. Fix (shared runner code, same path production
+  uses): `daemon_kickoff_if_empty` / `DAEMON_KICKOFF` never build an empty user turn — the
+  run drives on a clean kickoff; the recorded input stays "none". `ChatRequest.message` is
+  now optional. suite-68 provisions a real durable daemon agent and fires an empty-input
+  run → completes.
+
+**Known gap (not fixed here) — durable Event Trace sidebar:** the playground Event Trace
+panel is wired only for **reactive** agents (ChatPane → onTraceEvent); **durable** runs
+don't feed it, so the sidebar stays "No events yet" even though the trace exists in
+Langfuse (reachable via `trace_url`). Frontend follow-up: fetch `getRunTrace` →
+`getTraceById` → map spans → feed TracePanel for durable runs. **not-yet-wired (debt).**
+
+**Where triggers live in the UI (answers "I don't see triggers"):** schedule + webhook
+triggers are NOT on any list/detail page — open the **Workflow Builder** for a workflow
+and click the **⚡ Triggers** button (renders once the workflow is open/saved). The webhook
+token/URL is shown **once** on create/rotate (stored hashed); use **Rotate** to re-mint.
+
+---
+
 ## Known gaps — Execution Models v2 WS-0 (agent_class authoring + shape-aware dispatch)
 
 **Landed in this slice** (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127; migration 0058; suite-54): `agent_class` NOT NULL + CHECK on agents **and** workflows; create wizard split into Shape · Trigger · Class (R1); Settings + Workflow Save-modal Class selectors + save-time high-risk warnings (S2); shared `durable_dispatch.py` (single `/run` POST, parity); shape-aware production dispatch + `POST /internal/runs/{id}/step-update` callback writing `run_steps`; reactive workflow synchronous + wall-clock capped (M6/D2); reactive approval gate fail-closed via `_park_or_fail` (S2).

@@ -127,6 +127,27 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     expect(hasArea("triggered by an external")).toBe(true);
   });
 
+  it("swaps the instructions template across the full shape × class matrix (no trigger)", async () => {
+    await openNoCode();
+    const hasArea = (marker: string) =>
+      screen.getAllByRole("textbox").some((a) => (a as HTMLTextAreaElement).value.includes(marker));
+
+    // reactive + user_delegated (default) → conversational template
+    expect(hasArea("Greet the user")).toBe(true);
+
+    // reactive + daemon → autonomous, ephemeral, no live user
+    await userEvent.click(screen.getByRole("radio", { name: /Daemon/i }));
+    expect(hasArea("invoked on demand")).toBe(true);
+
+    // durable + daemon → autonomous, long-running, checkpointed
+    await userEvent.click(screen.getByRole("radio", { name: /Durable/i }));
+    expect(hasArea("durable, daemon")).toBe(true);
+
+    // durable + user_delegated → conversational but checkpointed
+    await userEvent.click(screen.getByRole("radio", { name: /User-delegated/i }));
+    expect(hasArea("durable, user-delegated")).toBe(true);
+  });
+
   it("Scheduled sends the input_payload to createTrigger", async () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");

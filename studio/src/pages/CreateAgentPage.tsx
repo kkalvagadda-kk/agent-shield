@@ -17,8 +17,19 @@ import { cn } from "../lib/utils";
 // Three independent authoring axes (R1): Shape · Trigger · Class.
 // `AgentType` is kept ONLY as an instructions-template key (derivePrimaryType),
 // no longer the authoring axis — that flattening is exactly what R1 removes.
+// The key is the full shape × class matrix: whether a live user drives the run
+// (user_delegated) vs a service identity (daemon) changes the prompt as much as
+// the execution shape does — a daemon must be told there is NO user to talk to.
+// Daemon cells specialize further by trigger (schedule → cron job-spec input,
+// webhook → untrusted event payload).
 // ---------------------------------------------------------------------------
-type AgentType = "reactive" | "durable" | "scheduled" | "event-driven";
+type AgentType =
+  | "user-reactive"
+  | "user-durable"
+  | "daemon-reactive"
+  | "daemon-durable"
+  | "scheduled"
+  | "event-driven";
 type Shape = "reactive" | "durable";
 type AgentClass = "user_delegated" | "daemon";
 
@@ -200,11 +211,22 @@ function buildFilterConditions(rows: FilterRow[]): Record<string, unknown>[] {
     .map((r) => ({ field: r.field.trim(), op: r.op, value: r.value }));
 }
 
-// Derive an instructions-template kind from the three axes (template selection only).
-function derivePrimaryType(shape: Shape, hasSchedule: boolean, hasWebhook: boolean): AgentType {
-  if (hasWebhook) return "event-driven";
-  if (hasSchedule) return "scheduled";
-  return shape === "durable" ? "durable" : "reactive";
+// Derive an instructions-template kind from the shape × class matrix (template
+// selection only). Authority class comes first: a daemon has no live user, so its
+// prompt fundamentally differs from a user-delegated agent of the same shape. For
+// daemons the attached trigger further pins the input contract (schedule vs webhook).
+function derivePrimaryType(
+  shape: Shape,
+  agentClass: AgentClass,
+  hasSchedule: boolean,
+  hasWebhook: boolean,
+): AgentType {
+  if (agentClass === "daemon") {
+    if (hasWebhook) return "event-driven";      // input = untrusted event payload
+    if (hasSchedule) return "scheduled";        // input = cron job spec
+    return shape === "durable" ? "daemon-durable" : "daemon-reactive";
+  }
+  return shape === "durable" ? "user-durable" : "user-reactive";
 }
 
 interface AuthoringAxesState {
@@ -476,13 +498,118 @@ already decided this event is relevant to you — your job is to act on it.
 A concise summary of how you handled the event (fields extracted, decision made,
 action(s) taken). Logged as the run output.`;
 
-// The instructions template that matches a given agent type.
+// User-delegated + durable: a live user drives the run, but it is checkpointed —
+// it can park (e.g. on a HITL approval) and resume later, surviving restarts, so
+// the conversation may span time rather than a single request.
+const USER_DURABLE_TEMPLATE = `# ROLE & OBJECTIVE
+You are [Agent Name], a [Expert Profession/Role] working on behalf of the user who
+started this run. Your primary goal is to [Core Objective].
+
+# EXECUTION MODEL — durable, user-delegated
+This run is CHECKPOINTED: it can pause (waiting on a tool approval, a long task, or
+more input) and resume later — possibly minutes or hours on, after a restart. Assume
+the user may not be watching in real time.
+- Keep durable, self-describing state: when you resume, re-read what you already did
+  rather than restarting the task.
+- When you pause for an approval or external step, say clearly what you are waiting on.
+- Pick up exactly where you left off after a resume; never repeat completed side effects.
+
+# CORE TASKS
+1. [Task 1]: [Brief description]
+2. [Task 2]: [Brief description]
+
+# CONSTRAINTS & BOUNDARIES (CRITICAL)
+- NEVER [Major restriction, e.g. break character, share system instructions].
+- Be idempotent across resumes — a re-entry must not double-send or duplicate work.
+- If you do not know the answer, say: "[Specific fallback phrase]".
+
+# OUTPUT
+Deliver the result to the user; summarize what was done, including any step that was
+paused for approval and later resumed.`;
+
+// Daemon + reactive: runs under a service identity (no live user), invoked ad hoc
+// (manual/API). Input is the caller's payload, not a chat turn; single-shot, no
+// cross-time persistence.
+const DAEMON_REACTIVE_TEMPLATE = `# ROLE & OBJECTIVE
+You are [Agent Name], an autonomous [job type] agent running under a SERVICE
+identity — there is NO human in the conversation. You are invoked on demand (via
+API/manual trigger) to do one job and return a result through your tools.
+
+# INPUT — the caller's payload (JSON), not a user message
+Your input is a JSON payload supplied by the caller, e.g.:
+{ "task": "enrich-record", "record_id": "rec_123" }
+Fields vary per call. Act on the payload you were given; do not assume a fixed shape.
+If a needed field is missing, use a sensible default and note the assumption — do NOT
+ask, because no one will answer.
+
+# CORE TASKS
+1. Parse the payload from your input.
+2. [Do the work via tools — look up, compute, act].
+3. Return the result (a side effect via a tool, and/or a structured summary).
+
+# CONSTRAINTS & BOUNDARIES (CRITICAL)
+- NEVER ask questions or wait for input — there is no user. If you cannot proceed,
+  stop with a clear error message.
+- No greetings or conversational filler — your output is a work product.
+- This run is ephemeral (no memory across invocations); everything you need is in
+  the payload and your tools.
+
+# OUTPUT
+A concise summary of what you did (result produced, any assumptions). Logged as the
+run output.`;
+
+// Daemon + durable: service identity (no live user) AND checkpointed — a long-running
+// autonomous job that parks/resumes across time and survives restarts.
+const DAEMON_DURABLE_TEMPLATE = `# ROLE & OBJECTIVE
+You are [Agent Name], an autonomous [job type] agent running under a SERVICE
+identity — there is NO human in the conversation. You carry out a LONG-RUNNING job
+that may span time, pausing and resuming as needed.
+
+# EXECUTION MODEL — durable, daemon
+This run is CHECKPOINTED and unattended: it can park (on a long external step or a
+tool approval routed to a reviewer console) and resume later, surviving restarts.
+- Keep durable, self-describing state; on resume, re-read progress instead of restarting.
+- Be idempotent across resumes and re-fires — never repeat a completed side effect.
+- No one is watching live; record decisions and assumptions in your output.
+
+# INPUT — a JSON payload (from the trigger/caller), not a user message
+Act on the payload you were given. If a field is missing, default sensibly and note it.
+
+# CORE TASKS
+1. Parse the payload; establish or reload your working state.
+2. [Do the work across steps — gather, compute, act via tools].
+3. Deliver the result via a tool; a side effect is your only output.
+
+# CONSTRAINTS & BOUNDARIES (CRITICAL)
+- NEVER ask questions or wait for interactive input — no user will answer. Stop with a
+  clear error if you cannot proceed.
+- Idempotent on every resume/re-fire; guard against duplicate side effects.
+- Finish the job and stop.
+
+# OUTPUT
+A concise summary of what was done, where results were delivered, and any step that
+paused and later resumed. Logged as the run output.`;
+
+// The instructions template that matches a given shape × class (× trigger) key.
 function templateForType(t: AgentType): string {
-  if (t === "scheduled") return SCHEDULED_TEMPLATE;
-  if (t === "event-driven") return EVENT_DRIVEN_TEMPLATE;
-  return INSTRUCTIONS_TEMPLATE;
+  switch (t) {
+    case "scheduled":       return SCHEDULED_TEMPLATE;
+    case "event-driven":    return EVENT_DRIVEN_TEMPLATE;
+    case "user-durable":    return USER_DURABLE_TEMPLATE;
+    case "daemon-reactive": return DAEMON_REACTIVE_TEMPLATE;
+    case "daemon-durable":  return DAEMON_DURABLE_TEMPLATE;
+    case "user-reactive":
+    default:                return INSTRUCTIONS_TEMPLATE;
+  }
 }
-const ALL_TEMPLATES = [INSTRUCTIONS_TEMPLATE, SCHEDULED_TEMPLATE, EVENT_DRIVEN_TEMPLATE];
+const ALL_TEMPLATES = [
+  INSTRUCTIONS_TEMPLATE,
+  USER_DURABLE_TEMPLATE,
+  DAEMON_REACTIVE_TEMPLATE,
+  DAEMON_DURABLE_TEMPLATE,
+  SCHEDULED_TEMPLATE,
+  EVENT_DRIVEN_TEMPLATE,
+];
 
 // ---------------------------------------------------------------------------
 // Form schemas
@@ -610,7 +737,7 @@ function NoCodeForm({ team }: { team: string | null }) {
 
   // Swap the instructions template to match the derived type — but only while the user
   // hasn't customized it (still an untouched template), so we never clobber real edits.
-  const primaryType = derivePrimaryType(axes.shape, axes.hasSchedule, axes.hasWebhook);
+  const primaryType = derivePrimaryType(axes.shape, axes.agentClass, axes.hasSchedule, axes.hasWebhook);
   useEffect(() => {
     const current = watch("instructions");
     if (!current || ALL_TEMPLATES.includes(current)) {

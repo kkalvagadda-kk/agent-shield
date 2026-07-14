@@ -61,6 +61,23 @@ from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecu
 
 logger = logging.getLogger(__name__)
 
+# Daemon/scheduled/webhook runs carry NO live user, so their "input" may be empty
+# (a schedule can fire with no job spec at all). We must still never hand the LLM an
+# empty user turn — providers reject non-whitespace-empty content — so when there is
+# no real input we substitute a clean, instruction-oriented kickoff. The recorded run
+# input stays "no input" (None); this is only the internal turn that drives the graph.
+DAEMON_KICKOFF = (
+    "Begin now. There is no user message for this run — act on your instructions "
+    "and any job-spec or event payload you were given."
+)
+
+
+def daemon_kickoff_if_empty(message: str | None) -> str:
+    """Return `message` unless it is blank/whitespace, in which case the daemon
+    kickoff. Centralizes the 'never send an empty user turn' guard so every run
+    entry point (reactive /chat, durable /run) stays consistent."""
+    return message if (message or "").strip() else DAEMON_KICKOFF
+
 
 def _make_langfuse_handler(trace_id: str | None, session_id: str | None = None):
     """Create a LangfuseCallbackHandler attached to an existing trace, or None."""
@@ -706,7 +723,9 @@ class WorkflowExecutor:
         scan_result = await scan_input(
             message, agent_name=agent_name, session_id=thread_id
         )
-        safe_message = scan_result.sanitized_text
+        # Daemon/scheduled runs may arrive with no user input — never build an empty
+        # HumanMessage (the provider rejects it); drive the graph with a kickoff instead.
+        safe_message = daemon_kickoff_if_empty(scan_result.sanitized_text)
         tracer.span(trace_ctx, "safety_scan_input",
                     input={"message_len": len(message)},
                     output={"sanitized": scan_result.sanitized_text != message})
@@ -774,7 +793,9 @@ class WorkflowExecutor:
         scan_result = await scan_input(
             message, agent_name=agent_name, session_id=thread_id
         )
-        safe_message = scan_result.sanitized_text
+        # Daemon/scheduled runs may arrive with no user input — never build an empty
+        # HumanMessage (the provider rejects it); drive the graph with a kickoff instead.
+        safe_message = daemon_kickoff_if_empty(scan_result.sanitized_text)
         tracer.span(trace_ctx, "safety_scan_input",
                     input={"message_len": len(message)},
                     output={"sanitized": scan_result.sanitized_text != message})

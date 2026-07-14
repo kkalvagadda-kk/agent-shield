@@ -53,11 +53,14 @@ spec:
         - name: {{ .Release.Name }}-minio
           port: 9001
 
-    # Event Gateway webhooks
+    # Event Gateway webhooks. The event-gateway serves /hooks/{agent}/{token}
+    # and /hooks/workflow/{name}/{token}; expose that exact prefix at the edge so
+    # the public webhook URL Studio shows (global.publicUrl + /hooks/...) routes
+    # here unchanged — no rewrite, public path == service path.
     - matches:
         - path:
             type: PathPrefix
-            value: /webhooks/
+            value: /hooks/
       backendRefs:
         - name: {{ .Release.Name }}-event-gateway
           port: 8091

@@ -175,10 +175,12 @@ spec:
             {{- end }}
             {{- end }}
             # Public base URL of the Event Gateway (Phase 9), used to build the
-            # webhook URL returned by rotate-token. Defaults to the in-cluster
-            # Service; override with the public URL in production.
+            # webhook URL returned by create/rotate-token. Prefer the public
+            # gateway host (global.publicUrl) so the URL shown in Studio is a real,
+            # externally reachable endpoint (the gateway routes /hooks/ → this
+            # Service). Falls back to the in-cluster Service only when neither is set.
             - name: EVENT_GATEWAY_PUBLIC_URL
-              value: {{ .Values.eventGatewayPublicUrl | default (printf "http://%s-event-gateway:8091" .Release.Name) | quote }}
+              value: {{ .Values.eventGatewayPublicUrl | default ((.Values.global).publicUrl) | default (printf "http://%s-event-gateway:8091" .Release.Name) | quote }}
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}
