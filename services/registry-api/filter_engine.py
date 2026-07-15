@@ -1,15 +1,46 @@
 """
 Filter evaluation engine for webhook triggers.
 
-Evaluates `filter_conditions` JSONB (array of {field, op, value} rules)
-against a payload dict. All rules must match (AND semantics).
+⚠ THIS FILE IS DUPLICATED AND MUST STAY BYTE-IDENTICAL IN BOTH SERVICES:
+    services/event-gateway/filter_engine.py   (production: the real webhook hop)
+    services/registry-api/filter_engine.py    (POST /playground/test-event; the door
+                                               Eval v2 E-4 scores the filter through)
+Both services build from their OWN directory as the Docker context, so neither can
+import a shared module without changing the build context for both. Until that lands
+the copies are kept in lockstep by an ENFORCED gate, not by discipline:
+`scripts/check-filter-engine-parity.sh` runs inside `scripts/deploy-cpe2e.sh` BEFORE
+either image is built, so divergent engines cannot be deployed at all.
 
-Supported operators: eq, neq, contains, not_contains, gt, gte, lt, lte, exists, not_exists, in, regex
+Why the gate exists (this already happened): the gateway's copy was hardened against
+ReDoS (below) and the fix was never back-ported. registry-api ran an UNBOUNDED regex
+for months, and — worse — `test-event` is the door an E-4 webhook eval scores the
+filter through, so an eval would have graded a decision production never makes. Same
+class as every other drift in this repo: two paths that compute the same thing, one
+gets fixed, the other silently doesn't. Edit BOTH, or the deploy fails.
+
+Evaluates `filter_conditions` JSONB (array of {field, op, value} rules) against
+a payload dict. All rules must match (AND semantics).
+
+Supported operators: eq, neq, contains, not_contains, gt, gte, lt, lte,
+exists, not_exists, in, regex
+
+⚠ ReDoS mitigation (threat model T-7): the `regex` operator runs against
+attacker-controlled payload values. CPython's `re` does not release the GIL
+during matching, so a watchdog thread cannot preempt catastrophic backtracking.
+We instead **bound the input length** fed to the matcher (backtracking cost is a
+function of input size), and validate the pattern compiles. On any regex error
+or over-length input we fail SAFE (not matched) — a filter never over-matches
+due to a bad/hostile pattern. `google-re2` (linear-time) is the production
+hardening upgrade; kept out of the image to avoid a C++ build dependency.
 """
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
+
+# Max characters of payload value passed to a regex match (bounds backtracking).
+REGEX_INPUT_MAX = int(os.getenv("REGEX_INPUT_MAX", "4096"))
 
 
 def _resolve_field(payload: dict[str, Any], field: str) -> tuple[bool, Any]:
@@ -108,6 +139,10 @@ def _evaluate_rule(payload: dict[str, Any], rule: dict[str, Any]) -> tuple[bool,
 
     if op == "regex":
         if isinstance(actual, str) and isinstance(expected, str):
+            # ReDoS bound (T-7): cap the input length before matching, and
+            # fail safe on over-length input or an invalid pattern.
+            if len(actual) > REGEX_INPUT_MAX:
+                return False, f"{field} exceeds regex input cap ({REGEX_INPUT_MAX})"
             try:
                 if re.search(expected, actual):
                     return True, ""
@@ -124,8 +159,7 @@ def evaluate_filters(
 ) -> dict[str, Any]:
     """Evaluate all filter rules against a payload.
 
-    Returns:
-        {"matched": bool, "reason": str}
+    Returns: {"matched": bool, "reason": str}
     """
     if not filter_conditions:
         return {"matched": True, "reason": "no filters configured"}

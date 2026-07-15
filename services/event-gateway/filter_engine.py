@@ -1,5 +1,22 @@
 """
-Filter evaluation engine for webhook triggers (vendored from registry-api).
+Filter evaluation engine for webhook triggers.
+
+⚠ THIS FILE IS DUPLICATED AND MUST STAY BYTE-IDENTICAL IN BOTH SERVICES:
+    services/event-gateway/filter_engine.py   (production: the real webhook hop)
+    services/registry-api/filter_engine.py    (POST /playground/test-event; the door
+                                               Eval v2 E-4 scores the filter through)
+Both services build from their OWN directory as the Docker context, so neither can
+import a shared module without changing the build context for both. Until that lands
+the copies are kept in lockstep by an ENFORCED gate, not by discipline:
+`scripts/check-filter-engine-parity.sh` runs inside `scripts/deploy-cpe2e.sh` BEFORE
+either image is built, so divergent engines cannot be deployed at all.
+
+Why the gate exists (this already happened): the gateway's copy was hardened against
+ReDoS (below) and the fix was never back-ported. registry-api ran an UNBOUNDED regex
+for months, and — worse — `test-event` is the door an E-4 webhook eval scores the
+filter through, so an eval would have graded a decision production never makes. Same
+class as every other drift in this repo: two paths that compute the same thing, one
+gets fixed, the other silently doesn't. Edit BOTH, or the deploy fails.
 
 Evaluates `filter_conditions` JSONB (array of {field, op, value} rules) against
 a payload dict. All rules must match (AND semantics).

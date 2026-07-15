@@ -226,7 +226,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.186"
+REGISTRY_API_TAG="0.2.187"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.142"
@@ -234,7 +234,7 @@ EVAL_RUNNER_TAG="0.1.11"
 DECLARATIVE_RUNNER_TAG="0.1.48"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
-EVENT_GATEWAY_TAG="0.1.2"
+EVENT_GATEWAY_TAG="0.1.3"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -261,6 +261,14 @@ fi
 #     alembic-migrate=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
 #     registry-api=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
 #     -n agentshield-platform
+
+# Pre-build gate: `filter_engine.py` is duplicated in event-gateway (the real webhook
+# hop) and registry-api (`/playground/test-event`, the door an E-4 webhook eval scores
+# the filter through). They MUST be byte-identical — the gateway's ReDoS hardening once
+# went un-back-ported for months, leaving registry-api running an unbounded regex and any
+# webhook eval grading a decision production never makes. Gating BEFORE the build makes
+# divergent engines undeployable rather than merely detectable. Fails loudly with a diff.
+bash "$(dirname "${BASH_SOURCE[0]}")/check-filter-engine-parity.sh"
 
 echo "[1/8] Building images..."
 echo "  → registry-api:${REGISTRY_API_TAG} (WS-2 CP2 + fix: durable trigger dispatch now targets the agent's own pod (runner_url) not the non-existent shared declarative-runner Service — production trigger→single-agent durable runs reach the pod; plus reviewer_scope/principal_display/403, migration 0062 approver_role, daemon workflow identity)"
