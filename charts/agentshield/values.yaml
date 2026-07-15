@@ -611,10 +611,10 @@ registry-api:
     # /playground/test-event evaluates filters identically to the production webhook
     # hop. The two copies are gated byte-identical by check-filter-engine-parity.sh,
     # which runs inside deploy-cpe2e.sh BEFORE either image builds.
-    tag: "0.2.187"
+    tag: "0.2.190"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.11"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.12"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   service:
@@ -640,7 +640,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.11"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.12"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   resources:
@@ -927,7 +927,10 @@ studio:
     # E-3: scheduled-eval authoring UI (job_spec + job-spec evidence). 0.1.140 was E-2's
     # tag — 9f6603a changed studio/src without bumping it, so the cluster served a
     # pre-E-3 bundle. Bump on EVERY source change; IfNotPresent will not re-pull a tag.
-    tag: "0.1.142"
+    # E-4: webhook-eval authoring UI (synthetic event + expected_match +
+    # injection_probe) and the results evidence (filter verdict + ASR/utility side by
+    # side + the `matched` column's first reader).
+    tag: "0.1.143"
     pullPolicy: IfNotPresent
 
   service:

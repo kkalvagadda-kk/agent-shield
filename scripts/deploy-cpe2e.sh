@@ -217,6 +217,46 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
+# E-4 (phases 1-4, registry-api only): webhook eval — the filter decision as a
+# first-class dimension + injection robustness (ASR vs utility reported separately).
+#   * D2 — ONE run door: `test-event` no longer hand-builds a SECOND PlaygroundRun.
+#     `_create_and_dispatch_playground_run` is now the single builder (1 def, 2 call
+#     sites), which closes three live defects at once: test-event now threads
+#     `eval_mode` (it defaulted to 'live', so a matched webhook eval would have
+#     DELIVERED REAL SIDE EFFECTS), now DISPATCHES durable runs (they hung at
+#     'running' forever), and now carries the Langfuse trace + agent_version_id.
+#   * launch guard opens for mode='webhook' (was a hard 422 "not implemented yet")
+#   * /eval/score mode='webhook' branch (was 501): score_filter + score_injection
+#     (both pure code), action dims reused verbatim from E-0/E-1/E-2, plus a SAFETY
+#     VETO — an exact filter error or a really-fired forbidden tool cannot be
+#     out-voted by a weighted mean (both otherwise composited ABOVE the publish gate).
+#   * NO new filter code — the parity-gated filter_engine is the only decider.
+#
+# E-4 P5 (eval-runner 0.1.12): the webhook eval branch — `MODE=webhook` fires each
+# item's synthetic `trigger_payload` at the REAL test-event door, scores the REAL
+# filter decision it returns, and only on a MATCH drives + scores the action (durable
+# -inner → poll + project run_steps; reactive-inner → drive the stream) under E-2's
+# record seam. A correct MISS creates NO run (run_id IS NULL — the evidence nothing
+# ran). Writes `eval_run_results.matched`, orphaned since E-0 (no writer, no reader).
+#   * FAIL-CLOSED DISPATCH (the load-bearing fix): `run_eval` dispatched by PRIORITY
+#     FALLTHROUGH, so any MODE without a branch dropped through to the reactive tail —
+#     no `eval_mode` (⇒ 'live' ⇒ REAL SIDE EFFECTS DELIVERED), no filter, and a
+#     plausible `{"response": x}` PASS for an eval that tested nothing. CP1a opening
+#     the guard for `webhook` one phase before this branch existed made that live and
+#     reachable by API. Dispatch is now an explicit mode→handler MAP: `reactive` is a
+#     registered handler, not the default tail, and an unhandled MODE resolves to None
+#     ⇒ every item recorded FAILED with no run created. A missing branch is now a loud
+#     error by construction instead of a fake green (proven by T-S77-010).
+#
+# E-4 P5b (registry-api 0.2.189): test-event now feeds a matched event the IDENTICAL
+# production shape — `input_payload=payload` + the driving turn derived with
+# internal.py's own line (`payload.get("message") or json.dumps(payload)`). The durable
+# dispatch body carries ONLY `input_payload`, so passing None (as the D2 rewire did)
+# dispatched `{}` and the agent answered "I have not been provided with any event
+# payload": a REAL matched run, really scored, that never saw the event. Invisible
+# until D2 made this door dispatch durable at all, and caught by suite-77's POSITIVE
+# CONTROL — the exact failure a filter-miss-only test cannot see.
+#
 # E-2 (phases 1-3): side-effect record/mock seam. Migration 0063 adds
 # `tools.side_effecting` (fail-closed backfill: only HTTP GET/HEAD is read-only) +
 # `playground_runs.eval_mode` (PERSISTED — a durable HITL resume re-drives the graph
@@ -226,11 +266,11 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.187"
+REGISTRY_API_TAG="0.2.190"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.142"
-EVAL_RUNNER_TAG="0.1.11"
+STUDIO_TAG="0.1.143"
+EVAL_RUNNER_TAG="0.1.12"
 DECLARATIVE_RUNNER_TAG="0.1.48"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
@@ -271,7 +311,7 @@ fi
 bash "$(dirname "${BASH_SOURCE[0]}")/check-filter-engine-parity.sh"
 
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (WS-2 CP2 + fix: durable trigger dispatch now targets the agent's own pod (runner_url) not the non-existent shared declarative-runner Service — production trigger→single-agent durable runs reach the pod; plus reviewer_scope/principal_display/403, migration 0062 approver_role, daemon workflow identity)"
+echo "  → registry-api:${REGISTRY_API_TAG} (E-4 P1-P4: webhook eval — D2 ONE run door (test-event stops hand-building a 2nd PlaygroundRun: now threads eval_mode + dispatches durable + traces), launch guard opens for mode=webhook, /eval/score webhook branch with score_filter + score_injection and a safety veto on filter errors / fired forbidden tools)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"

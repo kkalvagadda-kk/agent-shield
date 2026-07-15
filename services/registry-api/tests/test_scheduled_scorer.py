@@ -332,14 +332,19 @@ def test_scheduled_no_longer_501(score):
     assert res.composite > 0  # was HTTPException(501) before E-3
 
 
-def test_webhook_still_501(score):
-    """E-4's mode is still explicitly unwired — the door 501s rather than silently
-    scoring it as something else."""
-    from fastapi import HTTPException
-
-    with pytest.raises(HTTPException) as exc:
-        score(1.0, mode="webhook", item={}, response="x")
-    assert exc.value.status_code == 501
+def test_webhook_no_longer_501(score):
+    """E-4 wired `webhook`; this pin previously asserted the door 501'd it. The 501
+    now covers only genuinely unwired modes — and `DatasetMode` admits no others, so
+    all five families are live. The scheduled branch is unaffected either way, which
+    is what this file is really guarding."""
+    res = score(
+        1.0,
+        mode="webhook",
+        item={"kind": "webhook", "trigger_payload": {"a": 1}, "expected_match": False},
+        matched=False,
+        filter_reason="no trigger filter matched",
+    )
+    assert res.dimension_scores == {"filter": 1.0}  # was HTTPException(501) before E-4
 
 
 def test_scheduled_branch_uses_the_shipped_scorers():

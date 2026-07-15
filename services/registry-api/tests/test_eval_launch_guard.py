@@ -20,7 +20,8 @@ What it proves:
   3. reactive/durable/workflow rules are UNCHANGED (E-0 back-compat regression pin)
   4. mode is not a pure function of the executable — a durable agent WITH a schedule
      armed is evaluable BOTH 'durable' and 'scheduled'
-  5. webhook is still explicitly rejected (E-4), never a silent fallthrough
+  5. webhook is REACHABLE (E-4) — armed webhook trigger ⇒ launches; none ⇒ 422 naming
+     the trigger; workflow-level ⇒ 422. Never a silent fallthrough.
 
 Interpreter note: routers.eval_runner imports models.py, whose SQLAlchemy
 Mapped[str | None] annotations require python>=3.10 (the service runs 3.12 —
@@ -157,11 +158,45 @@ def test_a_durable_agent_with_a_schedule_is_evaluable_both_ways():
 
 
 # --------------------------------------------------------------------------- #
-# 5 — webhook stays explicitly rejected until E-4 (no silent fallthrough)
+# 5 — 'webhook' is REACHABLE (E-4 — this pin previously asserted the 501-era
+#     "not implemented yet (E-4)" rejection; E-4 replaces the placeholder with the
+#     real rule, so the pin now asserts the RULE rather than the stub)
 # --------------------------------------------------------------------------- #
-def test_webhook_dataset_is_rejected_until_e4():
-    detail = _rejects("webhook", _agent(shape="durable", webhook=True))
-    assert "not implemented yet (E-4)" in detail
+def test_webhook_trigger_resolves_webhook():
+    assert _resolve_eval_mode(_agent(shape="durable", webhook=True)) == "webhook"
+    assert _resolve_eval_mode(_agent(shape="reactive", webhook=True)) == "webhook"
+
+
+def test_webhook_dataset_launches_against_an_armed_agent():
+    # No raise == the launch door admits it. Both inner shapes — E-4 scores both
+    # (a reactive-inner webhook agent has no run_steps, so it scores response +
+    # side_effect; a durable-inner one adds the trajectory family).
+    _assert_mode_compatible("webhook", "ds", _agent(shape="durable", webhook=True))
+    _assert_mode_compatible("webhook", "ds", _agent(shape="reactive", webhook=True))
+
+
+def test_webhook_dataset_without_a_webhook_trigger_is_rejected():
+    # The trigger is the fact that makes the agent evaluable on this family: with no
+    # webhook armed there are no `filter_conditions` to decide anything, so scoring a
+    # filter decision would be fiction.
+    detail = _rejects("webhook", _agent(shape="durable", webhook=False))
+    assert "arm a webhook trigger" in detail
+
+
+def test_workflow_level_webhook_eval_is_rejected():
+    detail = _rejects("webhook", _workflow())
+    assert "workflow-level webhook eval is not supported" in detail
+
+
+def test_an_agent_with_both_triggers_is_evaluable_both_ways():
+    # The schedule-before-webhook order in `_resolve_eval_mode` is DIAGNOSTIC only —
+    # it names a mode in the 422 text and gates nothing. The guard reads the facts
+    # independently, so both families stay legitimately evaluable.
+    facts = _agent(shape="durable", schedule=True, webhook=True)
+    assert _resolve_eval_mode(facts) == "scheduled"  # diagnostic precedence
+    _assert_mode_compatible("webhook", "ds", facts)
+    _assert_mode_compatible("scheduled", "ds", facts)
+    _assert_mode_compatible("durable", "ds", facts)
 
 
 def test_unknown_mode_fails_closed():

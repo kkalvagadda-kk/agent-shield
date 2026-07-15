@@ -141,7 +141,9 @@ def _resolve_eval_mode(facts: _ExecutableFacts) -> str:
 
     A CompositeWorkflow executable → 'workflow'; an agent with an armed schedule
     trigger → 'scheduled' (its production entrypoint is the job spec, so that is
-    what it naturally evaluates as — E-3); otherwise its `execution_shape`
+    what it naturally evaluates as — E-3); an agent with an armed webhook trigger
+    → 'webhook' (its production entrypoint is the event it filters, so that is
+    what it naturally evaluates as — E-4); otherwise its `execution_shape`
     ('reactive' | 'durable'), defaulting to 'reactive' when unresolvable
     (back-compat).
 
@@ -149,11 +151,18 @@ def _resolve_eval_mode(facts: _ExecutableFacts) -> str:
     executable resolves to in the 422 raised by `_assert_mode_compatible`. The
     scoring mode is always the DATASET's authored `mode` (E-0) — an executable
     may be compatible with several.
+
+    The schedule-before-webhook ORDER is therefore a diagnostic-only choice (which
+    mode the 422 text names first). It gates nothing: `_assert_mode_compatible`
+    reads the facts INDEPENDENTLY, so an agent carrying BOTH an armed schedule and
+    an armed webhook trigger stays legitimately evaluable BOTH ways.
     """
     if facts.is_workflow:
         return "workflow"
     if facts.has_schedule_trigger:
         return "scheduled"
+    if facts.has_webhook_trigger:
+        return "webhook"
     if facts.execution_shape in ("reactive", "durable"):
         return facts.execution_shape
     return "reactive"
@@ -177,8 +186,12 @@ def _assert_mode_compatible(dataset_mode: str, dataset_name: str, facts: _Execut
         evaluate, so scoring one would be fiction. The inner shape
         (reactive/durable) is deliberately NOT constrained — E-3 scores both.
       - **workflow** — requires a workflow executable (run-tree/member-path items).
-      - **webhook** — E-4's slice; the score door still 501s it, so it is rejected
-        here explicitly rather than launching a Job that cannot be scored.
+      - **webhook** — requires an armed (enabled) `webhook` trigger on the agent.
+        The dataset's `trigger_payload` is fired at THAT trigger's real
+        `filter_conditions` through the real `test-event` door; with no webhook
+        armed there is no filter to decide anything, so scoring a filter decision
+        would be fiction. Like scheduled, the inner shape (reactive/durable) is
+        deliberately NOT constrained — E-4 scores both.
     """
     resolved = _resolve_eval_mode(facts)
 
@@ -218,7 +231,17 @@ def _assert_mode_compatible(dataset_mode: str, dataset_name: str, facts: _Execut
             _reject("a 'workflow' dataset requires a workflow executable")
         return
     if dataset_mode == "webhook":
-        _reject("webhook eval is not implemented yet (E-4)")
+        if facts.is_workflow:
+            _reject(
+                "a 'webhook' dataset evaluates an agent's webhook filter decision; "
+                "workflow-level webhook eval is not supported"
+            )
+        if not facts.has_webhook_trigger:
+            _reject(
+                "a 'webhook' dataset fires its trigger_payload at the agent's webhook "
+                "filter — arm a webhook trigger on this agent first"
+            )
+        return
     # An unknown mode is unrepresentable: `DatasetMode` + the DB CHECK on
     # playground_datasets.mode constrain it to the five above. Fail closed.
     _reject(f"unknown dataset mode '{dataset_mode}'")

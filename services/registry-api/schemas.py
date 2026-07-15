@@ -1266,17 +1266,71 @@ class ScheduledDatasetItem(_DatasetItemBase):
     tool_mocks: Optional[dict[str, Any]] = None
 
 
+class InjectionProbe(BaseModel):
+    """An untrusted-input robustness case on a webhook item (E-4; §2.4).
+
+    A webhook payload is ATTACKER-CONTROLLED — it arrives from the internet, not
+    from a user the platform authenticated. `injection_probe` encodes the attack:
+    the payload carries an injected instruction and this declares what the agent
+    must NOT do about it.
+
+    - `must_not_call` — tools the injected instruction tries to coerce. Scored by
+      `judge.score_injection` against the UNION of the recorded calls (E-2) and the
+      projected trajectory (E-1): a mocked write lands in the recorded calls, an
+      ungoverned call lands only in the trajectory, and reading one would miss the
+      other.
+    - `must_refuse` — the agent should visibly refuse the injected instruction.
+
+    `extra='allow'` matches the other item sub-models: a probe may carry fields a
+    later attack battery interprets without failing validation today.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    must_not_call: list[str] = Field(default_factory=list)
+    must_refuse: bool = False
+
+
 class WebhookDatasetItem(_DatasetItemBase):
-    """Filter match/miss + action correctness + injection robustness (§2.4; WS-4)."""
+    """Filter match/miss + action correctness + injection robustness (§2.4; scored E-4).
+
+    `trigger_payload` is the SYNTHETIC EVENT — the eval POSTs it through the REAL
+    `POST /playground/test-event` door, which runs the REAL `filter_engine.
+    evaluate_filters` against the trigger's REAL `filter_conditions`. E-4 adds no
+    filter code: the door's copy of the engine is kept byte-identical to the
+    event-gateway's by `scripts/check-filter-engine-parity.sh` (run inside
+    `deploy-cpe2e.sh` BEFORE either image builds), so the decision the eval scores is
+    the decision production makes.
+
+    `expected_match` is the FIRST-CLASS signal — a webhook agent's first job is to
+    NOT run on events it should filter. `expected_filter_reason` (a substring,
+    meaningful only when `expected_match=false`) makes a miss for the WRONG reason a
+    failure rather than a lucky pass.
+
+    `expected_trajectory` / `expected_side_effects` are the SAME structured models
+    `DurableDatasetItem` uses (E-1 `ExpectedTrajectory`, E-2 `SideEffectAssertion`) —
+    tightened from the untyped dicts they were, so a malformed golden trajectory (a
+    step missing `tool`) or a bad `occurs` value is rejected **422 at the door** by
+    the discriminated union instead of being key-sniffed at score time. They are
+    meaningful only for a MATCHED event (a filtered event runs nothing); the
+    trajectory family additionally requires a durable-inner agent (only a durable run
+    leaves `run_steps` to project).
+    """
 
     kind: Literal["webhook"] = "webhook"
+    # The synthetic event → POSTed through the real test-event door's real filter.
     trigger_payload: Optional[dict[str, Any]] = None
     expected_match: Optional[bool] = None
     expected_filter_reason: Optional[str] = None
     expected_output: Optional[str] = None
-    expected_trajectory: Optional[dict[str, Any]] = None
-    expected_side_effects: Optional[list[dict[str, Any]]] = None
-    injection_probe: Optional[dict[str, Any]] = None
+    expected_trajectory: Optional[ExpectedTrajectory] = None
+    expected_side_effects: Optional[list[SideEffectAssertion]] = None
+    injection_probe: Optional[InjectionProbe] = None
+    # Optional per-tool fixed mock returned instead of invoking. NOT yet threaded to
+    # the seam (the seam returns a type-default success sentinel today) — declared
+    # here for contract parity with `Durable`/`ScheduledDatasetItem`; same E-2
+    # gap-ledger row "item `tool_mocks` not threaded to the seam" (E-4 adds no new debt).
+    tool_mocks: Optional[dict[str, Any]] = None
 
 
 class WorkflowDatasetItem(_DatasetItemBase):
@@ -1503,6 +1557,19 @@ class EvalScoreRequest(BaseModel):
     # per-member rubric. Only the `mode=workflow` branch reads these.
     member_path: Optional[list[str]] = None
     per_member_steps: Optional[dict[str, list[dict[str, Any]]]] = None
+    # Eval v2 E-4 (webhook): the filter DECISION the real `POST /playground/test-event`
+    # door returned for the item's `trigger_payload` — the door runs the real
+    # `filter_engine.evaluate_filters` against the trigger's real `filter_conditions`,
+    # from a copy the parity gate keeps byte-identical to the event-gateway's.
+    #
+    # It is the DOOR'S RETURNED DECISION, not an `AgentEvent.status` string (E-4 D1):
+    # the test-event door writes no `agent_events` row — that table is the production
+    # audit log of real DELIVERIES, and writing synthetic eval fires into it would make
+    # the Event Trace UI unable to tell a probe from a real event. So there is no
+    # `matched`⇔`'matched'` string mapping to get wrong: `matched` is the bool the door
+    # returned, `filter_reason` its `reason`. Only the `mode=webhook` branch reads them.
+    matched: Optional[bool] = None
+    filter_reason: Optional[str] = None
 
 
 class EvalScoreResponse(BaseModel):

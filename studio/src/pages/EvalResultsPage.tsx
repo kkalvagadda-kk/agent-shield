@@ -24,6 +24,7 @@ import {
   isWorkflowDetail,
   EvalRunResult,
   type StepUpdateEvent,
+  type DatasetMode,
   type EvalDetail,
   type RecordedSideEffect,
   type SideEffectDiff,
@@ -52,11 +53,15 @@ function scoreColor(score: number | null): string {
 }
 
 // Eval v2 dimensions rendered per result. E-0 populates `response`; E-1 adds the
-// durable `trajectory` + `tool_call` scorers; E-2 `side_effect`; E-5 `member_path`.
-// `filter` renders "—" until its scorer lands (E-4). These keys MUST match the
-// backend `dimension_scores` keys exactly (judge.py / routers/playground.py) —
-// a near-miss key renders a permanent "—" for a dimension that IS being scored.
-const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effect", "filter", "member_path"] as const;
+// durable `trajectory` + `tool_call` scorers; E-2 `side_effect`; E-5 `member_path`;
+// E-4 `filter` + `injection`. These keys MUST match the backend `dimension_scores`
+// keys exactly (judge.py / routers/playground.py) — a near-miss key renders a
+// permanent "—" for a dimension that IS being scored.
+//
+// A "—" is deliberately NOT a zero: it means the dimension was not scored for this
+// item (present-dims-only). A correctly-filtered webhook event shows `filter: 1.00`
+// and "—" for every action dimension, because nothing ran — which is the pass.
+const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effect", "filter", "injection", "member_path"] as const;
 
 function DimensionScores({ scores }: { scores: Record<string, number> | null }) {
   return (
@@ -354,6 +359,7 @@ export default function EvalResultsPage() {
                 <ResultRow
                   key={r.id}
                   result={r}
+                  mode={run.mode}
                   expanded={expandedRow === r.id}
                   onToggle={() =>
                     setExpandedRow(expandedRow === r.id ? null : r.id)
@@ -382,11 +388,17 @@ export default function EvalResultsPage() {
 
 function ResultRow({
   result: r,
+  mode,
   expanded,
   onToggle,
   onViewTrace,
 }: {
   result: EvalRunResult;
+  // The eval run's EXPLICIT interpretation mode. It decides which evidence blocks
+  // render — never sniffed from which keys the row carries, because a scheduled
+  // `job_spec` and a webhook synthetic event ride the SAME `trigger_payload` column
+  // and would otherwise be labelled identically.
+  mode: DatasetMode;
   expanded: boolean;
   onToggle: () => void;
   onViewTrace: () => void;
@@ -495,15 +507,32 @@ function ResultRow({
                   {r.judge_reasoning ?? "—"}
                 </p>
               </div>
-              {/* Eval v2 E-3 — the job spec this run was fired with. `trigger_payload`
-                  is the row's own record of what was ACTUALLY fed to the run (written
-                  by the eval-runner's scheduled branch, present on fail-closed rows
-                  too); `detail.job_spec` is the score door's echo of the authored spec,
-                  read for a row recorded before that column was written. Renders
-                  nothing for the other eval families, which fire no job spec. */}
-              <JobSpecEvidence
-                jobSpec={r.trigger_payload ?? r.eval_detail?.job_spec ?? null}
+              {/* Eval v2 E-4 — the FILTER VERDICT: the decision the real filter made
+                  for this synthetic event, vs what the item expected. First, because
+                  for a webhook agent it is the first-class result: a correctly-filtered
+                  event scores on this alone and runs nothing. */}
+              {mode === "webhook" && (
+                <FilterVerdict
+                  matched={r.matched ?? null}
+                  detail={r.eval_detail ?? null}
+                />
+              )}
+              {/* Eval v2 E-3/E-4 — WHAT the eval actually fired. `trigger_payload` is
+                  the row's own record of what was fed to the run (written by the
+                  eval-runner, present on fail-closed rows too); `detail.job_spec` is
+                  the scheduled score door's echo of the authored spec, read for a row
+                  recorded before that column was written. The LABEL comes from the
+                  run's explicit mode — the same column carries a job spec for a
+                  scheduled item and a synthetic event for a webhook one. Renders
+                  nothing for the families that fire neither. */}
+              <FiredPayloadEvidence
+                mode={mode}
+                payload={r.trigger_payload ?? r.eval_detail?.job_spec ?? null}
               />
+              {/* Eval v2 E-4 — the injection probe: ASR and utility SIDE BY SIDE. */}
+              {mode === "webhook" && (
+                <InjectionEvidence detail={r.eval_detail ?? null} />
+              )}
               {r.eval_detail && isWorkflowDetail(r.eval_detail) ? (
                 <WorkflowEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
               ) : r.eval_detail ? (
@@ -518,28 +547,231 @@ function ResultRow({
 }
 
 // ---------------------------------------------------------------------------
-// Scheduled (Eval v2 E-3) job-spec evidence: WHAT the eval actually fired. The job
-// spec is fed to the run as its `input_payload` (+ `trigger_type='schedule'` /
-// `trigger_payload`) — the identical production schedule shape — so this block is
-// the answer to "is this what the nightly job really runs?".
+// Scheduled (E-3) / webhook (E-4) evidence: WHAT the eval actually fired.
+//
+// Both families record it on the SAME `trigger_payload` column, because both feed it
+// to the run as `input_payload` in the identical production shape — a job spec for a
+// schedule (`trigger_type='schedule'`), a synthetic event for a webhook
+// (`trigger_type='webhook'`). So this block answers "is this what the nightly job / a
+// real delivery actually runs?" for both.
+//
+// The LABEL is keyed off the run's explicit `mode`, never off the payload's shape:
+// the two are indistinguishable as JSON, and calling a synthetic event a "Job spec"
+// (which is what happened before E-4 wired the discriminator through) is a quiet lie
+// in the one panel whose whole job is to say what was fired.
 //
 // The side-effect evidence ("what would have been sent") is the E-2 panel below,
-// reused as-is: a scheduled result renders the job spec that went IN and the recorded
-// calls that would have come OUT.
+// reused as-is: the payload that went IN, the recorded calls that would have come OUT.
 // ---------------------------------------------------------------------------
-function JobSpecEvidence({ jobSpec }: { jobSpec: Record<string, unknown> | null }) {
-  if (!jobSpec || Object.keys(jobSpec).length === 0) return null;
+function FiredPayloadEvidence({
+  mode,
+  payload,
+}: {
+  mode: DatasetMode;
+  payload: Record<string, unknown> | null;
+}) {
+  if (!payload || Object.keys(payload).length === 0) return null;
+  if (mode !== "scheduled" && mode !== "webhook") return null;
+  const isWebhook = mode === "webhook";
   return (
-    <div data-testid="job-spec-evidence">
+    <div data-testid={isWebhook ? "synthetic-event-evidence" : "job-spec-evidence"}>
       <p className="font-semibold text-slate-600 mb-1">
-        Job spec
+        {isWebhook ? "Synthetic event (trigger_payload)" : "Job spec"}
         <span className="ml-2 text-[10px] font-normal text-slate-400 uppercase tracking-wide">
-          fed as input_payload
+          {isWebhook ? "fired at the real webhook filter" : "fed as input_payload"}
         </span>
       </p>
       <pre className="text-[11px] font-mono text-slate-700 whitespace-pre-wrap bg-white rounded p-2 border border-slate-100 overflow-x-auto">
-        {JSON.stringify(jobSpec, null, 2)}
+        {JSON.stringify(payload, null, 2)}
       </pre>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Webhook (Eval v2 E-4) FILTER VERDICT: the decision the REAL filter made for this
+// synthetic event, vs what the item expected.
+//
+// This is the first-class evidence for a webhook agent, because its first job is to
+// NOT run on events it should filter. A correctly-filtered event is a PASS with no run
+// at all — so this block has to make "nothing ran, and that was right" legible, or a
+// human reads an empty row as a broken eval.
+//
+// `matched` is `eval_run_results.matched` — a column that existed since E-0 with
+// NEITHER a writer nor a reader. The eval-runner's webhook branch writes it; this is
+// the reader.
+// ---------------------------------------------------------------------------
+function FilterVerdict({
+  matched,
+  detail,
+}: {
+  matched: boolean | null;
+  detail: EvalDetail | null;
+}) {
+  const fd = detail?.filter_detail ?? null;
+  const expected = fd?.expected_match ?? null;
+  const realReason = detail?.filter_reason ?? fd?.filter_reason ?? null;
+  const expectedReason = fd?.expected_filter_reason ?? null;
+  // A row that fail-closed BEFORE firing has no decision at all. Say so — "no decision"
+  // and "filtered" are completely different outcomes and must never render alike.
+  if (matched === null || matched === undefined) {
+    return (
+      <div data-testid="filter-verdict">
+        <p className="font-semibold text-slate-600 mb-1">Filter verdict</p>
+        <p className="text-[11px] text-amber-700 bg-amber-50 rounded p-2 border border-amber-100">
+          No filter decision was recorded — the item failed closed before the event was
+          fired, so the filter never ran. This is not a "filtered" result.
+        </p>
+      </div>
+    );
+  }
+  const correct = expected === null ? null : matched === expected;
+  return (
+    <div data-testid="filter-verdict">
+      <p className="font-semibold text-slate-600 mb-1">Filter verdict</p>
+      <div className="flex flex-wrap items-center gap-2 mb-1">
+        <span
+          data-testid="filter-decision"
+          className={`inline-block px-2 py-0.5 rounded text-[10px] font-medium ${
+            matched ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-600"
+          }`}
+        >
+          real filter: {matched ? "matched — the agent ran" : "filtered — nothing ran"}
+        </span>
+        {expected !== null && (
+          <span className="text-[10px] text-slate-500">
+            expected: {expected ? "match" : "filtered"}
+          </span>
+        )}
+        {correct !== null && (
+          <span
+            className={`inline-block px-2 py-0.5 rounded text-[10px] font-medium ${
+              correct ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
+            }`}
+          >
+            {correct ? "correct decision" : "FILTER ERROR"}
+          </span>
+        )}
+      </div>
+      {realReason && (
+        <p className="text-[11px] text-slate-600">
+          reason: <span className="font-mono">{realReason}</span>
+        </p>
+      )}
+      {expectedReason && (
+        <p className="text-[11px] text-slate-600">
+          expected reason to contain:{" "}
+          <span className="font-mono">{expectedReason}</span>
+          {fd?.reason_matched === false && (
+            <span className="ml-2 text-red-700 font-medium">
+              — not present: the event was filtered for a different reason, so the rule
+              under test never ran
+            </span>
+          )}
+        </p>
+      )}
+      {!matched && (
+        <p className="text-[11px] text-slate-400 mt-1">
+          No run exists for this item — that is the pass. The whole job of a filter is
+          to not run.
+        </p>
+      )}
+      {detail?.veto && detail.veto.length > 0 && (
+        <p
+          data-testid="filter-veto"
+          className="text-[11px] text-red-700 bg-red-50 rounded p-2 border border-red-100 mt-1"
+        >
+          Composite forced to 0 — {detail.veto.join(", ")}. These are exact facts a
+          weighted average may not out-vote.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Webhook (Eval v2 E-4) INJECTION evidence: ASR and utility, SIDE BY SIDE.
+//
+// The side-by-side is the whole point, not a layout choice. An agent that refuses
+// every event drives ASR to 0 and would read as a flawless defense; only its utility
+// exposes it as useless. Rendering ASR alone would let a human sign off on exactly the
+// agent this probe exists to catch (the AgentDojo/InjecAgent framing, made visible).
+// ---------------------------------------------------------------------------
+function InjectionEvidence({ detail }: { detail: EvalDetail | null }) {
+  if (!detail) return null;
+  if (detail.injection_not_exercised) {
+    return (
+      <div data-testid="injection-evidence">
+        <p className="font-semibold text-slate-600 mb-1">Injection probe</p>
+        <p className="text-[11px] text-slate-500 bg-slate-50 rounded p-2 border border-slate-100">
+          Not exercised — the event was filtered, so the agent never saw the payload.
+          There is no injection score for this item: the filter already blocked it, and
+          that is fully credited by the filter dimension.
+        </p>
+      </div>
+    );
+  }
+  const id = detail.injection_detail ?? null;
+  const asr = detail.asr ?? id?.asr ?? null;
+  const utility = detail.utility ?? id?.utility ?? null;
+  const forbidden = detail.forbidden_called ?? id?.forbidden_called ?? null;
+  if (asr === null && utility === null && !id) return null;
+  return (
+    <div data-testid="injection-evidence">
+      <p className="font-semibold text-slate-600 mb-1">Injection probe</p>
+      <div className="grid grid-cols-2 gap-2 mb-1">
+        <div
+          data-testid="injection-asr"
+          className={`rounded p-2 border ${
+            asr === 0 ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100"
+          }`}
+        >
+          <p className="text-[10px] uppercase tracking-wide text-slate-500">
+            ASR (attack success)
+          </p>
+          <p
+            className={`text-sm font-semibold ${
+              asr === 0 ? "text-green-700" : "text-red-700"
+            }`}
+          >
+            {asr === null ? "—" : asr.toFixed(2)}
+          </p>
+          <p className="text-[10px] text-slate-500">
+            {asr === 0
+              ? "no forbidden tool fired"
+              : "an injected instruction really fired a forbidden tool"}
+          </p>
+        </div>
+        <div
+          data-testid="injection-utility"
+          className="rounded p-2 border bg-white border-slate-100"
+        >
+          <p className="text-[10px] uppercase tracking-wide text-slate-500">
+            Utility (task still done)
+          </p>
+          <p className="text-sm font-semibold text-slate-700">
+            {utility === null ? "—" : utility.toFixed(2)}
+          </p>
+          <p className="text-[10px] text-slate-500">
+            a defense that refuses everything scores ASR 0 but tanks this
+          </p>
+        </div>
+      </div>
+      {forbidden && forbidden.length > 0 && (
+        <p className="text-[11px] text-red-700">
+          forbidden tools actually called:{" "}
+          <span className="font-mono">{forbidden.join(", ")}</span>
+        </p>
+      )}
+      {id?.must_not_call && id.must_not_call.length > 0 && (
+        <p className="text-[11px] text-slate-500">
+          must not call: <span className="font-mono">{id.must_not_call.join(", ")}</span>
+          {id.must_refuse ? " · must refuse: yes" : ""}
+          {id.must_refuse && id.refused !== null && id.refused !== undefined
+            ? ` · refused: ${id.refused ? "yes" : "no"}`
+            : ""}
+        </p>
+      )}
     </div>
   );
 }

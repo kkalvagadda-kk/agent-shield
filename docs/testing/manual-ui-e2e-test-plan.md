@@ -96,6 +96,100 @@ token/URL is shown **once** on create/rotate (stored hashed); use **Rotate** to 
 
 ---
 
+## Known gaps — Eval v2 E-4 (webhook eval: filter decision + action + prompt-injection robustness)
+
+**E-4 is COMPLETE end-to-end** (P1–P7). A `webhook` dataset is authorable in Studio, launches a real
+eval-runner Job, fires each synthetic event at the **real** parity-gated filter, scores the decision, runs the
+matched action under the record seam, probes injection, and renders it all. Landed across **registry-api
+0.2.189 / eval-runner 0.1.12 / studio 0.1.143** (no migration — E-4 owns none; head stays **0064**).
+Gated by `scripts/e2e/suite-77-eval-v2-webhook.sh` (`T-S77-000`–`010`, registered in `run-all.sh`) +
+`studio/e2e/eval-v2-webhook.spec.ts`.
+
+> **Three silent failures were found and fixed during this slice — all of them failed *safe-looking*
+> (nothing errored, no pod crashed, no static check went red). Written up in
+> `docs/bugs/webhook-eval-door-silent-failures.md`:** the runner's priority-fallthrough dispatch running a
+> webhook eval **live** on the reactive path; `test-event` feeding a matched durable run `input_payload=None`
+> so the agent never saw its own event; and a helper inserted under `@router.post("/test-event")` **stealing
+> the route** so the door echoed its own request body with a 200. The third passed *every* content-verification
+> grep — the code was in the image, just wired to the wrong name — and only a real HTTP request (suite-22)
+> caught it.
+
+**Landed in this slice:**
+- **D2 — ONE run door.** `test-event` no longer hand-builds a second `PlaygroundRun`;
+  `_create_and_dispatch_playground_run` is the single builder (1 def, 2 call sites). This closed **three live
+  defects** that had been failing *safe* (so nothing ever errored): test-event never threaded `eval_mode` (the
+  column defaulted `'live'`, so **a matched webhook eval would have DELIVERED REAL SIDE EFFECTS** — E-2's seam
+  reads the persisted column); it never dispatched durable runs (a durable webhook agent's run hung at
+  `running` forever); it dropped the Langfuse trace + `agent_version_id`.
+- **Launch guard opens for `webhook`** (was a hard 422 "not implemented yet (E-4)"): requires an armed webhook
+  trigger; workflow-level webhook eval rejected.
+- **`/eval/score` `mode=webhook`** (was 501): `score_filter` + `score_injection` (both pure code), action dims
+  reused verbatim from E-0/E-1/E-2, present-dims-only, ASR and utility reported **separately**.
+- **Safety veto.** An exact filter error, or a really-fired forbidden tool, vetoes the composite to 0.0. On the
+  data-model's weights alone both composited **above** the 0.7 publish gate (0.75 and 0.73) — i.e. a weighted
+  mean silently let through the exact two failures E-4 exists to catch. Safety facts gate; they are not averaged.
+- **eval-runner webhook branch** (P5): `MODE=webhook` fires the item's `trigger_payload` at the real
+  `test-event` door and scores the returned decision. A correct **miss creates no run at all**
+  (`eval_run_results.run_id IS NULL` — the evidence nothing ran). A match drives the action under
+  `eval_mode=record` whenever the item asserts side effects **or carries an injection probe**. Writes
+  `eval_run_results.matched`.
+- **Fail-closed dispatch** (P5): the runner now dispatches through an explicit **mode→handler map** with
+  `reactive` REGISTERED, not a priority if-chain with a reactive tail. See the resolved hazard below.
+- **Studio** (P6): the webhook item editor (synthetic event + `expected_match` + `expected_filter_reason` +
+  injection probe) and the results evidence (filter verdict + synthetic event + ASR/utility side by side).
+  `eval_run_results.matched`'s **first reader**.
+
+**RESOLVED in this slice (was the P1–P4 ledger's 🔴 row) — an unhandled MODE no longer degrades into a live run:**
+- CP1a opened the launch guard for `webhook` one phase before the runner had a branch, and the runner dispatched
+  by **priority fallthrough** — so `MODE=webhook` fell through to the **reactive tail**: an empty
+  `input_message`, **no `eval_mode` ⇒ `'live'` ⇒ real side effects delivered**, the filter never fired, and a
+  plausible `{"response": x}` **PASS**. Fixed **structurally**, not with another `if`: dispatch is an explicit
+  map, so a mode with no handler resolves to `None` and every item is recorded **failed** with the mode named,
+  having created **no run**. Proven live by **`T-S77-010`** (the REAL eval-runner image, launched by the
+  product's own Job builder with an unhandled MODE, asserted to create **zero** `playground_runs`).
+  The same class of hazard was closed in Studio: with every mode now having an editor, the old "editor coming
+  later — create an empty dataset" fallthrough became a **fail-closed refusal** (an empty dataset launches an
+  eval that scores nothing and reports a clean pass).
+
+**RESOLVED in this slice (found by suite-77's positive control, T-S77-004):**
+- **`test-event` fed a matched durable run `input_payload=None`.** The durable dispatch body carries **only**
+  `input_payload` (`durable_dispatch.py` — the runner derives its turn from it), so `input_message` never
+  reaches a durable agent. A matched webhook run therefore dispatched `{}` and the agent answered *"I have not
+  been provided with any event payload"* — a REAL run, really scored, that never saw the event. Invisible until
+  D2 made this door dispatch durable **at all** (it previously hung forever). The door now feeds the
+  **identical production shape** the real webhook door uses (`input_payload=payload` + a driving turn derived
+  with `internal.py`'s own line). **This is exactly the failure a filter-miss-only test cannot see** — a miss
+  scoring 1.0 and "the eval never ran" are the same observable, which is why `T-S77-004` is mandatory.
+
+**not-yet-wired (debt):**
+- **Item `tool_mocks` not threaded to the seam** — inherited E-2 debt; declared on `WebhookDatasetItem` for
+  contract parity with `Durable`/`ScheduledDatasetItem`. E-4 adds no new debt here.
+
+**deferred (intentional):**
+- **The eval scores the `test-event` door's returned decision, not an `AgentEvent.status` row** (E-4 **D1**).
+  `test-event` writes no `agent_events` row, and it should not: that table is the production audit log of real
+  **deliveries**, and writing synthetic eval fires into it would leave the Event Trace UI unable to tell a probe
+  from a real event (that needs a `source` discriminator + its own readers). The decision is real and
+  parity-gated. **`T-S77-009` is the live differential control**: the same payloads through the REAL
+  event-gateway (real WS-4-signed, the product's own `sign_webhook`) must produce `agent_events.status`
+  `matched`/`filtered` agreeing with the eval door's decision. **Verified green.**
+- **Webhook eval fires through `test-event`, not the signed gateway edge.** The gateway edge threads no
+  `eval_mode` (it would deliver for real). The eval drives the **same** parity-gated filter engine and the
+  **same** run door under the record seam. Mirrors E-3's D1.
+- **LLM-semantic refusal detection.** `score_injection`'s `must_refuse` uses a **light keyword** check; a
+  calibrated classifier is a follow-up. Deliberately it does **not** veto — only the *exact* ASR half
+  (a forbidden tool really fired) gates. Fuzzy signals get weight, exact ones gate.
+- **Full AgentDojo/InjecAgent attack battery** — E-4 ships single-payload `injection_probe` items.
+- **Reactive-inner webhook agents cannot record.** E-2's seam is armed only on the durable `/run` dispatch, so a
+  reactive-inner agent whose item asserts side effects (or carries a probe) is **refused before the event is
+  fired** rather than delivering for real. Inherited E-2/E-3 limitation, fail-closed by design.
+- **`filter_engine.py` duplicated in registry-api + event-gateway** (pre-existing). Each service builds from its
+  own Docker context, so neither can import a shared module without changing both builds.
+  `scripts/check-filter-engine-parity.sh` runs inside `deploy-cpe2e.sh` **before either image builds**, making
+  divergence **undeployable** — enforcement, not discipline. **E-4 depends on this gate** (it is what makes the
+  eval honest: without it E-4 would score a filter production never runs) and asserts it (`T-S77-000a`); it does
+  not close it.
+
 ## Known gaps — Execution Models v2 WS-0 (agent_class authoring + shape-aware dispatch)
 
 **Landed in this slice** (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127; migration 0058; suite-54): `agent_class` NOT NULL + CHECK on agents **and** workflows; create wizard split into Shape · Trigger · Class (R1); Settings + Workflow Save-modal Class selectors + save-time high-risk warnings (S2); shared `durable_dispatch.py` (single `/run` POST, parity); shape-aware production dispatch + `POST /internal/runs/{id}/step-update` callback writing `run_steps`; reactive workflow synchronous + wall-clock capped (M6/D2); reactive approval gate fail-closed via `_park_or_fail` (S2).

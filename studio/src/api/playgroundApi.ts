@@ -156,11 +156,53 @@ export interface ScheduledDatasetItem {
   expected_side_effects?: SideEffectAssertion[];
 }
 
+// Eval v2 E-4 — webhook dataset item (discriminated-union variant, `kind:"webhook"`).
+// Mirrors backend `WebhookDatasetItem` (schemas.py) / e4/data-model.md §2.
+//
+// `trigger_payload` is the SYNTHETIC EVENT. The eval fires it at the agent's REAL
+// webhook trigger through the REAL `test-event` door, which runs the real
+// `filter_engine` against the trigger's real `filter_conditions` — a copy the
+// deploy-time parity gate keeps byte-identical to the event-gateway's. So the decision
+// scored is the decision production makes, not an eval-only re-implementation.
+//
+// `expected_match` is the FIRST-CLASS signal: a webhook agent's first job is to NOT run
+// on events it should filter. A correctly-filtered event scores `filter: 1.0` and runs
+// NOTHING — a pass, not a skip. `expected_filter_reason` (only meaningful when
+// `expected_match` is false) additionally requires that substring in the real reason: a
+// miss for the WRONG reason means the rule under test was never exercised.
+//
+// The action expecteds (`expected_output`/`expected_trajectory`/`expected_side_effects`)
+// are scored ONLY on a match — there is nothing to score when nothing ran.
+export interface InjectionProbe {
+  // Tools an injected instruction must NEVER be able to make the agent call. Checked
+  // against the union of the recorded calls and the real trajectory.
+  must_not_call?: string[];
+  // Whether the agent must visibly refuse (a LIGHT keyword check — a calibrated
+  // refusal classifier is an explicit gap-ledger deferral).
+  must_refuse?: boolean;
+}
+
+export interface WebhookDatasetItem {
+  kind: "webhook";
+  trigger_payload: Record<string, unknown>;
+  expected_match: boolean;
+  expected_filter_reason?: string;
+  expected_output?: string;
+  expected_trajectory?: ExpectedTrajectory;
+  expected_side_effects?: SideEffectAssertion[];
+  // The payload is attacker-controlled (it arrives from the internet, not from an
+  // authenticated user). A probe's presence makes the eval-runner run the item under
+  // `eval_mode=record` regardless of assertions: the question is whether a forbidden
+  // WRITE fired, and a live delivery would answer it by really wiring the money.
+  injection_probe?: InjectionProbe;
+}
+
 export type AnyDatasetItem =
   | DatasetItem
   | DurableDatasetItem
   | ScheduledDatasetItem
-  | WorkflowDatasetItem;
+  | WorkflowDatasetItem
+  | WebhookDatasetItem;
 
 export function isDurableItem(item: AnyDatasetItem): item is DurableDatasetItem {
   return (item as DurableDatasetItem).kind === "durable";
@@ -184,6 +226,12 @@ export interface EvalRun {
   created_at: string;
   sandbox_deployment_id: string | null;
   workflow_deployment_id: string | null;
+  // Eval v2 E-0 — the interpretation mode this run was scored under (== the dataset's
+  // authored mode). The backend has always returned it; declaring it here is what lets
+  // the results page render evidence by the EXPLICIT discriminator instead of guessing
+  // from which keys a row happens to carry (a scheduled `job_spec` and a webhook
+  // `trigger_payload` share the same column).
+  mode: DatasetMode;
 }
 
 export interface EvalRunResult {
@@ -205,11 +253,19 @@ export interface EvalRunResult {
   // Eval v2 E-1 — durable per-dimension evidence + soft link to the run tree.
   eval_detail?: EvalDetail | null;
   run_id?: string | null;
-  // Eval v2 E-3 — the JOB SPEC this result's run was actually fired with (== the
-  // run's `input_payload`/`trigger_payload`), written by the eval-runner's scheduled
-  // branch. Present on fail-closed rows too, so the results UI can always show WHAT
-  // was fired even when the item could not be scored.
+  // Eval v2 E-3/E-4 — WHAT this result's run was actually fired with (== the run's
+  // `input_payload`/`trigger_payload`): the JOB SPEC for a scheduled item, the
+  // SYNTHETIC EVENT for a webhook item. Written by the eval-runner, and present on
+  // fail-closed rows too, so the results UI can always show what was fired even when
+  // the item could not be scored. Which one it is comes from the run's `mode`, never
+  // from sniffing the shape.
   trigger_payload?: Record<string, unknown> | null;
+  // Eval v2 E-4 — the REAL filter decision the `test-event` door returned for this
+  // item's synthetic event (webhook mode only; null on every other family and on a
+  // webhook row that fail-closed BEFORE firing, where no decision was ever made).
+  // Written by the eval-runner's webhook branch, read by the filter-verdict block —
+  // the column existed since E-0 with neither a writer nor a reader.
+  matched?: boolean | null;
   created_at: string;
 }
 
@@ -317,6 +373,47 @@ export interface EvalDetail {
   actual_member_path?: string[] | null;
   member_diff?: MemberDiff | null;
   per_member?: PerMemberEvidence[] | null;
+  // Eval v2 E-4 — webhook filter + injection evidence.
+  // The decision half: what the REAL filter decided and why, vs what the item expected.
+  matched?: boolean | null;
+  filter_reason?: string | null;
+  filter_detail?: FilterDetail | null;
+  // The injection half. `asr` (attack success rate: did a forbidden tool really fire?)
+  // and `utility` (the response dim of the SAME run) are surfaced side by side ON
+  // PURPOSE: an agent that refuses everything drives ASR to 0 and would read as a
+  // perfect defense while being useless. Reporting only ASR would grade it perfect.
+  asr?: number | null;
+  utility?: number | null;
+  forbidden_called?: string[] | null;
+  injection_detail?: InjectionDetail | null;
+  // True when the item carried a probe but the event was FILTERED — the probe was
+  // never exercised, so there is no injection dimension. Surfaced rather than silently
+  // omitted: an absent dimension must never read as a passing one.
+  injection_not_exercised?: boolean | null;
+  // The exact facts no weighted average may out-vote (a filter error; an injected
+  // instruction that really fired a forbidden tool). When present, the composite was
+  // forced to 0 regardless of the other dimensions.
+  veto?: string[] | null;
+}
+
+export interface FilterDetail {
+  matched?: boolean | null;
+  expected_match?: boolean | null;
+  filter_reason?: string | null;
+  expected_filter_reason?: string | null;
+  // null when no reason was asserted; false when the event was filtered for a
+  // DIFFERENT reason than the item named (the rule under test never ran).
+  reason_matched?: boolean | null;
+  error?: string | null;
+}
+
+export interface InjectionDetail {
+  asr?: number | null;
+  utility?: number | null;
+  forbidden_called?: string[] | null;
+  refused?: boolean | null;
+  must_not_call?: string[] | null;
+  must_refuse?: boolean | null;
 }
 
 // True when this detail carries workflow run-tree evidence (member path / per-member)

@@ -74,7 +74,25 @@ check_caller "_run_scheduled_item" "services/eval-runner/main.py" "run_eval's MO
 check_caller "_call_score_api_scheduled" "services/eval-runner/main.py" "the scheduled item runner"
 check_caller "ScheduledItemEditor" "studio/src/pages/DatasetsPage.tsx" "the dataset modal"
 check_caller "buildScheduledItem" "studio/src/pages/DatasetsPage.tsx" "the save path"
-check_caller "JobSpecEvidence" "studio/src/pages/EvalResultsPage.tsx" "the evidence panel"
+# E-4 renamed `JobSpecEvidence` → `FiredPayloadEvidence` when the webhook family began
+# recording its SYNTHETIC EVENT on the same `trigger_payload` column. The panel is the
+# same panel and E-3's claim is unchanged — the job spec still renders — but it is now
+# labelled from the run's explicit `mode`, because a job spec and a webhook event are
+# indistinguishable as JSON and calling one the other is a quiet lie in the one panel
+# whose whole job is to say what was fired. The `job-spec-evidence` testid below is what
+# actually pins E-3's rendering claim across the rename.
+check_caller "FiredPayloadEvidence" "studio/src/pages/EvalResultsPage.tsx" "the evidence panel"
+
+# The `job-spec-evidence` testid is what pins E-3's rendering claim ACROSS the rename —
+# but it is a testid string, not a symbol, so it legitimately occurs exactly ONCE and
+# `check_caller`'s def+caller >= 2 rule does not apply to it. Presence is the assertion.
+if grep -q "job-spec-evidence" studio/src/pages/EvalResultsPage.tsx 2>/dev/null; then
+  ok "T023 the scheduled job-spec evidence testid survives E-4's rename" \
+     "job-spec-evidence still rendered by EvalResultsPage (E-3's panel is intact)"
+else
+  bad "T023 the scheduled job-spec evidence testid survives E-4's rename" \
+      "job-spec-evidence is GONE from EvalResultsPage — E-3's scheduled evidence panel was dropped"
+fi
 
 # The load-bearing one: trigger_payload needs BOTH a writer and a reader. This is the
 # orphan E-0 actually left (the column shipped with no reader at all), so it is
@@ -118,13 +136,30 @@ lines = open(values).read().splitlines()
 
 def paired_tag(repo_suffix):
     """The `tag:` that belongs to the `repository:` ending in repo_suffix — read from
-    the same image block, not from anywhere in the file."""
+    the same image block, not from anywhere in the file.
+
+    Comments and blank lines are SKIPPED rather than counted against a fixed lookahead
+    window. The window used to be 5 raw lines, which meant adding one more explanatory
+    comment between `repository:` and `tag:` pushed the tag out of range and this gate
+    reported `values.yaml says 'None'` — a confusing FAIL about a tag that was sitting
+    right there. (It failed loudly rather than falsely passing, so it was never unsafe,
+    just wrong.) These image blocks accumulate comments precisely because the "bumped
+    one file only" bug keeps recurring, so the parser must not punish documenting them.
+    The scan still stops at the next key at or above the block's indent, so it can never
+    wander into a DIFFERENT component's tag."""
     for i, ln in enumerate(lines):
         if re.match(r"\s*repository:\s*\S*" + re.escape(repo_suffix) + r"\s*$", ln):
-            for nxt in lines[i + 1:i + 6]:
+            repo_indent = len(ln) - len(ln.lstrip())
+            for nxt in lines[i + 1:]:
+                if not nxt.strip() or nxt.lstrip().startswith("#"):
+                    continue
                 m = re.match(r'\s*tag:\s*"?([^"\s]+)"?\s*$', nxt)
                 if m:
                     return m.group(1)
+                # A real key at or above the repository's own indent ends this block —
+                # never read a neighbouring component's tag as this one's.
+                if len(nxt) - len(nxt.lstrip()) <= repo_indent:
+                    break
     return None
 
 def inline_tag(key):

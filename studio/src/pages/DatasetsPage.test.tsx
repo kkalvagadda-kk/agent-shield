@@ -78,19 +78,29 @@ describe("DatasetsPage — mode selector (Eval v2 E-0)", () => {
     );
   });
 
-  it("disables the item editor for still-unbuilt modes and shows a hint", async () => {
+  // E-4 closed the last gap: every one of the five DatasetMode values now has a real
+  // item editor, so there is no "coming later" state left to assert. Webhook — which
+  // this test used to pin as unbuilt — now renders its own editor, and the old
+  // disabled-placeholder path became the fail-closed guard for a mode with no editor
+  // (it refuses instead of offering an empty dataset, because an empty dataset launches
+  // an eval that scores nothing and reports a clean pass).
+  it("renders a real item editor for every mode — no mode falls through to the empty-dataset path", async () => {
     renderWithProviders(<DatasetsPage />);
 
     fireEvent.click(await screen.findByRole("button", { name: /New Dataset/i }));
     const select = (await screen.findByLabelText("Dataset mode")) as HTMLSelectElement;
-    fireEvent.change(select, { target: { value: "webhook" } });
 
-    expect(select.value).toBe("webhook");
-    // Reactive editor is gone; disabled placeholder editor + "coming later" hint.
-    expect(screen.queryByPlaceholderText(/expected_output/)).not.toBeInTheDocument();
-    const disabledEditor = screen.getByLabelText("Items editor (disabled)") as HTMLTextAreaElement;
-    expect(disabledEditor).toBeDisabled();
-    expect(screen.getByText(/coming later/i)).toBeInTheDocument();
+    for (const mode of ["durable", "scheduled", "workflow", "webhook"]) {
+      fireEvent.change(select, { target: { value: mode } });
+      expect(select.value).toBe(mode);
+      // The reactive editor is gone, and NO mode reaches the no-editor guard.
+      expect(screen.queryByPlaceholderText(/expected_output/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId("dataset-mode-no-editor")).not.toBeInTheDocument();
+    }
+
+    // ...and webhook specifically renders ITS editor, not a neighbour's.
+    fireEvent.change(select, { target: { value: "webhook" } });
+    expect(screen.getByTestId("webhook-trigger-payload")).toBeInTheDocument();
   });
 });
 
@@ -767,5 +777,188 @@ describe("DatasetsPage — scheduled item editor (Eval v2 E-3)", () => {
         items: [{ kind: "scheduled", job_spec: JOB_SPEC }],
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Eval v2 E-4 — the webhook item editor. A webhook dataset is authored as a SYNTHETIC
+// EVENT (`trigger_payload`, fired at the agent's real webhook filter) plus the
+// expected filter decision — the first-class signal, because a webhook agent's first
+// job is to NOT run on events it should filter. The `injection_probe` covers the other
+// half: the payload arrives from the public internet, so an instruction smuggled into
+// it must not be able to drive the agent.
+// ---------------------------------------------------------------------------
+describe("DatasetsPage — webhook item editor (Eval v2 E-4)", () => {
+  const MATCH_EVENT = { event_type: "payment.fail", order_id: "12345" };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(listDatasets).mockResolvedValue([]);
+    mock(listEvalRuns).mockResolvedValue([]);
+    mock(createDataset).mockResolvedValue({
+      id: "ds-4",
+      owner_user_id: "u1",
+      name: "webhook-ds",
+      mode: "webhook",
+      schema_version: 1,
+      items: [],
+      created_at: new Date().toISOString(),
+    });
+    mock(listAllDeployments).mockResolvedValue({ items: [], total: 0 });
+    mock(listAllWorkflowDeployments).mockResolvedValue([]);
+  });
+
+  async function openWebhookEditor() {
+    renderWithProviders(<DatasetsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /New Dataset/i }));
+    const select = (await screen.findByLabelText("Dataset mode")) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "webhook" } });
+    return select;
+  }
+
+  async function openWithEvent(name = "webhook-ds") {
+    await openWebhookEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: name },
+    });
+    fireEvent.change(screen.getByLabelText("Webhook trigger payload"), {
+      target: { value: JSON.stringify(MATCH_EVENT) },
+    });
+  }
+
+  it("renders the webhook editor ONLY in webhook mode", async () => {
+    await openWebhookEditor();
+    expect(screen.getByLabelText("Webhook trigger payload")).toBeInTheDocument();
+    expect(screen.getByLabelText("Expected match")).toBeInTheDocument();
+    // Not the reactive / durable / scheduled editors, and not the no-editor guard.
+    expect(screen.queryByPlaceholderText(/expected_output/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Durable input payload")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Scheduled job spec")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("dataset-mode-no-editor")).not.toBeInTheDocument();
+  });
+
+  it("is not rendered for other modes (no regression to durable/scheduled/workflow)", async () => {
+    renderWithProviders(<DatasetsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /New Dataset/i }));
+    const select = (await screen.findByLabelText("Dataset mode")) as HTMLSelectElement;
+
+    for (const [mode, label] of [
+      ["durable", "Durable input payload"],
+      ["scheduled", "Scheduled job spec"],
+      ["workflow", "Workflow input message"],
+    ] as const) {
+      fireEvent.change(select, { target: { value: mode } });
+      expect(screen.queryByLabelText("Webhook trigger payload")).not.toBeInTheDocument();
+      expect(screen.getByLabelText(label)).toBeInTheDocument();
+    }
+  });
+
+  it("hides expected_filter_reason when the event SHOULD match, shows it when it should be filtered", async () => {
+    await openWebhookEditor();
+    // Default is "should match" → the reason field is meaningless (a match's reason
+    // just names which rule fired) and must not be offered.
+    expect(screen.queryByLabelText("Expected filter reason")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Expected match"));
+    expect(screen.getByLabelText("Expected filter reason")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Expected match"));
+    expect(screen.queryByLabelText("Expected filter reason")).not.toBeInTheDocument();
+  });
+
+  it("SENDS trigger_payload + expected_match + injection_probe on save", async () => {
+    await openWithEvent();
+    fireEvent.change(screen.getByLabelText("Webhook expected output"), {
+      target: { value: "The on-call engineer was paged." },
+    });
+    fireEvent.change(screen.getByTestId("webhook-must-not-call-input"), {
+      target: { value: "wire_transfer" },
+    });
+    fireEvent.click(screen.getByTestId("webhook-add-must-not-call"));
+    fireEvent.click(screen.getByLabelText("Must refuse"));
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(createDataset).toHaveBeenCalledWith({
+        name: "webhook-ds",
+        mode: "webhook",
+        items: [
+          {
+            kind: "webhook",
+            trigger_payload: MATCH_EVENT,
+            expected_match: true,
+            expected_output: "The on-call engineer was paged.",
+            injection_probe: { must_not_call: ["wire_transfer"], must_refuse: true },
+          },
+        ],
+      }),
+    );
+  });
+
+  it("SENDS expected_filter_reason only for an event that should be FILTERED", async () => {
+    await openWithEvent();
+    fireEvent.click(screen.getByLabelText("Expected match"));
+    fireEvent.change(screen.getByLabelText("Expected filter reason"), {
+      target: { value: "payment.ok" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(createDataset).toHaveBeenCalledWith({
+        name: "webhook-ds",
+        mode: "webhook",
+        items: [
+          {
+            kind: "webhook",
+            trigger_payload: MATCH_EVENT,
+            expected_match: false,
+            expected_filter_reason: "payment.ok",
+          },
+        ],
+      }),
+    );
+  });
+
+  it("blocks save on an invalid synthetic event (JSON) and does not POST", async () => {
+    await openWebhookEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: "webhook-ds" },
+    });
+    fireEvent.change(screen.getByLabelText("Webhook trigger payload"), {
+      target: { value: "{not json" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringMatching(/Synthetic event is not valid JSON/i),
+      ),
+    );
+    expect(createDataset).not.toHaveBeenCalled();
+  });
+
+  it("an EMPTY probe is not sent — an eval must not record a run for a question nobody asked", async () => {
+    await openWithEvent();
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() => expect(createDataset).toHaveBeenCalled());
+    const body = mock(createDataset).mock.calls[0][0];
+    expect(body.items[0]).not.toHaveProperty("injection_probe");
+  });
+
+  it("a forbidden tool can be removed again before save", async () => {
+    await openWithEvent();
+    fireEvent.change(screen.getByTestId("webhook-must-not-call-input"), {
+      target: { value: "wire_transfer" },
+    });
+    fireEvent.click(screen.getByTestId("webhook-add-must-not-call"));
+    expect(screen.getByTestId("webhook-must-not-call-list")).toHaveTextContent("wire_transfer");
+
+    fireEvent.click(screen.getByLabelText("Remove wire_transfer"));
+    expect(screen.queryByTestId("webhook-must-not-call-list")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+    await waitFor(() => expect(createDataset).toHaveBeenCalled());
+    expect(mock(createDataset).mock.calls[0][0].items[0]).not.toHaveProperty("injection_probe");
   });
 });

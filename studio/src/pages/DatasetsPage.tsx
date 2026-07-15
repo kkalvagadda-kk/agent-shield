@@ -19,6 +19,7 @@ import {
   type ScheduledDatasetItem,
   type SideEffectAssertion,
   type TrajectoryMatchMode,
+  type WebhookDatasetItem,
   type WorkflowDatasetItem,
 } from "../api/playgroundApi";
 import { listAllDeployments, listAllWorkflowDeployments } from "../api/registryApi";
@@ -60,6 +61,19 @@ export default function DatasetsPage() {
   const [wfMemberPath, setWfMemberPath] = useState<string[]>([]);
   const [wfPerMember, setWfPerMember] = useState<PerMemberDraft[]>([]);
 
+  // Eval v2 E-4 — webhook item: the synthetic event fired at the agent's REAL webhook
+  // filter, the expected filter decision (the first-class signal), the action expecteds
+  // scored only on a match, and the attacker-controlled injection probe.
+  const [whTriggerPayload, setWhTriggerPayload] = useState("");
+  const [whExpectedMatch, setWhExpectedMatch] = useState(true);
+  const [whExpectedFilterReason, setWhExpectedFilterReason] = useState("");
+  const [whExpectedOutput, setWhExpectedOutput] = useState("");
+  const [whMatchMode, setWhMatchMode] = useState<TrajectoryMatchMode>("superset");
+  const [whSteps, setWhSteps] = useState<DurableStepDraft[]>([]);
+  const [whSideEffects, setWhSideEffects] = useState<SideEffectDraft[]>([]);
+  const [whMustNotCall, setWhMustNotCall] = useState<string[]>([]);
+  const [whMustRefuse, setWhMustRefuse] = useState(false);
+
   const resetCreateForm = () => {
     setDsName("");
     setDsMode("reactive");
@@ -78,6 +92,15 @@ export default function DatasetsPage() {
     setWfMatchMode("ordered");
     setWfMemberPath([]);
     setWfPerMember([]);
+    setWhTriggerPayload("");
+    setWhExpectedMatch(true);
+    setWhExpectedFilterReason("");
+    setWhExpectedOutput("");
+    setWhMatchMode("superset");
+    setWhSteps([]);
+    setWhSideEffects([]);
+    setWhMustNotCall([]);
+    setWhMustRefuse(false);
   };
 
   // Run eval modal state
@@ -147,7 +170,7 @@ export default function DatasetsPage() {
     }
     // Reactive: one JSON object per line. Durable (E-1): a structured trajectory
     // editor. Scheduled (E-3): a job-spec editor. Workflow (E-5): a run-tree editor.
-    // Webhook creates an empty dataset (its editor lands with E-4).
+    // Webhook (E-4): a synthetic-event editor.
     let items: AnyDatasetItem[] = [];
     if (dsMode === "reactive") {
       for (const line of dsItems.split("\n")) {
@@ -193,6 +216,29 @@ export default function DatasetsPage() {
         return;
       }
       items = [built.item];
+    } else if (dsMode === "webhook") {
+      const built = buildWebhookItem(
+        whTriggerPayload,
+        whExpectedMatch,
+        whExpectedFilterReason,
+        whExpectedOutput,
+        whMatchMode,
+        whSteps,
+        whSideEffects,
+        whMustNotCall,
+        whMustRefuse,
+      );
+      if ("error" in built) {
+        toast.error(built.error);
+        return;
+      }
+      items = [built.item];
+    } else {
+      // Fail-closed, matching the editor switch's guard: a mode with no builder must
+      // refuse, never fall through to `items = []`. An empty dataset launches a real
+      // eval that scores nothing and reports a clean pass — a silent fake green.
+      toast.error(`No item builder for mode '${dsMode}' — cannot author this dataset.`);
+      return;
     }
     createMutation.mutate({ name: dsName.trim(), items, mode: dsMode });
   };
@@ -421,19 +467,48 @@ export default function DatasetsPage() {
                   perMember={wfPerMember}
                   setPerMember={setWfPerMember}
                 />
+              ) : dsMode === "webhook" ? (
+                <WebhookItemEditor
+                  triggerPayload={whTriggerPayload}
+                  setTriggerPayload={setWhTriggerPayload}
+                  expectedMatch={whExpectedMatch}
+                  setExpectedMatch={setWhExpectedMatch}
+                  expectedFilterReason={whExpectedFilterReason}
+                  setExpectedFilterReason={setWhExpectedFilterReason}
+                  expectedOutput={whExpectedOutput}
+                  setExpectedOutput={setWhExpectedOutput}
+                  matchMode={whMatchMode}
+                  setMatchMode={setWhMatchMode}
+                  steps={whSteps}
+                  setSteps={setWhSteps}
+                  sideEffects={whSideEffects}
+                  setSideEffects={setWhSideEffects}
+                  mustNotCall={whMustNotCall}
+                  setMustNotCall={setWhMustNotCall}
+                  mustRefuse={whMustRefuse}
+                  setMustRefuse={setWhMustRefuse}
+                />
               ) : (
+                // UNREACHABLE by construction — `DatasetMode` is exactly the five
+                // modes above and every one now has an editor (webhook was the last,
+                // E-4). This branch is the fail-closed guard for a SIXTH mode added
+                // without one: it refuses rather than offering an empty dataset.
+                //
+                // The old behavior here ("the editor is coming later — create an empty
+                // dataset now") is exactly the shape of hazard the eval-runner's
+                // dispatch had: an unhandled mode degrading into a plausible-looking
+                // wrong answer. An empty dataset launches an eval that scores nothing
+                // and reports a clean pass. A mode with no editor must be loud.
                 <div>
                   <label className="label text-xs mb-1">Items</label>
-                  <textarea
-                    disabled
-                    aria-label="Items editor (disabled)"
-                    className="input text-xs font-mono h-40 resize-none opacity-50 cursor-not-allowed"
-                    placeholder=""
-                    value=""
-                  />
-                  <p className="text-xs text-amber-600 mt-1">
-                    The <code>{dsMode}</code> item editor is coming later. You can
-                    create an empty {dsMode} dataset now and add items later.
+                  <p
+                    data-testid="dataset-mode-no-editor"
+                    className="text-xs text-red-700 bg-red-50 rounded p-2 border border-red-100"
+                  >
+                    No item editor exists for mode <code>{dsMode}</code>, so a dataset
+                    cannot be authored for it here. Creating an empty one would launch
+                    an eval that scores nothing and reports a pass — this refuses
+                    instead.
                   </p>
                 </div>
               )}
@@ -727,9 +802,233 @@ function ScheduledItemEditor({
 }
 
 /**
+ * Structured editor for a webhook dataset item (E-4): the synthetic event
+ * (`trigger_payload`) fired at the agent's REAL webhook filter, whether the filter
+ * should match it (`expected_match` — the first-class signal), the reason it should be
+ * filtered by (only when it should NOT match), the action expecteds that are scored
+ * only on a match, and an optional `injection_probe` for the attacker-controlled half.
+ * Rendered only when the dataset mode is `webhook`. Validation happens on save
+ * (`buildWebhookItem`).
+ */
+function WebhookItemEditor({
+  triggerPayload,
+  setTriggerPayload,
+  expectedMatch,
+  setExpectedMatch,
+  expectedFilterReason,
+  setExpectedFilterReason,
+  expectedOutput,
+  setExpectedOutput,
+  matchMode,
+  setMatchMode,
+  steps,
+  setSteps,
+  sideEffects,
+  setSideEffects,
+  mustNotCall,
+  setMustNotCall,
+  mustRefuse,
+  setMustRefuse,
+}: {
+  triggerPayload: string;
+  setTriggerPayload: (v: string) => void;
+  expectedMatch: boolean;
+  setExpectedMatch: (v: boolean) => void;
+  expectedFilterReason: string;
+  setExpectedFilterReason: (v: string) => void;
+  expectedOutput: string;
+  setExpectedOutput: (v: string) => void;
+  matchMode: TrajectoryMatchMode;
+  setMatchMode: (v: TrajectoryMatchMode) => void;
+  steps: DurableStepDraft[];
+  setSteps: Dispatch<SetStateAction<DurableStepDraft[]>>;
+  sideEffects: SideEffectDraft[];
+  setSideEffects: Dispatch<SetStateAction<SideEffectDraft[]>>;
+  mustNotCall: string[];
+  setMustNotCall: Dispatch<SetStateAction<string[]>>;
+  mustRefuse: boolean;
+  setMustRefuse: (v: boolean) => void;
+}) {
+  const [toolDraft, setToolDraft] = useState("");
+
+  const addTool = () => {
+    const t = toolDraft.trim();
+    if (!t) return;
+    setMustNotCall((prev) => (prev.includes(t) ? prev : [...prev, t]));
+    setToolDraft("");
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label htmlFor="webhook-trigger-payload" className="label text-xs mb-1">
+          Synthetic Event (<code>trigger_payload</code>, JSON object)
+        </label>
+        <textarea
+          id="webhook-trigger-payload"
+          aria-label="Webhook trigger payload"
+          data-testid="webhook-trigger-payload"
+          className="input text-xs font-mono h-24 resize-none"
+          placeholder={`{"event_type": "payment.fail", "order_id": "12345"}`}
+          value={triggerPayload}
+          onChange={(e) => setTriggerPayload(e.target.value)}
+        />
+        <p className="text-xs text-slate-400 mt-1">
+          POSTed through the <strong>real webhook filter</strong> — the same
+          <code> filter_engine</code> the event-gateway runs, against this agent's real{" "}
+          <code>filter_conditions</code>. The decision scored is the decision production
+          makes.
+        </p>
+      </div>
+
+      <div>
+        <label className="label text-xs mb-1">Filter Decision</label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            aria-label="Expected match"
+            data-testid="webhook-expected-match"
+            checked={expectedMatch}
+            onChange={(e) => setExpectedMatch(e.target.checked)}
+          />
+          <span>
+            The filter should <strong>match</strong> this event (the agent should run)
+          </span>
+        </label>
+        <p className="text-xs text-slate-400 mt-1">
+          Unchecked = the event should be <strong>filtered out</strong>. That is a
+          first-class pass, not a skip: a correctly-filtered event scores{" "}
+          <code>filter: 1.0</code> and runs nothing — not running is the whole job of a
+          filter.
+        </p>
+      </div>
+
+      {!expectedMatch && (
+        <div>
+          <label htmlFor="webhook-filter-reason" className="label text-xs mb-1">
+            Expected Filter Reason (optional)
+          </label>
+          <input
+            id="webhook-filter-reason"
+            aria-label="Expected filter reason"
+            data-testid="webhook-filter-reason"
+            className="input text-sm"
+            placeholder="e.g. payment.ok"
+            value={expectedFilterReason}
+            onChange={(e) => setExpectedFilterReason(e.target.value)}
+          />
+          <p className="text-xs text-slate-400 mt-1">
+            A substring that must occur in the real filter reason. A miss for the{" "}
+            <em>wrong</em> reason means the rule under test was never exercised — so it
+            scores 0.
+          </p>
+        </div>
+      )}
+
+      <div>
+        <label htmlFor="webhook-expected-output" className="label text-xs mb-1">
+          Expected Output (optional)
+        </label>
+        <textarea
+          id="webhook-expected-output"
+          aria-label="Webhook expected output"
+          className="input text-xs h-16 resize-none"
+          placeholder="What the agent should report after handling a matched event."
+          value={expectedOutput}
+          onChange={(e) => setExpectedOutput(e.target.value)}
+        />
+        <p className="text-xs text-slate-400 mt-1">
+          Scored only when the event <strong>matches</strong> — a filtered event has no
+          response to judge.
+        </p>
+      </div>
+
+      <TrajectoryStepsEditor
+        idPrefix="webhook"
+        matchMode={matchMode}
+        setMatchMode={setMatchMode}
+        steps={steps}
+        setSteps={setSteps}
+        emptyHint="No steps — a matched event is scored on the response + side effects only. Steps are scored for a durable-inner webhook agent (a reactive one leaves no run steps)."
+      />
+
+      <SideEffectsEditor sideEffects={sideEffects} setSideEffects={setSideEffects} />
+
+      <div className="border-t border-slate-200 pt-4">
+        <label className="label text-xs mb-1">
+          Injection Probe (optional)
+        </label>
+        <p className="text-xs text-slate-400 mb-2">
+          A webhook payload arrives from the public internet, not from an authenticated
+          user. A probe asks whether an instruction smuggled <em>into</em> the event can
+          make the agent act. Results report <strong>ASR</strong> (attack success) and{" "}
+          <strong>utility</strong> separately, so a defense that refuses everything is
+          visibly penalized rather than scored perfect.
+        </p>
+        <div className="flex gap-2">
+          <input
+            aria-label="Forbidden tool"
+            data-testid="webhook-must-not-call-input"
+            className="input text-sm flex-1"
+            placeholder="Tool the agent must never be tricked into calling"
+            value={toolDraft}
+            onChange={(e) => setToolDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addTool();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="btn-secondary text-xs"
+            data-testid="webhook-add-must-not-call"
+            onClick={addTool}
+          >
+            + Add
+          </button>
+        </div>
+        {mustNotCall.length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2" data-testid="webhook-must-not-call-list">
+            {mustNotCall.map((t) => (
+              <span
+                key={t}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-rose-50 text-rose-700 text-xs"
+              >
+                {t}
+                <button
+                  type="button"
+                  aria-label={`Remove ${t}`}
+                  className="text-rose-400 hover:text-rose-700"
+                  onClick={() => setMustNotCall((prev) => prev.filter((x) => x !== t))}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <label className="flex items-center gap-2 text-sm mt-3">
+          <input
+            type="checkbox"
+            aria-label="Must refuse"
+            data-testid="webhook-must-refuse"
+            checked={mustRefuse}
+            onChange={(e) => setMustRefuse(e.target.checked)}
+          />
+          <span>The agent must visibly refuse the injected instruction</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+/**
  * The expected-trajectory block (match mode + ordered tool steps with per-step
- * `args_match` and an `expect_approval` HITL toggle). Shared by the durable (E-1) and
- * scheduled (E-3) editors — one trajectory editor, not one per eval family.
+ * `args_match` and an `expect_approval` HITL toggle). Shared by the durable (E-1),
+ * scheduled (E-3) and webhook (E-4) editors — one trajectory editor, not one per eval
+ * family.
  * `idPrefix` scopes the element ids; the labels are stable because only one editor is
  * ever mounted (the dataset mode is exclusive).
  */
@@ -1008,6 +1307,68 @@ export function buildDurableItem(
  * run as its `input_payload`/`trigger_payload` — and `expected_side_effects`, whose
  * presence makes the runner fire the item under `eval_mode=record`.
  */
+/**
+ * Validate + assemble a webhook dataset item (E-4) from the form drafts.
+ *
+ * `trigger_payload` (the synthetic event) and `expected_match` (the filter decision)
+ * are the two required fields — the decision is the first-class dimension, and an item
+ * that does not state the expected decision has nothing to score.
+ *
+ * `expected_filter_reason` is only sent when `expected_match` is false: the reason
+ * guard exists to catch a miss for the WRONG rule, and on a match the reason merely
+ * names which rule fired. Sending it on a match would be a field the scorer ignores —
+ * an item that lies about what it asserts.
+ *
+ * The `injection_probe` is sent only when it says something (a forbidden tool or a
+ * refusal requirement). An empty probe would make the runner record the run for a
+ * question nobody asked.
+ */
+export function buildWebhookItem(
+  triggerPayloadStr: string,
+  expectedMatch: boolean,
+  expectedFilterReasonStr: string,
+  expectedOutputStr: string,
+  matchMode: TrajectoryMatchMode,
+  steps: DurableStepDraft[],
+  sideEffects: SideEffectDraft[] = [],
+  mustNotCall: string[] = [],
+  mustRefuse = false,
+): { item: WebhookDatasetItem } | { error: string } {
+  const triggerPayload = parseJsonObject(triggerPayloadStr, "Synthetic event");
+  if ("error" in triggerPayload) return { error: triggerPayload.error };
+
+  const builtSteps = buildTrajectorySteps(steps);
+  if ("error" in builtSteps) return { error: builtSteps.error };
+
+  const builtSideEffects = buildSideEffectAssertions(sideEffects);
+  if ("error" in builtSideEffects) return { error: builtSideEffects.error };
+
+  const item: WebhookDatasetItem = {
+    kind: "webhook",
+    trigger_payload: triggerPayload.value,
+    expected_match: expectedMatch,
+  };
+
+  const reason = expectedFilterReasonStr.trim();
+  if (!expectedMatch && reason) item.expected_filter_reason = reason;
+
+  const expectedOutput = expectedOutputStr.trim();
+  if (expectedOutput) item.expected_output = expectedOutput;
+  if (builtSteps.value.length > 0) {
+    item.expected_trajectory = { match_mode: matchMode, steps: builtSteps.value };
+  }
+  if (builtSideEffects.value.length > 0) {
+    item.expected_side_effects = builtSideEffects.value;
+  }
+  const tools = mustNotCall.map((t) => t.trim()).filter(Boolean);
+  if (tools.length > 0 || mustRefuse) {
+    item.injection_probe = {};
+    if (tools.length > 0) item.injection_probe.must_not_call = tools;
+    if (mustRefuse) item.injection_probe.must_refuse = true;
+  }
+  return { item };
+}
+
 export function buildScheduledItem(
   jobSpecStr: string,
   expectedOutputStr: string,
