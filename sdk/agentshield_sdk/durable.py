@@ -171,15 +171,27 @@ async def _drive(
     thread_id: str,
     emitter: StepEmitter,
     start_step: int,
+    recorded_side_effects: list[dict] | None = None,
 ) -> RunResult:
     """Drive astream_events(v2), emitting a run_steps row per tool boundary, until
-    completion or an interrupt. Shared by run_durable + resume_durable — the ONE loop."""
+    completion or an interrupt. Shared by run_durable + resume_durable — the ONE loop.
+
+    ``recorded_side_effects`` (Eval v2 E-2) is the buffer the governed-tool delivery
+    seam appends to under `eval_mode=record` — created by the DRIVER via
+    ``graph_builder.begin_eval_context`` and passed in explicitly rather than imported
+    here, so this harness stays standalone (httpx only; see the module docstring and
+    sdk/tests/test_durable.py, which loads it without the package)."""
     step = start_step
     final_text: str | None = None
-    # event run_id -> (step_number, tool_args) for in-flight tools. Args are only on
-    # the on_tool_start event (`data.input`); we carry them to on_tool_end so the
-    # completed step's `output` records the exact call the run made (Eval v2 E-1).
-    open_tools: dict[str, tuple[int, Any]] = {}
+    # event run_id -> (step_number, tool_args, rec_mark) for in-flight tools. Args are
+    # only on the on_tool_start event (`data.input`); we carry them to on_tool_end so
+    # the completed step's `output` records the exact call the run made (Eval v2 E-1).
+    # `rec_mark` is the recording-buffer length at the call's start, so on_tool_end can
+    # slice out exactly the side effects THIS call recorded (Eval v2 E-2).
+    open_tools: dict[str, tuple[int, Any, int]] = {}
+
+    def _rec_mark() -> int:
+        return len(recorded_side_effects) if recorded_side_effects is not None else 0
 
     try:
         async for event in graph.astream_events(input_state, config, version="v2"):
@@ -188,7 +200,7 @@ async def _drive(
             if etype == "on_tool_start":
                 step += 1
                 args = (event.get("data") or {}).get("input")
-                open_tools[event.get("run_id", name)] = (step, args)
+                open_tools[event.get("run_id", name)] = (step, args, _rec_mark())
                 # Eval v2 E-1: carry {tool, args} on the tool-boundary output so the
                 # eval-runner can project run_steps → actual_trajectory (data-model §3).
                 await emitter.emit(StepUpdate(
@@ -198,13 +210,23 @@ async def _drive(
                 entry = open_tools.pop(event.get("run_id", name), None)
                 if entry is None:
                     step += 1
-                    s, args = step, None
+                    s, args, mark = step, None, _rec_mark()
                 else:
-                    s, args = entry
+                    s, args, mark = entry
                 out = (event.get("data") or {}).get("output")
                 tool_output: dict[str, Any] = {"tool": name, "args": args}
                 if out is not None:
                     tool_output["result"] = str(out)[:2000]
+                # Eval v2 E-2: drain what the delivery seam recorded for THIS call onto
+                # the SAME run_steps row the eval-runner already projects — no new
+                # persistence path. `output` is a JSONB dict column; this stays a dict.
+                if recorded_side_effects is not None:
+                    rec = [
+                        r for r in recorded_side_effects[mark:]
+                        if r.get("tool") == name
+                    ]
+                    if rec:
+                        tool_output["recorded_side_effects"] = rec
                 await emitter.emit(StepUpdate(s, f"tool:{name}", "completed", output=tool_output))
             elif etype == "on_chain_end":
                 ft = _final_text((event.get("data") or {}).get("output"))
@@ -252,13 +274,21 @@ async def run_durable(
     thread_id: str,
     callback_url: str,   # bound into `emitter`; kept for contract fidelity + logging
     emitter: StepEmitter,
+    recorded_side_effects: list[dict] | None = None,
 ) -> RunResult:
     """Start a durable run. Drives the graph, emits real per-node steps, parks
     fail-closed on a HITL interrupt. Returns the terminal RunResult; the graph state
-    is durably checkpointed in PostgresSaver so the process may exit after a park."""
+    is durably checkpointed in PostgresSaver so the process may exit after a park.
+
+    ``recorded_side_effects``: the E-2 recording buffer from
+    ``graph_builder.begin_eval_context(eval_mode)``; None (default) = a normal live
+    run with nothing to drain."""
     logger.info("run_durable: start thread=%s callback=%s", thread_id, callback_url)
     config = {"configurable": {"thread_id": thread_id}}
-    return await _drive(graph, input, config, thread_id=thread_id, emitter=emitter, start_step=0)
+    return await _drive(
+        graph, input, config, thread_id=thread_id, emitter=emitter, start_step=0,
+        recorded_side_effects=recorded_side_effects,
+    )
 
 
 async def resume_durable(
@@ -269,6 +299,7 @@ async def resume_durable(
     callback_url: str,
     emitter: StepEmitter,
     start_step: int = 0,
+    recorded_side_effects: list[dict] | None = None,
 ) -> RunResult:
     """Re-enter from the PostgresSaver checkpoint keyed by thread_id.
       - decision != None → an approval was decided; the interrupted node receives it.
@@ -289,4 +320,7 @@ async def resume_durable(
         resume_input = Command(resume=decision)
     else:
         resume_input = None
-    return await _drive(graph, resume_input, config, thread_id=thread_id, emitter=emitter, start_step=start_step)
+    return await _drive(
+        graph, resume_input, config, thread_id=thread_id, emitter=emitter,
+        start_step=start_step, recorded_side_effects=recorded_side_effects,
+    )

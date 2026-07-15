@@ -98,6 +98,10 @@ class ResumeRequest(BaseModel):
     reason: str | None = None
     run_id: str | None = None        # set for a durable /run resume (WS-1 T4)
     callback_url: str | None = None  # durable resume re-drives the harness, posting steps here
+    # Eval v2 E-2 — the mode the run started in (sent by the registry off the persisted
+    # PlaygroundRun). A resume re-drives the graph and re-crosses the tool delivery
+    # edge, so the record/mock seam must be re-armed. Parity with the declarative-runner.
+    eval_mode: str = "live"
 
 
 # --- Middleware: basic request timing ---
@@ -240,6 +244,10 @@ class DurableRunRequest(BaseModel):
     callback_url: str
     input_payload: dict[str, Any] = {}
     agent_name: str | None = None  # ignored — this pod IS the agent (accepted for parity with the dispatch body)
+    # Eval v2 E-2 — 'live' (default) | 'record'. Same field, same dispatch body, same
+    # `governed_tool` seam as the declarative-runner: a custom-container SDK agent
+    # evaluated in record mode records + mocks its side-effecting calls too.
+    eval_mode: str = "live"
 
 
 @app.post("/run")
@@ -255,14 +263,19 @@ async def run_durable_endpoint(req: DurableRunRequest, request: Request):
 
     message = req.input_payload.get("message") or json.dumps(req.input_payload)
     trace_id = request.headers.get("x-agentshield-trace-id") or req.run_id
-    asyncio.create_task(_execute_durable_run_bg(message, req.run_id, req.callback_url, trace_id))
+    asyncio.create_task(
+        _execute_durable_run_bg(message, req.run_id, req.callback_url, trace_id, req.eval_mode)
+    )
     return {"status": "accepted", "run_id": req.run_id}
 
 
-async def _execute_durable_run_bg(message: str, run_id: str, callback_url: str, trace_id: str) -> None:
+async def _execute_durable_run_bg(
+    message: str, run_id: str, callback_url: str, trace_id: str, eval_mode: str = "live",
+) -> None:
     try:
         result = await runner.run_durable(
-            message, run_id=run_id, callback_url=callback_url, trace_id=trace_id
+            message, run_id=run_id, callback_url=callback_url, trace_id=trace_id,
+            eval_mode=eval_mode,
         )
         logger.info("SDK durable run %s finished status=%s", run_id, result.status)
     except SafetyBlockedError as exc:
@@ -295,7 +308,10 @@ async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
     # the remaining steps reach the callback. Chat resume (no callback_url) is unchanged.
     if req.callback_url and req.run_id:
         import asyncio
-        asyncio.create_task(_resume_durable_bg(thread_id, decision, req.run_id, req.callback_url, trace_id))
+        asyncio.create_task(
+            _resume_durable_bg(thread_id, decision, req.run_id, req.callback_url, trace_id,
+                               req.eval_mode)
+        )
         return {"status": "accepted", "thread_id": thread_id}
 
     try:
@@ -307,10 +323,11 @@ async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
 
 
 async def _resume_durable_bg(thread_id: str, decision: dict, run_id: str, callback_url: str,
-                             trace_id: str | None) -> None:
+                             trace_id: str | None, eval_mode: str = "live") -> None:
     try:
         result = await runner.resume_durable(
             thread_id, decision, run_id=run_id, callback_url=callback_url, trace_id=trace_id,
+            eval_mode=eval_mode,
         )
         logger.info("SDK durable resume %s finished status=%s", run_id, result.status)
     except Exception as exc:  # fail loud — post a terminal failed step so the run never hangs

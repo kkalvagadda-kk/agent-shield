@@ -18,7 +18,7 @@ from langchain_core.messages import HumanMessage  # type: ignore[import]
 
 from .agent import Agent
 from .checkpointer import get_checkpointer
-from .graph_builder import build_graph, resolve_agent_tools, _current_thread_id
+from .graph_builder import build_graph, resolve_agent_tools, begin_eval_context, _current_thread_id
 from .otel import otel_run_context
 from .safety_client import scan_input, scan_output, SafetyBlockedError
 from .streaming import stream_events
@@ -253,14 +253,19 @@ class Runner:
         return {"response": out_scan.clean_text, "thread_id": thread_id}
 
     async def run_durable(
-        self, message: str, run_id: str, callback_url: str, trace_id: str | None = None
+        self, message: str, run_id: str, callback_url: str, trace_id: str | None = None,
+        eval_mode: str = "live",
     ):
         """Durable fire-and-forget run: real per-node steps + HITL park via the shared
         harness (``agentshield_sdk.durable``) — the SAME ``run_durable`` the
         declarative-runner consumes (parity core, WS-1). Mirrors ``run()``'s input
         safety-scan + OTEL trace binding (safety lives outside the graph); the streamed
         output is not re-scanned mid-run, same as ``run_streamed()``. Returns the
-        harness ``RunResult`` (completed | awaiting_approval | failed)."""
+        harness ``RunResult`` (completed | awaiting_approval | failed).
+
+        ``eval_mode`` (Eval v2 E-2) arms the record/mock delivery seam for this run —
+        the identical flag the declarative-runner sets, honored by the identical
+        `governed_tool` edge (one seam, no fork). 'live' by default."""
         self._assert_ready()
         import httpx
 
@@ -271,6 +276,7 @@ class Runner:
         )
         state = {"messages": [HumanMessage(content=scan_result.sanitized_text)]}
         token = _current_thread_id.set(run_id)
+        recorded = begin_eval_context(eval_mode)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
@@ -278,23 +284,28 @@ class Runner:
                     return await _run_durable(
                         self._graph, state, thread_id=run_id,
                         callback_url=callback_url, emitter=emitter,
+                        recorded_side_effects=recorded,
                     )
         finally:
             _current_thread_id.reset(token)
 
     async def resume_durable(
         self, thread_id: str, decision: dict, run_id: str, callback_url: str,
-        trace_id: str | None = None,
+        trace_id: str | None = None, eval_mode: str = "live",
     ):
         """Re-enter a parked durable run after an approval decision via the shared
         harness, emitting the remaining steps to ``callback_url``. Symmetric with
-        ``run_durable``; used by the SDK server's durable ``/resume`` branch (WS-1 T4)."""
+        ``run_durable``; used by the SDK server's durable ``/resume`` branch (WS-1 T4).
+
+        ``eval_mode`` re-arms the E-2 seam: a resume re-drives the graph and re-crosses
+        the delivery edge, so it must run in the mode the run started in."""
         self._assert_ready()
         import httpx
 
         from .durable import Bookmark, StepEmitter, resume_durable as _resume_durable
 
         token = _current_thread_id.set(thread_id)
+        recorded = begin_eval_context(eval_mode)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
@@ -302,6 +313,7 @@ class Runner:
                     return await _resume_durable(
                         self._graph, thread_id=thread_id, decision=decision,
                         callback_url=callback_url, emitter=emitter,
+                        recorded_side_effects=recorded,
                     )
         finally:
             _current_thread_id.reset(token)

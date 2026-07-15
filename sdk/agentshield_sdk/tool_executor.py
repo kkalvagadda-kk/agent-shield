@@ -97,6 +97,7 @@ class HttpToolExecutor:
         body_template: str,
         description: str | None = None,
         timeout_ms: int = 10_000,
+        side_effecting: bool | None = None,
     ) -> None:
         self.name = name
         self.risk = risk
@@ -106,6 +107,9 @@ class HttpToolExecutor:
         self.body_template = body_template
         self.description = description
         self.timeout_ms = timeout_ms
+        # Eval v2 E-2 — the registry's classification (None = unclassifiable, which
+        # the delivery seam treats as side-effecting: mocked, never invoked).
+        self.side_effecting = side_effecting
 
     @staticmethod
     def _substitute_vars(template: str, variables: dict) -> str:
@@ -167,6 +171,11 @@ class HttpToolExecutor:
         )
         http_tool_fn.risk = self.risk
         http_tool_fn.tool_name = self.name
+        # Eval v2 E-2 — read by `graph_builder.governed_tool` at the delivery edge.
+        # `invocation_target` is the downstream the record entry reports as
+        # `would_have_invoked` (the request that was NOT sent).
+        http_tool_fn.side_effecting = self.side_effecting
+        http_tool_fn.invocation_target = f"{self.method} {self.url}"
 
         if all_vars:
             params = [
@@ -204,6 +213,7 @@ class PythonToolExecutor:
         description: str | None = None,
         timeout_ms: int = 10_000,
         input_schema: dict | None = None,
+        side_effecting: bool | None = None,
     ) -> None:
         self.name = name
         self.risk = risk
@@ -211,6 +221,9 @@ class PythonToolExecutor:
         self.description = description
         self.timeout_ms = timeout_ms
         self.input_schema = input_schema
+        # Eval v2 E-2 — see HttpToolExecutor. Python tool code is opaque to the
+        # platform, so the registry classifies it side-effecting by default.
+        self.side_effecting = side_effecting
 
     def as_tool_callable(self) -> Any:
         """Return an async callable that invokes the python-executor."""
@@ -241,6 +254,9 @@ class PythonToolExecutor:
         )
         python_tool_fn.risk = self.risk
         python_tool_fn.tool_name = self.name
+        # Eval v2 E-2 — read by `graph_builder.governed_tool` at the delivery edge.
+        python_tool_fn.side_effecting = self.side_effecting
+        python_tool_fn.invocation_target = f"python-executor:{self.name}"
 
         # Prefer named parameters derived from the tool's registered input_schema
         # (gives the model a real, typed arg schema — the same treatment HTTP tools

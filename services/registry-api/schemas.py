@@ -628,6 +628,10 @@ class ToolCreate(BaseModel):
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     risk_level: str = Field("low", pattern="^(low|medium|high|critical)$")
+    # Eval v2 E-2: explicit side-effect classification. `None` (the default) means
+    # "not stated" → the door INFERS it from the method (routers/tools.py
+    # ::infer_side_effecting), fail-closed. Set it only to override the inference.
+    side_effecting: bool | None = None
     auth_config_id: uuid.UUID | None = None
     owner_team: str | None = None
     # HTTP-specific
@@ -652,6 +656,10 @@ class ToolUpdate(BaseModel):
     output_schema: dict[str, Any] | None = None
     risk_level: str | None = Field(None, pattern="^(low|medium|high|critical)$")
     status: str | None = Field(None, pattern="^(active|inactive|deprecated)$")
+    # Eval v2 E-2: explicit override. When ABSENT and `http_method` IS being changed,
+    # the door re-infers the classification from the new method (a GET→POST edit must
+    # not leave a write tool classified read-only) — routers/tools.py::update_tool.
+    side_effecting: bool | None = None
     auth_config_id: uuid.UUID | None = None
     http_method: str | None = None
     http_url: str | None = None
@@ -674,6 +682,11 @@ class ToolResponse(BaseModel):
     input_schema: dict[str, Any] | None
     output_schema: dict[str, Any] | None
     risk_level: str
+    # Eval v2 E-2: served so the SDK tool resolver can stamp `.side_effecting` onto
+    # the resolved callable — `governed_tool` then reads `fn.side_effecting` at the
+    # delivery edge with no extra lookup. Defaults to True (fail-closed) if a legacy
+    # row somehow lacks it, so an unclassifiable tool is mocked, never invoked.
+    side_effecting: bool = True
     auth_config_id: uuid.UUID | None
     owner_team: str | None
     version: int
@@ -1070,6 +1083,12 @@ class PlaygroundRunCreate(BaseModel):
     input_payload: Optional[dict[str, Any]] = None
     trigger_type: Optional[str] = None
     trigger_payload: Optional[dict[str, Any]] = None
+    # Eval v2 E-2: 'record' makes the tool delivery edge record + mock a
+    # side-effecting call instead of invoking it. An EXPLICIT param, authored only by
+    # the batch eval-runner — never derived from `context == 'playground'`: a human
+    # test-firing an agent in the sandbox legitimately wants real side effects, so
+    # the default here (and for every interactive chat run) is 'live'.
+    eval_mode: Literal["live", "record"] = "live"
 
 
 class PlaygroundRunResponse(BaseModel):
@@ -1083,6 +1102,9 @@ class PlaygroundRunResponse(BaseModel):
     sandbox: bool
     input_message: Optional[str]
     execution_shape: str
+    # Eval v2 E-2 — surfaced so a caller can read back WHICH mode a run actually ran
+    # in (CP1a asserts a run created without `eval_mode` persists as 'live').
+    eval_mode: str = "live"
     input_payload: Optional[dict[str, Any]] = None
     trigger_type: Optional[str] = None
     trigger_payload: Optional[dict[str, Any]] = None
@@ -1163,28 +1185,85 @@ class ExpectedTrajectory(BaseModel):
     steps: list[ExpectedTrajectoryStep] = Field(default_factory=list)
 
 
+class SideEffectAssertion(BaseModel):
+    """One expected side effect, scored against the recorded calls (E-2 data-model §4).
+
+    `args_match` is a partial dict-subset asserted present in the recorded args.
+    `occurs`/`count`: 'exactly' N, 'at_least' N, or 'never' (any match ⇒ 0.0).
+    Scored by `judge.score_side_effects` — deterministic, no LLM.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    tool: str
+    args_match: Optional[dict[str, Any]] = None
+    occurs: Literal["exactly", "at_least", "never"] = "exactly"
+    count: int = 1
+
+
 class DurableDatasetItem(_DatasetItemBase):
     """Trajectory + tool-call + HITL-arg review (data-model §2.2; scored WS-1).
 
     `expected_trajectory` is now a STRUCTURED model (match_mode + typed steps), so a
     malformed trajectory (e.g. a step missing `tool`) is rejected 422 at the door —
     the discriminated union validates the variant, not runtime key-sniffing later.
+
+    `expected_side_effects` (E-2) asserts what the run WOULD have delivered: the
+    eval-runner runs an item carrying them under `eval_mode=record`, so the write is
+    recorded + mocked rather than invoked, and `score_side_effects` asserts the
+    recorded calls against these.
     """
 
     kind: Literal["durable"] = "durable"
     input_payload: Optional[dict[str, Any]] = None
     expected_output: Optional[str] = None
     expected_trajectory: Optional[ExpectedTrajectory] = None
+    expected_side_effects: Optional[list[SideEffectAssertion]] = None
+    # Optional per-tool fixed mock returned instead of invoking. NOT yet threaded to
+    # the seam (the seam returns a type-default success sentinel today) — see the E-2
+    # gap ledger row "item `tool_mocks` not threaded to the seam".
+    tool_mocks: Optional[dict[str, Any]] = None
 
 
 class ScheduledDatasetItem(_DatasetItemBase):
-    """Job-spec run → side-effect verification (data-model §2.3; scored WS-3)."""
+    """Job-spec run → side-effect verification (data-model §2.3; scored E-3).
+
+    `job_spec` is the per-schedule job spec — the SAME shape as the shipped
+    `AgentTrigger.input_payload` (`models.py`) — and is fed to the run as its
+    `input_payload` (+ `trigger_type='schedule'` / `trigger_payload=job_spec`),
+    i.e. the identical production shape, not an eval-only payload.
+
+    `expected_trajectory` / `expected_side_effects` are the SAME structured models
+    `DurableDatasetItem` uses (E-1 `ExpectedTrajectory`, E-2 `SideEffectAssertion`),
+    so a malformed golden trajectory (a step missing `tool`) or a bad `occurs`
+    value is rejected **422 at the door** by the discriminated union instead of
+    being key-sniffed at score time. E-3 adds no scorer and no item semantics of
+    its own: the scheduled score door reuses `score_trajectory`/`score_tool_calls`
+    (E-1) and `score_side_effects` (E-2) over exactly these fields.
+
+    `expected_side_effects` is the HEADLINE signal for scheduled — a scheduled
+    agent's whole point is the side effect it fires unattended ("did the nightly
+    compliance job send the right email?"). Items carrying it are run by the
+    eval-runner under `eval_mode=record` (E-2), so the write is recorded + mocked
+    rather than delivered, and asserted against the recorded calls.
+
+    `expected_trajectory` is meaningful for a **durable-inner** schedule (the
+    scheduled agent's `execution_shape == 'durable'`, so the run leaves
+    `run_steps` to project); a reactive-inner schedule scores response +
+    side_effect only.
+    """
 
     kind: Literal["scheduled"] = "scheduled"
+    # == AgentTrigger.input_payload; fed to the run as its `input_payload`.
     job_spec: Optional[dict[str, Any]] = None
     expected_output: Optional[str] = None
-    expected_trajectory: Optional[dict[str, Any]] = None
-    expected_side_effects: Optional[list[dict[str, Any]]] = None
+    expected_trajectory: Optional[ExpectedTrajectory] = None
+    expected_side_effects: Optional[list[SideEffectAssertion]] = None
+    # Optional per-tool fixed mock returned instead of invoking. NOT yet threaded to
+    # the seam (the seam returns a type-default success sentinel today) — declared
+    # here for contract parity with `DurableDatasetItem`; same E-2 gap-ledger row
+    # "item `tool_mocks` not threaded to the seam" (E-3 adds no new debt).
+    tool_mocks: Optional[dict[str, Any]] = None
 
 
 class WebhookDatasetItem(_DatasetItemBase):
@@ -1412,6 +1491,12 @@ class EvalScoreRequest(BaseModel):
     # default composite weights (0.4/0.4/0.2) when the eval run supplies them.
     actual_trajectory: Optional[list[dict[str, Any]]] = None
     dimension_weights: Optional[dict[str, float]] = None
+    # Eval v2 E-2 (durable): the side-effect calls the delivery seam RECORDED instead
+    # of invoking, collected by the eval-runner off the projected `run_steps`
+    # (`output.recorded_side_effects[]`). Each entry:
+    # {tool, args, mocked_response, would_have_invoked}. Scored against the item's
+    # `expected_side_effects` by `judge.score_side_effects` (the `side_effect` dim).
+    recorded_side_effects: Optional[list[dict[str, Any]]] = None
     # Eval v2 E-5 (workflow): the ordered member names the eval-runner extracted
     # from the workflow run tree (child `agent_name`s, ordered by `started_at`)
     # and, per member, that child's projected run_steps for the optional

@@ -129,6 +129,12 @@ async def _resume_and_advance(
                 if pr is not None:
                     resume_body["run_id"] = str(tid)
                     resume_body["callback_url"] = f"{registry_internal_base()}/api/v1/playground/runs/{tid}/step-update"
+                    # Eval v2 E-2: a console decide re-drives the graph, so the resume
+                    # must re-cross the tool delivery edge in the mode the run STARTED
+                    # in — read back off the persisted PlaygroundRun (never re-derived).
+                    # Production AgentRuns have no eval_mode (evals run in the sandbox),
+                    # so that branch stays on the runner's 'live' default.
+                    resume_body["eval_mode"] = pr.eval_mode
                     is_durable = True
     except Exception:
         pass  # thread_id is not a durable run id → fall through to chat/workflow resume

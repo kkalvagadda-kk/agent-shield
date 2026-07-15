@@ -200,6 +200,52 @@ def _project_trajectory(steps: list[dict[str, Any]] | None) -> list[dict[str, An
     return _collapse_tool_calls(trajectory)
 
 
+def _project_recorded_side_effects(steps: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Project the REAL recorded side effects off the real `run_steps` rows.
+
+    Under `eval_mode=record` the governed-tool delivery seam records each
+    side-effecting call it mocked instead of delivering, and the durable harness
+    drains those onto the SAME tool-boundary row this module already projects
+    (`output.recorded_side_effects[]` — a JSONB dict column, never text). Flatten
+    them in step order into the list `/eval/score` hands to
+    `judge.score_side_effects`. Same projection seam as `_project_trajectory`, one
+    zoom level in — no second read path.
+
+    Each entry: `{tool, args, mocked_response, would_have_invoked}`.
+    """
+    recorded: list[dict[str, Any]] = []
+    for s in steps or []:
+        out = s.get("output")
+        out = out if isinstance(out, dict) else {}
+        for r in out.get("recorded_side_effects") or []:
+            if isinstance(r, dict):
+                recorded.append(r)
+    return recorded
+
+
+def _requires_recording(item: dict[str, Any]) -> bool:
+    """True iff this item asserts a side effect that an EMPTY recording cannot
+    satisfy — i.e. any assertion that is not `never` (nor its degenerate twin
+    `exactly 0`). Those are the only assertions a run that recorded nothing may
+    legitimately pass: `never` is satisfied BY the absence.
+
+    When this is True and the record-mode run recorded nothing, the side effect is
+    UNVERIFIABLE, so `_run_durable_item` records the item failed rather than
+    scoring it (retro #4: an eval that cannot record a side-effect fails the item,
+    it never silently passes).
+
+    This predicate lives here, not in `judge`, because the eval-runner is the only
+    component that fail-closes on it — and it ships as a separate image that cannot
+    import the registry-api's judge module. `test_recorded_side_effects.py` pins it
+    to `judge.score_side_effects`' ACTUAL empty-recording semantics, so the two can't
+    drift into disagreement.
+    """
+    return any(
+        a.get("occurs") != "never" and int(a.get("count", 1)) >= 1
+        for a in (item.get("expected_side_effects") or [])
+    )
+
+
 def _assert_expected_approvals(idx: int, item: dict[str, Any], trajectory: list[dict[str, Any]]) -> None:
     """Projection assertion (E-1 T011): warn when an `expect_approval` tool did NOT
     park in the projected trajectory. This does not decide the score (the judge is
@@ -329,11 +375,12 @@ async def _call_score_api_durable(
     response_text: str,
     run_id: str,
     actual_trajectory: list[dict[str, Any]],
+    recorded_side_effects: list[dict[str, Any]],
 ) -> tuple[float, dict[str, float], dict[str, Any]] | None:
     """Score a durable item via the single scoring door mode=durable. Returns
     (composite, dimension_scores, detail) or None if the door is unavailable.
-    Durable trajectory/tool dims are deterministic — there is NO keyword fallback;
-    a door failure is fail-closed at the caller."""
+    Durable trajectory/tool/side-effect dims are deterministic — there is NO keyword
+    fallback; a door failure is fail-closed at the caller."""
     try:
         resp = await client.post(
             "/api/v1/playground/eval/score",
@@ -344,6 +391,9 @@ async def _call_score_api_durable(
                 "response": response_text,
                 "run_id": run_id,
                 "actual_trajectory": actual_trajectory,
+                # E-2: what the delivery seam recorded instead of delivering →
+                # scored by `judge.score_side_effects` (the `side_effect` dim).
+                "recorded_side_effects": recorded_side_effects,
             },
             headers=_EVAL_HEADERS,
             timeout=60.0,
@@ -362,19 +412,28 @@ async def _run_durable_item(
     client: httpx.AsyncClient, item: dict[str, Any], idx: int
 ) -> dict[str, Any]:
     """Evaluate one durable dataset item end-to-end: launch a REAL durable
-    playground run, poll its REAL run_steps to terminal (self-approving gates),
-    project run_steps → actual_trajectory, and score via the single door. Returns
-    {passed, score, record}. Fail-closed on every non-terminal / empty-trajectory
-    path — never a fabricated pass."""
+    playground run (under `eval_mode=record` when the item asserts side effects),
+    poll its REAL run_steps to terminal (self-approving gates), project run_steps →
+    actual_trajectory + recorded_side_effects, and score via the single door. Returns
+    {passed, score, record}. Fail-closed on every non-terminal / empty-trajectory /
+    unrecorded-required-side-effect path — never a fabricated pass."""
     input_payload = item.get("input_payload") or {}
     input_text = item.get("input_message") or item.get("input") or json.dumps(input_payload)
     expected = item.get("expected_output") or ""
 
+    # Eval v2 E-2: an item that asserts side effects runs under `eval_mode=record`,
+    # so every side-effecting tool call is recorded + answered with a mock instead of
+    # invoking the real downstream — the eval never sends a real email / files a real
+    # JIRA. The flag is EXPLICIT and item-driven (No-Bandaid: never a `context ==
+    # 'playground'` sniff); an item asserting nothing stays `live` and delivers for
+    # real, exactly like an interactive sandbox run.
+    expects_side_effects = bool(item.get("expected_side_effects"))
     run_body: dict[str, Any] = {
         "agent_name": AGENT_NAME,
         "input_message": input_text,
         "input_payload": input_payload,
         "execution_shape": "durable",
+        "eval_mode": "record" if expects_side_effects else "live",
     }
     if AGENT_VERSION_ID:
         run_body["agent_version_id"] = AGENT_VERSION_ID
@@ -407,7 +466,33 @@ async def _run_durable_item(
     response_text = (run_data or {}).get("output_text") or ""
     _assert_expected_approvals(idx, item, actual_trajectory)
 
-    scored = await _call_score_api_durable(client, item, input_text, response_text, run_id, actual_trajectory)
+    # E-2: project the recorded side effects off the SAME real run_steps rows.
+    recorded_side_effects = _project_recorded_side_effects(steps)
+    if _requires_recording(item) and not recorded_side_effects:
+        # FAIL-CLOSED (retro #4): the item asserts a side effect the run had to
+        # DELIVER, but the record-mode run recorded nothing — either the tool was
+        # never called or the seam failed to record it. Either way the side effect
+        # is UNVERIFIABLE, so the item is recorded failed rather than scored: a
+        # weighted mean could otherwise let a strong response score carry the item
+        # to a pass (and `dimension_weights` is per-run overridable, so the
+        # arithmetic is not a guarantee). Never a silent pass.
+        return _fail_closed_record(
+            idx, input_text, expected,
+            "item asserts side effects but the eval_mode=record run recorded none "
+            "(side effect unverifiable — fail-closed)",
+            run_id=run_id, response=response_text, trajectory=actual_trajectory,
+        )
+    if recorded_side_effects:
+        logger.info(
+            "item=%d recorded %d side effect(s) NOT delivered: %s",
+            idx, len(recorded_side_effects),
+            [r.get("tool") for r in recorded_side_effects],
+        )
+
+    scored = await _call_score_api_durable(
+        client, item, input_text, response_text, run_id, actual_trajectory,
+        recorded_side_effects,
+    )
     if scored is None:
         return _fail_closed_record(
             idx, input_text, expected, "eval/score door unavailable for durable item",

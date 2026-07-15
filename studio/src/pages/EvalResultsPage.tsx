@@ -25,7 +25,10 @@ import {
   EvalRunResult,
   type StepUpdateEvent,
   type EvalDetail,
+  type RecordedSideEffect,
+  type SideEffectDiff,
 } from "../api/playgroundApi";
+import { tokenizeArgsForDisplay } from "../lib/piiTokenize";
 import {
   patchVersion,
   patchWorkflowVersion,
@@ -49,9 +52,11 @@ function scoreColor(score: number | null): string {
 }
 
 // Eval v2 dimensions rendered per result. E-0 populates `response`; E-1 adds the
-// durable `trajectory` + `tool_call` scorers; the rest render "—" until their
-// scorers land (E-2..E-5).
-const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effects", "filter", "member_path"] as const;
+// durable `trajectory` + `tool_call` scorers; E-2 `side_effect`; E-5 `member_path`.
+// `filter` renders "—" until its scorer lands (E-4). These keys MUST match the
+// backend `dimension_scores` keys exactly (judge.py / routers/playground.py) —
+// a near-miss key renders a permanent "—" for a dimension that IS being scored.
+const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effect", "filter", "member_path"] as const;
 
 function DimensionScores({ scores }: { scores: Record<string, number> | null }) {
   return (
@@ -519,6 +524,8 @@ function DurableEvidence({
   const actualSteps = detail.actual_trajectory ?? [];
   const toolDiffs = detail.tool_diffs ?? [];
   const approvals = detail.approvals ?? [];
+  const recorded = detail.recorded_side_effects ?? [];
+  const sideEffectDiffs = detail.side_effect_detail?.side_effect_diffs ?? [];
 
   return (
     <div data-testid="durable-evidence" className="space-y-3 pt-1">
@@ -644,8 +651,111 @@ function DurableEvidence({
         </div>
       )}
 
+      {/* Side effects recorded instead of delivered (Eval v2 E-2) */}
+      <SideEffectEvidence recorded={recorded} diffs={sideEffectDiffs} />
+
       {/* Deep-link into the real run tree (StepTracker steps) */}
       {runId && <RunStepsDeepLink runId={runId} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Side-effect (Eval v2 E-2) evidence. Under `eval_mode=record` the governed-tool
+// delivery seam records a side-effecting call and answers it with a mock INSTEAD of
+// invoking the real downstream — so this panel is "the email that would have been
+// sent": what the agent tried to do, with what args, and what it got back instead.
+//
+// Args are PII-tokenized for display (E-2 gap ledger / OQ-3 policy) — the raw args
+// are what `score_side_effects` asserts server-side, never what a reviewer reads.
+//
+// Renders only when the item asserted side effects OR the run recorded some; a
+// normal `live` item has neither and this collapses away.
+// ---------------------------------------------------------------------------
+function SideEffectEvidence({
+  recorded,
+  diffs,
+}: {
+  recorded: RecordedSideEffect[];
+  diffs: SideEffectDiff[];
+}) {
+  if (recorded.length === 0 && diffs.length === 0) return null;
+
+  return (
+    <div data-testid="side-effect-evidence" className="space-y-2">
+      <p className="font-semibold text-slate-600 mb-1">
+        Side effects recorded, not delivered
+        <span className="ml-2 text-[10px] font-normal text-slate-400 uppercase tracking-wide">
+          eval_mode=record
+        </span>
+      </p>
+
+      {/* Per-assertion outcomes (the side_effect dimension's evidence) */}
+      {diffs.length > 0 && (
+        <ul data-testid="side-effect-assertions" className="space-y-0.5">
+          {diffs.map((d, i) => (
+            <li key={i} className="flex flex-wrap items-center gap-2 text-slate-600">
+              <span className="font-mono">{d.tool}</span>
+              <span className="text-[10px] text-slate-400">
+                {d.occurs ?? "exactly"}
+                {d.occurs !== "never" && ` ${d.count ?? 1}`} · matched {d.matched}
+              </span>
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded ${
+                  d.satisfied ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
+                }`}
+              >
+                {d.satisfied ? "satisfied" : "violated"}
+              </span>
+              {d.args_match && Object.keys(d.args_match).length > 0 && (
+                <span className="font-mono text-[10px] text-slate-400">
+                  args_match {tokenizeArgsForDisplay(d.args_match)}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {/* The intercepted calls themselves */}
+      {recorded.length === 0 ? (
+        <p data-testid="no-recorded-side-effects" className="text-slate-400">
+          No side effects were recorded — the run never attempted a write.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {recorded.map((r, i) => (
+            <div
+              key={i}
+              data-testid={`recorded-side-effect-${i}`}
+              className="bg-white rounded p-2 border border-slate-100"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <span className="font-mono text-slate-700">{r.tool}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+                  not delivered
+                </span>
+              </div>
+              <p className="text-slate-500">
+                <span className="text-slate-400">args </span>
+                <span className="font-mono">{tokenizeArgsForDisplay(r.args)}</span>
+              </p>
+              {r.would_have_invoked && (
+                <p className="text-slate-500">
+                  <span className="text-slate-400">would have invoked </span>
+                  <span className="font-mono">{r.would_have_invoked}</span>
+                </p>
+              )}
+              {r.mocked_response && (
+                <p className="text-slate-500">
+                  <span className="text-slate-400">returned instead </span>
+                  <span className="font-mono">{JSON.stringify(r.mocked_response)}</span>
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -122,6 +122,11 @@ async def create_playground_run(
         trigger_payload=body.trigger_payload,
         requested_by_username=requested_by_username,
         requested_by_team=requested_by_team,
+        # Eval v2 E-2: PERSIST the mode the run was created with. It is read back on
+        # every re-entry into the graph (the durable HITL resume paths), so a parked
+        # eval resumes in the SAME mode it started in and can never begin delivering
+        # side effects for real mid-run. Explicit param — never a `context` sniff.
+        eval_mode=body.eval_mode,
         status="running",
         started_at=now,
     )
@@ -145,14 +150,15 @@ async def create_playground_run(
     await db.commit()
 
     logger.info(
-        "create_playground_run: run_id=%s agent=%s user=%s shape=%s trace=%s",
-        run_id, body.agent_name, caller, shape, trace_id,
+        "create_playground_run: run_id=%s agent=%s user=%s shape=%s eval_mode=%s trace=%s",
+        run_id, body.agent_name, caller, shape, body.eval_mode, trace_id,
     )
 
     # For durable runs, dispatch to the runner pod's /run endpoint
     if shape == "durable":
         background_tasks.add_task(
-            _dispatch_durable_run, run_id, body.agent_name, body.input_payload, db
+            _dispatch_durable_run, run_id, body.agent_name, body.input_payload, db,
+            body.eval_mode,
         )
 
     return {
@@ -232,13 +238,19 @@ async def _dispatch_durable_run(
     agent_name: str,
     input_payload: dict | None,
     db: AsyncSession,
+    eval_mode: str = "live",
 ) -> None:
     """Dispatch a durable playground run to the declarative-runner /run endpoint.
 
     Thin wrapper over the shared ``durable_dispatch.dispatch_durable_run`` — the ONE
     place the /run POST lives (parity with the production internal path; the
     2026-07-11 HITL retro root cause was exactly a sandbox/production copy). On a
-    dispatch failure, mark THIS PlaygroundRun failed (fail-closed)."""
+    dispatch failure, mark THIS PlaygroundRun failed (fail-closed).
+
+    ``eval_mode`` (Eval v2 E-2) rides the dispatch body to the runner, which sets it
+    on the `_current_eval_mode` ContextVar the governed-tool delivery edge reads. It
+    is an explicit parameter with a 'live' default: a caller that does not ask for
+    record mode can never get it."""
     from db import AsyncSessionLocal
     from durable_dispatch import dispatch_durable_run, registry_internal_base
     from workflow_orchestrator import _resolve_agent_environment, _team_namespace
@@ -266,6 +278,7 @@ async def _dispatch_durable_run(
         input_payload=input_payload,
         callback_url=callback,
         runner_url=runner_url,
+        eval_mode=eval_mode,
     )
     if not ok:
         logger.warning("_dispatch_durable_run: marking playground run %s failed: %s", run_id, err)
@@ -1077,18 +1090,31 @@ async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
 
     E-1 wires the **durable** branch: ``response`` (LLM) + ``trajectory`` +
     ``tool_call`` (both deterministic, over the projected ``actual_trajectory``)
-    reduced by ``weighted_mean`` with durable default weights 0.4/0.4/0.2
-    (overridable per run via ``dimension_weights``). A reference-free durable
-    item (no ``expected_trajectory``) degrades to ``{response}`` only. Other
-    modes (scheduled/webhook/workflow) return 501 until their slices land — one
-    scoring door, no parallel scoring path.
+    reduced by ``weighted_mean`` with durable default weights 0.4/0.4/0.2.
+    E-2 adds the deterministic ``side_effect`` dimension (weight 0.2) for a
+    durable item carrying ``expected_side_effects``: ``score_side_effects``
+    asserts the calls the delivery seam RECORDED under ``eval_mode=record``
+    (``recorded_side_effects``, projected off the real ``run_steps`` by the
+    eval-runner) against them. All weights are overridable per run via
+    ``dimension_weights``. A reference-free durable
+    item (no ``expected_trajectory``) degrades to ``{response}`` only.
+
+    E-3 wires the **scheduled** branch: the item's ``job_spec`` was fed to the run
+    as its ``input_payload`` and the run fired under ``eval_mode=record``, so
+    ``side_effect`` is the HEADLINE dimension and the default weights skew to it.
+    It writes **no new scorer** — it reuses ``score_response`` (E-0),
+    ``score_trajectory``/``score_tool_calls`` (E-1, durable-inner only) and
+    ``score_side_effects`` (E-2), reduced by the same ``weighted_mean``.
+
+    ``webhook`` returns 501 until E-4 lands — one scoring door, no parallel
+    scoring path.
     """
-    if body.mode not in ("reactive", "durable", "workflow"):
+    if body.mode not in ("reactive", "durable", "scheduled", "workflow"):
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail=(
                 f"eval scoring for mode '{body.mode}' is not implemented yet "
-                "(E-1+); only 'reactive', 'durable' and 'workflow' are wired"
+                "(E-4); 'reactive', 'durable', 'scheduled' and 'workflow' are wired"
             ),
         )
 
@@ -1096,13 +1122,23 @@ async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
         score_composite,
         score_member_path,
         score_response,
+        score_side_effects,
         score_tool_calls,
         score_trajectory,
         weighted_mean,
     )
 
     item = body.item or {}
-    input_text = body.input if body.input is not None else (item.get("input_message") or item.get("input") or "")
+    if body.input is not None:
+        input_text = body.input
+    elif body.mode == "scheduled":
+        # E-3: a scheduled item carries no `input_message` — the run's driving input
+        # IS its `job_spec` (fed to the run as `input_payload`). Keyed off the
+        # explicit mode discriminator, never sniffed from which keys the item has.
+        job_spec_fallback = item.get("job_spec") or {}
+        input_text = json.dumps(job_spec_fallback) if job_spec_fallback else ""
+    else:
+        input_text = item.get("input_message") or item.get("input") or ""
     response_text = body.response or ""
     expected_output = item.get("expected_output")
     rubric = item.get("rubric")
@@ -1199,17 +1235,109 @@ async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
             },
         )
 
-    # --- Durable: response + (trajectory + tool_call) over the projected run_steps ---
+    # --- Scheduled: response + (durable-inner trajectory/tool_call) + side_effect ---
+    # E-3. The item's `job_spec` was fed to the run as its `input_payload` (the
+    # identical production shape) and the run fired under `eval_mode=record`, so the
+    # write tools were RECORDED + mocked, never delivered. `side_effect` is the
+    # headline dimension — a scheduled agent's whole point is the effect it fires
+    # unattended, and a response-only score says nothing about it.
+    #
+    # NO NEW SCORER: every dimension here is an E-0/E-1/E-2 scorer reused verbatim,
+    # reduced by the same `weighted_mean`. The only thing E-3 owns is the weighting
+    # and which dimensions are present (a scheduled-only scorer/fork would be the
+    # anti-pattern the parity grep forbids).
+    if body.mode == "scheduled":
+        # Inner shape: a scheduled agent runs reactive-inner or durable-inner. The
+        # runner sends `actual_trajectory` only for a durable-inner run (there are no
+        # run_steps to project otherwise), so its PRESENCE is the explicit signal —
+        # not a guess about the item's contents.
+        actual_trajectory = body.actual_trajectory
+        durable_inner = actual_trajectory is not None
+        expected_trajectory = item.get("expected_trajectory") or None
+        expected_steps = (expected_trajectory or {}).get("steps") or []
+        # E-2's always-surfaced contract: the recorded calls ride in `detail` even when
+        # the item asserts nothing, so results can always show "what would have been
+        # sent" (and a run that recorded NOTHING is visibly empty, not silently fine).
+        recorded_side_effects = body.recorded_side_effects or []
+        detail: dict[str, Any] = {
+            "response_reason": reason,
+            "job_spec": item.get("job_spec"),
+            "expected_trajectory": expected_trajectory,
+            "actual_trajectory": actual_trajectory or [],
+            "tool_diffs": [],
+            "approvals": [],
+            "recorded_side_effects": recorded_side_effects,
+        }
+        dimension_scores = {"response": score}
+
+        # Trajectory family (E-1) — durable-inner only, and only when the item
+        # actually carries a golden trajectory. A reactive-inner schedule leaves no
+        # run_steps, so scoring a trajectory for it would be fiction.
+        if durable_inner and expected_trajectory and expected_steps:
+            match_mode = expected_trajectory.get("match_mode", "superset")
+            traj_score, traj_detail = score_trajectory(
+                actual_trajectory, expected_trajectory, match_mode,
+            )
+            tool_score, tool_detail = score_tool_calls(actual_trajectory, expected_steps)
+            dimension_scores["trajectory"] = traj_score
+            dimension_scores["tool_call"] = tool_score
+            detail["trajectory_detail"] = traj_detail
+            detail["tool_diffs"] = tool_detail.get("tool_diffs", [])
+            detail["approvals"] = tool_detail.get("approvals", [])
+
+        # Side-effect (E-2) — present ONLY for an item that asserts side effects (the
+        # same items the eval-runner runs under `eval_mode=record`). An item asserting
+        # none has NO side_effect dimension: it is never scored 1.0 by default, so a
+        # run that recorded nothing can't be flattered by a free pass (fail-closed).
+        expected_side_effects = item.get("expected_side_effects") or []
+        if expected_side_effects:
+            se_score, se_detail = score_side_effects(recorded_side_effects, expected_side_effects)
+            dimension_scores["side_effect"] = se_score
+            detail["side_effect_detail"] = se_detail
+
+        # Side-effect-skewed default weights (e3/data-model.md §3). The doc states the
+        # weights per DIMENSION FAMILY — durable-inner `response .3 / trajectory .3 /
+        # side_effect .4`, reactive-inner `response .4 / side_effect .6`. E-1 measures
+        # the trajectory family with TWO dimensions (`trajectory` + `tool_call`), so
+        # the family's .3 is split .2/.1 — preserving both the family weight AND the
+        # durable branch's 2:1 trajectory:tool_call ratio (0.4:0.2). Giving `tool_call`
+        # no weight would let the reducer silently DROP a dimension we actually scored
+        # (`score_composite` skips dims whose weight is None) — a scored-but-uncounted
+        # dimension is exactly the kind of quiet hole this door exists to prevent.
+        # Overridable per run via `body.dimension_weights` (eval_runs.dimension_weights).
+        if durable_inner:
+            default_weights = {
+                "response": 0.3, "trajectory": 0.2, "tool_call": 0.1, "side_effect": 0.4,
+            }
+        else:
+            default_weights = {"response": 0.4, "side_effect": 0.6}
+        weights = body.dimension_weights or default_weights
+        # Present-dims-only: the reducer sums the weights of PRESENT dimensions, so a
+        # reference-free scheduled item (no expecteds at all) collapses to {response}
+        # — it degrades, it does not manufacture passing dimensions.
+        composite = weighted_mean(dimension_scores, weights)
+        return EvalScoreResponse(
+            composite=composite,
+            dimension_scores=dimension_scores,
+            detail=detail,
+        )
+
+    # --- Durable: response + (trajectory + tool_call) + side_effect over the run_steps ---
     dimension_scores = {"response": score}
     actual_trajectory = body.actual_trajectory or []
     expected_trajectory = item.get("expected_trajectory") or None
     expected_steps = (expected_trajectory or {}).get("steps") or []
+    # E-2: the calls the delivery seam recorded instead of delivering (projected off
+    # the REAL run_steps by the eval-runner). Surfaced in `detail` even when the item
+    # asserts nothing, so the results UI can always show "what would have been sent".
+    recorded_side_effects = body.recorded_side_effects or []
     detail: dict[str, Any] = {
         "response_reason": reason,
         "expected_trajectory": expected_trajectory,
         "actual_trajectory": actual_trajectory,
         "tool_diffs": [],
         "approvals": [],
+        "recorded_side_effects": recorded_side_effects,
     }
 
     if expected_trajectory and expected_steps:
@@ -1225,10 +1353,22 @@ async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
         detail["approvals"] = tool_detail.get("approvals", [])
     # else: reference-free durable → dimension_scores == {"response"} (graceful degrade)
 
-    # Durable composite weights: default 0.4/0.4/0.2, overridable per run. The
-    # reducer sums only the weights of PRESENT dimensions, so a degraded
+    # E-2 side-effect dimension: only for an item that ASSERTS side effects (the same
+    # items the eval-runner runs under `eval_mode=record`). An item asserting none has
+    # no side_effect dimension at all — it is not scored 1.0 by default, so a
+    # never-recorded run can't be flattered by a free pass.
+    expected_side_effects = item.get("expected_side_effects") or []
+    if expected_side_effects:
+        se_score, se_detail = score_side_effects(recorded_side_effects, expected_side_effects)
+        dimension_scores["side_effect"] = se_score
+        detail["side_effect_detail"] = se_detail
+
+    # Durable composite weights: default 0.4/0.4/0.2 (+0.2 side_effect), overridable
+    # per run. The reducer sums only the weights of PRESENT dimensions, so a degraded
     # {response}-only item collapses to the response score (No-Bandaid: one reducer).
-    weights = body.dimension_weights or {"response": 0.4, "trajectory": 0.4, "tool_call": 0.2}
+    weights = body.dimension_weights or {
+        "response": 0.4, "trajectory": 0.4, "tool_call": 0.2, "side_effect": 0.2,
+    }
     composite = weighted_mean(dimension_scores, weights)
     return EvalScoreResponse(
         composite=composite,
@@ -1476,6 +1616,13 @@ async def resume_stream_playground_run(
                         "decision": decision_str,
                         "reviewer_id": reviewer,
                         "reason": approval.reviewer_notes,
+                        # Eval v2 E-2: the resume RE-DRIVES the graph and re-crosses
+                        # the tool delivery edge, so it must run in the SAME mode the
+                        # run started in — read back off the persisted run (this is
+                        # why `eval_mode` is a column, not a request-scoped field).
+                        # Without it, a record-mode eval that parked at HITL would
+                        # deliver its post-approval tool calls for real.
+                        "eval_mode": run.eval_mode,
                     },
                     headers={"Accept": "text/event-stream"},
                 ) as response:

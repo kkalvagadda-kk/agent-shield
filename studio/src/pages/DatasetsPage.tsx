@@ -16,6 +16,7 @@ import {
   type EvalRun,
   type ExpectedTrajectoryStep,
   type PlaygroundDataset,
+  type SideEffectAssertion,
   type TrajectoryMatchMode,
   type WorkflowDatasetItem,
 } from "../api/playgroundApi";
@@ -32,10 +33,12 @@ export default function DatasetsPage() {
   const [dsItems, setDsItems] = useState("");
 
   // Durable item editor state (E-1). A durable dataset is authored as a single
-  // trajectory item: an input_payload + an optional expected_trajectory.
+  // trajectory item: an input_payload + an optional expected_trajectory (+ E-2's
+  // optional expected_side_effects).
   const [durInputPayload, setDurInputPayload] = useState("");
   const [durMatchMode, setDurMatchMode] = useState<TrajectoryMatchMode>("superset");
   const [durSteps, setDurSteps] = useState<DurableStepDraft[]>([]);
+  const [durSideEffects, setDurSideEffects] = useState<SideEffectDraft[]>([]);
 
   // Workflow item editor state (E-5). A workflow dataset is authored as a single
   // run-tree item: an input + an ordered expected_member_path (+ optional
@@ -53,6 +56,7 @@ export default function DatasetsPage() {
     setDurInputPayload("");
     setDurMatchMode("superset");
     setDurSteps([]);
+    setDurSideEffects([]);
     setWfInput("");
     setWfExpectedOutput("");
     setWfMatchMode("ordered");
@@ -140,7 +144,7 @@ export default function DatasetsPage() {
         }
       }
     } else if (dsMode === "durable") {
-      const built = buildDurableItem(durInputPayload, durMatchMode, durSteps);
+      const built = buildDurableItem(durInputPayload, durMatchMode, durSteps, durSideEffects);
       if ("error" in built) {
         toast.error(built.error);
         return;
@@ -358,6 +362,8 @@ export default function DatasetsPage() {
                   setMatchMode={setDurMatchMode}
                   steps={durSteps}
                   setSteps={setDurSteps}
+                  sideEffects={durSideEffects}
+                  setSideEffects={setDurSideEffects}
                 />
               ) : dsMode === "workflow" ? (
                 <WorkflowItemEditor
@@ -515,13 +521,27 @@ interface DurableStepDraft {
   expectApproval: boolean;
 }
 
+// A single expected SIDE EFFECT as edited in the form (E-2). `argsMatch` is raw
+// JSON text until validated on save; `count` is text so the field can be emptied
+// while typing.
+interface SideEffectDraft {
+  tool: string;
+  argsMatch: string;
+  occurs: SideEffectOccurs;
+  count: string;
+}
+
+type SideEffectOccurs = NonNullable<SideEffectAssertion["occurs"]>;
+
 const MATCH_MODES: TrajectoryMatchMode[] = ["exact", "ordered", "superset", "unordered"];
+const OCCURS_MODES: SideEffectOccurs[] = ["exactly", "at_least", "never"];
 
 /**
  * Structured editor for a durable dataset item (E-1): an `input_payload` plus an
  * optional `expected_trajectory` (ordered tool steps with per-step `args_match`
- * and an `expect_approval` HITL toggle). Rendered only when the dataset mode is
- * `durable`. Validation happens on save (`buildDurableItem`).
+ * and an `expect_approval` HITL toggle), plus E-2's optional
+ * `expected_side_effects`. Rendered only when the dataset mode is `durable`.
+ * Validation happens on save (`buildDurableItem`).
  */
 function DurableItemEditor({
   inputPayload,
@@ -530,6 +550,8 @@ function DurableItemEditor({
   setMatchMode,
   steps,
   setSteps,
+  sideEffects,
+  setSideEffects,
 }: {
   inputPayload: string;
   setInputPayload: (v: string) => void;
@@ -537,6 +559,8 @@ function DurableItemEditor({
   setMatchMode: (v: TrajectoryMatchMode) => void;
   steps: DurableStepDraft[];
   setSteps: Dispatch<SetStateAction<DurableStepDraft[]>>;
+  sideEffects: SideEffectDraft[];
+  setSideEffects: Dispatch<SetStateAction<SideEffectDraft[]>>;
 }) {
   const updateStep = (idx: number, patch: Partial<DurableStepDraft>) =>
     setSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
@@ -544,6 +568,16 @@ function DurableItemEditor({
     setSteps((prev) => [...prev, { tool: "", argsMatch: "", expectApproval: false }]);
   const removeStep = (idx: number) =>
     setSteps((prev) => prev.filter((_, i) => i !== idx));
+
+  const updateSideEffect = (idx: number, patch: Partial<SideEffectDraft>) =>
+    setSideEffects((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const addSideEffect = () =>
+    setSideEffects((prev) => [
+      ...prev,
+      { tool: "", argsMatch: "", occurs: "exactly", count: "1" },
+    ]);
+  const removeSideEffect = (idx: number) =>
+    setSideEffects((prev) => prev.filter((_, i) => i !== idx));
 
   return (
     <div className="space-y-4">
@@ -649,20 +683,121 @@ function DurableItemEditor({
           </div>
         )}
       </div>
+
+      {/* Expected side effects (E-2). Authoring ANY assertion here is what makes
+          the eval-runner launch this item under `eval_mode=record`, so the write
+          tools are recorded + mocked instead of really firing. */}
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="label text-xs">Expected Side Effects</label>
+          <button
+            type="button"
+            onClick={addSideEffect}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            <Plus size={12} />
+            Add side effect
+          </button>
+        </div>
+        {sideEffects.length === 0 ? (
+          <p className="text-xs text-slate-400">
+            None — this item runs <code>live</code> and its tool calls are delivered
+            for real. Add one to run it in <code>record</code> mode: side-effecting
+            calls are recorded and mocked instead of really sending.
+          </p>
+        ) : (
+          <>
+            <p className="text-xs text-amber-600 mb-2">
+              This item will run in <code>record</code> mode — no real emails, tickets,
+              or payments are sent.
+            </p>
+            <div className="space-y-2">
+              {sideEffects.map((s, i) => (
+                <div
+                  key={i}
+                  data-testid={`side-effect-${i}`}
+                  className="rounded-lg border border-slate-200 p-2 space-y-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400 w-4">{i + 1}.</span>
+                    <input
+                      aria-label={`Side effect ${i + 1} tool`}
+                      className="input text-xs flex-1"
+                      placeholder="tool name (e.g. send_email)"
+                      value={s.tool}
+                      onChange={(e) => updateSideEffect(i, { tool: e.target.value })}
+                    />
+                    <button
+                      type="button"
+                      aria-label={`Remove side effect ${i + 1}`}
+                      onClick={() => removeSideEffect(i)}
+                      className="text-slate-400 hover:text-red-500"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  <input
+                    aria-label={`Side effect ${i + 1} args match`}
+                    className="input text-xs font-mono"
+                    placeholder={`args match (JSON, optional) e.g. {"to": "compliance@acme.com"}`}
+                    value={s.argsMatch}
+                    onChange={(e) => updateSideEffect(i, { argsMatch: e.target.value })}
+                  />
+                  <div className="flex items-center gap-2">
+                    <select
+                      aria-label={`Side effect ${i + 1} occurs`}
+                      className="input text-xs flex-1"
+                      value={s.occurs}
+                      onChange={(e) =>
+                        updateSideEffect(i, { occurs: e.target.value as SideEffectOccurs })
+                      }
+                    >
+                      {OCCURS_MODES.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                    {s.occurs !== "never" && (
+                      <input
+                        aria-label={`Side effect ${i + 1} count`}
+                        type="number"
+                        min={1}
+                        className="input text-xs w-20"
+                        value={s.count}
+                        onChange={(e) => updateSideEffect(i, { count: e.target.value })}
+                      />
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    {s.occurs === "never"
+                      ? "The run must NEVER make this call — any recorded match fails the item."
+                      : `The run must make this call ${s.occurs === "at_least" ? "at least" : "exactly"} ${s.count || "1"} time(s).`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
 /**
  * Validate + assemble the durable dataset item from the trajectory editor.
- * Rejects a malformed `input_payload` or `args_match` before any POST — a
- * reference-free durable item (no steps) is legal and degrades to the response
- * dimension server-side.
+ * Rejects a malformed `input_payload`, `args_match`, or side-effect assertion
+ * before any POST — a reference-free durable item (no steps, no side effects) is
+ * legal and degrades to the response dimension server-side.
+ *
+ * This is the function that puts `expected_side_effects` on the POST — the field
+ * whose presence makes the eval-runner launch the item under `eval_mode=record`.
  */
 export function buildDurableItem(
   inputPayloadStr: string,
   matchMode: TrajectoryMatchMode,
   steps: DurableStepDraft[],
+  sideEffects: SideEffectDraft[] = [],
 ): { item: DurableDatasetItem } | { error: string } {
   const trimmedPayload = inputPayloadStr.trim();
   if (!trimmedPayload) {
@@ -703,9 +838,44 @@ export function buildDurableItem(
     builtSteps.push(step);
   }
 
+  const builtSideEffects: SideEffectAssertion[] = [];
+  for (let i = 0; i < sideEffects.length; i++) {
+    const s = sideEffects[i];
+    const tool = s.tool.trim();
+    if (!tool) {
+      return { error: `Side effect ${i + 1}: tool name is required.` };
+    }
+    const assertion: SideEffectAssertion = { tool, occurs: s.occurs };
+    const rawArgs = s.argsMatch.trim();
+    if (rawArgs) {
+      try {
+        const parsed = JSON.parse(rawArgs);
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return { error: `Side effect ${i + 1}: args match must be a JSON object.` };
+        }
+        assertion.args_match = parsed as Record<string, unknown>;
+      } catch {
+        return { error: `Side effect ${i + 1}: args match is not valid JSON.` };
+      }
+    }
+    // `never` is a pure absence assertion — a count on it is meaningless, so it is
+    // not sent (the scorer ignores count for never; omitting keeps the item honest).
+    if (s.occurs !== "never") {
+      const count = Number(s.count);
+      if (!Number.isInteger(count) || count < 1) {
+        return { error: `Side effect ${i + 1}: count must be a whole number ≥ 1.` };
+      }
+      assertion.count = count;
+    }
+    builtSideEffects.push(assertion);
+  }
+
   const item: DurableDatasetItem = { kind: "durable", input_payload: inputPayload };
   if (builtSteps.length > 0) {
     item.expected_trajectory = { match_mode: matchMode, steps: builtSteps };
+  }
+  if (builtSideEffects.length > 0) {
+    item.expected_side_effects = builtSideEffects;
   }
   return { item };
 }

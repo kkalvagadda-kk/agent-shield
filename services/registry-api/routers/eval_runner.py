@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -26,7 +27,7 @@ from auth_middleware import get_optional_user
 from db import get_db
 from observability_backend import get_observability_backend
 from k8s import create_eval_job
-from models import Agent, AgentVersion, CompositeWorkflow, Deployment as DeploymentModel, EvalRun, EvalRunResult, PlaygroundDataset, WorkflowDeployment, WorkflowVersion
+from models import Agent, AgentTrigger, AgentVersion, CompositeWorkflow, Deployment as DeploymentModel, EvalRun, EvalRunResult, PlaygroundDataset, WorkflowDeployment, WorkflowVersion
 from tracing import trace_eval_run_completed, trace_eval_run_created, trace_eval_run_result
 from schemas import (
     EvalRunCreate,
@@ -55,6 +56,172 @@ async def _resolve_eval_run(
     if not run:
         raise HTTPException(status_code=404, detail="Eval run not found")
     return run
+
+
+# ---------------------------------------------------------------------------
+# Eval mode resolution + the launch compatibility guard (Eval v2 E-0 / E-3)
+#
+# A dataset's `mode` is its AUTHORING intent (which per-item schema its rows
+# follow == which scorer branch runs). The EXECUTABLE has facts: it is a
+# workflow or an agent; the agent has an `execution_shape` and may have armed
+# triggers. The launch door must answer ONE question — "can this executable be
+# evaluated the way this dataset is authored?" — from EXPLICIT facts, never by
+# sniffing item keys or by priority fallthrough.
+#
+# E-3's load-bearing change: mode is NOT a pure function of the executable. An
+# agent with BOTH a manual and a schedule trigger is legitimately evaluable
+# BOTH ways (`durable` on its manual shape, `scheduled` on its job spec), so the
+# pre-E-3 `resolved_mode != dataset.mode → 422` EQUALITY rule — which read only
+# `Agent.execution_shape` and could therefore never yield 'scheduled' — rejected
+# every scheduled dataset at launch. The dataset DECLARES the intent; the
+# executable only has to be COMPATIBLE with it.
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _ExecutableFacts:
+    """The eval-relevant facts about the executable under evaluation.
+
+    Read ONCE at the launch door and passed explicitly to both
+    `_resolve_eval_mode` (the executable's natural/default eval mode, used for
+    the diagnostic) and `_assert_mode_compatible` (the guard) — so neither
+    re-queries and neither infers a fact the other already established.
+    """
+
+    is_workflow: bool
+    execution_shape: Optional[str]
+    has_schedule_trigger: bool
+    has_webhook_trigger: bool
+
+
+async def _load_executable_facts(
+    agent_name: Optional[str],
+    workflow_id: Optional[uuid.UUID],
+    db: AsyncSession,
+) -> _ExecutableFacts:
+    """Read the executable's eval-relevant facts (one pass, no inference)."""
+    if workflow_id is not None:
+        return _ExecutableFacts(
+            is_workflow=True,
+            execution_shape=None,
+            has_schedule_trigger=False,
+            has_webhook_trigger=False,
+        )
+
+    agent_result = await db.execute(
+        select(Agent.id, Agent.execution_shape).where(Agent.name == agent_name)
+    )
+    agent_row = agent_result.one_or_none()
+    if agent_row is None:
+        return _ExecutableFacts(
+            is_workflow=False,
+            execution_shape=None,
+            has_schedule_trigger=False,
+            has_webhook_trigger=False,
+        )
+    agent_id, execution_shape = agent_row
+
+    # An ENABLED trigger is the fact that makes an agent evaluable on that
+    # family — a disabled trigger fires nothing in production, so evaluating
+    # against it would score a path the agent does not actually take.
+    trig_result = await db.execute(
+        select(AgentTrigger.trigger_type)
+        .where(AgentTrigger.agent_id == agent_id)
+        .where(AgentTrigger.enabled.is_(True))
+    )
+    trigger_types = set(trig_result.scalars().all())
+    return _ExecutableFacts(
+        is_workflow=False,
+        execution_shape=execution_shape,
+        has_schedule_trigger="schedule" in trigger_types,
+        has_webhook_trigger="webhook" in trigger_types,
+    )
+
+
+def _resolve_eval_mode(facts: _ExecutableFacts) -> str:
+    """The executable's NATURAL eval mode — what it evaluates as by default.
+
+    A CompositeWorkflow executable → 'workflow'; an agent with an armed schedule
+    trigger → 'scheduled' (its production entrypoint is the job spec, so that is
+    what it naturally evaluates as — E-3); otherwise its `execution_shape`
+    ('reactive' | 'durable'), defaulting to 'reactive' when unresolvable
+    (back-compat).
+
+    This is a DIAGNOSTIC/default reader, not the guard: it names the mode the
+    executable resolves to in the 422 raised by `_assert_mode_compatible`. The
+    scoring mode is always the DATASET's authored `mode` (E-0) — an executable
+    may be compatible with several.
+    """
+    if facts.is_workflow:
+        return "workflow"
+    if facts.has_schedule_trigger:
+        return "scheduled"
+    if facts.execution_shape in ("reactive", "durable"):
+        return facts.execution_shape
+    return "reactive"
+
+
+def _assert_mode_compatible(dataset_mode: str, dataset_name: str, facts: _ExecutableFacts) -> None:
+    """Raise 422 unless the executable can be evaluated as `dataset_mode`.
+
+    One explicit rule per mode — no equality shortcut, no key-sniffing, no
+    priority fallthrough:
+
+      - **reactive** — always compatible. ANY executable (reactive, durable, or a
+        workflow) has a final response to score reactively; this is the pre-E-0
+        behavior and gating it broke durable/workflow evals against backfilled
+        reactive datasets. Unchanged.
+      - **durable** — requires `execution_shape == 'durable'`: the items need a
+        real `run_steps` trajectory, which only a durable run produces. Unchanged.
+      - **scheduled** — requires an armed (enabled) `schedule` trigger on the
+        agent. The dataset's `job_spec` is the shape of THAT trigger's
+        `input_payload`; with no schedule armed there is no job-spec entrypoint to
+        evaluate, so scoring one would be fiction. The inner shape
+        (reactive/durable) is deliberately NOT constrained — E-3 scores both.
+      - **workflow** — requires a workflow executable (run-tree/member-path items).
+      - **webhook** — E-4's slice; the score door still 501s it, so it is rejected
+        here explicitly rather than launching a Job that cannot be scored.
+    """
+    resolved = _resolve_eval_mode(facts)
+
+    def _reject(reason: str) -> None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Eval mode mismatch: dataset '{dataset_name}' is authored as mode "
+                f"'{dataset_mode}' but the executable resolves to mode '{resolved}' "
+                f"— {reason}"
+            ),
+        )
+
+    if dataset_mode == "reactive":
+        return
+    if dataset_mode == "durable":
+        if facts.is_workflow or facts.execution_shape != "durable":
+            _reject(
+                "a 'durable' dataset scores a run's real run_steps trajectory, so it "
+                "requires an agent with execution_shape='durable'"
+            )
+        return
+    if dataset_mode == "scheduled":
+        if facts.is_workflow:
+            _reject(
+                "a 'scheduled' dataset evaluates an agent's job-spec schedule; "
+                "workflow-level schedule eval is not supported"
+            )
+        if not facts.has_schedule_trigger:
+            _reject(
+                "a 'scheduled' dataset feeds its job_spec to the agent's schedule "
+                "entrypoint — arm a schedule trigger on this agent first"
+            )
+        return
+    if dataset_mode == "workflow":
+        if not facts.is_workflow:
+            _reject("a 'workflow' dataset requires a workflow executable")
+        return
+    if dataset_mode == "webhook":
+        _reject("webhook eval is not implemented yet (E-4)")
+    # An unknown mode is unrepresentable: `DatasetMode` + the DB CHECK on
+    # playground_datasets.mode constrain it to the five above. Fail closed.
+    _reject(f"unknown dataset mode '{dataset_mode}'")
 
 
 # ---------------------------------------------------------------------------
@@ -139,38 +306,16 @@ async def create_eval_run(
     if not agent_name:
         raise HTTPException(status_code=422, detail="Cannot resolve agent_name — provide agent_name, sandbox_deployment_id, or workflow_deployment_id")
 
-    # Eval v2 E-0: resolve the run's interpretation `mode` from the executable.
-    # A `mode` is a projection of the execution cube onto the eval-relevant
-    # families (data-model.md §1): a CompositeWorkflow executable → 'workflow';
-    # an agent → its `execution_shape` ('reactive' | 'durable'). Default
-    # 'reactive' (back-compat) when the shape can't be resolved.
-    if workflow_id is not None:
-        resolved_mode = "workflow"
-    else:
-        shape_result = await db.execute(
-            select(Agent.execution_shape).where(Agent.name == agent_name)
-        )
-        shape = shape_result.scalar_one_or_none()
-        resolved_mode = shape if shape in ("reactive", "durable") else "reactive"
-
-    # E-0 is behavior-neutral: scoring follows the DATASET's authoring `mode`. A
-    # REACTIVE dataset scores ANY executable's response reactively (exactly as before
-    # E-0, where any agent — reactive OR durable OR a workflow — could be evaluated
-    # against a dataset). Only a NON-reactive dataset (E-1+) requires the executable's
-    # interpretation mode to match, because its items need a mode-specific run (e.g. a
-    # durable trajectory). So the mismatch guard fires ONLY for non-reactive datasets —
-    # gating it on all datasets broke durable/workflow evals against the (backfilled)
-    # reactive datasets, which is a regression, not the intended constraint.
-    if dataset.mode != "reactive" and resolved_mode != dataset.mode:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Eval mode mismatch: the executable resolves to mode "
-                f"'{resolved_mode}' but dataset '{dataset.name}' is authored as "
-                f"mode '{dataset.mode}'. Evaluate a '{dataset.mode}'-mode "
-                f"executable, or author a '{resolved_mode}'-mode dataset."
-            ),
-        )
+    # Eval v2 E-0/E-3: read the executable's eval-relevant facts ONCE, then assert
+    # the DATASET's authored mode is compatible with them. `_resolve_eval_mode`
+    # names the executable's natural mode (workflow → 'workflow'; an armed
+    # schedule trigger → 'scheduled' — E-3; else `execution_shape`) for the
+    # diagnostic; `_assert_mode_compatible` holds one explicit rule per mode.
+    # Scoring still follows the dataset's `mode` (E-0) — an executable can be
+    # compatible with more than one (a durable agent with a schedule armed is
+    # legitimately evaluable both `durable` and `scheduled`).
+    facts = await _load_executable_facts(agent_name, workflow_id, db)
+    _assert_mode_compatible(dataset.mode, dataset.name, facts)
 
     eval_run = EvalRun(
         user_id=caller,
@@ -181,9 +326,10 @@ async def create_eval_run(
         dataset_id=body.dataset_id,
         sandbox_deployment_id=body.sandbox_deployment_id,
         workflow_deployment_id=body.workflow_deployment_id,
-        # The SCORING mode = the dataset's authoring mode (reactive for every dataset
-        # today → reactive scoring, byte-identical to pre-E-0). The executable's
-        # resolved_mode is only used for the non-reactive guard above.
+        # The SCORING mode = the dataset's authoring mode — it is the dataset that
+        # declares which per-item schema/scorer branch applies. The executable's
+        # natural mode (`_resolve_eval_mode`) only feeds the compatibility guard's
+        # diagnostic above; it is never the scorer selector.
         mode=dataset.mode,
         status="pending",
         started_at=datetime.now(tz=timezone.utc),
@@ -200,11 +346,11 @@ async def create_eval_run(
 
     # Launch the eval-runner K8s Job; fail fast if it cannot be created.
     # The Job's MODE is the SCORING mode == dataset.mode (== EvalRun.mode above),
-    # NOT the executable's resolved_mode. For a durable dataset the 422 guard has
-    # already forced resolved_mode == dataset.mode == 'durable', so they agree; but
-    # passing dataset.mode keeps MODE unambiguously the scorer selector (the runner
-    # requests the durable RUN shape explicitly via execution_shape). resolved_mode
-    # is only the executable-shape used by the mismatch guard above.
+    # NOT the executable's natural mode. MODE is unambiguously the scorer selector;
+    # the runner requests the RUN shape it needs explicitly (durable via
+    # `execution_shape`; scheduled via job_spec → input_payload + trigger_type).
+    # E-3: a 'scheduled' dataset now reaches here (the compatibility guard admits it
+    # once a schedule trigger is armed) ⇒ MODE=scheduled reaches the runner.
     try:
         await create_eval_job(
             eval_run_id=str(eval_run.id),

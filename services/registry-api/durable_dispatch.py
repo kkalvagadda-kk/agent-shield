@@ -46,6 +46,7 @@ async def dispatch_durable_run(
     callback_url: str,
     runner_url: str | None = None,
     timeout_s: float = 10.0,
+    eval_mode: str = "live",
 ) -> tuple[bool, str | None]:
     """POST a durable run to the declarative-runner /run. Returns (accepted, error).
 
@@ -53,6 +54,14 @@ async def dispatch_durable_run(
     mark ITS OWN run row failed (PlaygroundRun for sandbox, AgentRun for production).
     Fire-and-forget: step progress + terminal status arrive asynchronously at
     ``callback_url``.
+
+    ``eval_mode`` (Eval v2 E-2) — 'live' (default: deliver tool calls for real) or
+    'record' (a batch eval: the runner sets the `_current_eval_mode` ContextVar and
+    the governed-tool delivery edge records + mocks a side-effecting call instead of
+    invoking it). It rides the JSON body rather than a header because THIS dispatch
+    is a body-shaped POST; `auto_approve`, which threads the same shape through the
+    /chat/stream path, rides a header there for the same reason. Defaulting to 'live'
+    here means a caller that does not ask for record mode never gets it.
     """
     url = f"{(runner_url or default_runner_url()).rstrip('/')}/run"
     body = {
@@ -60,6 +69,7 @@ async def dispatch_durable_run(
         "run_id": run_id,
         "input_payload": input_payload or {},
         "callback_url": callback_url,
+        "eval_mode": eval_mode,
     }
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:

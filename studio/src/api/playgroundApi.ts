@@ -88,11 +88,27 @@ export interface ExpectedTrajectory {
   steps: ExpectedTrajectoryStep[];
 }
 
+// Eval v2 E-2 — one expected side effect. Mirrors backend `SideEffectAssertion`
+// (schemas.py) / e2/data-model.md §4. Asserted against the calls the governed-tool
+// delivery seam RECORDED instead of delivering (`eval_mode=record`) — so an item
+// carrying these runs without ever sending the real email / filing the real JIRA.
+export interface SideEffectAssertion {
+  tool: string;
+  // Partial dict-subset assertion on the recorded call args.
+  args_match?: Record<string, unknown>;
+  // exactly N | at_least N | never (any match ⇒ the assertion fails).
+  occurs?: "exactly" | "at_least" | "never";
+  count?: number;
+}
+
 export interface DurableDatasetItem {
   kind: "durable";
   input_payload: Record<string, unknown>;
   expected_output?: string;
   expected_trajectory?: ExpectedTrajectory;
+  // Eval v2 E-2 — what the run SHOULD have delivered. Its presence is what makes
+  // the eval-runner launch this item under `eval_mode=record`.
+  expected_side_effects?: SideEffectAssertion[];
   rubric?: string;
   notes?: string;
 }
@@ -220,14 +236,49 @@ export interface PerMemberEvidence {
   had_steps?: boolean | null;
 }
 
+// Eval v2 E-2 — one call the delivery seam RECORDED instead of delivering. Produced
+// by the governed-tool seam (`graph_builder._record_side_effect`), drained onto
+// `run_steps.output.recorded_side_effects[]` and projected back by the eval-runner.
+// This is "the email that would have been sent".
+export interface RecordedSideEffect {
+  tool: string;
+  args?: Record<string, unknown> | null;
+  // What was returned to the agent in place of invoking the real downstream.
+  mocked_response?: Record<string, unknown> | null;
+  // The downstream that was NOT called.
+  would_have_invoked?: string | null;
+}
+
+// Per-assertion outcome from `judge.score_side_effects` (detail.side_effect_diffs[]).
+export interface SideEffectDiff {
+  tool: string;
+  args_match?: Record<string, unknown> | null;
+  occurs?: string;
+  count?: number;
+  // How many recorded calls matched the assertion.
+  matched: number;
+  satisfied: boolean;
+}
+
+export interface SideEffectDetail {
+  side_effect_diffs?: SideEffectDiff[] | null;
+  recorded?: RecordedSideEffect[] | null;
+}
+
 // `eval_run_results.eval_detail` for a durable result. Mirrors the durable
 // `EvalScoreResponse.detail` (e1/contracts/eval-score-api.md). Eval v2 E-5 adds the
-// workflow run-tree fields (member path + per-member evidence).
+// workflow run-tree fields (member path + per-member evidence); E-2 adds the
+// recorded side effects + the `side_effect` dimension's per-assertion detail.
 export interface EvalDetail {
   expected_trajectory?: ExpectedTrajectory | null;
   actual_trajectory?: TrajectoryStep[] | null;
   tool_diffs?: ToolDiff[] | null;
   approvals?: ApprovalDetail[] | null;
+  // Eval v2 E-2 — side-effect evidence. `recorded_side_effects` is always present
+  // on a durable detail (empty for a `live` item); `side_effect_detail` only when
+  // the item asserted side effects.
+  recorded_side_effects?: RecordedSideEffect[] | null;
+  side_effect_detail?: SideEffectDetail | null;
   // Eval v2 E-5 — workflow run-tree evidence.
   expected_member_path?: string[] | null;
   actual_member_path?: string[] | null;
@@ -256,9 +307,12 @@ export interface EvalScoreRequest {
   input?: string;
   response?: string;
   // Eval v2 E-1 — durable dispatch: the projected run-step trajectory + optional
-  // per-dimension weight overrides (else durable defaults 0.4/0.4/0.2).
+  // per-dimension weight overrides (else durable defaults 0.4/0.4/0.2 + 0.2 side_effect).
   actual_trajectory?: TrajectoryStep[];
   dimension_weights?: Record<string, number>;
+  // Eval v2 E-2 — the calls the delivery seam recorded instead of delivering,
+  // projected off the real run_steps by the eval-runner (scores the side_effect dim).
+  recorded_side_effects?: RecordedSideEffect[];
   // Eval v2 E-5 — workflow dispatch: the ordered member names the runner extracted
   // from the run tree + each member's projected child steps (per-member rubric).
   member_path?: string[];

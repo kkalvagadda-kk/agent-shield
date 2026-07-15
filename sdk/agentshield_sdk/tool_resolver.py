@@ -52,8 +52,9 @@ async def resolve_tools(tool_names: list[str]) -> list[Any]:
             callable_ = _build_executor(tool_def)
             resolved.append(callable_)
             logger.info(
-                "Resolved tool '%s' (type=%s, risk=%s)",
+                "Resolved tool '%s' (type=%s, risk=%s, side_effecting=%s)",
                 name, tool_def.get("type"), tool_def.get("risk_level", "low"),
+                getattr(callable_, "side_effecting", None),
             )
 
     return resolved
@@ -64,6 +65,12 @@ def _build_executor(tool_def: dict) -> Any:
     tool_type = tool_def.get("type", "http")
     name = tool_def["name"]
     risk = tool_def.get("risk_level", "low")
+    # Eval v2 E-2: the registry's classification rides onto the callable next to
+    # .risk/.tool_name, so `governed_tool` reads `fn.side_effecting` at the delivery
+    # edge with no extra lookup. `.get` (not `["…"]`) on purpose: a registry too old
+    # to serve the field yields None = unclassifiable, which the seam treats as
+    # side-effecting (mocked, never invoked) under record — fail-closed.
+    side_effecting = tool_def.get("side_effecting")
 
     if tool_type == "python":
         executor = PythonToolExecutor(
@@ -73,6 +80,7 @@ def _build_executor(tool_def: dict) -> Any:
             description=tool_def.get("description"),
             timeout_ms=tool_def.get("timeout_ms", 10_000),
             input_schema=tool_def.get("input_schema"),
+            side_effecting=side_effecting,
         )
     else:
         executor = HttpToolExecutor(
@@ -84,6 +92,7 @@ def _build_executor(tool_def: dict) -> Any:
             body_template=tool_def.get("http_body_template") or "",
             description=tool_def.get("description"),
             timeout_ms=tool_def.get("http_timeout_ms", 10_000),
+            side_effecting=side_effecting,
         )
 
     return executor.as_tool_callable()

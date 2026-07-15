@@ -42,6 +42,14 @@ class HttpToolNodeExecutor:
         self.headers: dict = node_config.get("headers", {})
         self.body_template: str = node_config.get("body_template", "")
         self.risk: str = node_config.get("risk", "low")
+        # Eval v2 E-2: the registry's side-effect classification rides onto the
+        # callable next to .risk/.tool_name, so the seam in graph_builder's
+        # governed_tool reads `fn.side_effecting` at the delivery edge with no extra
+        # lookup — the SAME contract the SDK tool_resolver builds. `.get` (not
+        # `["…"]`) on purpose: absent ⇒ None ⇒ unclassifiable ⇒ the seam mocks it
+        # under eval_mode=record (fail-closed). Only an explicit False (a provably
+        # read-only tool) is delivered for real under record.
+        self.side_effecting: bool | None = node_config.get("side_effecting")
         # The tool's declared parameter schema (JSON Schema object). When present it
         # is the AUTHORITATIVE source of the LLM-facing parameter names — see
         # _build_tool_fn — so a tool exposes structured params (order_id, amount)
@@ -169,6 +177,7 @@ class HttpToolNodeExecutor:
         )
         http_tool_fn.risk = self.risk
         http_tool_fn.tool_name = self.name
+        http_tool_fn.side_effecting = self.side_effecting
 
         # Build a typed __signature__ so LangChain introspects the right schema.
         # inspect.signature() follows __wrapped__ chains, so wrapping via
@@ -242,6 +251,9 @@ class PythonToolNodeExecutor:
         self.description: str | None = node_config.get("description")
         self.python_code: str = node_config.get("python_code", "")
         self.risk: str = node_config.get("risk", "low")
+        # Eval v2 E-2 — see HttpToolNodeExecutor: absent ⇒ None ⇒ fail-closed (mocked
+        # under record). Same contract as the SDK tool_resolver stamps.
+        self.side_effecting: bool | None = node_config.get("side_effecting")
         self.executor_url: str = executor_url
         self.timeout_ms: int = node_config.get("timeout_ms", 10_000)
 
@@ -269,6 +281,7 @@ class PythonToolNodeExecutor:
         python_tool_fn.__doc__ = self.description or f"Run Python tool '{self.name}'. Pass required arguments as keyword args."
         python_tool_fn.risk = self.risk
         python_tool_fn.tool_name = self.name
+        python_tool_fn.side_effecting = self.side_effecting
 
         # Generic signature — accepts freeform kwargs since we don't statically parse the code
         params = [

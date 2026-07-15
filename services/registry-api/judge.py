@@ -130,8 +130,8 @@ async def score_run(
 # Scorer library (Eval v2 E-0). The single scoring door — POST /playground/eval/score
 # — calls these. Reactive uses `score_response` (reference-based) + `score_composite`
 # and MUST stay byte-identical to the pre-E-0 `judge_for_eval`. Mode-specific
-# scorers (trajectory / tool-call / side-effect / filter / member-path) are E-1+
-# and are deliberately NOT added here.
+# scorers land with their slice: trajectory + tool-call (E-1), side-effect (E-2),
+# member-path (E-5). `filter` (E-4) is deliberately NOT added here yet.
 # ---------------------------------------------------------------------------
 async def score_response(
     input_text: str,
@@ -425,6 +425,90 @@ def score_tool_calls(
             passed += 1
 
     return passed / len(expected_steps), {"tool_diffs": tool_diffs, "approvals": approvals}
+
+
+# ---------------------------------------------------------------------------
+# Side-effect scorer (Eval v2 E-2). PURE CODE — no LLM. Reads the calls the
+# governed-tool delivery seam RECORDED instead of delivering under
+# `eval_mode=record` (`run_steps.output.recorded_side_effects[]`, drained by
+# sdk/agentshield_sdk/durable.py) and asserts them against the item's
+# `expected_side_effects`. The `/playground/eval/score` durable branch (T011) is
+# the caller; the eval-runner (T012) projects the recorded calls off the real
+# run_steps and posts them. Reuses `_dict_subset` — the SAME arg matcher
+# `score_tool_calls` uses (No-Bandaid: one arg-matching rule).
+# ---------------------------------------------------------------------------
+def _side_effect_matches(rec: dict, tool: str, args_match: dict | None) -> bool:
+    """One recorded call matches an assertion iff the tool name is equal AND
+    ``args_match`` is a dict-subset of the recorded args. An empty ``args_match``
+    asserts only that the tool was called (same semantics as ``score_tool_calls``)."""
+    if rec.get("tool") != tool:
+        return False
+    return _dict_subset(args_match or {}, rec.get("args") or {})
+
+
+def score_side_effects(
+    recorded: list[dict] | None,
+    expected_side_effects: list[dict] | None,
+) -> tuple[float, dict]:
+    """Score the side effects a record-mode run WOULD have delivered against the
+    item's ``expected_side_effects``. Pure/deterministic (no LLM) — E-2's scorer,
+    the reader E-3/E-4 consume.
+
+    ``recorded`` is the flattened ``run_steps.output.recorded_side_effects[]`` the
+    governed-tool delivery seam produced (``{tool, args, mocked_response,
+    would_have_invoked}``) — a REAL artifact of the real governed path, never
+    hand-built. Per assertion (data-model §4): count the recorded calls whose
+    ``tool`` matches and whose args contain ``args_match`` (dict-subset), then
+    compare that count to ``occurs``/``count``:
+
+      - ``exactly``  — matched == count
+      - ``at_least`` — matched >= count
+      - ``never``    — matched == 0 (any match ⇒ that assertion fails)
+
+    **Fail-closed:** a required call (``occurs != never``) with **no** matching
+    recorded call scores that assertion 0.0 — an un-recorded side effect is never
+    scored as a pass. An empty ``expected_side_effects`` (nothing asserted) is
+    trivially satisfied → 1.0, matching the other reference-free scorers.
+
+    Returns ``(score in [0,1], detail{side_effect_diffs[], recorded[]})`` — one
+    ``side_effect_diffs`` entry per assertion
+    (``{tool, args_match, occurs, count, matched, satisfied}``) plus the recorded
+    calls themselves, which the results UI renders as "the email that would have
+    been sent".
+    """
+    recorded = [r for r in (recorded or []) if isinstance(r, dict)]
+    expected_side_effects = expected_side_effects or []
+    if not expected_side_effects:
+        return 1.0, {"side_effect_diffs": [], "recorded": recorded}
+
+    diffs: list[dict] = []
+    passed = 0
+    for exp in expected_side_effects:
+        tool = exp.get("tool")
+        args_match = exp.get("args_match") or {}
+        occurs = exp.get("occurs", "exactly")
+        count = int(exp.get("count", 1))
+        matched = sum(1 for r in recorded if _side_effect_matches(r, tool, args_match))
+
+        if occurs == "never":
+            satisfied = matched == 0
+        elif occurs == "at_least":
+            satisfied = matched >= count
+        elif occurs == "exactly":
+            satisfied = matched == count
+        else:
+            raise ValueError(f"unknown occurs: {occurs!r}")
+
+        diffs.append({
+            "tool": tool, "args_match": args_match, "occurs": occurs,
+            "count": count, "matched": matched, "satisfied": satisfied,
+        })
+        if satisfied:
+            passed += 1
+
+    return passed / len(expected_side_effects), {
+        "side_effect_diffs": diffs, "recorded": recorded,
+    }
 
 
 def weighted_mean(dims: dict, weights: dict | None = None) -> float:

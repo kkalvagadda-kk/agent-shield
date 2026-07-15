@@ -96,7 +96,7 @@ describe("EvalResultsPage — dimension scores (Eval v2 E-0)", () => {
 
     // Non-reactive dimensions render an em-dash for a reactive result.
     expect(screen.getByTestId("dim-trajectory")).toHaveTextContent("—");
-    expect(screen.getByTestId("dim-side_effects")).toHaveTextContent("—");
+    expect(screen.getByTestId("dim-side_effect")).toHaveTextContent("—");
     expect(screen.getByTestId("dim-filter")).toHaveTextContent("—");
     expect(screen.getByTestId("dim-member_path")).toHaveTextContent("—");
 
@@ -214,6 +214,209 @@ describe("EvalResultsPage — durable trajectory evidence (Eval v2 E-1)", () => 
     await waitFor(() => expect(listRunSteps).toHaveBeenCalledWith("pgrun-1234abcd"));
     // The control flips to "Hide run tree" once the read-only steps load.
     expect(await screen.findByText(/Hide run tree/i)).toBeInTheDocument();
+  });
+});
+
+// Eval v2 E-2 — the side effects a record-mode eval INTERCEPTED. The fixtures below
+// are the exact shape the real producers emit: the delivery seam records
+// {tool,args,mocked_response,would_have_invoked} (graph_builder._record_side_effect),
+// the eval-runner projects them off run_steps, and /eval/score returns them plus
+// score_side_effects' per-assertion diffs in `eval_detail`.
+describe("EvalResultsPage — recorded side effects (Eval v2 E-2)", () => {
+  const evalRunBase = {
+    id: "run-1",
+    user_id: "u1",
+    agent_name: "breach-agent",
+    agent_version_id: "v1",
+    workflow_id: null,
+    workflow_version_id: null,
+    dataset_id: "ds-1",
+    status: "completed",
+    total_items: 1,
+    passed_count: 1,
+    failed_count: 0,
+    overall_score: 0.9,
+    started_at: NOW,
+    completed_at: NOW,
+    created_at: NOW,
+    sandbox_deployment_id: "dep-1",
+    workflow_deployment_id: null,
+  };
+
+  const resultBase = {
+    id: "res-1",
+    eval_run_id: "run-1",
+    dataset_item_idx: 0,
+    input_message: "Report the ACME breach",
+    expected_output: null,
+    response: "Emailed compliance.",
+    judge_score: 0.9,
+    judge_reasoning: "Reported correctly.",
+    passed: true,
+    langfuse_trace_id: null,
+    trace_url: null,
+    run_id: "pgrun-1234abcd",
+    created_at: NOW,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(getEvalRun).mockResolvedValue(evalRunBase);
+    mock(listRunSteps).mockResolvedValue([]);
+  });
+
+  async function expandRow() {
+    renderPage();
+    const inputCell = await screen.findByText("Report the ACME breach");
+    fireEvent.click(inputCell);
+  }
+
+  it("renders the side_effect dimension score from the durable result", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.93,
+        eval_detail: { recorded_side_effects: [], side_effect_detail: null },
+      },
+    ]);
+    renderPage();
+    // The key MUST be `side_effect` — the backend's dimension_scores key.
+    expect(await screen.findByTestId("dim-side_effect")).toHaveTextContent("1.00");
+  });
+
+  it("renders the recorded call — the email that would have been sent — never delivered", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.93,
+        eval_detail: {
+          recorded_side_effects: [
+            {
+              tool: "send_email",
+              args: { to: "compliance@acme.com", subject: "Q3 breach" },
+              mocked_response: { status: "ok", id: "mock-2f1c" },
+              would_have_invoked: "POST https://mail.internal/send",
+            },
+          ],
+          side_effect_detail: {
+            side_effect_diffs: [
+              {
+                tool: "send_email",
+                args_match: { to: "compliance@acme.com" },
+                occurs: "exactly",
+                count: 1,
+                matched: 1,
+                satisfied: true,
+              },
+            ],
+            recorded: [],
+          },
+        },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("side-effect-evidence")).toBeInTheDocument();
+    const call = screen.getByTestId("recorded-side-effect-0");
+    expect(call).toHaveTextContent("send_email");
+    // The downstream that was NOT called + the mock returned in its place.
+    expect(call).toHaveTextContent("POST https://mail.internal/send");
+    expect(call).toHaveTextContent("mock-2f1c");
+    expect(call).toHaveTextContent(/not delivered/i);
+    // PII policy: the recipient is tokenized for display, never rendered raw.
+    expect(call).toHaveTextContent("‹email›");
+    expect(call).not.toHaveTextContent("compliance@acme.com");
+    // Non-PII args still readable, so the reviewer can judge the call.
+    expect(call).toHaveTextContent("Q3 breach");
+
+    // The assertion outcome (score_side_effects diff) renders as satisfied.
+    expect(screen.getByTestId("side-effect-assertions")).toHaveTextContent(/satisfied/i);
+  });
+
+  it("renders a violated `never` assertion", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        passed: false,
+        dimension_scores: { response: 0.9, side_effect: 0.0 },
+        composite: 0.75,
+        eval_detail: {
+          recorded_side_effects: [
+            {
+              tool: "send_email",
+              args: { to: "customer@acme.com" },
+              mocked_response: { status: "ok", id: "mock-9a2b" },
+              would_have_invoked: "POST https://mail.internal/send",
+            },
+          ],
+          side_effect_detail: {
+            side_effect_diffs: [
+              { tool: "send_email", occurs: "never", matched: 1, satisfied: false },
+            ],
+            recorded: [],
+          },
+        },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("dim-side_effect")).toHaveTextContent("0.00");
+    const assertions = screen.getByTestId("side-effect-assertions");
+    expect(assertions).toHaveTextContent(/violated/i);
+    expect(assertions).toHaveTextContent("never");
+    // The forbidden call the agent attempted is still shown (recorded, not sent).
+    expect(screen.getByTestId("recorded-side-effect-0")).toHaveTextContent("send_email");
+  });
+
+  it("renders the empty state when an assertion recorded nothing", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        passed: false,
+        dimension_scores: { response: 0.9, side_effect: 0.0 },
+        composite: 0.75,
+        eval_detail: {
+          recorded_side_effects: [],
+          side_effect_detail: {
+            side_effect_diffs: [
+              {
+                tool: "send_email",
+                occurs: "exactly",
+                count: 1,
+                matched: 0,
+                satisfied: false,
+              },
+            ],
+            recorded: [],
+          },
+        },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("no-recorded-side-effects")).toHaveTextContent(
+      /never attempted a write/i,
+    );
+    expect(screen.getByTestId("side-effect-assertions")).toHaveTextContent(/violated/i);
+  });
+
+  it("collapses away entirely for a live item that asserted no side effects", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9 },
+        composite: 0.9,
+        eval_detail: { recorded_side_effects: [], actual_trajectory: [] },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("durable-evidence")).toBeInTheDocument();
+    // No assertions and nothing recorded → the panel is not rendered at all.
+    expect(screen.queryByTestId("side-effect-evidence")).not.toBeInTheDocument();
+    expect(screen.getByTestId("dim-side_effect")).toHaveTextContent("—");
   });
 });
 

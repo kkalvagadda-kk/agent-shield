@@ -271,6 +271,10 @@ class WorkflowExecutor:
                 "python_code": tool.get("python_code", ""),
                 "risk": tool.get("risk_level", "low"),
                 "timeout_ms": tool.get("http_timeout_ms") or 10_000,
+                # Eval v2 E-2: carry the registry's classification through to the
+                # callable (the seam reads fn.side_effecting at the delivery edge).
+                # Absent ⇒ None ⇒ fail-closed (mocked under eval_mode=record).
+                "side_effecting": tool.get("side_effecting"),
             }
             return PythonToolNodeExecutor(config, executor_url=PYTHON_EXECUTOR_URL)
 
@@ -298,6 +302,13 @@ class WorkflowExecutor:
             config["description"] = tool.get("description")
         if "input_schema" not in config:
             config["input_schema"] = tool.get("input_schema")
+        if "side_effecting" not in config:
+            # Eval v2 E-2: without this the flag never reaches the callable on the
+            # declarative-runner path, so EVERY tool (even a provably read-only GET)
+            # read as unclassified and was mocked under eval_mode=record. The SDK's
+            # tool_resolver already threads it; this is the same contract for the
+            # runner's own executor builder (suite-74 T-S74-005).
+            config["side_effecting"] = tool.get("side_effecting")
         return HttpToolNodeExecutor(config)
 
     async def _prefetch_agent_tools(self) -> None:

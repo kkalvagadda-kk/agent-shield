@@ -42,6 +42,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tools", tags=["tools"])
 
 
+# Methods that are provably read-only. Anything else — a write method, a python /
+# native / mcp_tool whose body we cannot inspect, or an HTTP tool with no method at
+# all — is treated as side-effecting.
+_READ_ONLY_HTTP_METHODS = frozenset({"GET", "HEAD"})
+
+
+def infer_side_effecting(tool_type: str | None, http_method: str | None) -> bool:
+    """Classify a tool as side-effecting (Eval v2 E-2) — the ONE rule.
+
+    Fail-closed by construction: return False (read-only, delivered for real even
+    under eval) ONLY for an HTTP tool whose method is provably read-only. Everything
+    else returns True, so under `eval_mode=record` the delivery edge mocks it rather
+    than invoking it — an unclassifiable tool is never allowed through.
+
+    Callers may override the result explicitly (`ToolCreate/ToolUpdate.side_effecting`);
+    this is the inference used when they don't. Migration 0063 mirrors this rule in
+    SQL to backfill the existing rows (a migration is a snapshot and must not import
+    app code that will drift under it) — keep the two in sync.
+    """
+    if (tool_type or "").lower() != "http":
+        return True
+    return (http_method or "").upper() not in _READ_ONLY_HTTP_METHODS
+
+
 async def _get_tool(tool_id: uuid.UUID, db: AsyncSession) -> Tool:
     result = await db.execute(select(Tool).where(Tool.id == tool_id))
     tool = result.scalar_one_or_none()
@@ -82,7 +106,16 @@ async def create_tool(
         if ac is None:
             raise HTTPException(status_code=422, detail=f"AuthConfig '{body.auth_config_id}' not found.")
 
-    tool = Tool(**body.model_dump())
+    # `side_effecting` is NOT NULL — a body that leaves it unset must not write NULL
+    # over the column default, so resolve it here: an explicit value wins, otherwise
+    # infer it from the method (fail-closed). Excluded from the kwargs splat so the
+    # two can never both apply.
+    tool = Tool(**body.model_dump(exclude={"side_effecting"}))
+    tool.side_effecting = (
+        body.side_effecting
+        if body.side_effecting is not None
+        else infer_side_effecting(body.type, body.http_method)
+    )
     tool.created_by = caller
     db.add(tool)
     await db.commit()
@@ -173,6 +206,17 @@ async def update_tool(
         ac = (await db.execute(select(AuthConfig).where(AuthConfig.id == updates["auth_config_id"]))).scalar_one_or_none()
         if ac is None:
             raise HTTPException(status_code=422, detail=f"AuthConfig '{updates['auth_config_id']}' not found.")
+
+    # Eval v2 E-2 — the classification must not go stale under a method edit: changing
+    # GET→POST without re-inferring would leave a write tool marked read-only, i.e.
+    # delivered for real under eval (fail-OPEN). Rule: the same request may override
+    # explicitly; otherwise a method change re-runs the inference.
+    if "http_method" in updates and updates.get("side_effecting") is None:
+        updates["side_effecting"] = infer_side_effecting(
+            tool.type, updates["http_method"]
+        )
+    elif updates.get("side_effecting") is None:
+        updates.pop("side_effecting", None)  # explicit null is not an override
 
     for field, value in updates.items():
         setattr(tool, field, value)

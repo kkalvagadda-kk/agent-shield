@@ -23,11 +23,14 @@
 > just-in-time step). Never treat a `file:line` or migration number here as ground truth. (CLAUDE.md: design
 > docs go stale — verify in code before relying.)
 
-> **Grounding note (E-2 is partly banner-indicative).** WS-1's durable path is shipped, so the flag has a
-> real run to ride. But the **exact governance-wrapper interception point** — the single function every
-> declarative-runner **and** SDK tool call passes through — must be located and confirmed at impl. The
-> record/mock seam is an **explicit `eval_mode` parameter** threaded to that point; the `file:line` for the
-> wrapper is indicative until re-grounded.
+> **Grounding note — RESOLVED at impl (2026-07-15).** WS-1's durable path is shipped, so the flag had a real
+> run to ride. The **governance-wrapper interception point** was the one open question, and it is now
+> confirmed: `sdk/agentshield_sdk/graph_builder.py` `_wrap_tool_with_governance.governed_tool` **step 3** —
+> the single `return await fn(**kwargs)` delivery edge that every declarative-runner **and** SDK tool call
+> crosses. There is exactly **one** such point (no fork to collapse). The record/mock branch sits immediately
+> before it, so OPA (step 1) and HITL (step 2) run unchanged and only the downstream delivery is substituted.
+> The `eval_mode` flag is threaded there as an **explicit parameter** (run-create → `PlaygroundRun.eval_mode`
+> → dispatch body → the runner's `begin_eval_context` → the `_current_eval_mode` ContextVar).
 
 ---
 
@@ -221,15 +224,36 @@ confirm at impl).
 
 ## 7. Gap Ledger
 
+> **Status 2026-07-15 — re-grounded against the shipped code.** Phases 1–5 landed. Rows that were
+> "confirm at impl" are resolved and folded into the design body (§2); the live rows below are the honest
+> remainder. See `e2/tasks.md` for the per-task ledger.
+
 | Item | Status | Note |
 |---|---|---|
-| Record-once cassette **replay** store (vs fixed mock) | **deferred (intentional)** | E-2 ships fixed mock + record; VCR-style keyed replay (`{tool,args-hash}` → recorded response) is a follow-up (`research.md` §4.3). |
-| Locating the single governance interception point | **must confirm at impl** | The `file:line` for the wrapper is indicative; the design requires exactly **one** delivery-branch point across declarative-runner + SDK. If two exist today, collapse to one (No-Bandaid), don't branch both. |
-| PII tokenization of recorded args | reuses OQ-3 (by-design) | Recorded args are asserted by value + tokenized for display; raw PII never rendered to the reviewer. Policy inherited, not new. |
-| Per-tool custom mock schemas | not-yet-needed (debt, low) | `tool_mocks` on the item + type-default success suffice; richer per-tool mock contracts if demand grows. |
+| Record-once cassette **replay** store (vs fixed mock) | **deferred (intentional)** | E-2 ships fixed mock + record only: the seam returns a type-default `{"status":"ok","id":"mock-<uuid>"}` sentinel and records `{tool,args,mocked_response,would_have_invoked}`. VCR-style keyed replay (`{tool,args-hash}` → the real recorded response) is the follow-up (`research.md` §4.3). The record→mock proof is the E-2 scope; nothing in E-2 reads a cassette. |
+| Item **`tool_mocks` not threaded to the seam** | **not-yet-wired (debt, low)** | `DurableDatasetItem.tool_mocks` is accepted + persisted at the door (`schemas.py`), but the seam does **not** read it — every intercepted call gets the type-default sentinel regardless. The plan's T008 contract said "item `tool_mocks` else a type-default"; only the type-default half shipped, because the seam runs **in the agent pod** and the item never travels there (only `eval_mode` rides the dispatch body). Wiring it means threading the per-tool mock map through `dispatch_durable_run` → `DurableRunRequest` → `begin_eval_context`. Harmless today (an agent that branches on a write's response body would need it); tracked so it never reads as shipped. `schemas.py:1222` points here. |
+| A **violated** side-effect assertion does not by itself fail the item | **by-design (noted, sharp edge)** | `side_effect` is one weighted dimension (default `0.2`), so a recorded-but-wrong call (or a violated `never`) scores the dim `0.0` yet can still land the composite ≈`0.83` — above the `0.7` pass threshold — when response/trajectory are perfect. Same property E-1's `tool_call` dim has; the dimension score + `eval_detail` are the evidence. The case the eval **cannot verify** (a required call recorded **nowhere**) is fail-closed **hard at the eval-runner** instead of relying on this arithmetic, since `dimension_weights` is per-run overridable. If "any violated side effect ⇒ item fails" is wanted, that is a new policy decision (a gate, not a weight) — not silently assumed here. |
+| SDK/custom-container agent path parity | **not-yet-wired (debt) if the suite uses a declarative agent** | The seam is one shared function in `sdk/agentshield_sdk/graph_builder.py`, so an SDK-container agent honors the identical flag — but it is bundled into each agent image at build time, so an SDK-container agent must be **rebuilt** on the new SDK to get it. suite-74 drives a **declarative** agent (declarative-runner image, rebuilt at `0.1.46`). Tracked so SDK-container parity never reads as proven. |
+| `_execute_durable_run` sets no OPA `_current_user_context` | **noted (pre-existing, out of E-2 scope)** | E-2 adds `_current_eval_mode` only; the durable path's empty OPA user context is a separate pre-existing gap, neither introduced nor fixed here. |
 
-**No orphan flags:** `Tool.side_effecting` → read by the wrapper; `recorded_side_effects` → read by
-`score_side_effects` + results UI; `eval_mode` → read by the wrapper delivery branch. All shipped together.
+### Resolved (folded into the design body — no longer gaps)
+
+- ~~Locating the single governance interception point~~ — **RESOLVED.** It is
+  `sdk/agentshield_sdk/graph_builder.py` `_wrap_tool_with_governance.governed_tool` **step 3**, the single
+  `return await fn(**kwargs)` delivery edge every declarative-runner **and** SDK tool call crosses. There was
+  exactly **one**; no collapse was needed and no runner-side mock fork exists (T020 grep-gated). §2 documents it.
+- ~~PII tokenization of recorded args~~ — **RESOLVED (policy inherited from OQ-3, now implemented).** Recorded
+  args are asserted **by value** server-side (`score_side_effects` dict-subset over the raw args) and
+  **tokenized for display** by `studio/src/lib/piiTokenize.ts` (email/SSN/card/phone → `‹email›`…), consumed by
+  `EvalResultsPage`'s recorded-side-effect panel. Raw PII is never rendered to the reviewer.
+- ~~`eval_mode` may not need persisting~~ — **RESOLVED: it does.** A durable run parks at HITL and **resumes**
+  via a separate dispatch, which re-drives the graph and re-crosses the delivery edge — so `eval_mode` is a
+  column (`playground_runs.eval_mode`, migration `0063`) read back on the resume dispatch.
+
+**No orphan flags:** `Tool.side_effecting` → read by `governed_tool` (`_should_record`); `eval_mode` → read by
+the runner's `begin_eval_context` → the delivery branch; `recorded_side_effects` → written by the durable
+harness, read by `score_side_effects` + the results UI; `score_side_effects` → called by `/eval/score`. All
+shipped together (T020 grep gate).
 
 ---
 

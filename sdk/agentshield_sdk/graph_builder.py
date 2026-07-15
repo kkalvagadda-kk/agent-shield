@@ -19,7 +19,9 @@ import asyncio
 import contextvars
 import functools
 import inspect
+import json
 import logging
+import uuid
 from typing import Annotated, Any
 
 from . import config
@@ -39,6 +41,87 @@ _TOOL_RISK_REGISTRY: dict[str, str] = {}
 # human to approve. A real user's identity (a Keycloak sub) is never in this set,
 # so auto_approve is inert on any interactive request even if the flag leaks.
 _AUTO_APPROVE_IDENTITIES: frozenset[str] = frozenset({"eval-runner"})
+
+# --- Eval v2 E-2: the side-effect record/mock seam --------------------------------
+# `eval_mode` for the CURRENT run. "live" (the default) delivers every tool call for
+# real — a run that never says otherwise can never be intercepted. "record" makes the
+# delivery edge in `governed_tool` (step 3) record + mock a side-effecting call
+# instead of invoking it, so a batch eval of a write-shaped agent never sends a real
+# email / files a real JIRA. Set by the run driver (declarative-runner
+# `_execute_durable_run` / the SDK server) from the dispatch body, which the
+# registry-api fills from the PERSISTED PlaygroundRun.eval_mode — including on a HITL
+# resume, which re-drives the graph and re-crosses this edge.
+_EVAL_MODE_RECORD = "record"
+_current_eval_mode: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_eval_mode", default="live"
+)
+
+# The buffer recorded calls are appended to. `None` = no recording installed.
+# CONTRACT: `governed_tool` only ever APPENDS to the list object it reads out of this
+# var — it never `set()`s it. LangGraph runs nodes in child contexts (a context copy),
+# so a `set()` inside a tool call would be invisible to the driver; appending to the
+# shared list object is visible. The driver therefore installs the buffer BEFORE the
+# graph runs (see `begin_eval_context`) and hands the SAME list to the durable harness
+# to drain into `run_steps.output.recorded_side_effects[]`.
+_recorded_side_effects: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "recorded_side_effects", default=None
+)
+
+
+def begin_eval_context(eval_mode: str) -> list[dict]:
+    """Install the eval mode + a fresh recording buffer in the CURRENT context.
+
+    ONE call sets both, so the two can never drift (a run in record mode without a
+    buffer to record into is not representable). Call it in the task/context that
+    drives the graph, before driving; pass the returned list to the durable harness
+    as ``recorded_side_effects`` so the records land on the real tool step.
+    """
+    _current_eval_mode.set(eval_mode or "live")
+    buf: list[dict] = []
+    _recorded_side_effects.set(buf)
+    logger.info("eval context: eval_mode=%s (record seam %s)",
+                eval_mode, "ARMED" if eval_mode == _EVAL_MODE_RECORD else "off")
+    return buf
+
+
+def _should_record(fn: Any) -> bool:
+    """Does this tool call get recorded + mocked instead of delivered?
+
+    True only in record mode, and then for every tool that is not PROVABLY read-only.
+    `side_effecting` is stamped onto the callable by the tool resolver from the
+    registry's `ToolResponse.side_effecting`; a tool that carries no classification at
+    all (an inline/legacy callable, or a registry too old to serve the field) reads as
+    None — FAIL-CLOSED: it is mocked, never invoked. Only an explicit False (a
+    provably read-only tool, e.g. an HTTP GET) passes straight through.
+    """
+    if _current_eval_mode.get() != _EVAL_MODE_RECORD:
+        return False
+    return getattr(fn, "side_effecting", None) is not False
+
+
+def _record_side_effect(fn: Any, kwargs: dict) -> dict:
+    """Build the mock, record `{tool, args, mocked_response, would_have_invoked}`, and
+    return the mock. The recorded entry is what `score_side_effects` asserts and the
+    results UI renders ("the email that would have been sent")."""
+    mocked_response = {"status": "ok", "id": f"mock-{uuid.uuid4()}"}
+    entry = {
+        "tool": fn.tool_name,
+        "args": kwargs,
+        "mocked_response": mocked_response,
+        "would_have_invoked": getattr(fn, "invocation_target", None) or fn.tool_name,
+    }
+    buf = _recorded_side_effects.get()
+    if buf is None:
+        # The mock still stands (fail-closed: we do NOT fall back to invoking). The
+        # call is just not persisted, so an item asserting it scores 0.0 rather than
+        # silently passing.
+        logger.warning(
+            "record mode: no recording buffer installed — tool=%s mocked but NOT recorded",
+            fn.tool_name,
+        )
+    else:
+        buf.append(entry)
+    return entry
 
 
 def _get_tool_risk(tool_name: str) -> str:
@@ -196,7 +279,25 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
                 reason = approval_result.get("reason", "rejected by reviewer")
                 return f"Tool '{fn.tool_name}' was not approved: {reason}"
 
-        # 3. Execute the tool (HTTP call to platform endpoint or python-executor).
+        # 3. Deliver — the ONE edge every governed tool call crosses to reach its
+        #    downstream. Eval v2 E-2 substitutes the DELIVERY here and nowhere else:
+        #    under `eval_mode=record` a side-effecting call is recorded and answered
+        #    with a mock, so the eval exercises the REAL governed path (OPA above ran,
+        #    HITL above parked/approved for real) while the real world is untouched.
+        #    Mocking before governance would evaluate a different path than production
+        #    — the bandaid this seam exists to avoid.
+        if _should_record(fn):
+            entry = _record_side_effect(fn, kwargs)
+            logger.info(
+                "eval record: tool=%s agent=%s NOT invoked (would_have_invoked=%s)",
+                fn.tool_name, agent_name, entry["would_have_invoked"],
+            )
+            # Platform tools return a JSON string (tool_executor), and this wrapper
+            # already answers with plain strings on the deny/reject paths — so the
+            # mock is serialized the same way rather than changing the tool's shape.
+            return json.dumps(entry["mocked_response"])
+
+        # Execute the tool (HTTP call to platform endpoint or python-executor).
         if asyncio.iscoroutinefunction(fn):
             return await fn(**kwargs)
         return fn(**kwargs)

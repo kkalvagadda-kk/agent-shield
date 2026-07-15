@@ -197,6 +197,13 @@ class ResumeRequest(BaseModel):
     reason: str | None = None
     run_id: str | None = None        # set for a durable /run resume (WS-1 T4)
     callback_url: str | None = None  # durable resume re-drives the harness, posting steps here
+    # Eval v2 E-2: the mode the run STARTED in, read back off the persisted
+    # PlaygroundRun by the registry (routers/playground.py resume-stream,
+    # routers/approvals.py console decide). A resume re-drives the graph and
+    # re-crosses the tool delivery edge, so it must be re-set on the ContextVar —
+    # otherwise a parked record-mode eval would deliver its post-approval tool calls
+    # for real. Defaults to 'live': a resume that says nothing delivers normally.
+    eval_mode: str = "live"
 
 
 class WorkflowRunRequest(BaseModel):
@@ -522,7 +529,9 @@ async def resume_thread(thread_id: str, req: ResumeRequest):
 
     if req.callback_url and req.run_id:
         import asyncio
-        asyncio.create_task(_resume_durable_run(thread_id, decision, req.run_id, req.callback_url))
+        asyncio.create_task(
+            _resume_durable_run(thread_id, decision, req.run_id, req.callback_url, req.eval_mode)
+        )
         return {"status": "accepted", "thread_id": thread_id}
 
     try:
@@ -533,13 +542,22 @@ async def resume_thread(thread_id: str, req: ResumeRequest):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callback_url: str) -> None:
+async def _resume_durable_run(
+    thread_id: str, decision: dict, run_id: str, callback_url: str, eval_mode: str = "live",
+) -> None:
     """Re-enter a parked durable run through the shared harness, emitting the remaining
     steps to the callback. Fail-loud: on error, post a terminal failed step so the run
-    never hangs."""
+    never hangs.
+
+    ``eval_mode`` (Eval v2 E-2) is the mode the run STARTED in, sent by the registry
+    off the persisted PlaygroundRun: the resume re-drives the graph and re-crosses the
+    tool delivery edge, so the seam must be re-armed here or a parked record-mode eval
+    would deliver its post-approval tool calls for real."""
     from agentshield_sdk.durable import Bookmark, StepEmitter, _exc_reason, resume_durable  # type: ignore[import]
+    from agentshield_sdk.graph_builder import begin_eval_context  # type: ignore[import]
     from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
 
+    recorded = begin_eval_context(eval_mode)
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             emitter = StepEmitter(callback_url, client, bookmark=Bookmark(run_id))
@@ -547,6 +565,7 @@ async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callb
                 await resume_durable(
                     workflow_executor.graph, thread_id=thread_id, decision=decision,
                     callback_url=callback_url, emitter=emitter,
+                    recorded_side_effects=recorded,
                 )
     except Exception as exc:
         logger.exception("durable resume failed thread=%s: %s", thread_id, exc)
@@ -562,9 +581,20 @@ async def _resume_durable_run(thread_id: str, decision: dict, run_id: str, callb
 
 @app.post("/resume/{thread_id}/stream")
 async def resume_thread_stream(thread_id: str, req: ResumeRequest):
-    """Resume a HITL-paused workflow thread and stream the continuation as SSE."""
+    """Resume a HITL-paused workflow thread and stream the continuation as SSE.
+
+    Eval v2 E-2: this is the path the eval-runner's self-approve drives, so it too
+    re-crosses the tool delivery edge and must re-arm the seam from the run's
+    PERSISTED `eval_mode` (forwarded by routers/playground.py::resume_stream) —
+    otherwise the tool call the approval just unblocked would be delivered for real.
+    Records made on this path are not persisted to run_steps (it is the streaming chat
+    resume, which emits no step callbacks); see the E-2 gap ledger."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
+
+    from agentshield_sdk.graph_builder import begin_eval_context  # type: ignore[import]
+    begin_eval_context(req.eval_mode)
+
     decision = {
         "decision": req.decision,
         "reviewer_id": req.reviewer_id,
@@ -585,6 +615,12 @@ class DurableRunRequest(BaseModel):
     run_id: str
     input_payload: dict[str, Any] = {}
     callback_url: str
+    # Eval v2 E-2: 'live' (default — deliver tool calls for real) | 'record' (a batch
+    # eval: a side-effecting tool call is recorded + mocked at the delivery edge and
+    # NOT invoked). Set by registry-api's durable dispatch body
+    # (durable_dispatch.dispatch_durable_run) off the persisted PlaygroundRun. The
+    # 'live' default is what keeps every non-eval dispatch delivering for real.
+    eval_mode: str = "live"
 
 
 @app.post("/run")
@@ -611,6 +647,7 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
     from langchain_core.messages import HumanMessage  # type: ignore[import]
 
     from agentshield_sdk.durable import Bookmark, StepEmitter, _exc_reason, run_durable  # type: ignore[import]
+    from agentshield_sdk.graph_builder import begin_eval_context  # type: ignore[import]
     from agentshield_sdk.otel import otel_run_context  # type: ignore[import]
     from agentshield_sdk.safety_client import scan_input  # type: ignore[import]
 
@@ -632,6 +669,14 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
         req.input_payload.get("message")
         or (_json.dumps(req.input_payload) if req.input_payload else DAEMON_KICKOFF)
     )
+    # Eval v2 E-2: arm the record/mock seam for THIS run before the graph runs. We are
+    # inside the run's own asyncio task, so the ContextVar + buffer are scoped to this
+    # run and cannot leak into another (a concurrent live run stays live). Under
+    # `eval_mode=record` the governed-tool delivery edge records + mocks side-effecting
+    # calls instead of invoking them; `recorded` is the buffer it appends to, drained by
+    # the harness onto the tool step's run_steps.output.
+    recorded = begin_eval_context(req.eval_mode)
+    logger.info("durable run %s eval_mode=%s", req.run_id, req.eval_mode)
     try:
         scan = await scan_input(input_msg, agent_name=cfg.AGENT_NAME, session_id=req.run_id)
         state = {"messages": [HumanMessage(content=scan.sanitized_text)]}
@@ -642,6 +687,7 @@ async def _execute_durable_run(req: DurableRunRequest) -> None:
                 result = await run_durable(
                     workflow_executor.graph, state,
                     thread_id=req.run_id, callback_url=req.callback_url, emitter=emitter,
+                    recorded_side_effects=recorded,
                 )
         logger.info("durable run %s finished status=%s steps=%d",
                     req.run_id, result.status, result.steps_emitted)

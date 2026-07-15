@@ -1029,6 +1029,16 @@ class Tool(Base):
     risk_level: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default=text("'low'")
     )
+    # Eval v2 E-2: does invoking this tool change the world? Read by the ONE tool
+    # delivery edge (sdk/agentshield_sdk/graph_builder.py `governed_tool` step 3):
+    # under `eval_mode=record` a side-effecting tool is recorded + mocked instead of
+    # invoked, so a batch eval never sends a real email / files a real JIRA.
+    # Inferred at the API door from the HTTP method (routers/tools.py
+    # ::infer_side_effecting) and overridable per tool; fail-closed — anything not
+    # provably read-only (HTTP GET/HEAD) is true. Migration 0063.
+    side_effecting: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
     auth_config_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
         ForeignKey("auth_configs.id"),
@@ -1304,6 +1314,10 @@ class PlaygroundRun(Base):
     __table_args__ = (
         Index("idx_playground_runs_user_id", "user_id"),
         Index("idx_playground_runs_agent", "agent_name"),
+        CheckConstraint(
+            "eval_mode IN ('live','record')",
+            name="ck_playground_runs_eval_mode",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1350,6 +1364,16 @@ class PlaygroundRun(Base):
     input_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_shape: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=text("'reactive'")
+    )
+    # Eval v2 E-2: 'live' (default — deliver tool calls for real) | 'record' (a batch
+    # eval: a side-effecting tool call is recorded + mocked at the delivery edge and
+    # NOT invoked). PERSISTED, not transient: a durable run parks at HITL and resumes
+    # via a SEPARATE POST to the runner, which re-drives the graph and re-crosses the
+    # seam — the resume dispatch reads the mode back off this column (routers/
+    # playground.py::resume_stream, routers/approvals.py::_resume_and_advance) so a
+    # resumed eval can never start delivering for real mid-run. Migration 0063.
+    eval_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'live'")
     )
     input_payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     trigger_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
