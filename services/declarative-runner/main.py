@@ -423,9 +423,20 @@ async def _load_memory_context(
                 rows = resp.json()
                 out: list[dict[str, str]] = []
                 for r in rows:
-                    turn: dict[str, str] = {"role": r["role"], "content": r["content"]}
-                    if r.get("agent_name"):
-                        turn["agent_name"] = r["agent_name"]
+                    content = r["content"]
+                    author = r.get("agent_name")
+                    # Peer attribution (context-storage §5.2): in a shared workflow
+                    # transcript (scope='workflow_run', which drops the agent_name filter
+                    # so this member sees peers' turns) a turn authored by a DIFFERENT
+                    # member is prefixed `[<agent_name>]: ` so it reads as a peer's
+                    # contribution, not this member's own words. Same-author turns (and
+                    # every scope='agent' row, which is always self-authored) stay verbatim.
+                    # No graph-state schema change — the prefix rides in `content`.
+                    if author and author != agent_name:
+                        content = f"[{author}]: {content}"
+                    turn: dict[str, str] = {"role": r["role"], "content": content}
+                    if author:
+                        turn["agent_name"] = author
                     out.append(turn)
                 return out
     except Exception as exc:

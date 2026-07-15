@@ -431,3 +431,42 @@ Browser
 - Only `sequential` orchestration is executed at runtime. Supervisor and handoff can be selected but will return 422 from `POST /workflows/:id/runs`.
 - The run panel polls up to 15 times (30 seconds) then stops; long-running workflows may appear stuck.
 - T027 (manual browser verification) is pending — the browser flow should be verified before marking W4 fully complete.
+
+## Conversation memory & the shared workflow transcript (context-storage POC)
+
+Two related things thread context through a run. They use **different keys** and never mix.
+
+### Chat memory (single agent, across turns)
+
+Every chat turn carries a `session_id`. The registry uses it as the agent's `thread_id`
+(the LangGraph checkpoint key) **and** as the transcript `conversation_id`, so a follow-up
+turn on the same `session_id` recalls what was said before — the agent literally reloads the
+prior turns from the `agent_memory` transcript and injects them as leading messages before it
+runs. This is per-`(deployment, user, session)`: a second user replaying someone else's
+`session_id` is rejected (not-your-session), so one user never reads another's conversation.
+Because the transcript lives in Postgres (not pod RAM), the memory survives a pod restart.
+
+### Shared workflow transcript (multiple agents, one run)
+
+In a composite/multi-agent workflow, all members of a single run share **one**
+`conversation_id` (= the parent workflow run id). Before each member runs, it loads the whole
+shared transcript for that run — every member's turns, in order — not just the previous
+member's truncated output string. So member B can reference something that appeared only in
+member A's turn, and a supervisor sees a worker's reasoning, not just its final answer.
+
+- **Attribution.** Each transcript row records which agent authored it. When a member reads a
+  turn written by a *different* member, that turn's content is prefixed with `[<agent_name>]: `
+  so it reads it as a peer's contribution rather than its own words. Its own turns stay
+  verbatim.
+- **Write-back.** After a member runs, it appends its turn tagged with its own `agent_name`
+  and the `workflow_run_id`, so the next member sees the now-longer transcript. A fresh backend
+  fetch (`GET /agents/{name}/memory?scope=workflow_run&thread_id=<parent_run_id>`) returns every
+  member's tagged rows in order.
+- **Identity split (why durable resume still works).** The shared `conversation_id` is
+  orthogonal to each member's per-member `thread_id`. `thread_id` stays the checkpoint +
+  approval-correlation key (a durable member that pauses for HITL resumes on *its own*
+  `thread_id`); `conversation_id` is only the transcript key. They travel in separate request
+  fields and never alias, so sharing the transcript does not disturb per-member durable resume.
+- **String-passing is now a fallback.** The old behavior — passing only the previous member's
+  final output string as the next member's `message` — is retained as a fallback; the real
+  cross-member context now flows through the shared transcript.

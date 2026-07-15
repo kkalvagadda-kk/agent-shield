@@ -67,17 +67,26 @@ async def _resolve_agent_environment(agent_name: str) -> str:
         return "production"
 
 
-async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | None = None) -> tuple[str, str | None, str | None]:
+async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | None = None,
+                    conversation_id: str | None = None, scope: str = "agent") -> tuple[str, str | None, str | None]:
     """POST the message to the member agent's deployed pod. Returns (status, output, error).
 
     Passing `thread_id` lets a member that pauses for approval create its Approval
     row under a thread_id the orchestrator can correlate (see `_run_step`).
+
+    `conversation_id`/`scope` carry the SHARED workflow transcript key (context-storage
+    design §5.2 — identity split): they travel ALONGSIDE `thread_id` in different body
+    fields and never alias it. `thread_id` stays the per-member checkpoint + approval key;
+    `conversation_id` is the orthogonal cross-member transcript key each member loads.
     """
     environment = await _resolve_agent_environment(agent_name)
     url = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080/chat"
     body: dict = {"message": message}
     if thread_id:
         body["thread_id"] = thread_id
+    if conversation_id:
+        body["conversation_id"] = conversation_id
+        body["scope"] = scope
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(url, json=body)
@@ -113,7 +122,9 @@ async def _resolve_agent_shape(agent_name: str) -> str:
 
 
 async def _dispatch_durable_member(
-    agent_name: str, team: str, message: str, child_id: str
+    agent_name: str, team: str, message: str, child_id: str,
+    conversation_id: str | None = None, scope: str = "agent",
+    workflow_run_id: str | None = None,
 ) -> tuple[str, str | None, str | None]:
     """Dispatch a DURABLE member via the pod's `/run` (D4 "+ Visibility"), then poll the
     child AgentRun to a terminal state.
@@ -143,10 +154,19 @@ async def _dispatch_durable_member(
     # reuse it instead of hand-rolling a second POST (the 2026-07-11 HITL-retro drift root
     # cause). run_id == child_id == thread_id, so the SDK-created Approval and the console
     # resume correlate to this child.
+    # Shared workflow transcript key (§5.2 identity split) rides in the durable /run
+    # input_payload ALONGSIDE the message; the per-member thread_id (== child_id, the
+    # WS-1 checkpoint + approval key) is set on the child row above and is NOT aliased here.
+    input_payload: dict = {"message": message}
+    if conversation_id:
+        input_payload["conversation_id"] = conversation_id
+        input_payload["scope"] = scope
+    if workflow_run_id:
+        input_payload["workflow_run_id"] = workflow_run_id
     ok, err = await dispatch_durable_run(
         run_id=str(child_id),
         agent_name=agent_name,
-        input_payload={"message": message},
+        input_payload=input_payload,
         callback_url=callback_url,
         runner_url=base,
         timeout_s=15.0,
@@ -465,6 +485,18 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
         await s.refresh(child)
         child_id = str(child.id)
 
+    # Context-storage design §5.2 (identity split): every member of THIS workflow run
+    # shares ONE conversation_id (= parent_run_id) so each loads the same cross-member
+    # transcript (loaded runner-side in T012), while its per-member `thread_id`
+    # (checkpoint + Approval correlation, WS-1) stays exactly as assigned above. The two
+    # keys travel in DIFFERENT body fields and never alias — this is what keeps durable
+    # resume keyed off thread_id=child_id from regressing. String-passing (`current_input`
+    # as `message`) is retained as a fallback; cross-member context now flows via the
+    # shared transcript.
+    conversation_id = parent_run_id
+    conversation_scope = "workflow_run"
+    workflow_run_id = parent_run_id
+
     if member_shape == "durable":
         # D4 "+ Visibility": a durable member runs via `/run` so its per-node run_steps
         # land under child_id. thread_id must equal child_id so the member's Approval
@@ -483,9 +515,16 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
                 # trace stays a thin envelope — the detail lives on the members.
                 child.langfuse_trace_id = uuid.UUID(child_id).hex
                 await s.commit()
-        status_val, output, err = await _dispatch_durable_member(agent_name, team, current_input, child_id)
+        status_val, output, err = await _dispatch_durable_member(
+            agent_name, team, current_input, child_id,
+            conversation_id=conversation_id, scope=conversation_scope,
+            workflow_run_id=workflow_run_id,
+        )
     else:
-        status_val, output, err = await _dispatch(agent_name, team, current_input, thread_id)
+        status_val, output, err = await _dispatch(
+            agent_name, team, current_input, thread_id,
+            conversation_id=conversation_id, scope=conversation_scope,
+        )
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
     # Authoritative pause detection (reactive /chat members only — a durable member's

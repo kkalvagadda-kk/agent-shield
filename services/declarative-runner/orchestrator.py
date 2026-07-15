@@ -60,7 +60,17 @@ class WorkflowOrchestrator:
         url = f"http://{agent_name}-production.{ns}.svc.cluster.local:8080/chat"
         try:
             async with httpx.AsyncClient(timeout=120.0) as c:
-                r = await c.post(url, json={"message": input_msg})
+                # Context-storage §5.2 (identity split): every member of this composite
+                # workflow run shares ONE conversation_id (= parent_run_id) so each member
+                # loads the same cross-member transcript (runner-side, T012). This
+                # transcript key is orthogonal to any per-member checkpoint/approval key —
+                # they travel in different fields and never alias.
+                r = await c.post(url, json={
+                    "message": input_msg,
+                    "conversation_id": self.parent_run_id,
+                    "scope": "workflow_run",
+                    "workflow_run_id": self.parent_run_id,
+                })
             if r.status_code == 200:
                 data = r.json()
                 return "completed", (data.get("output") or data.get("response") or json.dumps(data))
@@ -70,7 +80,14 @@ class WorkflowOrchestrator:
             return "failed", str(exc)
 
     async def run_sequential(self, members: list[dict], input_payload: dict) -> None:
-        """Iterate members in order, threading output to input. Reports parent run status."""
+        """Iterate members in order, threading output to input. Reports parent run status.
+
+        `current` (the previous member's output string) is still threaded as each member's
+        `message`, but this string-pass is now a FALLBACK, not the sharing mechanism:
+        cross-member context flows through the shared workflow transcript keyed by the run's
+        `conversation_id` (= parent_run_id), which every member loads before it runs (see
+        `_dispatch_agent` + context-storage design §5.2).
+        """
         await self._mark_parent_status("running")
 
         current = input_payload.get("message", "") if isinstance(input_payload, dict) else str(input_payload)
