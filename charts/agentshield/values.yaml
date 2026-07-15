@@ -108,12 +108,29 @@ python-executor:
 scheduler:
   enabled: true
 
-# event-gateway: Phase 9 public webhook ingress. Image tag + tunables come from
-# the sub-chart defaults (charts/event-gateway/values.yaml); Ingress + L4
-# NetworkPolicy are OFF by default there (local Docker Desktop has no ingress
-# controller / non-enforcing CNI — tests hit the Service in-cluster).
+# event-gateway: Phase 9 public webhook ingress. Ingress + L4 NetworkPolicy are OFF by
+# default in the sub-chart (local Docker Desktop has no ingress controller /
+# non-enforcing CNI — tests hit the Service in-cluster).
+#
+# The image tag is pinned HERE, not left to the sub-chart default, and that is
+# load-bearing (WS-4). `helm dependency update` packages charts/event-gateway/ into
+# charts/event-gateway-0.1.0.tgz, and a PACKAGED sub-chart's values shadow the source
+# directory's. That .tgz is a build artifact which had gone stale at tag 0.1.1 —
+# regenerating it is supposed to fix that, except `helm dependency update` currently
+# FAILS (unrelated: "can't get a valid version for repositories envoy-gateway") and
+# deploy-cpe2e.sh:386 swallows the error with `2>/dev/null || true`. Net effect: editing
+# charts/event-gateway/values.yaml did NOTHING — the deploy served 0.1.1 under a bumped
+# tag, silently, which is the "a tag is a claim about content" trap.
+#
+# A top-level value always wins over a sub-chart default, packaged or not, so pinning it
+# here is immune to the artifact's state. This also makes event-gateway consistent with
+# every other service (registry-api, deploy-controller, studio all pin their tag here)
+# and with the CLAUDE.md rule: bump the tag in deploy-cpe2e.sh AND in this file.
+# Keep this in lockstep with EVENT_GATEWAY_TAG in scripts/deploy-cpe2e.sh.
 event-gateway:
   enabled: true
+  image:
+    tag: "0.1.2"
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
@@ -587,7 +604,7 @@ registry-api:
     repository: registry.internal/agentshield/registry-api
     # E-2: migration 0063 (tools.side_effecting + playground_runs.eval_mode);
     # eval_mode threaded run-create → durable dispatch body → runner
-    tag: "0.2.185"
+    tag: "0.2.186"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.11"
@@ -903,7 +920,7 @@ studio:
     # E-3: scheduled-eval authoring UI (job_spec + job-spec evidence). 0.1.140 was E-2's
     # tag — 9f6603a changed studio/src without bumping it, so the cluster served a
     # pre-E-3 bundle. Bump on EVERY source change; IfNotPresent will not re-pull a tag.
-    tag: "0.1.141"
+    tag: "0.1.142"
     pullPolicy: IfNotPresent
 
   service:

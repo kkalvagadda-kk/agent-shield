@@ -3,3 +3,10 @@ uvicorn[standard]==0.34.0
 httpx==0.28.1
 psycopg2-binary==2.9.10
 redis==5.2.1
+# Fernet — decrypts webhook_clients.secret_encrypted so the gateway can RECOMPUTE the
+# HMAC (WS-4). registry-api ENCRYPTS that column (its own pin is `cryptography==42.*`)
+# and this service DECRYPTS it. The pins deliberately need not match: the Fernet token
+# is a versioned, stable wire format, so 42-written tokens are read by 44. What MUST
+# match is the key — both read AGENTSHIELD_ENCRYPTION_KEY from the `agentshield-encryption`
+# Secret. A key mismatch fails CLOSED (deny), never open.
+cryptography==44.0.0

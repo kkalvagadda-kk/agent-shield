@@ -1198,6 +1198,10 @@ export interface AgentTrigger {
   approver_role?: string | null;
   // WS-2 T014 — the human (Keycloak `sub`) who armed/created this trigger (audit).
   armed_by?: string | null;
+  // WS-4 — how the event-gateway authenticates a hook call on this trigger.
+  // "token" = the coarse per-trigger bearer token (pre-WS-4 posture, kept for
+  // existing senders); "client_signed" = per-application client-id + HMAC.
+  auth_mode?: "token" | "client_signed";
   created_at: string;
   updated_at: string;
 }
@@ -1266,6 +1270,66 @@ export const deleteTrigger = async (
   triggerId: string
 ): Promise<void> => {
   await http.delete(`/agents/${agentName}/triggers/${triggerId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Webhook Clients (WS-4) — per-application credentials on a webhook trigger.
+//
+// Keyed on the trigger's own id, so ONE set of methods serves both agent and
+// workflow triggers (a workflow trigger is an agent_triggers row with
+// workflow_id set) — mirroring the single backend router.
+// ---------------------------------------------------------------------------
+export interface WebhookClient {
+  client_id: string;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string;
+}
+
+// The create response is the ONLY shape that ever carries `secret` — the read
+// model has no secret field at all, so it cannot be re-fetched. A lost secret
+// is unrecoverable; delete the client and register a new one.
+export interface WebhookClientCreated {
+  client_id: string;
+  secret: string;
+  created_at: string;
+}
+
+export const createTriggerClient = async (
+  triggerId: string,
+  body: { client_id: string }
+): Promise<WebhookClientCreated> => {
+  const { data } = await http.post<WebhookClientCreated>(
+    `/triggers/${triggerId}/clients`,
+    body
+  );
+  return data;
+};
+
+export const listTriggerClients = async (
+  triggerId: string
+): Promise<WebhookClient[]> => {
+  const { data } = await http.get<WebhookClient[]>(`/triggers/${triggerId}/clients`);
+  return data;
+};
+
+export const setClientEnabled = async (
+  triggerId: string,
+  clientId: string,
+  enabled: boolean
+): Promise<WebhookClient> => {
+  const { data } = await http.patch<WebhookClient>(
+    `/triggers/${triggerId}/clients/${clientId}`,
+    { enabled }
+  );
+  return data;
+};
+
+export const deleteTriggerClient = async (
+  triggerId: string,
+  clientId: string
+): Promise<void> => {
+  await http.delete(`/triggers/${triggerId}/clients/${clientId}`);
 };
 
 // ---------------------------------------------------------------------------

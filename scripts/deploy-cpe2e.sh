@@ -226,15 +226,15 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.185"
+REGISTRY_API_TAG="0.2.186"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.141"
+STUDIO_TAG="0.1.142"
 EVAL_RUNNER_TAG="0.1.11"
 DECLARATIVE_RUNNER_TAG="0.1.48"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
-EVENT_GATEWAY_TAG="0.1.1"
+EVENT_GATEWAY_TAG="0.1.2"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -287,7 +287,7 @@ docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR
 echo "  → scheduler:${SCHEDULER_TAG} (Phase 7 — fires scheduled agents on cron, HA)"
 docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" services/scheduler/
 
-echo "  → event-gateway:${EVENT_GATEWAY_TAG} (Phase 9 — public webhook ingress)"
+echo "  → event-gateway:${EVENT_GATEWAY_TAG} (WS-4: ONE shared verify_webhook_auth wrapping BOTH hooks — per-application client-id + allowlist + HMAC signing; uniform-401 enumeration oracle CLOSED (stale-ts had its own body); +cryptography +AGENTSHIELD_ENCRYPTION_KEY so it can decrypt the client secret)"
 docker build -t "registry.internal/agentshield/event-gateway:${EVENT_GATEWAY_TAG}" services/event-gateway/
 
 # ── Step 2: Namespaces ────────────────────────────────────────────────────────

@@ -1718,6 +1718,11 @@ class AgentTriggerResponse(BaseModel):
     # Reviewer scope a daemon trigger's approvals route to (WS-2 T011/T014);
     # NULL means the "agent:reviewer" default applies.
     approver_role: str | None = None
+    # Webhook auth mode (WS-4): 'token' = legacy coarse per-trigger bearer token;
+    # 'client_signed' = per-application client-id + allowlist + HMAC signature.
+    # Surfaced so the Studio trigger panel can show an operator which mode a
+    # trigger is on during the dual-mode migration.
+    auth_mode: str = "token"
     # Plaintext webhook token — populated ONLY in the create response (shown once);
     # never persisted (only sha256 is) and absent from list/get responses.
     token: str | None = None
@@ -1739,6 +1744,9 @@ class AgentEventResponse(BaseModel):
     filter_reason: str | None = None
     payload: dict[str, Any] | None = None
     run_id: uuid.UUID | None = None
+    # The webhook client that authenticated this event (WS-4); NULL on
+    # `auth_mode='token'` triggers, whose coarse bearer token names no application.
+    client_id: str | None = None
     source_ip: str | None = None
     received_at: datetime
 
@@ -1767,6 +1775,10 @@ class WorkflowTriggerResponse(BaseModel):
     # Reviewer scope a daemon workflow-trigger's approvals route to (WS-2 T011/T014);
     # NULL means the "agent:reviewer" default applies.
     approver_role: str | None = None
+    # Webhook auth mode (WS-4) — see AgentTriggerResponse.auth_mode. Same column,
+    # same semantics: a workflow trigger is an `agent_triggers` row with
+    # `workflow_id` set, so it gets client signing with no schema change.
+    auth_mode: str = "token"
     # Plaintext webhook token — populated ONLY in the create/rotate-token response
     # (shown once, never persisted — only sha256 is stored).
     token: str | None = None
@@ -1783,6 +1795,46 @@ class RotateTokenResponse(BaseModel):
     trigger_id: uuid.UUID
     token: str
     webhook_url: str
+
+
+# ---------------------------------------------------------------------------
+# Webhook clients (WS-4) — per-application credentials + per-trigger allowlist
+#
+# Secret leakage is prevented STRUCTURALLY, not by filtering: the read model
+# (WebhookClientResponse) has no `secret` field at all, so leaking it on a
+# list/get path is unrepresentable — there is nothing to forget to strip. Only
+# WebhookClientCreatedResponse can carry a secret, and it is returned exactly
+# once, from the 201.
+# ---------------------------------------------------------------------------
+
+class WebhookClientCreate(BaseModel):
+    """Register one application against a webhook trigger's allowlist."""
+    client_id: str = Field(..., min_length=1, max_length=128)
+
+
+class WebhookClientCreatedResponse(BaseModel):
+    """The ONLY shape that ever carries the signing secret — returned exactly once,
+    from the 201. The secret is stored Fernet-encrypted and is never retrievable
+    through any other endpoint."""
+    client_id: str
+    secret: str
+    created_at: datetime
+
+
+class WebhookClientResponse(BaseModel):
+    """Read model for a registered client. Deliberately has NO `secret` field —
+    reveal-once is a property of the type, not of handler discipline."""
+    model_config = ConfigDict(from_attributes=True)
+
+    client_id: str
+    enabled: bool
+    created_by: str | None = None
+    created_at: datetime
+
+
+class WebhookClientUpdate(BaseModel):
+    """Enable/disable a client — a live allowlist read, effective on the next request."""
+    enabled: bool
 
 
 # Error  (matches ErrorResponse in OpenAPI spec)

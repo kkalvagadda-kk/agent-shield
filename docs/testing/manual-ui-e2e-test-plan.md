@@ -196,77 +196,54 @@ scheduled dataset 422'd at launch and nothing downstream was reachable); the
 Playwright `studio/e2e/eval-v2-scheduled.spec.ts` + `scripts/deploy-cp1-e3.sh` /
 `scripts/smoke-test-cp1-e3-{infra,behaviour,constitution}.sh`.
 
-### 🔴 not-yet-wired (debt) — BLOCKING: two of E-3's three images were never bumped, so E-3's runtime + UI are UNPROVEN
+### ✅ RESOLVED — the blocker below is fixed; kept as the record of a whole failure class
 
-**The E-3 commit (`9f6603a`, "E-3 scheduled eval P1-P4") changed four service directories
-but bumped only two tags. The eval-runner and studio code it added has never been built
-into an image.** `e3/tasks.md` T019 requires registry-api `0.2.185`, eval-runner `0.1.11`,
-studio `0.1.141`. Evidence straight from the commit (`git show --name-only 9f6603a` vs its
-diff of `scripts/deploy-cpe2e.sh`):
+**`9f6603a` ("E-3 scheduled eval P1-P4") changed four service directories and bumped only
+two tags**, so the eval-runner and Studio code it added was never built into an image.
+With `imagePullPolicy: IfNotPresent` the node kept serving the pre-E-3 images and **E-3's
+code had never executed once**. Its own `e3/tasks.md` T019 specified the exact bumps
+(`eval-runner 0.1.11`, `studio 0.1.141`); execution dropped them.
 
-| Service dir changed by `9f6603a` | Tag bumped by `9f6603a`? | Running image has E-3 code? |
+| Service dir changed by `9f6603a` | Tag bumped by `9f6603a`? | Now |
 |---|---|---|
-| `services/registry-api/` | ✅ `REGISTRY_API_TAG` 0.2.184→**0.2.185** | **yes — live and proven** |
-| `sdk/agentshield_sdk/` | ✅ `DECLARATIVE_RUNNER_TAG` 0.1.47→**0.1.48** | yes |
-| `services/eval-runner/` (2 files) | ❌ **none** — stayed `0.1.10` (E-2's tag) | **no** |
-| `studio/src/` (5 files) | ❌ **none** — stayed `0.1.140` (E-2's tag) | **no** |
+| `services/registry-api/` | ✅ 0.2.184→0.2.185 | live |
+| `sdk/agentshield_sdk/` | ✅ 0.1.47→0.1.48 | live |
+| `services/eval-runner/` (2 files) | ❌ stayed `0.1.10` (E-2's tag) | **fixed → 0.1.11** |
+| `studio/src/` (5 files) | ❌ stayed `0.1.140` (E-2's tag) | **fixed → 0.1.142** |
 
-*(Status at time of audit: the eval-runner bump to `0.1.11` has since been made in both
-tag files but the image is **not yet built/deployed** — the last eval Job still ran
-`:0.1.10`. Studio remains un-bumped in both files. `smoke-test-cp1-e3-infra.sh` now
-prints this runtime-vs-configured drift as a ⚠️ line.)*
+**Why every guard missed it — the lesson worth keeping.** `smoke-test-cp1-e3-constitution.sh`
+caught "bumped one file only"; `smoke-test-cp1-e3-infra.sh` caught "the cluster does not
+match the tag files". This was a **third case neither covered**: the source changed and
+the tag was never bumped *at all*, so **both tag files agreed — on a stale tag — and the
+cluster faithfully matched it**. Nothing was inconsistent. Every check was green while the
+feature was absent. Agreement is not correctness when all sources agree on a number that
+no longer describes the code.
 
-**Verified on the cluster, not inferred.**
-- *eval-runner:* a probe of the running image finds **zero** occurrences of
-  `_run_scheduled_item` in `/app/main.py`, though the source carries it
-  (`services/eval-runner/main.py:692`, `_resolve_inner_shape:630`, the
-  `MODE == "scheduled"` branch `:1106`/`:1117`). Every eval Job runs
-  `eval-runner:0.1.10`, receives `MODE=scheduled` **correctly** from registry-api, then
-  falls through to the **E-0 reactive** path — the Job logs show the reactive
-  `item=N run_id=…` + `/runs/{id}/stream` drive, never the scheduled
-  `item=N scheduled run_id=… inner=… eval_mode=…` line.
-- *studio:* the deployed bundle contains E-1's `durable-input-payload` (2×) and E-2's
-  `side-effect-evidence` (1×) but **zero** `scheduled-job-spec` and **zero**
-  `job-spec-evidence` — it is literally the pre-E-3 build, in which selecting the
-  `scheduled` mode option creates an **empty dataset** (the "editors land later" path).
+⚠️ **It was safety-relevant, not just a false red.** On the stale image the reactive-inner
+item E-3 must *refuse* **fired a real run** (`playground_runs` = 1 where the gate asserts
+0) — a scheduled eval would have **delivered the real side effect**, the exact hazard E-3
+exists to remove.
 
-**Effect on the gates:**
-- `suite-75` `T-S75-003`–`008` are RED for this one root cause. Every item scores
-  `dims={'response': …}` only, with `run_id=null`, `trigger_payload=null`,
-  `eval_detail.job_spec=null` — the job spec is never fed as `input_payload`, `eval_mode`
-  is never set to `record`, and **nothing is recorded**. The MVP claim
-  (*recorded ⇒ not delivered*) is **unproven on this cluster**.
-- ⚠️ **Safety-relevant:** because the stale runner has no fail-closed refusal, the
-  reactive-inner item that E-3 is supposed to refuse **did fire a real run**
-  (`playground_runs` rows = 1 where the gate asserts 0). On the stale image a scheduled
-  eval of a reactive-inner agent would **deliver the real side effect**. This is the
-  exact hazard E-3 exists to remove, and it is *not* in the image.
-- `studio/e2e/eval-v2-scheduled.spec.ts` fails at `#scheduled-job-spec` (the editor is
-  absent from the bundle) — the spec is correct; the bundle is stale.
+**Class fix (shipped):** `smoke-test-cp1-e3-constitution.sh` now asserts, per commit, that
+a change under a service dir is coupled to that service's tag bump. Pointed at the real
+offender it reproduces the defect in seconds:
+`AUDIT_REF=9f6603a bash scripts/smoke-test-cp1-e3-constitution.sh` → FAILs eval-runner +
+studio, PASSes registry-api + SDK. Run it before committing service code. Rule: **a tag is
+a claim about content — after deploying, grep the image/bundle for a symbol the change
+introduced.** Full write-up: `docs/bugs/e3-never-ran-tag-not-bumped.md`.
 
-**This half IS live and proven** — the fault is isolated to the two un-bumped images:
-- `T-S75-000` (parity), `001`, `002` and `009` PASS on registry-api 0.2.185: a real
-  scheduled dataset round-trips `job_spec` + `expected_side_effects`, a malformed item
-  422s, and the launch guard 422s without an armed trigger then 201s with one
-  (`EvalRun.mode='scheduled'` persisted).
-- A REAL `POST /playground/eval/score {mode:'scheduled'}` returns **200** (was 501) with
-  `{"response":1.0,"trajectory":1.0,"tool_call":1.0,"side_effect":1.0}`, `detail.job_spec`
-  and `detail.recorded_side_effects` — the scoring door works end to end.
-- `T-S75-009` proves the REAL `/internal/runs/start` scheduled door is untouched by E-3
-  and still delivers live.
+**Resolved state (verified, not inferred):** eval-runner `0.1.11` contains
+`_run_scheduled_item`; the served Studio bundle carries `scheduled-job-spec` +
+`job-spec-evidence` (both were 0). **suite-75 = PASS 12 / FAIL 0**, all 10 required cases
+reported; `studio/e2e/eval-v2-scheduled.spec.ts` green.
 
-**Fix (two bumps, no code change):** set eval-runner `0.1.10 → 0.1.11` and studio
-`0.1.140 → 0.1.141` in **BOTH** `scripts/deploy-cpe2e.sh` and
-`charts/agentshield/values.yaml`, run `bash scripts/deploy-cp1-e3.sh`, then re-run
-`bash scripts/smoke-test-cp1-e3-behaviour.sh` and the Playwright spec.
+**Honest limitation (not a gap — a property of the fixture):** `T-S75-007`'s *weight-set*
+assertion is **vacuous when all four dimensions score 1.0** — the skewed, durable and
+equal-weight sets all collapse to the same composite, so the composite cannot discriminate
+them. The suite prints `discriminating=False` and says so rather than claiming a proof it
+did not earn. The load-bearing half (all four dimensions present ⇒ E-1's scorers reused,
+no scheduled-only fork) does hold.
 
-**Why the existing guards missed it:** `smoke-test-cp1-e3-constitution.sh` catches
-"bumped one file only" and `smoke-test-cp1-e3-infra.sh` catches "the cluster does not
-match the tag files". **This failure is a third case neither covers — the source changed
-and the tag was never bumped *at all*, so both files agree on a stale tag and the cluster
-faithfully matches it.** Every check is green while the code is not deployed. Same class
-as "a stale runner made every E-1 trajectory score 0"; the durable defence is a check
-that ties *a changed service directory* to *a changed tag*, which no script does today.
 
 **not-yet-wired (debt):**
 - **Reactive-inner scheduled items cannot assert side effects.** E-2's record seam is
@@ -757,3 +734,79 @@ After testing, remove what you created so you don't pollute the platform (isolat
 | event-gateway-threat-model.md | token, cross-agent, enumeration, filter, size, rotation, event log | T4.4–4.5 |
 
 **Not covered here (deferred / out of UI scope):** rate-limit 429 + replay 409 (threat model T-3/T-4 — automated in suite-28, hard to trigger by hand), safety-orchestrator input scan (G-2, service off), non-sequential workflow-HITL auto-advance (G-9, deferred(intentional)), organic OPA require_approval firing (G-9, not-yet-wired — suite-37 gated on OPA bundle/identity allow-path canary).
+
+## Known gaps — WS-4 (webhook client-id + allowlist + HMAC signing)
+
+**What the slice is for:** a webhook trigger authenticated with **one coarse bearer token**
+shared by every sender — no per-application identity, no revocation short of rotating the
+token on everyone, and no request integrity. WS-4 adds per-application **client-id +
+allowlist + HMAC request signing**, dual-mode so existing token senders keep working.
+
+**Landed in this slice** (registry-api 0.2.186 / event-gateway 0.1.2 / studio 0.1.142;
+**migration 0064**): `webhook_clients` (`secret_encrypted` TEXT, Fernet) +
+`agent_triggers.auth_mode` + `agent_events.client_id`; a NEW `routers/webhook_clients.py`
+at `/api/v1/triggers` keyed on `trigger_id` **alone** — one router serves agent **and**
+workflow triggers; `event-gateway/webhook_auth.py` with **one** `verify_webhook_auth`
+called by **both** hook handlers; the Studio client panel (register / reveal-once /
+enable-disable / revoke / audit).
+
+**Acceptance proof:** `scripts/e2e/suite-76-webhook-client-signing.sh` (`T-S76-000`–`009`,
+**11/0**) + Playwright `studio/e2e/webhook-clients.spec.ts` (**3/3**, incl. a real
+gateway 401 for a disabled client) + `scripts/deploy-cp1-ws4.sh` /
+`scripts/smoke-test-cp1-ws4-{infra,behaviour}.sh`.
+
+**Design decisions worth knowing:**
+- **The secret is Fernet-encrypted, NOT hashed.** The gateway must *recompute* the HMAC,
+  so it needs the raw secret back; a one-way hash is unimplementable here. Named
+  `secret_encrypted` so the column does not lie about what it holds.
+- **A webhook trigger is born `token` and upgrades to `client_signed` one-way on its first
+  client registration** (invariant: `client_signed` ⟺ ≥1 client). Birthing it
+  `client_signed` with an empty allowlist would mean a trigger that authenticates
+  **nobody**, and — since `auth_mode` is not on `AgentTriggerUpdate` — there would be no
+  API path to a token-mode trigger at all, so the legacy-token case could only be tested
+  with a hand-crafted DB row (the exact fake the suite forbids). `T-S76-009` is the gate.
+- **Revoking the last client does NOT revert to `token`.** A revoke must lock the door, not
+  silently reopen the coarse bearer-token path.
+- **Uniform 401 is structural, not remembered.** `_uniform_401()` takes **no arguments**, so
+  the failure reason cannot leak into the response even by mistake; the diagnosis goes to
+  the gateway log (`_deny(reason, **ctx)`). Two audiences, deliberately separated.
+  `T-S76-003` asserts all five failure modes are **byte-identical**
+  (`distinct_bodies=1`) — status codes alone would not prove the absence of an oracle.
+  This also **closed a pre-existing oracle**: stale-timestamp used to return a different
+  body (`main.py:262`/`:366`).
+
+**deferred (intentional):**
+- **Replay nonce is opt-in and keyed on `agent_name`, not `client_id`.** Contrary to the
+  plan's "v1 uses the 300s window only", replay protection already ships
+  (`X-Webhook-Nonce` → `rate_limiter.py::check_nonce`, Redis `SET NX`, fail-closed). The
+  real, narrower gap: a sender that omits the nonce header gets window-only protection, so
+  a replay **inside 300s** is possible; and the nonce namespace is per-agent, so it does
+  not isolate one client from another. Making it mandatory + client-scoped is a follow-up.
+- **Per-client rate limits.** Rate limiting stays per-trigger (the existing `rate_limiter`);
+  a noisy client can still exhaust a quiet one's budget. Per-client limits are a follow-up.
+
+**not-yet-wired (debt):**
+- **No trigger-scoped ownership check on the client router.** Any authenticated caller who
+  knows a `trigger_id` can register/revoke clients on it. This mirrors the sibling trigger
+  routers (which have the same gap) and was deliberately not widened here, but it IS a real
+  authz hole — a client registration is a credential grant. Documented in the router's
+  module docstring. Fix = the same scoping the trigger routers need.
+- **Senders are not migrated off `token`, and the flag is not deleted.** Dual-mode ships;
+  every existing trigger stays `token` until a client is registered on it. Deleting
+  `auth_mode` waits until every sender is on `client_signed`.
+- **`charts/agentshield/charts/*.tgz` shadow their source sub-charts — a live landmine.**
+  The event-gateway tag bump silently did nothing (deploy reported "successfully rolled
+  out" while serving **0.1.1**) because a stale untracked `event-gateway-0.1.0.tgz` pinned
+  the old tag and `helm dependency update` fails inside `deploy-cpe2e.sh:386`, swallowed by
+  `2>/dev/null || true`. Worked around by pinning the tag in the **top-level** values.yaml
+  (the pattern registry-api/studio/deploy-controller already use, immune to the artifact).
+  **Still-stale `.tgz` files remain for studio, deploy-controller, scheduler, python-executor
+  and others** — any future sub-chart tag edit will silently no-op the same way. Real fix =
+  make `deploy-cpe2e.sh` fail loudly on a dep-update error and stop committing/keeping stale
+  `.tgz` artifacts; deferred because it needs an unrelated envoy-gateway constraint fixed.
+
+**manual check (suite boundary):** `suite-76` and `suite-28` share one pod IP and suite-28
+exhausts the per-IP rate-limit budget by design, so `smoke-test-cp1-ws4-behaviour.sh` waits
+65s between them. `suite-66` (production webhook triggers, ~30-40min real-LLM) was not
+re-run; its workflow bare-token path is the same `verify_webhook_auth`, covered structurally
+by `T-S76-004` + suite-28.
