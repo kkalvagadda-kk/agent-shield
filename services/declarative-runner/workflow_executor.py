@@ -778,9 +778,16 @@ class WorkflowExecutor:
         return {"response": out_scan.clean_text, "thread_id": thread_id}
 
     async def run_streamed(
-        self, message: str, thread_id: str | None = None, trace_id: str | None = None
+        self, message: str, thread_id: str | None = None, trace_id: str | None = None,
+        memory_context: list[dict] | None = None,
     ) -> AsyncIterator[str]:
         """Stream workflow output as SSE-formatted strings.
+
+        Args:
+            memory_context: prior transcript turns (role/content, + author agent_name
+                for a shared workflow transcript) injected as leading Human/AI
+                messages so the streamed turn has conversational context — mirrors
+                run(). The LangGraph checkpoint key stays ``thread_id``.
 
         Yields:
             SSE-formatted strings (``event: …\\ndata: …\\n\\n`` frames).
@@ -815,7 +822,22 @@ class WorkflowExecutor:
         lf_handler = _make_langfuse_handler(trace_id, thread_id)
         if lf_handler:
             config["callbacks"] = [lf_handler]
-        state = {"messages": [HumanMessage(content=safe_message)]}
+
+        # Inject prior transcript as leading messages (mirrors run()). For a shared
+        # workflow transcript a turn may carry an author agent_name != this agent;
+        # prefix that content with "[<author>]: " so the model attributes peers.
+        from langchain_core.messages import AIMessage
+        history = []
+        for m in (memory_context or []):
+            content = m["content"]
+            author = m.get("agent_name")
+            if author and author != agent_name and m.get("role") == "assistant":
+                content = f"[{author}]: {content}"
+            if m.get("role") == "user":
+                history.append(HumanMessage(content=content))
+            elif m.get("role") == "assistant":
+                history.append(AIMessage(content=content))
+        state = {"messages": history + [HumanMessage(content=safe_message)]}
 
         # Bind OTEL spans to the run_id-derived trace (see run()).
         from agentshield_sdk.otel import otel_run_context

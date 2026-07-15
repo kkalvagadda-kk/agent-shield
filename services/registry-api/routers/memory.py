@@ -15,11 +15,11 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import get_db
-from models import Agent, AgentMemory
+from models import Agent
 from schemas import (
     AgentMemoryResponse,
     MemorySaveTurnRequest,
@@ -27,6 +27,7 @@ from schemas import (
     MemorySearchResult,
 )
 import memory as memory_service
+from store_factory import get_conversation_store
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +60,30 @@ async def save_turn(
             detail=f"Memory is not enabled for agent '{name}'.",
         )
 
-    messages = [{"role": m.role, "content": m.content} for m in body.messages]
-    rows = await memory_service.save_turn(
-        db=db,
-        agent_name=name,
+    # All transcript access goes through the ConversationStore seam (§4.1) — the
+    # router never touches the transcript ORM model directly. A workflow member
+    # may write under its own name via author_agent_name; otherwise the path
+    # {name} is the author.
+    turns = [
+        {
+            "role": m.role,
+            "content": m.content,
+            # message_kind may be None → the store/save layer derives it from role.
+            **({"message_kind": m.message_kind} if m.message_kind else {}),
+        }
+        for m in body.messages
+    ]
+    store = get_conversation_store()
+    rows = await store.append(
+        db,
+        conversation_id=body.thread_id,
+        agent_name=body.author_agent_name or name,
         team=agent.team,
-        thread_id=body.thread_id,
-        messages=messages,
+        turns=turns,
+        scope=body.scope,
         user_id=body.user_id,
-        session_id=body.session_id,
         deployment_id=body.deployment_id,
+        workflow_run_id=body.workflow_run_id,
     )
     await db.commit()
     return [AgentMemoryResponse.model_validate(r) for r in rows]
@@ -82,21 +97,58 @@ async def save_turn(
 async def list_memory(
     name: str,
     thread_id: Optional[str] = Query(None),
+    scope: str = Query("agent"),
+    user_id: Optional[str] = Query(None),
     deployment_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> list[AgentMemoryResponse]:
+    """Load a transcript through the ConversationStore, oldest-first by
+    message_index. The read is conversation-keyed (thread_id):
+      scope='agent'        → per-agent transcript, constrained by user_id when given.
+      scope='workflow_run' → shared transcript, the agent_name filter is dropped so
+                             every member's tagged rows come back in index order.
+    """
     await _get_agent_or_404(name, db)
-    q = select(AgentMemory).where(AgentMemory.agent_name == name)
-    if thread_id:
-        q = q.where(AgentMemory.thread_id == thread_id)
-    if deployment_id:
-        import uuid as _uuid
-        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
-    q = q.order_by(AgentMemory.created_at.desc()).limit(limit).offset(offset)
-    result = await db.execute(q)
-    return [AgentMemoryResponse.model_validate(r) for r in result.scalars().all()]
+    if not thread_id:
+        # The transcript store is conversation-keyed; a transcript read needs a
+        # thread_id. (The legacy cross-thread "list all" view is not a store
+        # operation — see the memory-api contract.)
+        return []
+
+    store = get_conversation_store()
+    turns = await store.load(
+        db,
+        conversation_id=thread_id,
+        scope=scope,
+        limit=limit,
+        agent_name=name,
+        user_id=user_id,
+        deployment_id=deployment_id,
+    )
+    if offset:
+        turns = turns[offset:]
+
+    # The store returns message-level Turns (role/content/+author/message_kind),
+    # not row metadata; enrich with the router-known conversation keys so the
+    # response carries thread_id/scope/agent_name. id/message_index/created_at are
+    # row-level and absent on a transcript read (see AgentMemoryResponse).
+    return [
+        AgentMemoryResponse(
+            id=None,
+            agent_name=t.get("agent_name") or name,
+            thread_id=thread_id,
+            role=t["role"],
+            content=t["content"],
+            message_index=None,
+            message_kind=t.get("message_kind")
+            or ("user" if t["role"] == "user" else "agent_output"),
+            scope=scope,
+            created_at=None,
+        )
+        for t in turns
+    ]
 
 
 @router.post(
@@ -137,7 +189,8 @@ async def clear_memory(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await _get_agent_or_404(name, db)
-    await memory_service.clear_agent_memory(db, name, deployment_id=deployment_id)
+    store = get_conversation_store()
+    await store.erase(db, agent_name=name, deployment_id=deployment_id)
     await db.commit()
 
 
@@ -153,7 +206,8 @@ async def delete_memory_thread(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await _get_agent_or_404(name, db)
-    count = await memory_service.delete_thread(db, name, thread_id)
+    store = get_conversation_store()
+    count = await store.erase(db, conversation_id=thread_id, agent_name=name)
     await db.commit()
     if count == 0:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No memory found for thread.")

@@ -1800,14 +1800,21 @@ class ErrorResponse(BaseModel):
 class MemoryMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant|system|tool)$")
     content: str
+    # None → derived on save: role=='user' → 'user', else 'agent_output'.
+    message_kind: str | None = Field(None, pattern="^(user|agent_output|rationale)$")
 
 
 class MemorySaveTurnRequest(BaseModel):
-    thread_id: str
+    thread_id: str  # == conversation_id (transcript key)
     messages: list[MemoryMessage]
     session_id: str | None = None
     user_id: str | None = None
     deployment_id: str | None = None
+    scope: str = Field("agent", pattern="^(agent|workflow_run)$")
+    workflow_run_id: str | None = None
+    # Overrides the path {name} as the row author — a workflow member writes
+    # under its own name into the shared transcript.
+    author_agent_name: str | None = None
 
 
 class MemorySearchRequest(BaseModel):
@@ -1819,15 +1826,22 @@ class MemorySearchRequest(BaseModel):
 class AgentMemoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
+    agent_name: str
     thread_id: str
     role: str
     content: str
-    message_index: int
-    created_at: datetime
+    message_kind: str
+    scope: str
+    # Row-level metadata: populated on the write path (save returns full rows) but
+    # absent on a conversation-keyed transcript read, which returns message-level
+    # Turns via the ConversationStore. Optional so both paths validate.
+    id: uuid.UUID | None = None
+    message_index: int | None = None
+    created_at: datetime | None = None
     user_id: str | None = None
     session_id: str | None = None
     deployment_id: uuid.UUID | None = None
+    workflow_run_id: uuid.UUID | None = None
 
 
 class MemorySearchResult(BaseModel):

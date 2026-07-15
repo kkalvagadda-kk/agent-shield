@@ -12,6 +12,7 @@ Satisfies the agent-contract (docs/plan/contracts/agent-contract.yaml):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -187,7 +188,10 @@ class ChatRequest(BaseModel):
     # executor substitutes a kickoff (daemon_kickoff_if_empty) so an empty message is
     # valid rather than a 422 — user input is not required for triggered runs.
     message: str = ""
-    thread_id: str | None = None
+    thread_id: str | None = None          # LangGraph checkpoint key
+    conversation_id: str | None = None    # transcript key; defaults to thread_id
+    scope: str = "agent"                   # agent | workflow_run
+    workflow_run_id: str | None = None
     metadata: dict | None = None
 
 
@@ -385,43 +389,92 @@ async def _complete_agent_run(run_id: str, status: str, output: str | None, late
         logger.warning("Failed to update agent_run %s: %s", run_id, exc)
 
 
-async def _load_memory_context(agent_name: str, thread_id: str | None) -> list[dict[str, str]]:
-    """Load conversation history from memory service for context injection."""
-    if not thread_id or not cfg.REGISTRY_API_URL:
+async def _load_memory_context(
+    agent_name: str,
+    conversation_id: str | None,
+    scope: str = "agent",
+    user_id: str = "",
+    deployment_id: str = "",
+) -> list[dict[str, str]]:
+    """Load prior transcript from the memory service for context injection.
+
+    Keyed by ``conversation_id`` (the transcript key). For ``scope='workflow_run'``
+    the memory API drops the agent_name filter, so returned rows carry their author
+    ``agent_name`` (a member sees peers' turns). Rows come back oldest-first
+    (message_index ascending), so we preserve order — no reverse."""
+    if not conversation_id or not cfg.REGISTRY_API_URL:
         return []
     try:
+        params: dict[str, str | int] = {
+            "thread_id": conversation_id,
+            "scope": scope,
+            "limit": 20,
+        }
+        if user_id:
+            params["user_id"] = user_id
+        if deployment_id:
+            params["deployment_id"] = deployment_id
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
                 f"{cfg.REGISTRY_API_URL}/api/v1/agents/{agent_name}/memory",
-                params={"thread_id": thread_id, "limit": 20},
+                params=params,
             )
             if resp.status_code == 200:
                 rows = resp.json()
-                return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+                out: list[dict[str, str]] = []
+                for r in rows:
+                    turn: dict[str, str] = {"role": r["role"], "content": r["content"]}
+                    if r.get("agent_name"):
+                        turn["agent_name"] = r["agent_name"]
+                    out.append(turn)
+                return out
     except Exception as exc:
-        logger.warning("Memory load failed for %s/%s: %s", agent_name, thread_id, exc)
+        logger.warning("Memory load failed for %s/%s: %s", agent_name, conversation_id, exc)
     return []
 
 
-async def _save_memory_turn(agent_name: str, thread_id: str | None, user_msg: str, assistant_msg: str, user_id: str) -> None:
-    """Persist the user+assistant messages to memory via registry-api."""
-    if not thread_id or not cfg.REGISTRY_API_URL:
+async def _save_memory_turn(
+    agent_name: str,
+    conversation_id: str | None,
+    user_msg: str,
+    assistant_msg: str,
+    user_id: str,
+    scope: str = "agent",
+    workflow_run_id: str | None = None,
+    deployment_id: str = "",
+    author_agent_name: str | None = None,
+    message_kind: str = "agent_output",
+) -> None:
+    """Persist the user+assistant messages to the transcript via registry-api.
+
+    For a workflow member (``scope='workflow_run'``) the row is tagged with
+    ``author_agent_name`` + ``workflow_run_id`` so the shared transcript records
+    which member produced it."""
+    if not conversation_id or not cfg.REGISTRY_API_URL:
         return
     try:
+        body: dict[str, Any] = {
+            "thread_id": conversation_id,
+            "user_id": user_id or None,
+            "scope": scope,
+            "messages": [
+                {"role": "user", "content": user_msg, "message_kind": "user"},
+                {"role": "assistant", "content": assistant_msg, "message_kind": message_kind},
+            ],
+        }
+        if deployment_id:
+            body["deployment_id"] = deployment_id
+        if workflow_run_id:
+            body["workflow_run_id"] = workflow_run_id
+        if author_agent_name:
+            body["author_agent_name"] = author_agent_name
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
                 f"{cfg.REGISTRY_API_URL}/api/v1/agents/{agent_name}/memory",
-                json={
-                    "thread_id": thread_id,
-                    "user_id": user_id or None,
-                    "messages": [
-                        {"role": "user", "content": user_msg},
-                        {"role": "assistant", "content": assistant_msg},
-                    ],
-                },
+                json=body,
             )
     except Exception as exc:
-        logger.warning("Memory save failed for %s/%s: %s", agent_name, thread_id, exc)
+        logger.warning("Memory save failed for %s/%s: %s", agent_name, conversation_id, exc)
 
 
 @app.post("/chat")
@@ -432,12 +485,18 @@ async def chat(req: ChatRequest, request: Request):
     trace_id = request.headers.get("x-agentshield-trace-id")
     user_id = request.headers.get("x-user-sub", "")
     team = request.headers.get("x-agent-team", "")
+    deployment_id = request.headers.get("x-deployment-id") or os.getenv("AGENTSHIELD_DEPLOYMENT_ID", "")
+    # conversation_id (transcript key) defaults to thread_id when the caller omits it.
+    conversation_id = req.conversation_id or req.thread_id
     start_ms = int(time.perf_counter() * 1000)
 
     agent_run_id = await _create_agent_run(cfg.AGENT_NAME, user_id, team, req.message, trace_id)
 
-    # Load conversation memory for context
-    memory_context = await _load_memory_context(cfg.AGENT_NAME, req.thread_id)
+    # Load conversation memory for context (scope-aware; workflow members see peers).
+    memory_context = await _load_memory_context(
+        cfg.AGENT_NAME, conversation_id, scope=req.scope,
+        user_id=user_id, deployment_id=deployment_id,
+    )
 
     try:
         result = await workflow_executor.run(
@@ -452,7 +511,12 @@ async def chat(req: ChatRequest, request: Request):
 
         # Save turn to memory (fire-and-forget)
         import asyncio
-        asyncio.create_task(_save_memory_turn(cfg.AGENT_NAME, req.thread_id, req.message, output_text[:4000], user_id))
+        asyncio.create_task(_save_memory_turn(
+            cfg.AGENT_NAME, conversation_id, req.message, output_text[:4000], user_id,
+            scope=req.scope, workflow_run_id=req.workflow_run_id,
+            deployment_id=deployment_id,
+            author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+        ))
 
         return result
     except SafetyBlockedError as exc:
@@ -473,44 +537,84 @@ async def chat(req: ChatRequest, request: Request):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
-    """Streaming chat — return workflow output as Server-Sent Events."""
+    """Streaming chat — return workflow output as Server-Sent Events.
+
+    POC-0 core fix: this handler now loads the prior transcript before streaming
+    and persists the turn after it closes — symmetric with /chat, which it was
+    not before (it did neither, so streamed chats never remembered anything)."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
     trace_id = request.headers.get("x-agentshield-trace-id")
     user_id = request.headers.get("x-user-sub", "")
     user_team = request.headers.get("x-agent-team", "")
+    deployment_id = request.headers.get("x-deployment-id") or os.getenv("AGENTSHIELD_DEPLOYMENT_ID", "")
+    # conversation_id (transcript key) defaults to thread_id when the caller omits it.
+    conversation_id = req.conversation_id or req.thread_id
     # Batch/dataset eval sets this (registry-side, only for the eval-runner
     # identity) so high-risk tools auto-approve instead of hanging on HITL. The
     # SDK additionally gates it on a trusted batch identity (defense-in-depth).
     auto_approve = request.headers.get("x-agentshield-auto-approve", "").lower() == "true"
 
     from agentshield_sdk.graph_builder import _current_user_context
-    _current_user_context.set({
-        "user_id": user_id,
-        "user_team": user_team,
-        "auto_approve": auto_approve,
-    })
 
     async def sse_generator():
+        import asyncio
+        import json as _json
+        # Capture the reset token so this request's identity never leaks into a
+        # later request served on the same worker (§6.3 leak fix).
+        token = _current_user_context.set({
+            "user_id": user_id,
+            "user_team": user_team,
+            "auto_approve": auto_approve,
+        })
+        accumulated: list[str] = []
         try:
+            # 1. Load prior transcript BEFORE streaming (symmetry with /chat).
+            memory_context = await _load_memory_context(
+                cfg.AGENT_NAME, conversation_id, scope=req.scope,
+                user_id=user_id, deployment_id=deployment_id,
+            )
+            # 2. Stream, injecting the transcript as prior messages and
+            #    accumulating assistant text_delta content to persist afterwards.
             async for chunk in workflow_executor.run_streamed(
-                req.message, thread_id=req.thread_id, trace_id=trace_id
+                req.message, thread_id=req.thread_id, trace_id=trace_id,
+                memory_context=memory_context,
             ):
+                event_name = None
+                data_str = None
+                for line in chunk.splitlines():
+                    if line.startswith("event:"):
+                        event_name = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_str = line[len("data:"):].strip()
+                if event_name == "text_delta" and data_str:
+                    try:
+                        accumulated.append(_json.loads(data_str).get("content", ""))
+                    except Exception:
+                        pass
                 yield chunk
         except SafetyBlockedError as exc:
             SAFETY_BLOCKS.inc()
-            import json as _json
             yield (
                 f"event: error\n"
                 f"data: {_json.dumps({'reason': exc.reason, 'type': 'safety_blocked'})}\n\n"
             )
         except Exception as exc:
-            import json as _json
             logger.exception("Streaming error in /chat/stream")
             yield (
                 f"event: error\n"
                 f"data: {_json.dumps({'reason': str(exc), 'type': 'internal_error'})}\n\n"
             )
+        finally:
+            _current_user_context.reset(token)
+        # 3. Persist the turn (fire-and-forget, after the stream closes — never
+        #    delays the client; failures are logged, not raised).
+        asyncio.create_task(_save_memory_turn(
+            cfg.AGENT_NAME, conversation_id, req.message, "".join(accumulated)[:4000], user_id,
+            scope=req.scope, workflow_run_id=req.workflow_run_id,
+            deployment_id=deployment_id,
+            author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+        ))
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 

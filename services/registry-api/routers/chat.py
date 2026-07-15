@@ -72,6 +72,36 @@ async def _caller_team(db: AsyncSession, user_sub: str) -> Optional[str]:
     return r.team_name if r else None
 
 
+async def _resolve_session_id(
+    db: AsyncSession, supplied: Optional[str], user_sub: str
+) -> str:
+    """Resolve the session_id a chat turn binds to, fail-closed (thread-ownership.md, S6).
+
+    - Empty supplied session OR unauthenticated caller → mint a fresh session_id.
+      There is no binding to prove, and an ambiguous identity must never bind to a
+      shared session.
+    - Supplied session already owned by a DIFFERENT user → 403. A session first used
+      by user A cannot be replayed by user B to read A's conversation.
+    - Supplied session owned by the same user (or not yet used) → allowed; this POST
+      establishes/continues ownership by writing a run with user_id=user_sub.
+    """
+    if not supplied or not user_sub:
+        return str(uuid.uuid4())
+    owner = (
+        await db.execute(
+            select(PlaygroundRun.user_id)
+            .where(PlaygroundRun.session_id == supplied)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if owner is not None and owner != user_sub:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not your session.",
+        )
+    return supplied
+
+
 async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
     """Return True if team holds an active, non-expired grant on the given agent."""
     now = datetime.now(tz=timezone.utc)
@@ -344,9 +374,23 @@ async def _proxy_agent_stream(
     service_url: str,
     message: str,
     run_id: str,
+    conversation_id: str,
     trace_id: str | None = None,
+    user_id: str = "",
+    user_team: str = "",
+    deployment_id: str = "",
 ) -> AsyncGenerator[str, None]:
     """Proxy the live agent pod's /chat/stream SSE output.
+
+    The pod body carries BOTH keys (chat-stream-memory contract):
+      thread_id       = session_id  → the LangGraph checkpoint key. This is the
+                        POC-0 fix: it was ``run_id`` (a fresh id per turn), so
+                        nothing threaded across turns; keying on the session lets
+                        the checkpointer + transcript accumulate the conversation.
+      conversation_id = session_id  → the transcript key (equal to thread_id for
+                        chat; they differ only for workflow members).
+      scope           = "agent".
+    ``run_id`` stays the client-facing correlation id in the emitted SSE frames.
 
     Translates named SSE events from the declarative-runner into unnamed
     data-only frames that the EventSource frontend expects:
@@ -365,12 +409,25 @@ async def _proxy_agent_stream(
         req_headers: dict[str, str] = {"Content-Type": "application/json"}
         if trace_id:
             req_headers["X-AgentShield-Trace-ID"] = trace_id
+        # Identity + deployment propagation so the runner can load/save memory
+        # scoped to this user and deployment (thread-ownership.md, memory-api.md).
+        if user_id:
+            req_headers["x-user-sub"] = user_id
+        if user_team:
+            req_headers["x-agent-team"] = user_team
+        if deployment_id:
+            req_headers["x-deployment-id"] = deployment_id
 
         async with httpx.AsyncClient() as client:
             async with client.stream(
                 "POST",
                 target,
-                json={"message": message, "thread_id": run_id},
+                json={
+                    "message": message,
+                    "thread_id": conversation_id,
+                    "conversation_id": conversation_id,
+                    "scope": "agent",
+                },
                 headers=req_headers,
                 timeout=timeout,
             ) as response:
@@ -590,7 +647,9 @@ async def start_chat(
                 detail=f"Agent '{name}' has no running {env_label} deployment.",
             )
 
-    session_id = body.session_id or str(uuid.uuid4())
+    # Fail-closed session binding: a supplied session owned by another user is
+    # rejected before we create any run under it (thread-ownership.md, S6).
+    session_id = await _resolve_session_id(db, body.session_id, user_sub)
 
     # -- Resolve the acting principal (WS-2 R3) -------------------------------
     # Interactive run → a JWT caller is present, so pass caller=<jwt user> (never
@@ -700,6 +759,11 @@ async def stream_chat(
         f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
     )
     trace_id = run.langfuse_trace_id
+    # Resolve identity now (the DB session closes before the stream generator
+    # runs). conversation_id = run.session_id is the transcript/checkpoint key.
+    conversation_id = run.session_id or run_id
+    owner_team = await _caller_team(db, run.user_id or "") or ""
+    deployment_id = str(deployment.id)
 
     # Find the corresponding AgentRun for production tracking
     ar_result = await db.execute(
@@ -720,7 +784,10 @@ async def stream_chat(
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id
+            service_url, run.input_message or "", run_id,
+            conversation_id=conversation_id, trace_id=trace_id,
+            user_id=run.user_id or "", user_team=owner_team,
+            deployment_id=deployment_id,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -793,7 +860,8 @@ async def start_deployment_chat(
 
     user_sub = caller.get("sub", "")
     caller_team = await _caller_team(db, user_sub)
-    session_id = body.session_id or str(uuid.uuid4())
+    # Fail-closed session binding (thread-ownership.md, S6).
+    session_id = await _resolve_session_id(db, body.session_id, user_sub)
 
     # Same single identity decision as start_chat: caller-present → the caller is
     # the principal (any agent class). Keeps run_by attribution consistent across
@@ -898,11 +966,18 @@ async def stream_deployment_chat(
     # and into _complete_chat_run so the trace is closed out — both were missing
     # here, so deployment-pinned runs produced no trace at all.
     trace_id = run.langfuse_trace_id
+    # Resolve identity before the DB session closes (stream generator runs later).
+    conversation_id = run.session_id or run_id
+    owner_team = await _caller_team(db, run.user_id or "") or ""
+    deployment_id = str(deployment.id)
 
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id
+            service_url, run.input_message or "", run_id,
+            conversation_id=conversation_id, trace_id=trace_id,
+            user_id=run.user_id or "", user_team=owner_team,
+            deployment_id=deployment_id,
         ):
             if chunk.startswith("data: "):
                 try:
