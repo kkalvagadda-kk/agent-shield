@@ -345,6 +345,8 @@ async def _proxy_agent_stream(
     message: str,
     run_id: str,
     trace_id: str | None = None,
+    user_id: str = "",
+    user_team: str = "",
 ) -> AsyncGenerator[str, None]:
     """Proxy the live agent pod's /chat/stream SSE output.
 
@@ -365,6 +367,18 @@ async def _proxy_agent_stream(
         req_headers: dict[str, str] = {"Content-Type": "application/json"}
         if trace_id:
             req_headers["X-AgentShield-Trace-ID"] = trace_id
+        # The caller's identity MUST reach the pod: the SDK reads these headers to
+        # build the OPA input, and WS-2's `user_identity_ok` floor denies any
+        # `user_delegated` tool call whose `input.user_id` is empty. Omitting them
+        # (as this proxy did) made the agent report a "policy restriction on the
+        # search tool" for every tool call — the deny is correct given the input; the
+        # input was wrong. Fail-closed, so nothing errored and the agent degraded
+        # politely, which is why it survived: only the trace showed an 11ms tool span.
+        # A daemon agent legitimately sends "" here and OPA's daemon branch admits it.
+        if user_id:
+            req_headers["X-User-Sub"] = user_id
+        if user_team:
+            req_headers["X-Agent-Team"] = user_team
 
         async with httpx.AsyncClient() as client:
             async with client.stream(
@@ -720,7 +734,9 @@ async def stream_chat(
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id
+            service_url, run.input_message or "", run_id, trace_id=trace_id,
+            user_id=caller.get("sub", ""),
+            user_team=await _caller_team(db, caller.get("sub", "")) or "",
         ):
             if chunk.startswith("data: "):
                 try:
@@ -902,7 +918,9 @@ async def stream_deployment_chat(
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id
+            service_url, run.input_message or "", run_id, trace_id=trace_id,
+            user_id=caller.get("sub", ""),
+            user_team=await _caller_team(db, caller.get("sub", "")) or "",
         ):
             if chunk.startswith("data: "):
                 try:

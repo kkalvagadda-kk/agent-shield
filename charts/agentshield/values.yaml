@@ -611,7 +611,7 @@ registry-api:
     # /playground/test-event evaluates filters identically to the production webhook
     # hop. The two copies are gated byte-identical by check-filter-engine-parity.sh,
     # which runs inside deploy-cpe2e.sh BEFORE either image builds.
-    tag: "0.2.190"
+    tag: "0.2.191"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.12"
@@ -682,7 +682,7 @@ deploy-controller:
   # for declarative/durable agents. Must be a real, built tag (not "latest").
   # E-2: REQUIRED rebuild — the record/mock delivery seam lives in
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
-  declarativeRunnerTag: "0.1.48"
+  declarativeRunnerTag: "0.1.49"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -716,7 +716,15 @@ safety-orchestrator:
 
   image:
     repository: registry.internal/agentshield/safety-orchestrator
-    tag: "0.1.0"
+    # Keep in lockstep with SAFETY_ORCHESTRATOR_TAG in scripts/deploy-cpe2e.sh.
+    # This block is the AUTHORITATIVE pin: `safety-orchestrator:` appears TWICE as a
+    # top-level key in this file (see also ~L172) and YAML is last-wins, so this one is
+    # what helm resolves — the earlier block is dead. The pin had drifted to 0.1.0 while
+    # deploy-cpe2e.sh built 0.1.3 (the tag was bumped in cdfe0ef; this pin was last
+    # touched in de6c46b and never followed). It went unnoticed only because the
+    # component ships `enabled: false` — the moment it is enabled, helm would serve the
+    # OLD image while every check stayed green. Found by scripts/check-tag-content-coupling.sh.
+    tag: "0.1.3"
     pullPolicy: IfNotPresent
 
   service:
