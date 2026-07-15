@@ -1,18 +1,19 @@
-"""0063 — agent_memory shared-workflow-thread columns + atomic-index backstop.
+"""0064 — agent_memory shared-workflow-thread columns + atomic-index backstop.
 
 POC-1 (context storage): scope/workflow_run_id/message_kind for the shared workflow
 transcript, a (thread_id, scope, message_index) read index, and a
 UNIQUE(thread_id, message_index) backstop for the S4 atomic-index fix. Idempotent +
 data-preserving; up/down/up round-trips.
 
-Note: data-model.md §3 specifies revision "0064"/down_revision "0063", but the true
-Alembic head in this worktree is 0062 (0063 never existed here), so this migration is
-renumbered to 0063 and chained onto 0062 per the T001 "re-verify head" instruction.
+Chains onto 0063 (exec-v2 `tools_side_effecting_and_run_eval_mode`), which is the current
+Alembic head after rebasing this branch onto main. This is the migration-sequencing fix
+from docs/design/context-storage-vs-exec-v2-merge-notes.md (decision 1): context-storage
+lands after exec-v2's chain, so revision=0064 / down_revision=0063.
 """
 from alembic import op
 
-revision = "0063"
-down_revision = "0062"
+revision = "0064"
+down_revision = "0063"
 branch_labels = None
 depends_on = None
 
