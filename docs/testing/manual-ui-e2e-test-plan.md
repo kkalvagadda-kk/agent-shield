@@ -164,6 +164,15 @@ Gated by `scripts/e2e/suite-77-eval-v2-webhook.sh` (`T-S77-000`–`010`, registe
 **not-yet-wired (debt):**
 - **Item `tool_mocks` not threaded to the seam** — inherited E-2 debt; declared on `WebhookDatasetItem` for
   contract parity with `Durable`/`ScheduledDatasetItem`. E-4 adds no new debt here.
+- **`suite-75` is FLAKY on the OPA bundle cold start (pre-existing, not E-4).** Observed 10/2 then **12/0 on a
+  re-run of identical code**. The eval's FIRST item fires ~60s after the agent's deployment flips `running`,
+  which is inside the documented ~5-minute window where the OPA bundle does not yet contain the new agent's
+  identity (`docs/debugging/003-opa-bundle-5min-cold-start.md`), so its tool call is denied
+  `deny_agent_unauthenticated` while a later item on the SAME pod succeeds 13s later. Diagnosis is exact, not
+  inferred: both runs were structurally identical (`eval_mode=record`, `trigger=schedule`, `shape=durable`,
+  same steps) and only the OPA decision differed. `suite-77` is incidentally immune — its first item is a
+  filter MISS that runs nothing, so its first real run fires later in the pod's life. **A cold-start retry/wait
+  in the eval-runner or the suites would close this; E-4 does not own it.**
 
 **deferred (intentional):**
 - **The eval scores the `test-event` door's returned decision, not an `AgentEvent.status` row** (E-4 **D1**).

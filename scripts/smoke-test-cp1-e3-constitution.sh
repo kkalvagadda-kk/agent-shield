@@ -273,7 +273,13 @@ fi
 
 # 4. the experience doc is updated — playground.py / eval_runner.py / DatasetsPage.tsx /
 #    EvalResultsPage.tsx are all CLAUDE.md-covered files.
+#
+# Checks the working tree AND the audited commit. Working-tree-only inverted this gate's
+# verdict at `git commit`: the moment the slice landed it reported "playground.md NOT in
+# the change" about a doc sitting right there in the commit. A gate that flips to FAIL
+# when you commit is a gate people learn to ignore, so it reads both states.
 if git diff --name-only HEAD 2>/dev/null | grep -q "docs/experience/playground.md" \
+   || git show --name-only --pretty=format: "${AUDIT_REF:-HEAD}" 2>/dev/null | grep -q "docs/experience/playground.md" \
    || echo "$CHANGED" | grep -q "docs/experience/playground.md"; then
   ok "T024 docs/experience/playground.md updated (a covered file changed — CLAUDE.md §3)" \
      "playground.md is in the change"

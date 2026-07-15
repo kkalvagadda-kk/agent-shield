@@ -321,12 +321,26 @@ done <<< "$TAG_REPORT"
 #     Fails LOUDLY in the "source changed but tag not bumped" direction (the E-3 bug:
 #     the code never ran for a whole slice while every static check stayed green).
 # ---------------------------------------------------------------------------
+# Files touched by "this change" — the UNCOMMITTED working tree, plus (when AUDIT_REF is
+# set) the audited commit itself.
+#
+# The commit half is not optional polish: this sweep is meant to be RE-RUNNABLE, and a
+# working-tree-only view reports "the experience doc was NOT updated" the moment the work
+# is committed — a FALSE NEGATIVE about a doc sitting right there in the commit. A gate
+# that inverts its verdict at `git commit` teaches people to ignore it.
+#
+# AUDIT_REF defaults to HEAD so a post-commit re-run answers the question the gate is
+# actually asking ("did this change update the doc?") rather than ("is the doc dirty
+# right now?"). Pre-commit, the working tree carries the change and HEAD does not — the
+# union covers both without the caller having to know which state they are in.
 changed_count() {
   local dir="$1"
+  local ref="${AUDIT_REF:-HEAD}"
   {
     git diff --name-only -- "$dir"
     git diff --name-only --cached -- "$dir"
     git ls-files --others --exclude-standard -- "$dir"
+    git show --name-only --pretty=format: "$ref" -- "$dir" 2>/dev/null
   } 2>/dev/null | sort -u | grep -c . || true
 }
 
