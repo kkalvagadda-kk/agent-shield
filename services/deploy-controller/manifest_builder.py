@@ -244,6 +244,23 @@ def build_deployment(
     if langfuse_sk:
         env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_SECRET_KEY", value=langfuse_sk))
 
+    # --- Context storage (persistent LangGraph checkpointer + memory scoping) ---
+    # Pass the direct (PgBouncer-bypassing) Postgres URL through to the agent pod so
+    # its AsyncPostgresSaver can persist checkpoints (agent pods live in agents-{team}
+    # namespaces where the postgres-passwords secret does not exist, so the controller
+    # forwards its own resolved value — same two-hop pattern as LANGFUSE_HOST above).
+    direct_database_url = os.environ.get("DIRECT_DATABASE_URL", "")
+    if direct_database_url:
+        env_vars.append(
+            k8s_client.V1EnvVar(name="DIRECT_DATABASE_URL", value=direct_database_url)
+        )
+    # Deployment id lets the runner scope memory reads/writes by deployment.
+    env_vars.append(
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_DEPLOYMENT_ID", value=str(deployment.get("id", ""))
+        )
+    )
+
     # --- Tool credential secrets (envFrom) ---
     env_from_sources = []
     for secret_ref in (tool_secret_refs or []):

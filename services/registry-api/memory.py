@@ -59,12 +59,25 @@ async def save_turn(
     user_id: str | None = None,
     session_id: str | None = None,
     deployment_id: str | None = None,
+    scope: str = "agent",
+    workflow_run_id: str | None = None,
 ) -> list[AgentMemory]:
-    """Persist a turn of conversation messages."""
-    # Determine the next message_index
+    """Persist a turn of conversation messages.
+
+    Allocates message_index atomically per-conversation (thread_id) using a
+    transaction-scoped advisory lock (data-model.md §5), so concurrent writers
+    to a shared workflow transcript get a single monotonic sequence. The lock is
+    released automatically at commit/rollback. Allocation is keyed on thread_id
+    only (agent_name dropped) because the transcript is now shared across members.
+    """
+    # Serialize index allocation for this conversation. hashtextextended → bigint
+    # key; the transaction-scoped lock is released on commit/rollback (no unlock).
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:tid, 0))"),
+        {"tid": thread_id},
+    )
     max_idx_result = await db.execute(
         select(func.max(AgentMemory.message_index)).where(
-            AgentMemory.agent_name == agent_name,
             AgentMemory.thread_id == thread_id,
         )
     )
@@ -72,9 +85,13 @@ async def save_turn(
 
     import uuid as _uuid
     dep_uuid = _uuid.UUID(deployment_id) if deployment_id else None
+    wf_uuid = _uuid.UUID(workflow_run_id) if workflow_run_id else None
 
     rows = []
     for i, msg in enumerate(messages):
+        message_kind = msg.get("message_kind") or (
+            "user" if msg["role"] == "user" else "agent_output"
+        )
         row = AgentMemory(
             agent_name=agent_name,
             team=team,
@@ -85,14 +102,18 @@ async def save_turn(
             message_index=max_idx + i + 1,
             session_id=session_id,
             deployment_id=dep_uuid,
+            scope=scope,
+            workflow_run_id=wf_uuid,
+            message_kind=message_kind,
         )
         db.add(row)
         rows.append(row)
 
     await db.flush()
 
-    # Cache in Redis
-    redis = _get_redis()
+    # Cache in Redis (agent-scoped key only). Workflow_run reads are cross-agent
+    # and must hit Postgres, so we don't warm the per-agent cache for that scope.
+    redis = _get_redis() if scope == "agent" else None
     if redis:
         try:
             key = _redis_key(agent_name, thread_id, deployment_id)
@@ -113,9 +134,44 @@ async def load_context(
     thread_id: str,
     window: int = _CONTEXT_WINDOW_DEFAULT,
     deployment_id: str | None = None,
+    scope: str = "agent",
+    user_id: str | None = None,
 ) -> list[dict[str, str]]:
-    """Load recent conversation context. Redis first, Postgres fallback."""
-    # Try Redis cache
+    """Load recent conversation context ordered by message_index.
+
+    scope='agent'        → per-agent transcript: filter (agent_name, thread_id),
+                           constrain user_id when provided; Redis hot / Postgres cold.
+    scope='workflow_run' → shared workflow transcript: filter (thread_id, scope),
+                           DROP the agent_name predicate (cross-agent read), and each
+                           returned row carries its author agent_name + message_kind.
+    """
+    import uuid as _uuid
+
+    if scope == "workflow_run":
+        # Cross-agent read: the Redis cache key is per-agent, so it cannot serve a
+        # transcript written by other members. Skip Redis entirely and read Postgres,
+        # which holds every author's rows for this thread.
+        q = select(AgentMemory).where(
+            AgentMemory.thread_id == thread_id,
+            AgentMemory.scope == "workflow_run",
+        )
+        if deployment_id:
+            q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
+        result = await db.execute(
+            q.order_by(AgentMemory.message_index.desc()).limit(window)
+        )
+        rows = list(reversed(result.scalars().all()))
+        return [
+            {
+                "role": r.role,
+                "content": r.content,
+                "agent_name": r.agent_name,
+                "message_kind": r.message_kind,
+            }
+            for r in rows
+        ]
+
+    # scope == "agent": per-agent transcript. Try Redis cache first.
     redis = _get_redis()
     if redis:
         try:
@@ -128,11 +184,12 @@ async def load_context(
             logger.warning("Redis cache read failed: %s", exc)
 
     # Fallback to Postgres
-    import uuid as _uuid
     q = select(AgentMemory).where(
         AgentMemory.agent_name == agent_name,
         AgentMemory.thread_id == thread_id,
     )
+    if user_id:
+        q = q.where(AgentMemory.user_id == user_id)
     if deployment_id:
         q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
     else:

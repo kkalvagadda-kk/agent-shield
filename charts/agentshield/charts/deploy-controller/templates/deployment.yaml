@@ -53,6 +53,16 @@ spec:
                 secretKeyRef:
                   name: agentshield-secrets
                   key: database-url
+            # Direct (PgBouncer-bypassing) Postgres URL. The controller carries it
+            # in its own env and forwards it as a plain-value env var into agent
+            # pods (agents-* namespaces, where this secret does not exist) so their
+            # AsyncPostgresSaver can persist LangGraph checkpoints. Same source
+            # registry-api uses for its own DIRECT_DATABASE_URL.
+            - name: DIRECT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-passwords
+                  key: registry-api-direct-url
             - name: POLL_INTERVAL_SECONDS
               value: "5"
             - name: LOG_LEVEL

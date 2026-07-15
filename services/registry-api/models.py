@@ -1783,8 +1783,22 @@ class AgentMemory(Base):
             "role IN ('user','assistant','system','tool')",
             name="ck_agent_memory_role",
         ),
+        CheckConstraint(
+            "scope IN ('agent','workflow_run')",
+            name="ck_agent_memory_scope",
+        ),
+        CheckConstraint(
+            "message_kind IN ('user','agent_output','rationale')",
+            name="ck_agent_memory_message_kind",
+        ),
         Index("ix_agent_memory_thread_msg", "thread_id", "message_index"),
         Index("ix_agent_memory_agent_team", "agent_name", "team"),
+        Index(
+            "idx_agent_memory_thread_scope", "thread_id", "scope", "message_index"
+        ),
+        UniqueConstraint(
+            "thread_id", "message_index", name="uq_agent_memory_thread_msg"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1799,6 +1813,14 @@ class AgentMemory(Base):
     message_index: Mapped[int] = mapped_column(Integer, nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     deployment_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    # POC-1 (context storage): shared workflow-thread transcript columns.
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="agent"
+    )
+    message_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="agent_output"
+    )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
