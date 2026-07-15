@@ -590,7 +590,7 @@ registry-api:
     tag: "0.2.185"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.11"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   service:
@@ -616,7 +616,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.10"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.11"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   resources:
@@ -900,8 +900,10 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    # E-2: rebuilt alongside the eval-v2 slice
-    tag: "0.1.140"
+    # E-3: scheduled-eval authoring UI (job_spec + job-spec evidence). 0.1.140 was E-2's
+    # tag — 9f6603a changed studio/src without bumping it, so the cluster served a
+    # pre-E-3 bundle. Bump on EVERY source change; IfNotPresent will not re-pull a tag.
+    tag: "0.1.141"
     pullPolicy: IfNotPresent
 
   service:

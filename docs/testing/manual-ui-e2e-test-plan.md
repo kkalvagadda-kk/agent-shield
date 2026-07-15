@@ -174,6 +174,155 @@ resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarati
 
 ---
 
+## Known gaps — Eval v2 E-3 (scheduled eval: job_spec datasets + side-effect assertions)
+
+**What the slice is for:** a scheduled agent's whole point is the side effect it fires
+unattended on a job spec ("did the nightly compliance job send the right email?").
+Response-only eval says nothing about that, so the publish gate was meaningless for
+scheduled agents. E-3 restores it by asserting the **recorded** side effect against a
+golden job spec. E-3 adds **no new scorer and no new dispatch** — it feeds the job spec
+through the shared run path under E-2's record seam (parity-gated by `T-S75-000`).
+
+**Landed in this slice** (registry-api 0.2.185 / studio 0.1.140; **no migration** — E-3
+owns none, head stays 0063): `ScheduledDatasetItem` tightened to the structured E-1/E-2
+models; `_resolve_eval_mode` + `_assert_mode_compatible` resolve `mode='scheduled'` from
+the agent's **armed schedule trigger** rather than `execution_shape` (before E-3 every
+scheduled dataset 422'd at launch and nothing downstream was reachable); the
+`/eval/score mode=scheduled` branch (was 501) reusing `score_response`/`score_trajectory`/
+`score_tool_calls`/`score_side_effects` with side-effect-skewed weights; the eval-runner
+`MODE=scheduled` branch; the Studio job-spec editor + job-spec evidence render.
+
+**Acceptance proof:** `scripts/e2e/suite-75-eval-v2-scheduled.sh` (`T-S75-000`–`009`) +
+Playwright `studio/e2e/eval-v2-scheduled.spec.ts` + `scripts/deploy-cp1-e3.sh` /
+`scripts/smoke-test-cp1-e3-{infra,behaviour,constitution}.sh`.
+
+### 🔴 not-yet-wired (debt) — BLOCKING: two of E-3's three images were never bumped, so E-3's runtime + UI are UNPROVEN
+
+**The E-3 commit (`9f6603a`, "E-3 scheduled eval P1-P4") changed four service directories
+but bumped only two tags. The eval-runner and studio code it added has never been built
+into an image.** `e3/tasks.md` T019 requires registry-api `0.2.185`, eval-runner `0.1.11`,
+studio `0.1.141`. Evidence straight from the commit (`git show --name-only 9f6603a` vs its
+diff of `scripts/deploy-cpe2e.sh`):
+
+| Service dir changed by `9f6603a` | Tag bumped by `9f6603a`? | Running image has E-3 code? |
+|---|---|---|
+| `services/registry-api/` | ✅ `REGISTRY_API_TAG` 0.2.184→**0.2.185** | **yes — live and proven** |
+| `sdk/agentshield_sdk/` | ✅ `DECLARATIVE_RUNNER_TAG` 0.1.47→**0.1.48** | yes |
+| `services/eval-runner/` (2 files) | ❌ **none** — stayed `0.1.10` (E-2's tag) | **no** |
+| `studio/src/` (5 files) | ❌ **none** — stayed `0.1.140` (E-2's tag) | **no** |
+
+*(Status at time of audit: the eval-runner bump to `0.1.11` has since been made in both
+tag files but the image is **not yet built/deployed** — the last eval Job still ran
+`:0.1.10`. Studio remains un-bumped in both files. `smoke-test-cp1-e3-infra.sh` now
+prints this runtime-vs-configured drift as a ⚠️ line.)*
+
+**Verified on the cluster, not inferred.**
+- *eval-runner:* a probe of the running image finds **zero** occurrences of
+  `_run_scheduled_item` in `/app/main.py`, though the source carries it
+  (`services/eval-runner/main.py:692`, `_resolve_inner_shape:630`, the
+  `MODE == "scheduled"` branch `:1106`/`:1117`). Every eval Job runs
+  `eval-runner:0.1.10`, receives `MODE=scheduled` **correctly** from registry-api, then
+  falls through to the **E-0 reactive** path — the Job logs show the reactive
+  `item=N run_id=…` + `/runs/{id}/stream` drive, never the scheduled
+  `item=N scheduled run_id=… inner=… eval_mode=…` line.
+- *studio:* the deployed bundle contains E-1's `durable-input-payload` (2×) and E-2's
+  `side-effect-evidence` (1×) but **zero** `scheduled-job-spec` and **zero**
+  `job-spec-evidence` — it is literally the pre-E-3 build, in which selecting the
+  `scheduled` mode option creates an **empty dataset** (the "editors land later" path).
+
+**Effect on the gates:**
+- `suite-75` `T-S75-003`–`008` are RED for this one root cause. Every item scores
+  `dims={'response': …}` only, with `run_id=null`, `trigger_payload=null`,
+  `eval_detail.job_spec=null` — the job spec is never fed as `input_payload`, `eval_mode`
+  is never set to `record`, and **nothing is recorded**. The MVP claim
+  (*recorded ⇒ not delivered*) is **unproven on this cluster**.
+- ⚠️ **Safety-relevant:** because the stale runner has no fail-closed refusal, the
+  reactive-inner item that E-3 is supposed to refuse **did fire a real run**
+  (`playground_runs` rows = 1 where the gate asserts 0). On the stale image a scheduled
+  eval of a reactive-inner agent would **deliver the real side effect**. This is the
+  exact hazard E-3 exists to remove, and it is *not* in the image.
+- `studio/e2e/eval-v2-scheduled.spec.ts` fails at `#scheduled-job-spec` (the editor is
+  absent from the bundle) — the spec is correct; the bundle is stale.
+
+**This half IS live and proven** — the fault is isolated to the two un-bumped images:
+- `T-S75-000` (parity), `001`, `002` and `009` PASS on registry-api 0.2.185: a real
+  scheduled dataset round-trips `job_spec` + `expected_side_effects`, a malformed item
+  422s, and the launch guard 422s without an armed trigger then 201s with one
+  (`EvalRun.mode='scheduled'` persisted).
+- A REAL `POST /playground/eval/score {mode:'scheduled'}` returns **200** (was 501) with
+  `{"response":1.0,"trajectory":1.0,"tool_call":1.0,"side_effect":1.0}`, `detail.job_spec`
+  and `detail.recorded_side_effects` — the scoring door works end to end.
+- `T-S75-009` proves the REAL `/internal/runs/start` scheduled door is untouched by E-3
+  and still delivers live.
+
+**Fix (two bumps, no code change):** set eval-runner `0.1.10 → 0.1.11` and studio
+`0.1.140 → 0.1.141` in **BOTH** `scripts/deploy-cpe2e.sh` and
+`charts/agentshield/values.yaml`, run `bash scripts/deploy-cp1-e3.sh`, then re-run
+`bash scripts/smoke-test-cp1-e3-behaviour.sh` and the Playwright spec.
+
+**Why the existing guards missed it:** `smoke-test-cp1-e3-constitution.sh` catches
+"bumped one file only" and `smoke-test-cp1-e3-infra.sh` catches "the cluster does not
+match the tag files". **This failure is a third case neither covers — the source changed
+and the tag was never bumped *at all*, so both files agree on a stale tag and the cluster
+faithfully matches it.** Every check is green while the code is not deployed. Same class
+as "a stale runner made every E-1 trajectory score 0"; the durable defence is a check
+that ties *a changed service directory* to *a changed tag*, which no script does today.
+
+**not-yet-wired (debt):**
+- **Reactive-inner scheduled items cannot assert side effects.** E-2's record seam is
+  armed only on the **durable** `/run` dispatch (the SDK/declarative-runner `/run` +
+  `/resume` carry `eval_mode` and arm the ContextVar the governed-tool delivery edge
+  reads); the reactive `/chat` path threads none. So a reactive-inner scheduled agent
+  cannot record, and asking it to would silently **deliver** the real email/ticket/
+  payment. The runner **refuses before creating the run** (`_run_scheduled_item`,
+  `services/eval-runner/main.py:727-739`) and records the item FAILED — fail-closed, not
+  a silent pass. Closing this needs `eval_mode` threaded onto the reactive `/chat`
+  dispatch. `T-S75-008` is the gate.
+- **The reactive-inner weight branch is dead code until the row above lands.** The score
+  door's reactive-inner default weights `{response .4, side_effect .6}`
+  (`services/registry-api/routers/playground.py:1311`) can never be reached with a
+  `side_effect` dimension present: the only items that get one are items asserting side
+  effects, and those are exactly the items the runner refuses for a reactive-inner agent.
+  The branch is kept (not deleted) because it is the correct weighting the moment the
+  seam rides `/chat` — but it is **unexercised** today. No test asserts it end-to-end,
+  by construction.
+- **Item `tool_mocks` not threaded to the seam** — inherited from E-2, no new debt. T001
+  declares the field on `ScheduledDatasetItem` for contract parity with
+  `DurableDatasetItem`; the seam still returns a type-default success sentinel
+  (`{"status":"ok","id":"mock-<uuid>"}`) rather than the item's fixed mock.
+
+**deferred (intentional):**
+- **The eval fires through the SANDBOX door, not `/internal/runs/start`** (`e3/tasks.md`
+  §D1). The real scheduled door is production-only, threads no `eval_mode`, and is
+  **circular** with the publish gate (`deployments.py:560` requires `eval_passed` to
+  deploy to production — you would need a published prod pod to earn the eval that
+  publishes it). E-3 drives the identical job-spec shape (`input_payload=job_spec` +
+  `trigger_type='schedule'` + `trigger_payload=job_spec`) through the **same**
+  `dispatch_durable_run` → declarative-runner `/run`. `T-S75-009` keeps the real door
+  honest with a live-delivery control. Revisit only if evals must run against published
+  production agents (needs `agent_runs.eval_mode` + a non-circular deploy story).
+- **Daemon identity on a trigger fire (`resolve_principal`) not re-proven by E-3** —
+  WS-3's surface, gated by `suite-71` T-S71-001. E-3 scores run behavior, not identity
+  resolution.
+- **Cron-timing eval (does it fire at the right time?)** — E-3 fires the job spec once
+  ("fire once, don't wait for cron"). Next-fire timing is WS-3's operate surface
+  (`suite-26`/`suite-71`), not an eval dimension.
+- **Alert-on-failure as an eval dimension** — out of scope; WS-3 verifies alerting
+  end-to-end. E-3 scores the run's behavior, not the alert transport.
+- **Record-once cassette replay for scheduled** — inherits E-2's mock-only limitation.
+
+**boundary (Playwright, by design):** `studio/e2e/eval-v2-scheduled.spec.ts` proves the
+authoring journey + save→reload→assert for real, but its **results-render half is
+conditional**: rendering the job-spec evidence needs an already-completed scheduled
+EvalRun, which needs a live daemon pod + the eval-runner Job + minutes of real LLM tool
+calls — too slow/flaky for a browser test. It discovers a real completed run from the
+backend (no `page.route`, no fabricated rows) and annotates a loud skip if none exists.
+The real recorded-not-delivered + score persistence is suite-75's job. **While the
+eval-runner image is stale, no completed scheduled EvalRun can exist, so that half always
+skips** — it unblocks itself with the same one-line bump.
+
+---
+
 ## 0. Before you start
 
 ### 0.1 Access Studio

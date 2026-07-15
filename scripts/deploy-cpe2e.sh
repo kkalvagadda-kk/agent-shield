@@ -133,6 +133,13 @@
 #   - registry-api:0.2.135 / studio:0.1.111 / declarative-runner:0.1.31 (Multi-tool HITL: provider-agnostic post_model_hook trims a turn to ONE high-risk tool call only when 2+ are high-risk (no concurrent-interrupt collision / duplicate execution); idempotent create_approval (no phantom duplicate on node re-run); resume chaining — resume proxies forward approval_requested + AgentChatPage/ChatPane handle re-interrupt during resume (ref + nonce); Evaluate-tab HitlPanel shows WHO. Needs agent redeploy.)
 #   - registry-api:0.2.134 / studio:0.1.110 / declarative-runner:0.1.29 (HITL approval context WHO/WHY/WHAT: SDK captures LLM reasoning via InjectedState on governed_tool + system-prompt nudge; migration 0053 approvals.reasoning; reasoning threaded hitl.py→approval record + approval_requested SSE; session_approvals adds reasoning + requester username/team; ConversationApprovalPanel/HitlPanel/HITLDashboard render who/why/what. Needs agent redeploy.)
 #   - registry-api:0.2.133 / studio:0.1.109 / declarative-runner:0.1.28 (Sandbox HITL 3 cases: (1) registry-derived approval context — sandbox deployment approvals routed to 'sandbox' out of the prod queue, migration 0052 playground_runs session_id + requester username/team, deployment_id on start_chat, session-approvals endpoint; studio env-aware AgentChatPage + ConversationApprovalPanel self-approve + HITL console username/team; (3) batch-eval auto-approve — registry sets x-agentshield-auto-approve only for eval-runner identity, runner threads it, SDK governed_tool skips the HITL interrupt gated on a trusted identity (defense-in-depth). Case 3 needs an agent redeploy.)
+#   - eval-runner:0.1.11   (E-3 scheduled eval SHIPS: 9f6603a added `_run_scheduled_item` to eval-runner
+#                           but did NOT bump the tag off 0.1.10 (set by 6d93401/E-2). With
+#                           imagePullPolicy=IfNotPresent the node kept the cached E-2 image, so every
+#                           MODE=scheduled Job silently fell through to the generic reactive path:
+#                           response-only dims, no trigger_payload, no fail-closed. E-3's code had never
+#                           once executed. suite-75 caught it (6/6 FAIL). NEVER reuse a tag — a code
+#                           change without a bump does not reach the cluster.)
 #   - registry-api:0.2.132 (OPA bundle cold-start fix: bundle_generator includes 'deploying' deployments (not just 'running') so a new agent's identity is in the OPA bundle immediately; OPA sidecar poll delays lowered 30/60→5/15s)
 #   - registry-api:0.2.131 (Deployment-chat HITL: migration 0051 playground_runs.deployment_id; GET /agents/{n}/chat/{run}/approval-status (requester-scoped poll); list_approvals provenance enrichment (requested_by/deployment_name/environment via thread_id→run join))
 #   - studio:0.1.108       (Deployment-chat HITL: AgentChatPage waiting-banner + poll + auto-resume (no inline approve/deny); HITL console requested_by + deployment/env columns)
@@ -222,8 +229,8 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 REGISTRY_API_TAG="0.2.185"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.140"
-EVAL_RUNNER_TAG="0.1.10"
+STUDIO_TAG="0.1.141"
+EVAL_RUNNER_TAG="0.1.11"
 DECLARATIVE_RUNNER_TAG="0.1.48"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
