@@ -431,6 +431,39 @@ echo "  All secrets applied."
 # ── Step 4: Helm dependency update ───────────────────────────────────────────
 echo ""
 echo "[4/8] Updating Helm dependencies..."
+
+# Purge stale PACKAGED copies of sub-charts we author in-tree.
+#
+# A packaged `charts/<name>-<ver>.tgz` SHADOWS the `charts/<name>/` source directory,
+# so helm renders the tarball and silently ignores your edit. `helm dependency update`
+# is supposed to repackage them, but it currently FAILS here ("can't get a valid
+# version for repositories envoy-gateway") and the `|| true` below swallows it — so a
+# stale .tgz can outlive its source indefinitely. These are gitignored build artifacts:
+# deleting them makes helm read the source dir, which is always what we want for a
+# chart we author.
+#
+# This has bitten twice in one day, both silently:
+#   1. WS-4: an event-gateway tag bump did nothing — deploy reported "successfully
+#      rolled out" while serving the OLD image.
+#   2. A Jul-8 deploy-controller-0.1.7.tgz pinned LANGFUSE_HOST to a BARE service name
+#      while the source template had long since been fixed to the namespace-qualified
+#      FQDN. Agent pods in production-* namespaces therefore could not resolve Langfuse,
+#      silently emitted NO spans, and every trace showed $0.00 cost. Cost a live demo.
+# Third-party deps (postgresql, redis, langfuse, keycloak, …) have no source dir here
+# and are left untouched.
+_purged=0
+for _tgz in "$CHART"/charts/*.tgz; do
+  [ -e "$_tgz" ] || continue
+  _base="$(basename "$_tgz" .tgz)"
+  _name="$(echo "$_base" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+$//')"
+  if [ -d "$CHART/charts/$_name" ]; then
+    echo "  ⚠ purging stale packaged sub-chart: $_base.tgz (shadows charts/$_name/ source)"
+    rm -f "$_tgz"
+    _purged=$((_purged + 1))
+  fi
+done
+[ "$_purged" -eq 0 ] && echo "  no stale packaged sub-charts (source dirs are authoritative)"
+
 helm dependency update "$CHART" 2>/dev/null || true
 
 # Apply Langfuse-specific infra (ClickHouse + S3 alias Services).
