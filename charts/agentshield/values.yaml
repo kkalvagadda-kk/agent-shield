@@ -587,7 +587,9 @@ registry-api:
     repository: registry.internal/agentshield/registry-api
     # E-2: migration 0063 (tools.side_effecting + playground_runs.eval_mode);
     # eval_mode threaded run-create → durable dispatch body → runner
-    tag: "0.2.184"
+    # Context Storage POC-0/1: migration 0064 (agent_memory scope/workflow_run_id/
+    # message_kind); ConversationStore; session_id threading; shared workflow thread.
+    tag: "0.2.186"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -649,7 +651,9 @@ deploy-controller:
 
   image:
     repository: registry.internal/agentshield/deploy-controller
-    tag: "0.1.36"
+    # Context Storage POC-0 (T005): injects DIRECT_DATABASE_URL +
+    # AGENTSHIELD_DEPLOYMENT_ID into agent pods. Unchanged in POC-1 (stays 0.1.37).
+    tag: "0.1.37"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
@@ -658,7 +662,9 @@ deploy-controller:
   # for declarative/durable agents. Must be a real, built tag (not "latest").
   # E-2: REQUIRED rebuild — the record/mock delivery seam lives in
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
-  declarativeRunnerTag: "0.1.47"
+  # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
+  # load/save + shared workflow transcript are all baked into this image.
+  declarativeRunnerTag: "0.1.49"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

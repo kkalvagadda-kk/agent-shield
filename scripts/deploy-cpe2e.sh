@@ -219,12 +219,34 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.184"
+# ── Context Storage POC-0 + POC-1 (this slice) ───────────────────────────────
+#   CONTEXT STORAGE — cross-agent conversation context a user can rely on.
+#   POC-0 (T001-T009): agent_memory columns + migration 0064 (scope, workflow_run_id,
+#     message_kind, atomic per-thread message_index); ConversationStore port+factory;
+#     fail-loud persistent AsyncPostgresSaver (never a silent MemorySaver when
+#     DIRECT_DATABASE_URL is set); DIRECT_DATABASE_URL + AGENTSHIELD_DEPLOYMENT_ID
+#     injected into agent pods; chat/playground thread on session_id (not per-turn
+#     run_id) with fail-closed session ownership (foreign session → 403); runner
+#     /chat/stream now LOADS + SAVES memory.
+#   POC-1 (T010-T012): ONE shared conversation_id=parent_run_id across workflow
+#     members (WS-1-safe: per-member thread_id=child_id checkpoint UNTOUCHED); the
+#     workflow-scoped read drops agent_name (member B sees member A) and write-back is
+#     tagged with author agent_name.
+#   Tag split (two deploy rounds, one committed final state):
+#     - CP1 (POC-0) deploy consumed registry-api 0.2.185 / declarative-runner 0.1.48
+#       / deploy-controller 0.1.37.
+#     - CP2 (POC-1) re-touched registry-api (workflow_orchestrator.py) +
+#       declarative-runner (orchestrator.py, main.py) AFTER CP1, so both advanced one
+#       more patch → registry-api 0.2.186 / declarative-runner 0.1.49. deploy-controller
+#       was NOT re-touched in POC-1 → stays 0.1.37.
+#   The repo is committed at the FINAL (CP2) tags below; scripts/checkpoints/*-deploy.sh
+#   deploy the current committed tags and assert their rollout.
+REGISTRY_API_TAG="0.2.186"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.36"
+DEPLOY_CONTROLLER_TAG="0.1.37"
 STUDIO_TAG="0.1.140"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.47"
+DECLARATIVE_RUNNER_TAG="0.1.49"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

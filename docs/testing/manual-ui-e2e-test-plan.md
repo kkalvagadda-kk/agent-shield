@@ -12,6 +12,43 @@
 
 ---
 
+## Known gaps (context-storage POC-0/1) — 2026-07-15
+
+Shipped this slice: cross-agent conversation context. POC-0 = an agent that remembers
+across turns and pod restarts, fail-closed session ownership (foreign session → 403),
+persistent `AsyncPostgresSaver` (fail-loud, never a silent `MemorySaver`). POC-1 = ONE
+shared `conversation_id=parent_run_id` transcript across workflow members (WS-1-safe:
+per-member `thread_id=child_id` checkpoint untouched). Journey proof = `suite-75-context-storage.sh`
+(T-S75-001..005) + `scripts/checkpoints/cp1-*.sh` / `cp2-*.sh`.
+
+Tagged **deferred (intentional)** vs **debt (follow-up)**:
+
+- **Haiku rationale summarizer** — *deferred (intentional)* to POC-1b. The schema already
+  ships ready (`agent_memory.message_kind='rationale'`); nothing writes rationale rows yet.
+- **Durable member (`/run` path) does not load/save the shared transcript** — *debt*. Only
+  reactive members (`/chat`, `/chat/stream`) load+save the shared workflow transcript; the
+  durable `/run` entrypoint threads only the per-member `thread_id` checkpoint. T-S75-005
+  guards that durable resume still works; the shared-transcript on durable members is a
+  follow-up.
+- **S2 PII-scan-on-write** — *deferred* to Tighten. Transcripts persist raw user content;
+  no write-time PII redaction yet.
+- **S1 prompt-injection defense on loaded transcript** — *deferred* to Tighten.
+- **S8 erasure spanning checkpoints** — *deferred* to Tighten. `store.erase` clears the
+  transcript rows; LangGraph checkpoint blobs for the thread are not co-erased yet.
+- **S9 access audit on transcript reads** — *deferred* to Tighten.
+- **S10 at-rest encryption of transcript columns** — *deferred* to Tighten. Also: agent-pod
+  `DIRECT_DATABASE_URL` is injected as a plain value (mirrors the existing
+  `LANGFUSE_*`/`registry_api_url` pattern); per-namespace secret hardening is S10/S11.
+- **S11 mesh enrollment for the direct DB hop** — *deferred* to Tighten.
+- **No Playwright/Vitest UI test this slice** — *deferred (intentional)*. POC-0/1 is a
+  backend slice with no new Studio surface (attribution UI is POC-2); `suite-75` is the
+  journey proof. To eyeball threading manually: deployed-agent chat → "my name is Ada" →
+  "what's my name?" in one session → recall; reload page (same session) → recall survives.
+- **Per-agent context slicing** — *deferred (intentional)*. Every workflow member currently
+  reads the full shared transcript; scoping a member to a subset of the thread is future work.
+
+---
+
 ## Production hardening (P1–P4) — execution modes PROVEN in production (2026-07-14)
 
 The execution modes WS-1 delivered were only proven for **sandbox/playground**. This
