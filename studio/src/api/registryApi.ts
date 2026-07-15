@@ -1,7 +1,13 @@
 import axios from "axios";
 import { getKeycloak } from "../lib/keycloak";
+import { DEMO, mockAdapter } from "../demo/demo";
 
 export const http = axios.create({ baseURL: "/api/v1" });
+
+// UX-preview mode: serve benign mock responses instead of hitting a backend.
+if (DEMO) {
+  http.defaults.adapter = mockAdapter;
+}
 
 // Attach Bearer token on every request; refresh if stale first
 http.interceptors.request.use(async (config) => {

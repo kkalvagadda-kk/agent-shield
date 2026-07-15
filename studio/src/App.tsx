@@ -38,6 +38,13 @@ import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
 import ObservabilityComparePage from "./pages/ObservabilityComparePage";
 import CostConsolePage from "./pages/CostConsolePage";
 import CredentialsPage from "./pages/CredentialsPage";
+import { DEMO } from "./demo/demo";
+import DemoHomePage from "./pages/preview/DemoHomePage";
+import KnowledgeBasesPage from "./pages/preview/KnowledgeBasesPage";
+import KnowledgeBaseDetailPage from "./pages/preview/KnowledgeBaseDetailPage";
+import PreferencesPage from "./pages/preview/PreferencesPage";
+import MultiAgentChatPage from "./pages/preview/MultiAgentChatPage";
+import ConversationsPage from "./pages/preview/ConversationsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -54,7 +61,13 @@ export default function App() {
           <main className="flex-1 overflow-auto">
             <ErrorBoundary>
             <Routes>
-              <Route path="/" element={<AgentListPage />} />
+              <Route path="/" element={DEMO ? <DemoHomePage /> : <AgentListPage />} />
+              {/* UX-preview routes (context storage / Knowledge Base) */}
+              <Route path="/knowledge" element={<KnowledgeBasesPage />} />
+              <Route path="/knowledge/:id" element={<KnowledgeBaseDetailPage />} />
+              <Route path="/preferences" element={<PreferencesPage />} />
+              <Route path="/preview/chat" element={<MultiAgentChatPage />} />
+              <Route path="/preview/conversations" element={<ConversationsPage />} />
               <Route path="/agents" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
               <Route path="/agents/:name/chat" element={<AgentChatPage />} />

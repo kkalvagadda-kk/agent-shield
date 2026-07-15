@@ -5,11 +5,23 @@ import App from "./App";
 import { AuthContext, buildAuthValue } from "./contexts/AuthContext";
 import { initKeycloak, getParsedToken } from "./lib/keycloak";
 import { getMe } from "./api/registryApi";
+import { DEMO, MOCK_USER, installFetchShim } from "./demo/demo";
 
 // @ts-expect-error build version marker
 window.__STUDIO_BUILD = "0.1.76";
 const root = createRoot(document.getElementById("root")!);
 
+// ── UX-preview mode: no Keycloak, no backend. Render with a mock user. ──
+if (DEMO) {
+  installFetchShim();
+  root.render(
+    <StrictMode>
+      <AuthContext.Provider value={buildAuthValue(MOCK_USER, "demo-team", "platform-admin")}>
+        <App />
+      </AuthContext.Provider>
+    </StrictMode>,
+  );
+} else {
 initKeycloak()
   .then(async () => {
     const user = getParsedToken();
@@ -43,3 +55,4 @@ initKeycloak()
       </div>
     );
   });
+}
