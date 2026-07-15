@@ -132,6 +132,13 @@ async def create_tool(
     summary="List tools",
 )
 async def list_tools(
+    name: str | None = Query(
+        None,
+        description="Exact tool name. The SDK tool resolver has always sent this "
+        "filter; without it FastAPI silently ignored the param and returned "
+        "arbitrary rows, so an agent asking for 'issue_refund' resolved whatever "
+        "tool sorted first (observed: 'http_echo' → a critical-risk OPA fixture).",
+    ),
     type: str | None = Query(None),
     risk_level: str | None = Query(None),
     status: str | None = Query(None),
@@ -152,6 +159,8 @@ async def list_tools(
     else:
         q = q.where(Tool.publish_status == "published")
 
+    if name:
+        q = q.where(Tool.name == name)
     if type:
         q = q.where(Tool.type == type)
     if risk_level:

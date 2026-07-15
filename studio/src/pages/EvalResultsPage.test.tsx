@@ -532,3 +532,177 @@ describe("EvalResultsPage — workflow run-tree evidence (Eval v2 E-5)", () => {
     expect(await screen.findByText(/Hide run tree/i)).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Eval v2 E-3 — scheduled results. The job spec is WHAT the eval fired (fed to the
+// run as its input_payload / trigger_payload — the identical production schedule
+// shape), and the reused E-2 panel shows what would have been sent because of it.
+// ---------------------------------------------------------------------------
+describe("EvalResultsPage — scheduled job-spec evidence (Eval v2 E-3)", () => {
+  const JOB_SPEC = { report: "weekly-compliance", recipients: ["compliance@acme.com"] };
+
+  const evalRunBase = {
+    id: "run-1",
+    user_id: "u1",
+    agent_name: "nightly-compliance",
+    agent_version_id: "v1",
+    workflow_id: null,
+    workflow_version_id: null,
+    dataset_id: "ds-1",
+    status: "completed",
+    total_items: 1,
+    passed_count: 1,
+    failed_count: 0,
+    overall_score: 0.9,
+    started_at: NOW,
+    completed_at: NOW,
+    created_at: NOW,
+    sandbox_deployment_id: "dep-1",
+    workflow_deployment_id: null,
+  };
+
+  const resultBase = {
+    id: "res-1",
+    eval_run_id: "run-1",
+    dataset_item_idx: 0,
+    input_message: JSON.stringify(JOB_SPEC),
+    expected_output: null,
+    response: "Weekly report sent.",
+    judge_score: 0.9,
+    judge_reasoning: "scheduled eval (mode=scheduled, inner=durable)",
+    passed: true,
+    langfuse_trace_id: null,
+    trace_url: null,
+    run_id: "pgrun-1234abcd",
+    created_at: NOW,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(getEvalRun).mockResolvedValue(evalRunBase);
+    mock(listRunSteps).mockResolvedValue([]);
+  });
+
+  async function expandRow() {
+    renderPage();
+    fireEvent.click(await screen.findByText(/weekly-compliance/));
+  }
+
+  it("renders the job spec fired by the scheduled eval (from trigger_payload)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.94,
+        trigger_payload: JOB_SPEC,
+        eval_detail: { job_spec: JOB_SPEC, recorded_side_effects: [] },
+      },
+    ]);
+    await expandRow();
+
+    const panel = await screen.findByTestId("job-spec-evidence");
+    expect(panel).toHaveTextContent("weekly-compliance");
+    expect(panel).toHaveTextContent(/fed as input_payload/i);
+  });
+
+  it("falls back to detail.job_spec when the row has no trigger_payload", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9 },
+        composite: 0.9,
+        trigger_payload: null,
+        eval_detail: { job_spec: JOB_SPEC, recorded_side_effects: [] },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toHaveTextContent(
+      "weekly-compliance",
+    );
+  });
+
+  it("renders the job spec on a FAIL-CLOSED row (what was fired, even unscored)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        response: "",
+        passed: false,
+        judge_score: 0.0,
+        judge_reasoning:
+          "item asserts side effects but the eval_mode=record run recorded none",
+        dimension_scores: null,
+        composite: null,
+        trigger_payload: JOB_SPEC,
+        eval_detail: { reason: "side effect unverifiable — fail-closed" },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toHaveTextContent(
+      "weekly-compliance",
+    );
+    // Fail-closed: no dimension was scored, so none renders a number.
+    expect(screen.getByTestId("dim-side_effect")).toHaveTextContent("—");
+  });
+
+  it("renders the job spec alongside the REUSED recorded-side-effect panel", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.94,
+        trigger_payload: JOB_SPEC,
+        eval_detail: {
+          job_spec: JOB_SPEC,
+          recorded_side_effects: [
+            {
+              tool: "send_email",
+              args: { to: "compliance@acme.com" },
+              mocked_response: { status: "ok" },
+              would_have_invoked: "POST https://mail.internal/send",
+            },
+          ],
+          side_effect_detail: {
+            side_effect_diffs: [
+              {
+                tool: "send_email",
+                occurs: "exactly",
+                count: 1,
+                matched: 1,
+                satisfied: true,
+              },
+            ],
+            recorded: [],
+          },
+        },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toBeInTheDocument();
+    // The E-2 panel is REUSED, not rebuilt: job spec in, recorded call out.
+    expect(screen.getByTestId("side-effect-evidence")).toBeInTheDocument();
+    expect(screen.getByTestId("recorded-side-effect-0")).toHaveTextContent(
+      /not delivered/i,
+    );
+  });
+
+  it("renders no job-spec panel for a non-scheduled result (no regression)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        input_message: "Report the ACME breach",
+        dimension_scores: { response: 0.9 },
+        composite: 0.9,
+        eval_detail: { recorded_side_effects: [] },
+      },
+    ]);
+    renderPage();
+    fireEvent.click(await screen.findByText("Report the ACME breach"));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("job-spec-evidence")).not.toBeInTheDocument(),
+    );
+  });
+});

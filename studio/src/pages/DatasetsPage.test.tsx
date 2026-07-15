@@ -558,3 +558,214 @@ describe("DatasetsPage — workflow item editor (Eval v2 E-5)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Eval v2 E-3 — the scheduled item editor. A scheduled dataset is authored as a
+// job spec (the run's input_payload / trigger_payload — the identical production
+// schedule shape) plus the headline expected_side_effects, whose presence is what
+// makes the eval-runner fire the item in `record` mode (never delivering for real).
+// ---------------------------------------------------------------------------
+describe("DatasetsPage — scheduled item editor (Eval v2 E-3)", () => {
+  const JOB_SPEC = { report: "weekly-compliance", recipients: ["compliance@acme.com"] };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(listDatasets).mockResolvedValue([]);
+    mock(listEvalRuns).mockResolvedValue([]);
+    mock(createDataset).mockResolvedValue({
+      id: "ds-3",
+      owner_user_id: "u1",
+      name: "scheduled-ds",
+      mode: "scheduled",
+      schema_version: 1,
+      items: [],
+      created_at: new Date().toISOString(),
+    });
+    mock(listAllDeployments).mockResolvedValue({ items: [], total: 0 });
+    mock(listAllWorkflowDeployments).mockResolvedValue([]);
+  });
+
+  async function openScheduledEditor() {
+    renderWithProviders(<DatasetsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /New Dataset/i }));
+    const select = (await screen.findByLabelText("Dataset mode")) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "scheduled" } });
+    return select;
+  }
+
+  async function openWithJobSpec(name = "scheduled-ds") {
+    await openScheduledEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: name },
+    });
+    fireEvent.change(screen.getByLabelText("Scheduled job spec"), {
+      target: { value: JSON.stringify(JOB_SPEC) },
+    });
+  }
+
+  it("renders the scheduled job-spec editor only in scheduled mode", async () => {
+    await openScheduledEditor();
+    expect(screen.getByLabelText("Scheduled job spec")).toBeInTheDocument();
+    expect(screen.getByLabelText("Scheduled expected output")).toBeInTheDocument();
+    // Not the reactive / durable / still-unbuilt editors.
+    expect(screen.queryByPlaceholderText(/expected_output/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Durable input payload")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Items editor (disabled)")).not.toBeInTheDocument();
+  });
+
+  it("is not rendered for other modes (no regression to durable/workflow)", async () => {
+    renderWithProviders(<DatasetsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: /New Dataset/i }));
+    const select = (await screen.findByLabelText("Dataset mode")) as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "durable" } });
+    expect(screen.queryByLabelText("Scheduled job spec")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Durable input payload")).toBeInTheDocument();
+
+    fireEvent.change(select, { target: { value: "workflow" } });
+    expect(screen.queryByLabelText("Scheduled job spec")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Workflow input message")).toBeInTheDocument();
+  });
+
+  it("SENDS job_spec + expected_side_effects on save (the record-mode trigger)", async () => {
+    await openWithJobSpec();
+    fireEvent.change(screen.getByLabelText("Scheduled expected output"), {
+      target: { value: "The weekly report was sent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Add side effect/i }));
+    fireEvent.change(screen.getByLabelText("Side effect 1 tool"), {
+      target: { value: "send_email" },
+    });
+    fireEvent.change(screen.getByLabelText("Side effect 1 args match"), {
+      target: { value: '{"to": "compliance@acme.com"}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(createDataset).toHaveBeenCalledWith({
+        name: "scheduled-ds",
+        mode: "scheduled",
+        items: [
+          {
+            kind: "scheduled",
+            job_spec: JOB_SPEC,
+            expected_output: "The weekly report was sent",
+            expected_side_effects: [
+              {
+                tool: "send_email",
+                occurs: "exactly",
+                count: 1,
+                args_match: { to: "compliance@acme.com" },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+  });
+
+  it("warns that an item asserting side effects runs in record mode", async () => {
+    await openScheduledEditor();
+    expect(screen.queryByTestId("side-effect-0")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Add side effect/i }));
+    expect(screen.getByTestId("side-effect-0")).toBeInTheDocument();
+    expect(screen.getByText(/no real emails, tickets/i)).toBeInTheDocument();
+  });
+
+  it("sends a durable-inner expected_trajectory when steps are authored", async () => {
+    await openWithJobSpec();
+    fireEvent.click(screen.getByRole("button", { name: /Add step/i }));
+    fireEvent.change(screen.getByLabelText("Step 1 tool"), {
+      target: { value: "send_email" },
+    });
+    fireEvent.click(screen.getByLabelText("Step 1 expect approval"));
+    // The scheduled editor renders its OWN step rows (not the durable editor's).
+    expect(screen.getByTestId("scheduled-step-0")).toBeInTheDocument();
+    expect(screen.queryByTestId("durable-step-0")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(createDataset).toHaveBeenCalledWith({
+        name: "scheduled-ds",
+        mode: "scheduled",
+        items: [
+          {
+            kind: "scheduled",
+            job_spec: JOB_SPEC,
+            expected_trajectory: {
+              match_mode: "superset",
+              steps: [{ tool: "send_email", expect_approval: true }],
+            },
+          },
+        ],
+      }),
+    );
+  });
+
+  it("blocks save when the job spec is missing", async () => {
+    await openScheduledEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: "scheduled-ds" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(createDataset).not.toHaveBeenCalled();
+  });
+
+  it("blocks save when the job spec is invalid JSON", async () => {
+    await openScheduledEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: "scheduled-ds" },
+    });
+    fireEvent.change(screen.getByLabelText("Scheduled job spec"), {
+      target: { value: "{not json" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(createDataset).not.toHaveBeenCalled();
+  });
+
+  it("blocks save when the job spec is a JSON array, not an object", async () => {
+    await openScheduledEditor();
+    fireEvent.change(screen.getByPlaceholderText(/order-lookup-tests/), {
+      target: { value: "scheduled-ds" },
+    });
+    fireEvent.change(screen.getByLabelText("Scheduled job spec"), {
+      target: { value: "[1, 2]" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(createDataset).not.toHaveBeenCalled();
+  });
+
+  it("blocks save on a malformed side-effect args_match", async () => {
+    await openWithJobSpec();
+    fireEvent.click(screen.getByRole("button", { name: /Add side effect/i }));
+    fireEvent.change(screen.getByLabelText("Side effect 1 tool"), {
+      target: { value: "send_email" },
+    });
+    fireEvent.change(screen.getByLabelText("Side effect 1 args match"), {
+      target: { value: "{oops" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(createDataset).not.toHaveBeenCalled();
+  });
+
+  it("allows a reference-free scheduled item (job spec only)", async () => {
+    await openWithJobSpec();
+    fireEvent.click(screen.getByRole("button", { name: /Create Dataset/i }));
+
+    await waitFor(() =>
+      expect(createDataset).toHaveBeenCalledWith({
+        name: "scheduled-ds",
+        mode: "scheduled",
+        items: [{ kind: "scheduled", job_spec: JOB_SPEC }],
+      }),
+    );
+  });
+});

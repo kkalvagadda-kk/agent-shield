@@ -587,7 +587,7 @@ registry-api:
     repository: registry.internal/agentshield/registry-api
     # E-2: migration 0063 (tools.side_effecting + playground_runs.eval_mode);
     # eval_mode threaded run-create → durable dispatch body → runner
-    tag: "0.2.184"
+    tag: "0.2.185"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -658,7 +658,7 @@ deploy-controller:
   # for declarative/durable agents. Must be a real, built tag (not "latest").
   # E-2: REQUIRED rebuild — the record/mock delivery seam lives in
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
-  declarativeRunnerTag: "0.1.47"
+  declarativeRunnerTag: "0.1.48"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

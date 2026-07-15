@@ -136,7 +136,31 @@ export interface WorkflowDatasetItem {
   per_member?: Record<string, PerMemberExpectation>;
 }
 
-export type AnyDatasetItem = DatasetItem | DurableDatasetItem | WorkflowDatasetItem;
+// Eval v2 E-3 — scheduled dataset item (discriminated-union variant, `kind:"scheduled"`).
+// Mirrors backend `ScheduledDatasetItem` (schemas.py) / e3/data-model.md §2.3.
+//
+// `job_spec` is the per-schedule job spec — the SAME shape as the shipped
+// `AgentTrigger.input_payload`. The eval fires it through the shared run door as the
+// run's `input_payload` (+ `trigger_type='schedule'` / `trigger_payload=job_spec`),
+// i.e. the identical production shape, so what the eval runs is what the timer runs.
+//
+// `expected_side_effects` is the HEADLINE signal for scheduled — a scheduled agent's
+// whole point is the effect it fires unattended. Its presence is what makes the
+// eval-runner launch the item under `eval_mode=record` (recorded + mocked, never
+// delivered). `expected_trajectory` is meaningful only for a durable-inner schedule.
+export interface ScheduledDatasetItem {
+  kind: "scheduled";
+  job_spec: Record<string, unknown>;
+  expected_output?: string;
+  expected_trajectory?: ExpectedTrajectory;
+  expected_side_effects?: SideEffectAssertion[];
+}
+
+export type AnyDatasetItem =
+  | DatasetItem
+  | DurableDatasetItem
+  | ScheduledDatasetItem
+  | WorkflowDatasetItem;
 
 export function isDurableItem(item: AnyDatasetItem): item is DurableDatasetItem {
   return (item as DurableDatasetItem).kind === "durable";
@@ -181,6 +205,11 @@ export interface EvalRunResult {
   // Eval v2 E-1 — durable per-dimension evidence + soft link to the run tree.
   eval_detail?: EvalDetail | null;
   run_id?: string | null;
+  // Eval v2 E-3 — the JOB SPEC this result's run was actually fired with (== the
+  // run's `input_payload`/`trigger_payload`), written by the eval-runner's scheduled
+  // branch. Present on fail-closed rows too, so the results UI can always show WHAT
+  // was fired even when the item could not be scored.
+  trigger_payload?: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -272,6 +301,10 @@ export interface SideEffectDetail {
 export interface EvalDetail {
   expected_trajectory?: ExpectedTrajectory | null;
   actual_trajectory?: TrajectoryStep[] | null;
+  // Eval v2 E-3 — the job spec the scheduled score door echoes back (the item's
+  // authored spec). The row's own `trigger_payload` is what the run was ACTUALLY
+  // fed; this is the fallback for a row recorded before that column was written.
+  job_spec?: Record<string, unknown> | null;
   tool_diffs?: ToolDiff[] | null;
   approvals?: ApprovalDetail[] | null;
   // Eval v2 E-2 — side-effect evidence. `recorded_side_effects` is always present

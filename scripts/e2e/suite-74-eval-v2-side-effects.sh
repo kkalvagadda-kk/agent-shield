@@ -45,9 +45,18 @@
 #               the REAL echo reflection with the real args, and records NOTHING. Run
 #               AFTER the record run against the SAME pod ⇒ also proves record mode
 #               does not leak across runs (the ContextVar default holds).
-#   T-S74-005 — read-only pass-through: a provably read-only GET tool
-#               (side_effecting=false) is DELIVERED for real even under record — the
-#               seam substitutes writes, not reads.
+#   T-S74-005a— read-only NOT intercepted: a provably read-only GET tool
+#               (side_effecting=false) is never recorded/mocked under record — the
+#               seam substitutes writes, not reads. (Deterministic: asserted over the
+#               run's recorded set, independent of any single step row.)
+#   T-S74-005b— read-only DELIVERED for real under record (real echo reflection on the
+#               persisted tool step). KNOWN RED against a pre-existing PRODUCER bug —
+#               StepEmitter.emit (sdk/agentshield_sdk/durable.py) drops a tool step's
+#               `completed` update when parallel tool calls finish out of step order,
+#               stranding the step at `running` AND silently dropping that step's
+#               `recorded_side_effects`. Kept as a hard FAIL, not relaxed: a dropped
+#               recording would let an `occurs:"never"` assertion pass for the wrong
+#               reason. Not an E-2 seam bug — 005a proves the seam behaved.
 #   T-S74-006 — fail-closed seam: the OPAQUE tool (classified side-effecting because
 #               it is not provably read-only) is mocked, not invoked, under record.
 #   T-S74-007 — scorer: an item whose `expected_side_effects` MATCH the real recorded
@@ -516,18 +525,44 @@ async def main():
         r_step = tool_step(steps_r, READ)
         r_out = _sout(r_step or {})
         r_res = str(r_out.get("result") or "")
-        # Two independent proofs, both must hold:
-        #  (a) the read tool is NOT among the recorded calls anywhere in the run, and
-        #  (b) if its step landed, it carries the REAL echo reflection (not the mock).
-        not_recorded = READ not in rec_tools_r
-        delivered = (r_step is None) or (is_real_echo(r_res) and not is_mock(r_res))
-        rec("T-S74-005 read-only pass-through: a provably read-only GET tool "
-            "(side_effecting=false) is DELIVERED for real, never recorded/mocked, "
-            "even under record",
-            not_recorded and delivered and r_step is not None,
-            f"recorded_tools_in_record_run={rec_tools_r} read_recorded={not not_recorded} "
-            f"read_step={'present' if r_step else 'MISSING'} result={r_res[:200]!r} "
-            f"real_reflection={is_real_echo(r_res)} mock_sentinel={is_mock(r_res)}")
+
+        # 005a — E-2's ACTUAL claim, and it is deterministic: a tool the registry
+        # classifies side_effecting=FALSE is never recorded and never mocked. Asserted
+        # over the recorded set of the WHOLE run, which does not depend on any single
+        # step row landing.
+        rec("T-S74-005a read-only NOT recorded/mocked: a provably read-only GET tool "
+            "(side_effecting=false) is never intercepted by the seam under record",
+            READ not in rec_tools_r,
+            f"recorded_tools_in_record_run={rec_tools_r} (must exclude {READ}; "
+            f"the write+opaque tools ARE expected here)")
+
+        # 005b — the other half: the read really reached /echo. This reads the tool
+        # step's persisted row, and that row is NOT reliably there: the durable
+        # producer DROPS a tool step's `completed` update when tool calls finish out
+        # of step order (StepEmitter.emit skips `completed` when step_number <=
+        # bookmark.last_completed_step — sdk/agentshield_sdk/durable.py). With the
+        # LLM calling read+opaque in one turn, whichever finishes second strands the
+        # first at `running` with result=None. That is a REAL pre-existing producer
+        # bug, not an E-2 seam bug — and it also silently drops that step's
+        # `recorded_side_effects`, which is why this stays a hard FAIL rather than
+        # being relaxed: a dropped recording makes an `occurs:"never"` assertion pass
+        # for the wrong reason. Reported, not papered over.
+        if r_step is None:
+            rec("T-S74-005b read-only DELIVERED for real under record (real echo "
+                "reflection on the persisted tool step)",
+                False,
+                f"tool:{READ} has NO completed run_step — it is stranded at 'running' "
+                f"(steps={[(s.get('name'), s.get('status')) for s in (steps_r or [])]}). "
+                f"Root cause is the durable producer, NOT the seam: StepEmitter.emit "
+                f"drops an out-of-order `completed` update (durable.py bookmark "
+                f"high-water mark) when parallel tool calls finish out of step order. "
+                f"005a already proves the seam did not intercept this tool.")
+        else:
+            rec("T-S74-005b read-only DELIVERED for real under record (real echo "
+                "reflection on the persisted tool step)",
+                is_real_echo(r_res) and not is_mock(r_res),
+                f"result={r_res[:200]!r} real_reflection={is_real_echo(r_res)} "
+                f"mock_sentinel={is_mock(r_res)}")
 
         # ---- T-S74-006: fail-closed seam on the OPAQUE tool under RECORD ----
         o_step = tool_step(steps_r, OPAQUE)
@@ -760,8 +795,13 @@ done <<< "$RES"
 # Completeness gate: a suite that silently stops early must NEVER read as green.
 # FAIL=0 is only a pass if every gate assertion actually RAN — an exception, an early
 # return, or a truncated result file otherwise produces "0 failures" on a half-run gate.
+# REQUIRED_IDS is the ONE source of truth for "did the gate run in full". A separate
+# hardcoded case COUNT was tried alongside this and immediately drifted (splitting 005
+# into 005a/005b silently broke it) — a count is a weaker restatement of this same
+# claim that cannot say WHICH case vanished. Add a case here and nowhere else.
+REQUIRED_IDS="001 002 003 004 005a 005b 006 007 008 009 010"
 MISSING=""
-for id in 001 002 003 004 005 006 007 008 009 010; do
+for id in $REQUIRED_IDS; do
   echo "$RES" | grep -q "T-S74-$id" || MISSING="$MISSING T-S74-$id"
 done
 if [ -n "$MISSING" ]; then
@@ -770,7 +810,7 @@ if [ -n "$MISSING" ]; then
   echo "  --- driver log tail (why it stopped) ---"
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S74-COMPLETE every gate assertion ran (001-010, none skipped)"
+  echo "PASS  T-S74-COMPLETE every gate assertion ran (001-010 incl. 005a/005b, none skipped)"
   PASS=$((PASS+1))
 fi
 
@@ -787,15 +827,8 @@ if [ "$PASS" -eq 0 ]; then
   echo "❌ Suite 74 INCONCLUSIVE (no assertions ran)"
   exit 1
 fi
-# A crashed/early-returned driver writes only the cases it reached; counting whatever
-# landed then reported PASS=5 FAIL=0 ✅ while six cases (incl. the two that were
-# failing) silently never ran. Assert the full census: the gate is green only when
-# EVERY case reported. Update EXPECTED_CASES when adding/removing a case.
-EXPECTED_CASES=11
-TOTAL=$((PASS + FAIL))
-if [ "$TOTAL" -ne "$EXPECTED_CASES" ]; then
-  echo "❌ Suite 74 INCOMPLETE: only $TOTAL/$EXPECTED_CASES cases reported —"
-  echo "   the driver did not run every case (crash / early return). A partial run is NOT a pass."
-  exit 1
-fi
-echo "✅ Suite 74 PASSED ($TOTAL/$EXPECTED_CASES cases)"
+# The T-S74-COMPLETE gate above is the completeness assertion (a crashed/early-returned
+# driver writes only the cases it reached — that once reported PASS=5 FAIL=0 ✅ while
+# six cases, including the failing ones, silently never ran). It fails the run by name,
+# so reaching here with FAIL=0 means every REQUIRED_IDS case really reported.
+echo "✅ Suite 74 PASSED ($PASS assertions, all $(echo $REQUIRED_IDS | wc -w | tr -d ' ') required cases reported)"

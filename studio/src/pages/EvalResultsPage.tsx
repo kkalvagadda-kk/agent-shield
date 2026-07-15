@@ -495,6 +495,15 @@ function ResultRow({
                   {r.judge_reasoning ?? "—"}
                 </p>
               </div>
+              {/* Eval v2 E-3 — the job spec this run was fired with. `trigger_payload`
+                  is the row's own record of what was ACTUALLY fed to the run (written
+                  by the eval-runner's scheduled branch, present on fail-closed rows
+                  too); `detail.job_spec` is the score door's echo of the authored spec,
+                  read for a row recorded before that column was written. Renders
+                  nothing for the other eval families, which fire no job spec. */}
+              <JobSpecEvidence
+                jobSpec={r.trigger_payload ?? r.eval_detail?.job_spec ?? null}
+              />
               {r.eval_detail && isWorkflowDetail(r.eval_detail) ? (
                 <WorkflowEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
               ) : r.eval_detail ? (
@@ -505,6 +514,33 @@ function ResultRow({
         </tr>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled (Eval v2 E-3) job-spec evidence: WHAT the eval actually fired. The job
+// spec is fed to the run as its `input_payload` (+ `trigger_type='schedule'` /
+// `trigger_payload`) — the identical production schedule shape — so this block is
+// the answer to "is this what the nightly job really runs?".
+//
+// The side-effect evidence ("what would have been sent") is the E-2 panel below,
+// reused as-is: a scheduled result renders the job spec that went IN and the recorded
+// calls that would have come OUT.
+// ---------------------------------------------------------------------------
+function JobSpecEvidence({ jobSpec }: { jobSpec: Record<string, unknown> | null }) {
+  if (!jobSpec || Object.keys(jobSpec).length === 0) return null;
+  return (
+    <div data-testid="job-spec-evidence">
+      <p className="font-semibold text-slate-600 mb-1">
+        Job spec
+        <span className="ml-2 text-[10px] font-normal text-slate-400 uppercase tracking-wide">
+          fed as input_payload
+        </span>
+      </p>
+      <pre className="text-[11px] font-mono text-slate-700 whitespace-pre-wrap bg-white rounded p-2 border border-slate-100 overflow-x-auto">
+        {JSON.stringify(jobSpec, null, 2)}
+      </pre>
+    </div>
   );
 }
 

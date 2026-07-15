@@ -219,12 +219,12 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.184"
+REGISTRY_API_TAG="0.2.185"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
 STUDIO_TAG="0.1.140"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.47"
+DECLARATIVE_RUNNER_TAG="0.1.48"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

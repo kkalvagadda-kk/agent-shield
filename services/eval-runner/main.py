@@ -342,30 +342,85 @@ def _fail_closed_record(
     idx: int, input_text: str, expected: str, reason: str,
     *, run_id: str | None = None, response: str = "",
     trajectory: list[dict[str, Any]] | None = None,
+    trigger_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fail-closed result row for a durable OR workflow item that could not be
-    scored on a real trajectory / member path (poll timeout / empty trajectory /
-    incomplete run tree / door unavailable). Never a fake pass: passed=False, no
-    dimension_scores. One fail-closed builder shared by both mode branches."""
+    """Fail-closed result row for a durable, scheduled OR workflow item that could
+    not be scored on a real trajectory / member path (poll timeout / empty trajectory
+    / incomplete run tree / door unavailable). Never a fake pass: passed=False, no
+    dimension_scores. One fail-closed builder shared by every mode branch.
+
+    ``trigger_payload`` (E-3) is the job spec the run was fed. It is recorded on the
+    FAILED row too, so the results UI can always show WHAT was fired even when the
+    item could not be scored — a fail-closed row with no evidence is unreadable."""
     detail: dict[str, Any] = {"reason": reason}
     if trajectory is not None:
         detail["actual_trajectory"] = trajectory
-    return {
+    record: dict[str, Any] = {
+        "dataset_item_idx": idx,
+        "input_message": input_text,
+        "expected_output": expected or None,
+        "response": response,
+        "judge_score": 0.0,
+        "judge_reasoning": reason,
         "passed": False,
-        "score": 0.0,
-        "record": {
-            "dataset_item_idx": idx,
-            "input_message": input_text,
-            "expected_output": expected or None,
-            "response": response,
-            "judge_score": 0.0,
-            "judge_reasoning": reason,
-            "passed": False,
-            "dimension_scores": None,
-            "eval_detail": detail,
-            "run_id": run_id,
-        },
+        "dimension_scores": None,
+        "eval_detail": detail,
+        "run_id": run_id,
     }
+    if trigger_payload is not None:
+        record["trigger_payload"] = trigger_payload
+    return {"passed": False, "score": 0.0, "record": record}
+
+
+async def _call_score_api_run(
+    client: httpx.AsyncClient,
+    mode: str,
+    item: dict[str, Any],
+    input_text: str,
+    response_text: str,
+    run_id: str,
+    actual_trajectory: list[dict[str, Any]] | None,
+    recorded_side_effects: list[dict[str, Any]],
+) -> tuple[float, dict[str, float], dict[str, Any]] | None:
+    """POST the single scoring door for a RUN-shaped item (`durable` or `scheduled`
+    — both score one real run's response + trajectory + recorded side effects).
+    Returns (composite, dimension_scores, detail) or None if the door is unavailable.
+
+    ``mode`` is an EXPLICIT parameter — the door's discriminator, never inferred from
+    the item's keys. ``actual_trajectory=None`` means "this run left no run_steps to
+    project" (a reactive-inner schedule); its ABSENCE from the body is the door's
+    explicit reactive-inner signal, which is why None is omitted rather than sent as
+    an empty list (an empty list would read as a durable run that did nothing).
+
+    These dimensions are deterministic — there is NO keyword fallback; a door failure
+    is fail-closed at the caller."""
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "item": item,
+        "input": input_text,
+        "response": response_text,
+        "run_id": run_id,
+        # E-2: what the delivery seam recorded instead of delivering →
+        # scored by `judge.score_side_effects` (the `side_effect` dim).
+        "recorded_side_effects": recorded_side_effects,
+    }
+    if actual_trajectory is not None:
+        payload["actual_trajectory"] = actual_trajectory
+    try:
+        resp = await client.post(
+            "/api/v1/playground/eval/score",
+            json=payload,
+            headers=_EVAL_HEADERS,
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            dims = {k: float(v) for k, v in (data.get("dimension_scores") or {}).items()}
+            return float(data["composite"]), dims, (data.get("detail") or {})
+        logger.warning("%s eval/score returned %d: %s", mode, resp.status_code, resp.text[:300])
+    except Exception as exc:
+        logger.warning("%s eval/score call failed: %s", mode, exc)
+    return None
 
 
 async def _call_score_api_durable(
@@ -377,35 +432,11 @@ async def _call_score_api_durable(
     actual_trajectory: list[dict[str, Any]],
     recorded_side_effects: list[dict[str, Any]],
 ) -> tuple[float, dict[str, float], dict[str, Any]] | None:
-    """Score a durable item via the single scoring door mode=durable. Returns
-    (composite, dimension_scores, detail) or None if the door is unavailable.
-    Durable trajectory/tool/side-effect dims are deterministic — there is NO keyword
-    fallback; a door failure is fail-closed at the caller."""
-    try:
-        resp = await client.post(
-            "/api/v1/playground/eval/score",
-            json={
-                "mode": "durable",
-                "item": item,
-                "input": input_text,
-                "response": response_text,
-                "run_id": run_id,
-                "actual_trajectory": actual_trajectory,
-                # E-2: what the delivery seam recorded instead of delivering →
-                # scored by `judge.score_side_effects` (the `side_effect` dim).
-                "recorded_side_effects": recorded_side_effects,
-            },
-            headers=_EVAL_HEADERS,
-            timeout=60.0,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            dims = {k: float(v) for k, v in (data.get("dimension_scores") or {}).items()}
-            return float(data["composite"]), dims, (data.get("detail") or {})
-        logger.warning("durable eval/score returned %d: %s", resp.status_code, resp.text[:300])
-    except Exception as exc:
-        logger.warning("durable eval/score call failed: %s", exc)
-    return None
+    """Score a durable item via the single scoring door mode=durable."""
+    return await _call_score_api_run(
+        client, "durable", item, input_text, response_text, run_id,
+        actual_trajectory, recorded_side_effects,
+    )
 
 
 async def _run_durable_item(
@@ -519,6 +550,312 @@ async def _run_durable_item(
             "dimension_scores": dimension_scores,
             "eval_detail": detail,
             "run_id": run_id,
+        },
+    }
+
+
+async def _drive_reactive_run(client: httpx.AsyncClient, run_id: str, idx: int) -> str:
+    """Drive a REAL reactive playground run to its response text.
+
+    A reactive run only EXECUTES when its stream is opened (routers/playground.py
+    `_stream_reactive` posts to the agent's `/chat` from inside the SSE generator), so
+    consuming the stream is the run, not just an observation of it. Falls back to
+    polling the run record's `output_text` when the stream yielded no text (the server
+    stores it via `_complete_run` after the stream ends), and surfaces a stream error
+    as the response so a broken run is scored on the error, never on silence.
+
+    ONE reactive driver, shared by the plain reactive branch and E-3's reactive-inner
+    scheduled branch — the alternative (a second copy in the scheduled path) is exactly
+    the fork the eval-v2 parity bar forbids."""
+    response_text = ""
+    error_msg = ""
+    try:
+        async with client.stream(
+            "GET",
+            f"/api/v1/playground/runs/{run_id}/stream",
+            headers={"Accept": "text/event-stream"},
+        ) as stream:
+            async for line in stream.aiter_lines():
+                if line.startswith("data:"):
+                    try:
+                        payload = json.loads(line[5:].strip())
+                        if payload.get("event") == "text_delta":
+                            response_text += payload.get("content", "")
+                        elif payload.get("event") == "error":
+                            error_msg = payload.get("message", "unknown error")
+                            logger.warning("item=%d stream error event: %s", idx, error_msg)
+                        elif payload.get("event") == "done":
+                            break
+                    except json.JSONDecodeError:
+                        pass
+    except Exception as exc:
+        logger.warning("item=%d stream error: %s", idx, exc)
+        error_msg = str(exc)
+
+    # Fallback: if stream yielded no text, poll the run record for output_text.
+    # The server stores output_text via _complete_run after the stream ends.
+    if not response_text and run_id:
+        for _attempt in range(6):
+            await asyncio.sleep(3)
+            try:
+                poll_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
+                if poll_resp.status_code == 200:
+                    run_data = poll_resp.json()
+                    if run_data.get("output_text"):
+                        response_text = run_data["output_text"]
+                        logger.info(
+                            "item=%d recovered output_text from run record (len=%d)",
+                            idx, len(response_text),
+                        )
+                        break
+                    if run_data.get("status") in ("completed", "failed"):
+                        break
+            except Exception:
+                pass
+
+    # If still no text but got an error, use it as the response
+    if not response_text and error_msg:
+        response_text = f"[ERROR] {error_msg}"
+    return response_text
+
+
+# ---------------------------------------------------------------------------
+# Eval v2 E-3 — scheduled eval (MODE=scheduled): fire the item's JOB SPEC through
+# the shared sandbox run door with the identical production scheduled shape
+# (`input_payload=job_spec` + `trigger_type='schedule'` + `trigger_payload=job_spec`)
+# under E-2's record seam, then score the REAL run via the single door
+# mode=scheduled. Fire ONCE — the eval does not wait for cron; the realism is the
+# job-spec shape + the shared dispatch + the record seam, not the timer.
+# ---------------------------------------------------------------------------
+async def _resolve_inner_shape(client: httpx.AsyncClient) -> str | None:
+    """Read the scheduled agent's INNER execution shape (`reactive` | `durable`) off
+    the registry — the one fact that decides how a job-spec run is driven and scored.
+
+    Resolved ONCE per eval run (an agent cannot change shape mid-run) and passed
+    EXPLICITLY to every item rather than re-sniffed per item. Returns None when the
+    agent is unreadable or carries an unusable shape, which fail-closes every item:
+    defaulting to 'reactive' would silently score a durable agent response-only
+    (a quiet hole), and defaulting to 'durable' would hang every reactive run in the
+    poll loop. Neither guess is safe, so we refuse."""
+    try:
+        resp = await client.get(f"/api/v1/agents/{AGENT_NAME}", headers=_EVAL_HEADERS)
+        if resp.status_code == 200:
+            shape = (resp.json() or {}).get("execution_shape")
+            if shape in ("reactive", "durable"):
+                logger.info("scheduled: agent %s inner shape=%s", AGENT_NAME, shape)
+                return shape
+            logger.warning(
+                "scheduled: agent %s has unusable execution_shape=%r", AGENT_NAME, shape,
+            )
+            return None
+        logger.warning("scheduled: GET /agents/%s returned %d", AGENT_NAME, resp.status_code)
+    except Exception as exc:
+        logger.warning("scheduled: GET /agents/%s failed: %s", AGENT_NAME, exc)
+    return None
+
+
+def _scheduled_driving_message(job_spec: dict[str, Any]) -> str:
+    """Resolve the job spec's driving turn with the IDENTICAL line the real production
+    scheduled door uses (`routers/internal.py`: `message = effective_payload.get(
+    "message") or json.dumps(effective_payload)`), so the eval feeds the agent the
+    same text a real schedule fire would.
+
+    Only the reactive-inner path needs this explicitly: the durable dispatch carries
+    `input_payload` to the runner, which derives the same turn from the same shape
+    (`declarative-runner/main.py`: `input_payload.get("message") or json.dumps(...)`
+    else DAEMON_KICKOFF)."""
+    if not job_spec:
+        return ""
+    return job_spec.get("message") or json.dumps(job_spec)
+
+
+async def _call_score_api_scheduled(
+    client: httpx.AsyncClient,
+    item: dict[str, Any],
+    input_text: str,
+    response_text: str,
+    run_id: str,
+    actual_trajectory: list[dict[str, Any]] | None,
+    recorded_side_effects: list[dict[str, Any]],
+) -> tuple[float, dict[str, float], dict[str, Any]] | None:
+    """Score a scheduled item via the single scoring door mode=scheduled — the SAME
+    POST as the durable door, one discriminator apart (no scheduled scoring path).
+
+    `actual_trajectory` is None for a reactive-inner schedule; the door reads that
+    absence as the reactive-inner signal and scores `response` + `side_effect` only."""
+    return await _call_score_api_run(
+        client, "scheduled", item, input_text, response_text, run_id,
+        actual_trajectory, recorded_side_effects,
+    )
+
+
+async def _run_scheduled_item(
+    client: httpx.AsyncClient, item: dict[str, Any], idx: int, inner_shape: str | None,
+) -> dict[str, Any]:
+    """Evaluate one scheduled dataset item end-to-end (E-3).
+
+    Fires the item's `job_spec` through the SHARED sandbox run door with the identical
+    production scheduled shape — `input_payload=job_spec`, `trigger_type='schedule'`,
+    `trigger_payload=job_spec` — under `eval_mode=record` when the item asserts side
+    effects, so the write is recorded + mocked instead of really sending. Durable-inner
+    runs are polled to terminal and projected with E-1's `_project_trajectory`; the
+    recorded calls come off the SAME real `run_steps` via E-2's
+    `_project_recorded_side_effects`. Scored via the single door mode=scheduled.
+
+    Fail-closed on EVERY path that cannot be scored on a real run — unknown inner
+    shape, an un-recordable reactive-inner record request, run-create failure, poll
+    timeout, empty durable trajectory, required-but-missing recording, or an
+    unavailable door. Never a fabricated pass.
+
+    Returns {passed, score, record}; the record carries `trigger_payload` (the job
+    spec that was actually fired) whatever the outcome."""
+    job_spec = item.get("job_spec") or {}
+    expected = item.get("expected_output") or ""
+    input_text = _scheduled_driving_message(job_spec)
+    expects_side_effects = bool(item.get("expected_side_effects"))
+
+    if inner_shape is None:
+        return _fail_closed_record(
+            idx, input_text, expected,
+            "could not resolve the scheduled agent's execution_shape — the inner shape "
+            "decides how the run is driven and scored (fail-closed: never guessed)",
+            trigger_payload=job_spec,
+        )
+
+    # FAIL-CLOSED (safety, before anything fires): E-2's record seam is armed ONLY on
+    # the durable dispatch body — the declarative-runner/SDK `/run` + `/resume` carry
+    # `eval_mode` and arm the ContextVar the governed-tool delivery edge reads, while
+    # the reactive `/chat` path threads none. So a reactive-inner agent CANNOT record:
+    # asking for `eval_mode=record` would be silently ignored and the run would DELIVER
+    # the real email / ticket / payment — the one thing E-3 forbids. Refuse BEFORE
+    # creating the run rather than discovering an empty recording afterwards (by then
+    # the side effect has already happened). Recorded as an honest FAILED item.
+    if expects_side_effects and inner_shape != "durable":
+        return _fail_closed_record(
+            idx, input_text, expected,
+            "item asserts side effects but the agent is reactive-inner: the record seam "
+            "is armed only on the durable /run dispatch, so this eval would DELIVER the "
+            "real side effect (fail-closed — the run was never fired)",
+            trigger_payload=job_spec,
+        )
+
+    # The IDENTICAL production job-spec shape: the per-schedule job spec IS the run's
+    # `input_payload` (+ trigger_type/trigger_payload), not an eval-only payload. Both
+    # doors converge on the same dispatch, so what runs here is what runs on the timer.
+    run_body: dict[str, Any] = {
+        "agent_name": AGENT_NAME,
+        "input_message": input_text,
+        "input_payload": job_spec,
+        "trigger_type": "schedule",
+        "trigger_payload": job_spec,
+        "execution_shape": inner_shape,
+        # E-2: item-driven and EXPLICIT — an item asserting nothing stays `live`.
+        "eval_mode": "record" if expects_side_effects else "live",
+    }
+    if AGENT_VERSION_ID:
+        run_body["agent_version_id"] = AGENT_VERSION_ID
+
+    try:
+        run_resp = await client.post("/api/v1/playground/runs", json=run_body, headers=_EVAL_HEADERS)
+        run_resp.raise_for_status()
+        run_id = run_resp.json().get("run_id")
+    except Exception as exc:
+        logger.warning("item=%d scheduled run-create failed: %s", idx, exc)
+        return _fail_closed_record(
+            idx, input_text, expected, f"scheduled run-create failed: {exc}",
+            trigger_payload=job_spec,
+        )
+    logger.info(
+        "item=%d scheduled run_id=%s inner=%s eval_mode=%s",
+        idx, run_id, inner_shape, run_body["eval_mode"],
+    )
+
+    actual_trajectory: list[dict[str, Any]] | None = None
+    recorded_side_effects: list[dict[str, Any]] = []
+
+    if inner_shape == "durable":
+        terminal, run_data, steps = await _poll_durable(client, run_id)
+        if not terminal:
+            return _fail_closed_record(
+                idx, input_text, expected,
+                f"scheduled run did not reach terminal status within {_DURABLE_POLL_TIMEOUT:.0f}s",
+                run_id=run_id, trigger_payload=job_spec,
+            )
+        # E-1's projection, verbatim — the scheduled run leaves the SAME run_steps.
+        actual_trajectory = _project_trajectory(steps)
+        if not actual_trajectory:
+            return _fail_closed_record(
+                idx, input_text, expected,
+                "scheduled run produced no steps (empty trajectory)",
+                run_id=run_id, trigger_payload=job_spec,
+            )
+        response_text = (run_data or {}).get("output_text") or ""
+        _assert_expected_approvals(idx, item, actual_trajectory)
+        # E-2's projection, verbatim — off the SAME real run_steps rows.
+        recorded_side_effects = _project_recorded_side_effects(steps)
+    else:
+        # Reactive-inner: no run_steps exist to project, so `actual_trajectory` stays
+        # None (the door's explicit reactive-inner signal) and the item is scored on
+        # response only. Nothing was recorded because nothing could be (guarded above).
+        response_text = await _drive_reactive_run(client, run_id, idx)
+
+    if _requires_recording(item) and not recorded_side_effects:
+        # FAIL-CLOSED (E-2's rule, reused): the item asserts a side effect the run had
+        # to DELIVER, but the record-mode run recorded nothing — the tool was never
+        # called or the seam failed to record it. Either way the side effect is
+        # UNVERIFIABLE, so the item is recorded failed rather than scored: a weighted
+        # mean could otherwise let a strong response score carry it to a pass.
+        return _fail_closed_record(
+            idx, input_text, expected,
+            "item asserts side effects but the eval_mode=record run recorded none "
+            "(side effect unverifiable — fail-closed)",
+            run_id=run_id, response=response_text, trajectory=actual_trajectory,
+            trigger_payload=job_spec,
+        )
+    if recorded_side_effects:
+        logger.info(
+            "item=%d recorded %d side effect(s) NOT delivered: %s",
+            idx, len(recorded_side_effects),
+            [r.get("tool") for r in recorded_side_effects],
+        )
+
+    scored = await _call_score_api_scheduled(
+        client, item, input_text, response_text, run_id, actual_trajectory,
+        recorded_side_effects,
+    )
+    if scored is None:
+        return _fail_closed_record(
+            idx, input_text, expected, "eval/score door unavailable for scheduled item",
+            run_id=run_id, response=response_text, trajectory=actual_trajectory,
+            trigger_payload=job_spec,
+        )
+
+    composite, dimension_scores, detail = scored
+    passed = composite >= _JUDGE_PASS_THRESHOLD
+    logger.info(
+        "item=%d scheduled scored composite=%.2f dims=%s passed=%s",
+        idx, composite, dimension_scores, passed,
+    )
+    return {
+        "passed": passed,
+        "score": composite,
+        "record": {
+            "dataset_item_idx": idx,
+            "input_message": input_text,
+            "expected_output": expected or None,
+            "response": response_text,
+            "judge_score": composite,
+            "judge_reasoning": (
+                f"scheduled eval (mode=scheduled, inner={inner_shape}): dims={dimension_scores}"
+            ),
+            "passed": passed,
+            "dimension_scores": dimension_scores,
+            "eval_detail": detail,
+            "run_id": run_id,
+            # The job spec that was actually fired (== the run's input_payload /
+            # trigger_payload). Persisted on `eval_run_results.trigger_payload` and
+            # rendered as the results' "Job spec" evidence.
+            "trigger_payload": job_spec,
         },
     }
 
@@ -761,7 +1098,36 @@ async def run_eval() -> None:
 
         results: list[dict[str, Any]] = []
 
+        # Eval v2 E-3: the scheduled agent's INNER shape decides how every job-spec
+        # run is driven + scored. Read ONCE here and passed explicitly to each item —
+        # an agent cannot change shape mid-eval, and a per-item re-read would be the
+        # same fact fetched N times. None ⇒ every item fail-closes (never guessed).
+        inner_shape: str | None = None
+        if MODE == "scheduled" and not WORKFLOW_ID:
+            inner_shape = await _resolve_inner_shape(client)
+
         for idx, item in enumerate(items):
+            # Eval v2 E-3: scheduled items fire their `job_spec` through the shared
+            # sandbox run door with the identical production scheduled shape, under
+            # E-2's record seam, and are scored via the single door mode=scheduled.
+            # Ahead of the durable branch: a scheduled agent may be durable-inner, and
+            # the dataset's authored mode — not the executable's shape — is what
+            # declares the eval's intent (the launch guard already proved them
+            # compatible).
+            if MODE == "scheduled" and not WORKFLOW_ID:
+                outcome = await _run_scheduled_item(client, item, idx, inner_shape)
+                results.append({"passed": outcome["passed"], "score": outcome["score"]})
+                try:
+                    rec_resp = await client.post(
+                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                        json=outcome["record"],
+                        headers={"X-User-Sub": "eval-runner"},
+                    )
+                    rec_resp.raise_for_status()
+                except Exception as exc:
+                    logger.warning("item=%d could not record scheduled result: %s", idx, exc)
+                continue
+
             # Eval v2 E-1: durable items run through the durable branch — a REAL
             # durable playground run, real run_steps → actual_trajectory, scored via
             # the single door mode=durable. Workflow eval keeps its own path.
@@ -803,9 +1169,9 @@ async def run_eval() -> None:
             input_text = item.get("input") or item.get("input_message") or ""
             expected = item.get("expected_output", "")
 
-            # 2. Execute: agent playground mode (workflow + durable handled above).
-            # Start a playground run + collect the SSE stream.
-            response_text = ""
+            # 2. Execute: agent playground mode (workflow + durable + scheduled
+            # handled above). Start a playground run, then drive it (`_drive_reactive_
+            # run` consumes the SSE stream — which is what actually executes the run).
             run_id = None
             run_body: dict[str, Any] = {
                 "agent_name": AGENT_NAME,
@@ -844,52 +1210,9 @@ async def run_eval() -> None:
                     pass
                 continue
 
-            # Collect SSE stream response
-            error_msg = ""
-            try:
-                async with client.stream(
-                    "GET",
-                    f"/api/v1/playground/runs/{run_id}/stream",
-                    headers={"Accept": "text/event-stream"},
-                ) as stream:
-                    async for line in stream.aiter_lines():
-                        if line.startswith("data:"):
-                            try:
-                                payload = json.loads(line[5:].strip())
-                                if payload.get("event") == "text_delta":
-                                    response_text += payload.get("content", "")
-                                elif payload.get("event") == "error":
-                                    error_msg = payload.get("message", "unknown error")
-                                    logger.warning("item=%d stream error event: %s", idx, error_msg)
-                                elif payload.get("event") == "done":
-                                    break
-                            except json.JSONDecodeError:
-                                pass
-            except Exception as exc:
-                logger.warning("item=%d stream error: %s", idx, exc)
-                error_msg = str(exc)
-
-            # Fallback: if stream yielded no text, poll the run record for output_text.
-            # The server stores output_text via _complete_run after the stream ends.
-            if not response_text and run_id:
-                for _attempt in range(6):
-                    await asyncio.sleep(3)
-                    try:
-                        poll_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
-                        if poll_resp.status_code == 200:
-                            run_data = poll_resp.json()
-                            if run_data.get("output_text"):
-                                response_text = run_data["output_text"]
-                                logger.info("item=%d recovered output_text from run record (len=%d)", idx, len(response_text))
-                                break
-                            if run_data.get("status") in ("completed", "failed"):
-                                break
-                    except Exception:
-                        pass
-
-            # If still no text but got an error, use it as the response
-            if not response_text and error_msg:
-                response_text = f"[ERROR] {error_msg}"
+            # Drive the run + collect its response (the SHARED reactive driver — the
+            # same one E-3's reactive-inner scheduled branch uses).
+            response_text = await _drive_reactive_run(client, run_id, idx)
 
             # 4. Score via the single scoring door (/eval/score); keyword
             #    fallback ONLY when the judge/door is unavailable (never gated on
