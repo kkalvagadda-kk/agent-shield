@@ -1692,6 +1692,8 @@ class AgentTrigger(Base):
     # many scheduled jobs with different params. Schedule triggers only; NULL for
     # webhooks (their payload is the inbound event).
     input_payload: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    armed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)  # authorizing human (daemon)
+    approver_role: Mapped[str | None] = mapped_column(String(256), nullable=True)  # daemon approval reviewer role
     # Failure alerting (Phase 8): notify alert_email when a run for this
     # trigger completes with status=failed. alert_on_failure gates it.
     alert_email: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -564,9 +564,14 @@ async def get_workflow_run_tree(
 async def create_workflow_trigger(
     workflow_id: uuid.UUID,
     body: AgentTriggerCreate,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentTrigger:
     wf = await _get_workflow(workflow_id, db)
+    # The human who arms the workflow trigger — authorizes the standing daemon
+    # workflow run; audit reads "workflow:X (service) on behalf of {armed_by}".
+    armed_by = (user or {}).get("sub") or x_user_sub
     plaintext = None
     token_hash = None
     if body.trigger_type == "webhook":
@@ -583,6 +588,8 @@ async def create_workflow_trigger(
         alert_email=body.alert_email,
         alert_on_failure=body.alert_on_failure,
         token_hash=token_hash,
+        armed_by=armed_by,
+        approver_role=body.approver_role,
     )
     db.add(trigger)
     await db.commit()

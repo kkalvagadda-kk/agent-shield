@@ -22,6 +22,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import AsyncSessionLocal
+from identity import (
+    PrincipalResolutionError,
+    resolve_principal,
+    resolve_workflow_principal,
+)
 from models import Agent, AgentRun, AgentTrigger, CompositeWorkflow, Deployment
 from schemas import AgentRunResponse, InternalRunStartRequest
 from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
@@ -89,11 +94,19 @@ async def _dispatch_and_complete(
         from durable_dispatch import dispatch_durable_run, registry_internal_base
 
         callback = f"{registry_internal_base()}/api/v1/internal/runs/{run_id}/step-update"
+        # Target the agent's OWN pod (same as the reactive branch below and the
+        # playground/workflow-member callers), NOT dispatch_durable_run's default
+        # shared declarative-runner Service — that Service does not exist for SDK/
+        # declarative agent pods, so omitting runner_url DNS-fails and the run never
+        # reaches the pod. Scheduled/event trigger runs target the production env.
+        ns = _team_namespace(team)
+        runner_url = f"http://{agent_name}-production.{ns}.svc.cluster.local:8080"
         ok, err = await dispatch_durable_run(
             run_id=run_id,
             agent_name=agent_name,
             input_payload=input_payload,
             callback_url=callback,
+            runner_url=runner_url,
         )
         if not ok:
             await _mark_agent_run_failed(run_id, err, agent_name, trigger_id)
@@ -163,21 +176,75 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
     if not member_names:
         raise HTTPException(status_code=422, detail="Workflow has no members to run.")
 
-    # Resolve the run input. The scheduler fires with only a trigger_id (no
-    # payload), so for schedule triggers we pull the per-trigger `input_payload`
-    # — the reusable "job spec" that parameterizes this workflow's scheduled job.
-    # The webhook path already sends the event body as trigger_payload.
-    effective_payload = body.trigger_payload
-    if effective_payload is None and body.trigger_id is not None:
+    # Load the trigger once (if any) — reused for the job-spec payload AND the identity
+    # decision below (mirrors the agent path in start_internal_run). The scheduler fires
+    # with only a trigger_id (no payload), so for schedule triggers we pull the per-trigger
+    # `input_payload` — the reusable "job spec". The webhook path already sends the event
+    # body as trigger_payload.
+    trig = None
+    if body.trigger_id is not None:
         trig = (await db.execute(
             select(AgentTrigger).where(AgentTrigger.id == body.trigger_id)
         )).scalar_one_or_none()
-        if trig is not None and trig.input_payload:
-            effective_payload = trig.input_payload
+
+    effective_payload = body.trigger_payload
+    if effective_payload is None and trig is not None and trig.input_payload:
+        effective_payload = trig.input_payload
 
     message = ""
     if effective_payload:
         message = effective_payload.get("message") or json.dumps(effective_payload)
+
+    # Resolve the acting principal for the workflow run (WS-2 T016 / D1) — the ONE identity
+    # decision, shared with the agent path but sourcing the DAEMON service subject by the
+    # workflow convention (workflows have no `agent_identities` row). No JWT caller on a
+    # trigger-driven run → caller=None (never sniff agent_class): a daemon workflow runs
+    # under the WORKFLOW's service identity (user_id empty — no live human); a user_delegated
+    # workflow runs under the arming human (trigger.armed_by). This overrides the generic
+    # transport `body.run_by` (e.g. "serviceaccount:scheduler") the dispatcher supplied.
+    # Members INHERIT this run_by via workflow_orchestrator._run_step (child.run_by =
+    # parent.run_by) — that inheritance IS the D1 actor_chain at the audit/run-tree layer;
+    # propagating the workflow's class onto each MEMBER POD's OPA input is the deferred
+    # identity-propagation initiative (the member pod builds its own OPA input from its env).
+    # An interactive builder test-run keeps the caller via composite_workflows.start_workflow_run.
+    try:
+        principal = await resolve_workflow_principal(wf, caller=None, trigger=trig, db=db)
+    except PrincipalResolutionError as exc:
+        failed = AgentRun(
+            agent_name=wf.name,
+            input=message[:4000] if message else None,
+            context="production",
+            status="failed",
+            trigger_type=body.trigger_type,
+            trigger_payload=effective_payload,
+            run_by=body.run_by,
+            team=wf.team,
+            workflow_id=wf.id,
+            trigger_id=body.trigger_id,
+            error_message=f"identity resolution failed (fail-closed): {exc}",
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(failed)
+        await db.commit()
+        await db.refresh(failed)
+        try:
+            from alerting import dispatch_failure_alert
+
+            await dispatch_failure_alert(
+                db,
+                trigger_id=body.trigger_id,
+                agent_name=wf.name,
+                run_id=str(failed.id),
+                error_message=failed.error_message,
+            )
+        except Exception as alert_exc:  # alerting must never break run recording
+            logger.error("failure-alert dispatch errored for denied workflow run %s: %s",
+                         failed.id, alert_exc)
+        logger.warning(
+            "start_internal_run: WORKFLOW DENY (fail-closed) run=%s workflow=%s trigger=%s reason=%s",
+            failed.id, wf.name, body.trigger_type, exc,
+        )
+        return failed
 
     run = AgentRun(
         agent_name=wf.name,
@@ -186,9 +253,15 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         status="queued",
         trigger_type=body.trigger_type,
         trigger_payload=effective_payload,
-        run_by=body.run_by,
+        # Daemon workflow → the workflow's SERVICE identity subject; user_delegated → the
+        # arming human. Members inherit this in _run_step (D1 actor_chain).
+        run_by=principal.run_by,
         team=wf.team,
         workflow_id=wf.id,
+        # Link the parent workflow run to its trigger so a daemon workflow member's
+        # parked approval can resolve armed_by + reviewer-role config at read time
+        # (WS-2 T011 — member walks parent_run_id → this parent → trigger_id).
+        trigger_id=body.trigger_id,
     )
     db.add(run)
     await db.flush()
@@ -197,7 +270,7 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
     trace_id = trace_create_run(
         run_id=str(run.id),
         agent_name=wf.name,
-        user_id=body.run_by or "system",
+        user_id=principal.run_by or "system",
         context="production",
         input_message=message[:4000] if message else "",
     )
@@ -306,21 +379,72 @@ async def start_internal_run(
             detail=f"Agent '{body.agent_name}' has no running deployment to dispatch to.",
         )
 
-    # Resolve the run input. The scheduler fires with only a trigger_id (no
-    # payload), so for schedule triggers we pull the per-trigger `input_payload`
-    # — the reusable "job spec" that parameterizes this agent's scheduled job.
-    # The webhook path already sends the event body as trigger_payload.
-    effective_payload = body.trigger_payload
-    if effective_payload is None and body.trigger_id is not None:
+    # Load the trigger once (if any) — reused for both the job-spec payload and
+    # the identity decision below. The webhook path sends the event body as
+    # trigger_payload; the scheduler fires with only a trigger_id (no payload), so
+    # for those we pull the per-trigger `input_payload` (the reusable "job spec").
+    trig = None
+    if body.trigger_id is not None:
         trig = (await db.execute(
             select(AgentTrigger).where(AgentTrigger.id == body.trigger_id)
         )).scalar_one_or_none()
-        if trig is not None and trig.input_payload:
-            effective_payload = trig.input_payload
+
+    effective_payload = body.trigger_payload
+    if effective_payload is None and trig is not None and trig.input_payload:
+        effective_payload = trig.input_payload
 
     message = ""
     if effective_payload:
         message = effective_payload.get("message") or json.dumps(effective_payload)
+
+    # Resolve the acting principal — the ONE identity decision (WS-2 R3), shared
+    # with the interactive `/chat` path. No JWT caller on a trigger-driven run, so
+    # pass caller=None explicitly (never sniff agent_class): a daemon runs under its
+    # SERVICE identity (user_id empty — no live human); a user_delegated run runs
+    # under the arming human (trigger.armed_by). resolve_principal RAISES for a
+    # user_delegated trigger with no armer, or a daemon with no service identity —
+    # we FAIL CLOSED (record a failed run, never dispatch, never downgrade to
+    # service). The resolved principal feeds the OPA `user_identity_ok` floor:
+    # `agent_class` reaches the pod's OPA input via the deploy-time env
+    # (AGENTSHIELD_AGENT_CLASS) and `user_id` = principal.user_id (empty for a
+    # daemon trigger-run). Threading principal.user_id/trigger_type onto the pod's
+    # OPA input for the trigger dispatch is the identity-propagation initiative
+    # (the durable /run + reactive /chat runner paths set no OPA user_context yet).
+    try:
+        principal = await resolve_principal(agent, caller=None, trigger=trig, db=db)
+    except PrincipalResolutionError as exc:
+        failed = AgentRun(
+            agent_name=body.agent_name,
+            input=message[:4000] if message else None,
+            context="production",
+            status="failed",
+            trigger_type=body.trigger_type,
+            trigger_payload=effective_payload,
+            run_by=body.run_by,
+            team=agent.team,
+            error_message=f"identity resolution failed (fail-closed): {exc}",
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.add(failed)
+        await db.commit()
+        await db.refresh(failed)
+        try:
+            from alerting import dispatch_failure_alert
+
+            await dispatch_failure_alert(
+                db,
+                trigger_id=body.trigger_id,
+                agent_name=body.agent_name,
+                run_id=str(failed.id),
+                error_message=failed.error_message,
+            )
+        except Exception as alert_exc:  # alerting must never break run recording
+            logger.error("failure-alert dispatch errored for denied run %s: %s", failed.id, alert_exc)
+        logger.warning(
+            "start_internal_run: DENY (fail-closed) run=%s agent=%s trigger=%s reason=%s",
+            failed.id, body.agent_name, body.trigger_type, exc,
+        )
+        return failed
 
     run = AgentRun(
         agent_name=body.agent_name,
@@ -329,8 +453,12 @@ async def start_internal_run(
         status="running",
         trigger_type=body.trigger_type,
         trigger_payload=effective_payload,
-        run_by=body.run_by,
+        run_by=principal.run_by,
         team=agent.team,
+        # Link the run to the trigger that fired it. This is the read-time source of
+        # `armed_by` + the daemon reviewer-role config for an approval's audit display
+        # / reviewer routing (WS-2 T011, approvals.py `_derive_reviewer_audit`).
+        trigger_id=body.trigger_id,
     )
     db.add(run)
     await db.flush()
@@ -339,7 +467,7 @@ async def start_internal_run(
     trace_id = trace_create_run(
         run_id=str(run.id),
         agent_name=body.agent_name,
-        user_id=body.run_by or "system",
+        user_id=principal.run_by or "system",
         context="production",
         input_message=message[:4000] if message else "",
     )
@@ -359,8 +487,9 @@ async def start_internal_run(
     )
 
     logger.info(
-        "start_internal_run: run_id=%s agent=%s shape=%s trigger=%s by=%s",
-        run.id, body.agent_name, agent.execution_shape, body.trigger_type, body.run_by,
+        "start_internal_run: run_id=%s agent=%s class=%s shape=%s trigger=%s run_by=%s service=%s",
+        run.id, body.agent_name, principal.agent_class, agent.execution_shape,
+        body.trigger_type, principal.run_by, principal.is_service,
     )
     return run
 
@@ -422,6 +551,18 @@ async def internal_step_update(
     approval_id = uuid.UUID(body["approval_id"]) if body.get("approval_id") else None
     now = datetime.now(timezone.utc)
 
+    # `run_steps.output` is a JSONB **dict** column (models.py RunStep.output:
+    # Mapped[dict|None]) and RunStepResponse types it `dict[str, Any] | None`.
+    # It is NOT a text column — do NOT run it through `_as_text` (that helper is for
+    # the genuine text columns: AgentRun.output and output_text, below). Coercing the
+    # dict to text stored a Python-repr string ("{'tool': 'get_weather', ...}"), which
+    # made GET /agent-runs/{id}/steps fail response validation with a 500 and silently
+    # emptied the Eval v2 per-member trajectory (the eval-runner swallows the error).
+    # Accept only a dict, so the dict column can never hold a non-dict (illegal state
+    # unrepresentable) — mirrors the playground step-update writer.
+    _raw_out = body.get("output")
+    step_out = _raw_out if isinstance(_raw_out, dict) else None
+
     step = (await db.execute(
         select(RunStep).where(and_(RunStep.run_id == parsed_id, RunStep.step_number == step_number))
     )).scalar_one_or_none()
@@ -430,8 +571,8 @@ async def internal_step_update(
         step.name = step_name
         if step_status in ("completed", "failed"):
             step.completed_at = now
-        if body.get("output"):
-            step.output = _as_text(body["output"])
+        if step_out is not None:
+            step.output = step_out
         if body.get("error_message"):
             step.error_message = body["error_message"]
         if approval_id:
@@ -444,7 +585,7 @@ async def internal_step_update(
             status=step_status,
             started_at=now if step_status == "running" else None,
             completed_at=now if step_status in ("completed", "failed") else None,
-            output=_as_text(body.get("output")),
+            output=step_out,
             error_message=body.get("error_message"),
             approval_id=approval_id,
         ))

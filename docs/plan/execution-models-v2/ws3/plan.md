@@ -154,3 +154,12 @@ No orphan flags — WS-3 adds no new producers; it drives existing shared paths 
 - **Correct the doc** — TODO-2 says "no alerting"; the code disagrees (`models.py:1644`). Reason from the
   running product and fix the doc (DoD #6).
 - **declarative-runner unchanged** here (WS-1 already updated it) — don't bump its tag unless it changed.
+
+## Status — T001 re-grounding (2026-07-15, live tree)
+- **Suite = `suite-71-scheduled-e2e.sh`** (plan's 58 is taken by `suite-58-workflow-live-run.sh`; suites exist through 70). IDs `T-S71-00x`; register after suite-70.
+- **No migration.** Alembic head = **0062**. All columns present: `agent_triggers.cron_expression/timezone/input_payload/alert_email/alert_on_failure/armed_by`, `agent_runs.trigger_type/run_by`.
+- **Read-endpoint gap CLOSED — no backend task.** `GET /agents/{name}/health` (`routers/agents.py:728`, `AgentHealthResponse`) already computes `next_fire_at`/`last_run_status`/`missed_fires`/`health` for `mode=scheduled`; `getAgentHealth` (`registryApi.ts:1355`) already wraps it → T4 is **frontend-only**.
+- **`OverviewScheduled.tsx` EXISTS** → operate task = verify + fill delta (next-fire, health badge, alert-config summary), not create.
+- **Alerting SHIPPED** — `alerting.dispatch_failure_alert` invoked from `internal.py::_dispatch_and_complete` on `status=failed` → T3 verifies + corrects gap-analysis TODO-2.
+- **Bump studio only** `0.1.135 → 0.1.136`; registry-api `0.2.179` and declarative-runner `0.1.44` UNCHANGED (no backend/runner change — WS-3 drives the shared WS-0/1/2 path).
+- **Parity:** no scheduled-only dispatch fork (grep-guarded T-S71-000).

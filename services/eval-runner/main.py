@@ -45,35 +45,12 @@ _JUDGE_PASS_THRESHOLD = float(os.environ.get("JUDGE_PASS_THRESHOLD", "0.7"))
 _WORKFLOW_POLL_TIMEOUT = float(os.environ.get("WORKFLOW_POLL_TIMEOUT", "180"))
 _WORKFLOW_POLL_INTERVAL = float(os.environ.get("WORKFLOW_POLL_INTERVAL", "5"))
 
-
-async def _run_workflow_item(
-    client: httpx.AsyncClient, workflow_id: str, input_text: str
-) -> str:
-    """Trigger a workflow run and poll until completion. Returns output text."""
-    resp = await client.post(
-        f"/api/v1/workflows/{workflow_id}/runs",
-        json={"input_message": input_text, "trigger_type": "api", "run_by": "eval-runner"},
-        headers={"X-User-Sub": "eval-runner"},
-    )
-    resp.raise_for_status()
-    run_id = resp.json()["run_id"]
-
-    deadline = asyncio.get_event_loop().time() + _WORKFLOW_POLL_TIMEOUT
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(_WORKFLOW_POLL_INTERVAL)
-        try:
-            tree_resp = await client.get(
-                f"/api/v1/workflows/{workflow_id}/runs/{run_id}/tree",
-                headers={"X-User-Sub": "eval-runner"},
-            )
-            tree_resp.raise_for_status()
-            tree = tree_resp.json()
-            parent_status = tree.get("parent", {}).get("status", "")
-            if parent_status in ("completed", "failed"):
-                return tree.get("parent", {}).get("output") or ""
-        except Exception as exc:
-            logger.debug("workflow poll error for run %s: %s", run_id, exc)
-    return ""
+# Eval v2 E-1 (durable): how long to poll a durable playground run to terminal,
+# self-approving any HITL gate so the run proceeds (data-model §3). A run that
+# never reaches terminal within this window is FAIL-CLOSED (recorded failed with
+# a reason, never scored on an empty trajectory).
+_DURABLE_POLL_TIMEOUT = float(os.environ.get("DURABLE_POLL_TIMEOUT", "240"))
+_DURABLE_POLL_INTERVAL = float(os.environ.get("DURABLE_POLL_INTERVAL", "4"))
 
 
 import re
@@ -131,6 +108,535 @@ async def _call_score_api(
     return None
 
 
+# ---------------------------------------------------------------------------
+# Eval v2 E-1 — durable trajectory eval (MODE=durable)
+# ---------------------------------------------------------------------------
+_EVAL_HEADERS = {"X-User-Sub": "eval-runner"}
+
+
+# A run_step whose status is one of these is an IN-FLIGHT boundary — the tool call
+# it belongs to has NOT reached a terminal disposition yet. The durable harness
+# emits such a boundary on `on_tool_start` (status="running"); a call that then
+# parks at a HITL gate gets a SEPARATE terminal `awaiting_approval` boundary at the
+# next step number (the interrupt fires before `on_tool_end`, so the `running` row
+# is never updated to `completed`). See sdk/agentshield_sdk/durable.py `_drive`.
+_INFLIGHT_STATUSES = frozenset({"running", "pending"})
+
+
+def _collapse_tool_calls(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse the consecutive run_steps of ONE logical tool call into a single
+    trajectory entry carrying its terminal / most-significant disposition.
+
+    A single logical tool call can span MULTIPLE run_steps. When a call parks at a
+    HITL gate the durable harness emits two rows for it: a `running` boundary
+    (`on_tool_start`, no approval_id) and — because the interrupt fires before
+    `on_tool_end` — a separate `awaiting_approval` boundary (next step number,
+    carrying the approval_id). Projected one-entry-per-row, the park evidence
+    (awaiting_approval + approval_id) lands on a DIFFERENT entry than the tool's
+    first `running` boundary, so `judge.score_tool_calls` greedy-matches an
+    `expect_approval` step to the un-parked `running` entry and scores `parked:false`
+    for a gate that genuinely parked (the E-1 scoring bug).
+
+    Merge rule (class-correct, NOT a fixture special-case): an entry is folded into
+    the immediately-preceding entry iff BOTH carry the same non-null `tool` AND the
+    preceding entry's status is in-flight (`running`/`pending`). The fold advances
+    the entry to the later boundary's status and adopts its approval_id/args, while
+    NEVER clearing an approval_id already seen (park evidence is sticky). This merges
+    a call's `running`→`awaiting_approval` (or `running`→`completed`) rows into one
+    logical entry. It does NOT merge two DISTINCT completed calls of the same tool (a
+    `completed` boundary is terminal, not in-flight), nor a park followed by a
+    genuinely new call (an `awaiting_approval` prefix is terminal). Order preserved.
+    """
+    collapsed: list[dict[str, Any]] = []
+    for e in entries:
+        prev = collapsed[-1] if collapsed else None
+        if (
+            prev is not None
+            and e.get("tool") is not None
+            and prev.get("tool") == e.get("tool")
+            and prev.get("status") in _INFLIGHT_STATUSES
+        ):
+            prev["status"] = e.get("status")
+            # Sticky approval_id: keep whichever boundary of the call carried it.
+            prev["approval_id"] = prev.get("approval_id") or e.get("approval_id")
+            if e.get("args") is not None:
+                prev["args"] = e.get("args")
+            continue
+        collapsed.append(e)
+    return collapsed
+
+
+def _project_trajectory(steps: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Project run_steps rows (GET /playground/runs/{id}/steps) into the
+    `actual_trajectory` the durable scorer compares (data-model §3).
+
+    Per row: {step_number, name, status, approval_id} always; `tool` and `args`
+    only when the boundary was a tool call (the durable harness records
+    `output={"tool": <name>, "args": <call args>}` on tool/parked boundaries).
+    Node-only / final-agent boundaries carry no `tool` and are skipped by the
+    scorer's tool-list extraction — leaving them out here keeps the projection
+    faithful to the producer.
+
+    The raw rows are then collapsed so each ENTRY represents one logical tool call
+    (`_collapse_tool_calls`): a call's `running`→`awaiting_approval` rows become a
+    single entry carrying the parked disposition, so `expect_approval` scoring sees
+    the gate on the same entry it matches.
+    """
+    trajectory: list[dict[str, Any]] = []
+    for s in steps or []:
+        out = s.get("output")
+        out = out if isinstance(out, dict) else {}
+        entry: dict[str, Any] = {
+            "step_number": s.get("step_number"),
+            "name": s.get("name"),
+            "status": s.get("status"),
+            "approval_id": s.get("approval_id"),
+        }
+        if out.get("tool") is not None:
+            entry["tool"] = out.get("tool")
+        if "args" in out:
+            entry["args"] = out.get("args")
+        trajectory.append(entry)
+    return _collapse_tool_calls(trajectory)
+
+
+def _assert_expected_approvals(idx: int, item: dict[str, Any], trajectory: list[dict[str, Any]]) -> None:
+    """Projection assertion (E-1 T011): warn when an `expect_approval` tool did NOT
+    park in the projected trajectory. This does not decide the score (the judge is
+    fail-closed and fails the step's tool_call dimension for an un-parked gate) —
+    it surfaces the fail-closed path in the runner logs for debugging."""
+    et = item.get("expected_trajectory") or {}
+    expects = [st.get("tool") for st in (et.get("steps") or []) if st.get("expect_approval")]
+    if not expects:
+        return
+    parked = {
+        s.get("tool")
+        for s in trajectory
+        if s.get("status") == "awaiting_approval" or s.get("approval_id")
+    }
+    for tool in expects:
+        if tool not in parked:
+            logger.warning(
+                "item=%d expect_approval tool '%s' did NOT park in projected trajectory "
+                "(fail-closed: judge fails this step's tool_call dimension)",
+                idx, tool,
+            )
+
+
+async def _self_approve(client: httpx.AsyncClient, run_id: str, approval_id: str) -> None:
+    """Reuse the sandbox self-approval path so a gated durable step PROCEEDS during
+    eval: decide the approval, then drive the resume-stream to completion. The
+    parked run_steps row keeps its `approval_id` (persisted by the step-update
+    callback) so `expect_approval` scoring still sees the gate fired even after the
+    resume overwrites the live step status."""
+    try:
+        dec = await client.post(
+            f"/api/v1/playground/approvals/{approval_id}/decide",
+            json={"decision": "approved"},
+            headers=_EVAL_HEADERS,
+        )
+        logger.info("durable self-approve run=%s approval=%s -> %d", run_id, approval_id, dec.status_code)
+    except Exception as exc:
+        logger.warning("durable self-approve decide failed run=%s approval=%s: %s", run_id, approval_id, exc)
+        return
+    # Drive the resume — consume the SSE so the gated step actually re-enters and
+    # the run advances to terminal. Best-effort: the poll loop is the source of truth.
+    try:
+        async with client.stream(
+            "GET",
+            f"/api/v1/playground/runs/{run_id}/resume-stream",
+            headers={"Accept": "text/event-stream", **_EVAL_HEADERS},
+            timeout=_DURABLE_POLL_TIMEOUT,
+        ) as stream:
+            async for _line in stream.aiter_lines():
+                pass
+    except Exception as exc:
+        logger.warning("durable resume-stream failed run=%s: %s", run_id, exc)
+
+
+async def _poll_durable(
+    client: httpx.AsyncClient, run_id: str
+) -> tuple[bool, dict[str, Any] | None, list[dict[str, Any]]]:
+    """Poll a durable run to terminal, self-approving any HITL gate so it proceeds.
+    Returns (terminal, run_data, steps). `terminal=False` is a poll timeout —
+    the caller records the item failed (fail-closed), never scores it."""
+    approved: set[str] = set()
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + _DURABLE_POLL_TIMEOUT
+    run_data: dict[str, Any] | None = None
+    steps: list[dict[str, Any]] = []
+
+    while loop.time() < deadline:
+        await asyncio.sleep(_DURABLE_POLL_INTERVAL)
+        try:
+            run_resp = await client.get(f"/api/v1/playground/runs/{run_id}", headers=_EVAL_HEADERS)
+            if run_resp.status_code == 200:
+                run_data = run_resp.json()
+            steps_resp = await client.get(f"/api/v1/playground/runs/{run_id}/steps", headers=_EVAL_HEADERS)
+            if steps_resp.status_code == 200:
+                steps = steps_resp.json()
+        except Exception as exc:
+            logger.debug("durable poll error run=%s: %s", run_id, exc)
+            continue
+
+        for s in steps:
+            appr = s.get("approval_id")
+            if s.get("status") == "awaiting_approval" and appr and appr not in approved:
+                approved.add(appr)
+                await _self_approve(client, run_id, appr)
+
+        status_val = (run_data or {}).get("status")
+        if status_val in ("completed", "failed"):
+            return True, run_data, steps
+
+    return False, run_data, steps
+
+
+def _fail_closed_record(
+    idx: int, input_text: str, expected: str, reason: str,
+    *, run_id: str | None = None, response: str = "",
+    trajectory: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Fail-closed result row for a durable OR workflow item that could not be
+    scored on a real trajectory / member path (poll timeout / empty trajectory /
+    incomplete run tree / door unavailable). Never a fake pass: passed=False, no
+    dimension_scores. One fail-closed builder shared by both mode branches."""
+    detail: dict[str, Any] = {"reason": reason}
+    if trajectory is not None:
+        detail["actual_trajectory"] = trajectory
+    return {
+        "passed": False,
+        "score": 0.0,
+        "record": {
+            "dataset_item_idx": idx,
+            "input_message": input_text,
+            "expected_output": expected or None,
+            "response": response,
+            "judge_score": 0.0,
+            "judge_reasoning": reason,
+            "passed": False,
+            "dimension_scores": None,
+            "eval_detail": detail,
+            "run_id": run_id,
+        },
+    }
+
+
+async def _call_score_api_durable(
+    client: httpx.AsyncClient,
+    item: dict[str, Any],
+    input_text: str,
+    response_text: str,
+    run_id: str,
+    actual_trajectory: list[dict[str, Any]],
+) -> tuple[float, dict[str, float], dict[str, Any]] | None:
+    """Score a durable item via the single scoring door mode=durable. Returns
+    (composite, dimension_scores, detail) or None if the door is unavailable.
+    Durable trajectory/tool dims are deterministic — there is NO keyword fallback;
+    a door failure is fail-closed at the caller."""
+    try:
+        resp = await client.post(
+            "/api/v1/playground/eval/score",
+            json={
+                "mode": "durable",
+                "item": item,
+                "input": input_text,
+                "response": response_text,
+                "run_id": run_id,
+                "actual_trajectory": actual_trajectory,
+            },
+            headers=_EVAL_HEADERS,
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            dims = {k: float(v) for k, v in (data.get("dimension_scores") or {}).items()}
+            return float(data["composite"]), dims, (data.get("detail") or {})
+        logger.warning("durable eval/score returned %d: %s", resp.status_code, resp.text[:300])
+    except Exception as exc:
+        logger.warning("durable eval/score call failed: %s", exc)
+    return None
+
+
+async def _run_durable_item(
+    client: httpx.AsyncClient, item: dict[str, Any], idx: int
+) -> dict[str, Any]:
+    """Evaluate one durable dataset item end-to-end: launch a REAL durable
+    playground run, poll its REAL run_steps to terminal (self-approving gates),
+    project run_steps → actual_trajectory, and score via the single door. Returns
+    {passed, score, record}. Fail-closed on every non-terminal / empty-trajectory
+    path — never a fabricated pass."""
+    input_payload = item.get("input_payload") or {}
+    input_text = item.get("input_message") or item.get("input") or json.dumps(input_payload)
+    expected = item.get("expected_output") or ""
+
+    run_body: dict[str, Any] = {
+        "agent_name": AGENT_NAME,
+        "input_message": input_text,
+        "input_payload": input_payload,
+        "execution_shape": "durable",
+    }
+    if AGENT_VERSION_ID:
+        run_body["agent_version_id"] = AGENT_VERSION_ID
+
+    try:
+        run_resp = await client.post("/api/v1/playground/runs", json=run_body, headers=_EVAL_HEADERS)
+        run_resp.raise_for_status()
+        run_id = run_resp.json().get("run_id")
+    except Exception as exc:
+        logger.warning("item=%d durable run-create failed: %s", idx, exc)
+        return _fail_closed_record(idx, input_text, expected, f"durable run-create failed: {exc}")
+    logger.info("item=%d durable run_id=%s", idx, run_id)
+
+    terminal, run_data, steps = await _poll_durable(client, run_id)
+    if not terminal:
+        return _fail_closed_record(
+            idx, input_text, expected,
+            f"durable run did not reach terminal status within {_DURABLE_POLL_TIMEOUT:.0f}s",
+            run_id=run_id,
+        )
+
+    actual_trajectory = _project_trajectory(steps)
+    if not actual_trajectory:
+        # Fail-closed: never score an empty trajectory as a pass.
+        return _fail_closed_record(
+            idx, input_text, expected, "durable run produced no steps (empty trajectory)",
+            run_id=run_id,
+        )
+
+    response_text = (run_data or {}).get("output_text") or ""
+    _assert_expected_approvals(idx, item, actual_trajectory)
+
+    scored = await _call_score_api_durable(client, item, input_text, response_text, run_id, actual_trajectory)
+    if scored is None:
+        return _fail_closed_record(
+            idx, input_text, expected, "eval/score door unavailable for durable item",
+            run_id=run_id, response=response_text, trajectory=actual_trajectory,
+        )
+
+    composite, dimension_scores, detail = scored
+    passed = composite >= _JUDGE_PASS_THRESHOLD
+    logger.info(
+        "item=%d durable scored composite=%.2f dims=%s passed=%s",
+        idx, composite, dimension_scores, passed,
+    )
+    return {
+        "passed": passed,
+        "score": composite,
+        "record": {
+            "dataset_item_idx": idx,
+            "input_message": input_text,
+            "expected_output": expected or None,
+            "response": response_text,
+            "judge_score": composite,
+            "judge_reasoning": f"durable eval (mode=durable): dims={dimension_scores}",
+            "passed": passed,
+            "dimension_scores": dimension_scores,
+            "eval_detail": detail,
+            "run_id": run_id,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Eval v2 E-5 — workflow run-tree eval (WORKFLOW_ID set): walk the REAL run tree
+# → member path + per-member child steps → score via the single door mode=workflow.
+# ---------------------------------------------------------------------------
+async def _run_workflow_tree_item(
+    client: httpx.AsyncClient, workflow_id: str, item: dict[str, Any], idx: int
+) -> tuple[list[str], dict[str, list[dict[str, Any]]], str, str] | None:
+    """Launch a REAL workflow run and read back its REAL run tree.
+
+    Extracts ``member_path`` = the ordered child ``agent_name``s (the tree children
+    are already ordered by ``started_at``), the parent's final ``response``, and —
+    for each member named in ``item['per_member']`` — that child's ``run_steps``
+    projected the SAME way E-1 projects durable steps (``_project_trajectory``).
+
+    Returns ``(member_path, per_member_steps, response, parent_run_id)`` or
+    ``None`` (fail-closed: launch failure / poll timeout / non-terminal tree) — the
+    caller records the item FAILED, never scoring on an empty member path.
+    """
+    input_payload = item.get("input_payload") or {}
+    input_text = (
+        item.get("input_message")
+        or item.get("input")
+        or (json.dumps(input_payload) if input_payload else "")
+    )
+
+    run_body: dict[str, Any] = {
+        "input_message": input_text,
+        "trigger_type": "api",
+        "run_by": "eval-runner",
+    }
+    if input_payload:
+        run_body["input_payload"] = input_payload
+    try:
+        resp = await client.post(
+            f"/api/v1/workflows/{workflow_id}/runs", json=run_body, headers=_EVAL_HEADERS,
+        )
+        resp.raise_for_status()
+        parent_run_id = resp.json()["run_id"]
+    except Exception as exc:
+        logger.warning("item=%d workflow run-create failed: %s", idx, exc)
+        return None
+    logger.info("item=%d workflow parent run_id=%s", idx, parent_run_id)
+
+    tree: dict[str, Any] | None = None
+    terminal = False
+    deadline = asyncio.get_event_loop().time() + _WORKFLOW_POLL_TIMEOUT
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(_WORKFLOW_POLL_INTERVAL)
+        try:
+            tree_resp = await client.get(
+                f"/api/v1/workflows/{workflow_id}/runs/{parent_run_id}/tree",
+                headers=_EVAL_HEADERS,
+            )
+            tree_resp.raise_for_status()
+            tree = tree_resp.json()
+        except Exception as exc:
+            logger.debug("workflow tree poll error run=%s: %s", parent_run_id, exc)
+            continue
+        if (tree.get("parent") or {}).get("status", "") in ("completed", "failed"):
+            terminal = True
+            break
+
+    if not terminal or not tree:
+        logger.warning(
+            "item=%d workflow run did not reach terminal within %.0fs",
+            idx, _WORKFLOW_POLL_TIMEOUT,
+        )
+        return None
+
+    children = tree.get("children") or []
+    member_path = [c.get("agent_name") for c in children if c.get("agent_name")]
+    response = (tree.get("parent") or {}).get("output") or ""
+
+    # Per-member zoom: read each requested member's child run_steps and project
+    # them the same way E-1 projects durable steps (one projection, No-Bandaid).
+    per_member = item.get("per_member") or {}
+    per_member_steps: dict[str, list[dict[str, Any]]] = {}
+    for member in per_member:
+        child = next((c for c in children if c.get("agent_name") == member), None)
+        if not child:
+            per_member_steps[member] = []
+            continue
+        try:
+            steps_resp = await client.get(
+                f"/api/v1/agent-runs/{child['id']}/steps", headers=_EVAL_HEADERS,
+            )
+            steps_resp.raise_for_status()
+            per_member_steps[member] = _project_trajectory(steps_resp.json())
+        except Exception as exc:
+            logger.warning("item=%d per-member steps read failed member=%s: %s", idx, member, exc)
+            per_member_steps[member] = []
+
+    return member_path, per_member_steps, response, parent_run_id
+
+
+async def _call_score_api_workflow(
+    client: httpx.AsyncClient,
+    item: dict[str, Any],
+    input_text: str,
+    response_text: str,
+    member_path: list[str],
+    per_member_steps: dict[str, list[dict[str, Any]]],
+    run_id: str,
+) -> tuple[float, dict[str, float], dict[str, Any]] | None:
+    """Score a workflow item via the single door mode=workflow. Returns
+    (composite, dimension_scores, detail) or None if the door is unavailable
+    (fail-closed at the caller — no keyword fallback for member-path scoring)."""
+    try:
+        resp = await client.post(
+            "/api/v1/playground/eval/score",
+            json={
+                "mode": "workflow",
+                "item": item,
+                "input": input_text,
+                "response": response_text,
+                "member_path": member_path,
+                "per_member_steps": per_member_steps,
+                "run_id": run_id,
+            },
+            headers=_EVAL_HEADERS,
+            timeout=60.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            dims = {k: float(v) for k, v in (data.get("dimension_scores") or {}).items()}
+            return float(data["composite"]), dims, (data.get("detail") or {})
+        logger.warning("workflow eval/score returned %d: %s", resp.status_code, resp.text[:300])
+    except Exception as exc:
+        logger.warning("workflow eval/score call failed: %s", exc)
+    return None
+
+
+async def _run_workflow_item_scored(
+    client: httpx.AsyncClient, item: dict[str, Any], idx: int
+) -> dict[str, Any]:
+    """Evaluate one workflow dataset item end-to-end (E-5): launch a REAL workflow
+    run, walk its REAL run tree → member_path + per-member child steps, score via
+    the single door mode=workflow, and record `dimension_scores`+`eval_detail`+
+    `run_id` (the parent workflow run, for the results deep-link). Fail-closed on
+    every non-terminal / empty-path / door-unavailable path — never a fake pass."""
+    input_payload = item.get("input_payload") or {}
+    input_text = (
+        item.get("input_message")
+        or item.get("input")
+        or (json.dumps(input_payload) if input_payload else "")
+    )
+    expected = item.get("expected_output") or ""
+
+    walked = await _run_workflow_tree_item(client, str(WORKFLOW_ID), item, idx)
+    if walked is None:
+        return _fail_closed_record(
+            idx, input_text, expected,
+            f"workflow run tree incomplete / poll timeout within {_WORKFLOW_POLL_TIMEOUT:.0f}s",
+        )
+    member_path, per_member_steps, response_text, run_id = walked
+
+    if not member_path:
+        # Fail-closed: never score an empty member path as a pass.
+        return _fail_closed_record(
+            idx, input_text, expected,
+            "workflow run produced no member path (empty run tree)",
+            run_id=run_id, response=response_text,
+        )
+
+    scored = await _call_score_api_workflow(
+        client, item, input_text, response_text, member_path, per_member_steps, run_id,
+    )
+    if scored is None:
+        return _fail_closed_record(
+            idx, input_text, expected, "eval/score door unavailable for workflow item",
+            run_id=run_id, response=response_text,
+        )
+
+    composite, dimension_scores, detail = scored
+    passed = composite >= _JUDGE_PASS_THRESHOLD
+    logger.info(
+        "item=%d workflow scored composite=%.2f dims=%s member_path=%s passed=%s",
+        idx, composite, dimension_scores, member_path, passed,
+    )
+    return {
+        "passed": passed,
+        "score": composite,
+        "record": {
+            "dataset_item_idx": idx,
+            "input_message": input_text,
+            "expected_output": expected or None,
+            "response": response_text,
+            "judge_score": composite,
+            "judge_reasoning": (
+                f"workflow eval (mode=workflow): member_path={member_path} dims={dimension_scores}"
+            ),
+            "passed": passed,
+            "dimension_scores": dimension_scores,
+            "eval_detail": detail,
+            "run_id": run_id,
+        },
+    }
+
+
 # DEPRECATED: _poll_for_judge — kept for reference, replaced by _call_judge_api
 async def _poll_for_judge(client: httpx.AsyncClient, run_id: str) -> float | None:
     """Return the Haiku judge score (0.0-1.0) once judge_status is terminal and a
@@ -171,126 +677,134 @@ async def run_eval() -> None:
         results: list[dict[str, Any]] = []
 
         for idx, item in enumerate(items):
+            # Eval v2 E-1: durable items run through the durable branch — a REAL
+            # durable playground run, real run_steps → actual_trajectory, scored via
+            # the single door mode=durable. Workflow eval keeps its own path.
+            if MODE == "durable" and not WORKFLOW_ID:
+                outcome = await _run_durable_item(client, item, idx)
+                results.append({"passed": outcome["passed"], "score": outcome["score"]})
+                try:
+                    rec_resp = await client.post(
+                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                        json=outcome["record"],
+                        headers={"X-User-Sub": "eval-runner"},
+                    )
+                    rec_resp.raise_for_status()
+                except Exception as exc:
+                    logger.warning("item=%d could not record durable result: %s", idx, exc)
+                continue
+
+            # Eval v2 E-5: workflow items walk the REAL run tree — launch a real
+            # workflow run, extract the ordered member path + per-member child steps,
+            # and score via the single door mode=workflow. Fail-closed on an
+            # incomplete tree (never scored on an empty member path).
+            if WORKFLOW_ID:
+                outcome = await _run_workflow_item_scored(client, item, idx)
+                results.append({"passed": outcome["passed"], "score": outcome["score"]})
+                try:
+                    rec_resp = await client.post(
+                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                        json=outcome["record"],
+                        headers={"X-User-Sub": "eval-runner"},
+                    )
+                    rec_resp.raise_for_status()
+                except Exception as exc:
+                    logger.warning("item=%d could not record workflow result: %s", idx, exc)
+                continue
+
             # Compat shim: today's reactive datasets author `{input}`; the Eval
             # v2 discriminated-union reactive variant carries `input_message`.
             # Accept either key so old and new datasets both read.
             input_text = item.get("input") or item.get("input_message") or ""
             expected = item.get("expected_output", "")
 
-            # 2. Execute: workflow mode OR agent playground mode
+            # 2. Execute: agent playground mode (workflow + durable handled above).
+            # Start a playground run + collect the SSE stream.
             response_text = ""
             run_id = None
+            run_body: dict[str, Any] = {
+                "agent_name": AGENT_NAME,
+                "input_message": input_text,
+            }
+            if AGENT_VERSION_ID:
+                run_body["agent_version_id"] = AGENT_VERSION_ID
 
-            if WORKFLOW_ID:
-                # Workflow mode: trigger workflow run + poll for output
+            try:
+                run_resp = await client.post(
+                    "/api/v1/playground/runs",
+                    json=run_body,
+                    headers={"X-User-Sub": "eval-runner"},
+                )
+                run_resp.raise_for_status()
+                run_id = run_resp.json().get("run_id")
+                logger.info("item=%d run_id=%s", idx, run_id)
+            except Exception as exc:
+                logger.warning("item=%d run-create failed: %s", idx, exc)
+                results.append({"passed": False, "score": 0.0})
                 try:
-                    response_text = await _run_workflow_item(client, WORKFLOW_ID, input_text)
-                    logger.info("item=%d workflow_run completed, output_len=%d", idx, len(response_text))
-                except Exception as exc:
-                    logger.warning("item=%d workflow-run failed: %s", idx, exc)
-                    results.append({"passed": False, "score": 0.0})
-                    try:
-                        await client.post(
-                            f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
-                            json={
-                                "dataset_item_idx": idx,
-                                "input_message": input_text,
-                                "expected_output": expected or None,
-                                "response": "",
-                                "judge_score": 0.0,
-                                "judge_reasoning": f"workflow-run failed: {exc}",
-                                "passed": False,
-                            },
-                            headers={"X-User-Sub": "eval-runner"},
-                        )
-                    except Exception:
-                        pass
-                    continue
-            else:
-                # Agent mode: start playground run + collect SSE stream
-                run_body: dict[str, Any] = {
-                    "agent_name": AGENT_NAME,
-                    "input_message": input_text,
-                }
-                if AGENT_VERSION_ID:
-                    run_body["agent_version_id"] = AGENT_VERSION_ID
-
-                try:
-                    run_resp = await client.post(
-                        "/api/v1/playground/runs",
-                        json=run_body,
+                    await client.post(
+                        f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
+                        json={
+                            "dataset_item_idx": idx,
+                            "input_message": input_text,
+                            "expected_output": expected or None,
+                            "response": "",
+                            "judge_score": 0.0,
+                            "judge_reasoning": f"run-create failed: {exc}",
+                            "passed": False,
+                        },
                         headers={"X-User-Sub": "eval-runner"},
                     )
-                    run_resp.raise_for_status()
-                    run_id = run_resp.json().get("run_id")
-                    logger.info("item=%d run_id=%s", idx, run_id)
-                except Exception as exc:
-                    logger.warning("item=%d run-create failed: %s", idx, exc)
-                    results.append({"passed": False, "score": 0.0})
+                except Exception:
+                    pass
+                continue
+
+            # Collect SSE stream response
+            error_msg = ""
+            try:
+                async with client.stream(
+                    "GET",
+                    f"/api/v1/playground/runs/{run_id}/stream",
+                    headers={"Accept": "text/event-stream"},
+                ) as stream:
+                    async for line in stream.aiter_lines():
+                        if line.startswith("data:"):
+                            try:
+                                payload = json.loads(line[5:].strip())
+                                if payload.get("event") == "text_delta":
+                                    response_text += payload.get("content", "")
+                                elif payload.get("event") == "error":
+                                    error_msg = payload.get("message", "unknown error")
+                                    logger.warning("item=%d stream error event: %s", idx, error_msg)
+                                elif payload.get("event") == "done":
+                                    break
+                            except json.JSONDecodeError:
+                                pass
+            except Exception as exc:
+                logger.warning("item=%d stream error: %s", idx, exc)
+                error_msg = str(exc)
+
+            # Fallback: if stream yielded no text, poll the run record for output_text.
+            # The server stores output_text via _complete_run after the stream ends.
+            if not response_text and run_id:
+                for _attempt in range(6):
+                    await asyncio.sleep(3)
                     try:
-                        await client.post(
-                            f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
-                            json={
-                                "dataset_item_idx": idx,
-                                "input_message": input_text,
-                                "expected_output": expected or None,
-                                "response": "",
-                                "judge_score": 0.0,
-                                "judge_reasoning": f"run-create failed: {exc}",
-                                "passed": False,
-                            },
-                            headers={"X-User-Sub": "eval-runner"},
-                        )
+                        poll_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
+                        if poll_resp.status_code == 200:
+                            run_data = poll_resp.json()
+                            if run_data.get("output_text"):
+                                response_text = run_data["output_text"]
+                                logger.info("item=%d recovered output_text from run record (len=%d)", idx, len(response_text))
+                                break
+                            if run_data.get("status") in ("completed", "failed"):
+                                break
                     except Exception:
                         pass
-                    continue
 
-                # Collect SSE stream response
-                error_msg = ""
-                try:
-                    async with client.stream(
-                        "GET",
-                        f"/api/v1/playground/runs/{run_id}/stream",
-                        headers={"Accept": "text/event-stream"},
-                    ) as stream:
-                        async for line in stream.aiter_lines():
-                            if line.startswith("data:"):
-                                try:
-                                    payload = json.loads(line[5:].strip())
-                                    if payload.get("event") == "text_delta":
-                                        response_text += payload.get("content", "")
-                                    elif payload.get("event") == "error":
-                                        error_msg = payload.get("message", "unknown error")
-                                        logger.warning("item=%d stream error event: %s", idx, error_msg)
-                                    elif payload.get("event") == "done":
-                                        break
-                                except json.JSONDecodeError:
-                                    pass
-                except Exception as exc:
-                    logger.warning("item=%d stream error: %s", idx, exc)
-                    error_msg = str(exc)
-
-                # Fallback: if stream yielded no text, poll the run record for output_text.
-                # The server stores output_text via _complete_run after the stream ends.
-                if not response_text and run_id:
-                    for _attempt in range(6):
-                        await asyncio.sleep(3)
-                        try:
-                            poll_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
-                            if poll_resp.status_code == 200:
-                                run_data = poll_resp.json()
-                                if run_data.get("output_text"):
-                                    response_text = run_data["output_text"]
-                                    logger.info("item=%d recovered output_text from run record (len=%d)", idx, len(response_text))
-                                    break
-                                if run_data.get("status") in ("completed", "failed"):
-                                    break
-                        except Exception:
-                            pass
-
-                # If still no text but got an error, use it as the response
-                if not response_text and error_msg:
-                    response_text = f"[ERROR] {error_msg}"
+            # If still no text but got an error, use it as the response
+            if not response_text and error_msg:
+                response_text = f"[ERROR] {error_msg}"
 
             # 4. Score via the single scoring door (/eval/score); keyword
             #    fallback ONLY when the judge/door is unavailable (never gated on

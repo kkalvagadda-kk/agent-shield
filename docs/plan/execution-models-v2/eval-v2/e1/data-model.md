@@ -117,6 +117,18 @@ entry:
 > into `output`, that is a **small producer addition in the harness** (add `{tool, args}` to the tool-boundary
 > `StepUpdate.output`), listed as a T1 pre-req, not a new store.
 
+**One entry per LOGICAL tool call (collapse — E-1 fix).** A single tool call can span MULTIPLE
+`run_steps`: on a HITL park the harness emits a `running` boundary (`on_tool_start`, no `approval_id`)
+and then a SEPARATE `awaiting_approval` boundary (next step number, carrying the `approval_id`) because
+the interrupt fires before `on_tool_end` (`sdk/agentshield_sdk/durable.py:_drive`). The projection
+therefore **collapses** a call's consecutive same-tool rows into ONE entry
+(`eval-runner/main.py:_collapse_tool_calls`): an entry folds into the immediately-preceding one iff both
+carry the same non-null `tool` AND the previous entry's status is in-flight (`running`/`pending`); the
+fold advances to the later boundary's status and keeps a **sticky** `approval_id`. Without this the park
+evidence lands on a different entry than the tool's first `running` boundary, and `score_tool_calls`
+greedy-matches an `expect_approval` step to the un-parked `running` entry → `parked:false` for a real
+park. Distinct completed calls of the same tool are NOT merged (a `completed` boundary is terminal).
+
 **Scoring reads (no LLM):**
 - `score_trajectory`: compare the ordered `[name where tool present]` (or `[tool]`) list to
   `expected_trajectory.steps[].tool` under `match_mode`.

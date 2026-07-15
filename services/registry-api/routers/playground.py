@@ -325,6 +325,19 @@ async def step_update_callback(
     step_out = body.get("output")
     if step_out is None:
         step_out = body.get("output_text")
+    # Persist the HITL approval_id emitted on an `awaiting_approval` boundary
+    # (durable harness StepUpdate.approval_id). Without this it never reached the
+    # run_steps row, so the durable eval could neither self-approve the gate nor
+    # project the parked step for `expect_approval` scoring (Eval v2 E-1). Only
+    # SET it (never clear) so a later resume that overwrites the step's live
+    # status back to completed keeps the durable evidence the gate fired.
+    appr_raw = body.get("approval_id")
+    appr_uuid: Optional[uuid.UUID] = None
+    if appr_raw:
+        try:
+            appr_uuid = uuid.UUID(str(appr_raw))
+        except (ValueError, TypeError):
+            appr_uuid = None
     if step:
         step.status = step_status
         step.name = step_name
@@ -332,6 +345,8 @@ async def step_update_callback(
             step.completed_at = now
         if step_out is not None:
             step.output = step_out
+        if appr_uuid is not None:
+            step.approval_id = appr_uuid
         if body.get("error_message"):
             step.error_message = body["error_message"]
     else:
@@ -343,6 +358,7 @@ async def step_update_callback(
             started_at=now if step_status == "running" else None,
             completed_at=now if step_status in ("completed", "failed") else None,
             output=step_out,
+            approval_id=appr_uuid,
             error_message=body.get("error_message"),
         )
         db.add(step)
@@ -1053,24 +1069,37 @@ async def judge_eval(body: JudgeRequest) -> JudgeResponse:
 async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
     """Single scoring door for batch eval — dispatches by ``mode``.
 
-    E-0 wires the **reactive** branch only: it scores ``response`` against the
+    E-0 wires the **reactive** branch: it scores ``response`` against the
     item's ``expected_output`` (reference-based) via ``score_response`` and
     reduces to a composite via ``score_composite``. For reactive that is one
     ``response`` dimension, so ``composite == dimension_scores["response"]`` —
-    numerically identical to the legacy ``judge_for_eval`` path. Other modes
-    (durable/scheduled/webhook/workflow) return 501 until E-1+ adds their
-    scorers behind this same door (no parallel scoring path).
+    numerically identical to the legacy ``judge_for_eval`` path.
+
+    E-1 wires the **durable** branch: ``response`` (LLM) + ``trajectory`` +
+    ``tool_call`` (both deterministic, over the projected ``actual_trajectory``)
+    reduced by ``weighted_mean`` with durable default weights 0.4/0.4/0.2
+    (overridable per run via ``dimension_weights``). A reference-free durable
+    item (no ``expected_trajectory``) degrades to ``{response}`` only. Other
+    modes (scheduled/webhook/workflow) return 501 until their slices land — one
+    scoring door, no parallel scoring path.
     """
-    if body.mode != "reactive":
+    if body.mode not in ("reactive", "durable", "workflow"):
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail=(
                 f"eval scoring for mode '{body.mode}' is not implemented yet "
-                "(E-1+); only 'reactive' is wired in E-0"
+                "(E-1+); only 'reactive', 'durable' and 'workflow' are wired"
             ),
         )
 
-    from judge import score_composite, score_response
+    from judge import (
+        score_composite,
+        score_member_path,
+        score_response,
+        score_tool_calls,
+        score_trajectory,
+        weighted_mean,
+    )
 
     item = body.item or {}
     input_text = body.input if body.input is not None else (item.get("input_message") or item.get("input") or "")
@@ -1094,12 +1123,117 @@ async def eval_score(body: EvalScoreRequest) -> EvalScoreResponse:
         logger.warning("eval/score error: %s", exc)
         raise HTTPException(status_code=500, detail=f"Judge error: {exc}")
 
+    # --- Reactive: single response dimension, composite == response (unchanged) ---
+    if body.mode == "reactive":
+        dimension_scores = {"response": score}
+        composite = score_composite(dimension_scores, weights=None)
+        return EvalScoreResponse(
+            composite=composite,
+            dimension_scores=dimension_scores,
+            detail={"response_reason": reason},
+        )
+
+    # --- Workflow: member_path (run tree) + response + optional per-member rubric ---
+    if body.mode == "workflow":
+        expected_member_path = item.get("expected_member_path") or []
+        actual_member_path = body.member_path or []
+        # Default ordered so a correct answer via the WRONG route scores <1.0
+        # (the reason E-5 exists); an item may override via member_path_match_mode.
+        mp_match_mode = item.get("member_path_match_mode", "ordered")
+        mp_score, member_diff = score_member_path(
+            actual_member_path, expected_member_path, mp_match_mode,
+        )
+
+        # `score` (computed above) is the response dimension vs expected_output.
+        dimension_scores = {"member_path": mp_score, "response": score}
+
+        # Per-member rubric zoom: an LLM score_response over each requested
+        # member's projected run_steps (reference-free, rubric-scored). A member
+        # with no steps (reactive child) degrades to an empty-behavior score —
+        # surfaced in detail, never silently passed.
+        per_member = item.get("per_member") or {}
+        per_member_steps = body.per_member_steps or {}
+        per_member_detail: list[dict[str, Any]] = []
+        per_member_scores: list[float] = []
+        for member, spec in per_member.items():
+            rubric_text = spec.get("rubric") if isinstance(spec, dict) else None
+            member_steps = per_member_steps.get(member) or []
+            steps_text = json.dumps(member_steps)[:1600] if member_steps else ""
+            try:
+                async with asyncio.timeout(35.0):
+                    pm_score, pm_reason = await score_response(
+                        input_text=f"Member '{member}' execution steps",
+                        output_text=steps_text,
+                        expected_output=None,
+                        rubric=rubric_text,
+                        team=team,
+                    )
+            except Exception as exc:
+                logger.warning("per-member score error member=%s: %s", member, exc)
+                pm_score, pm_reason = 0.0, f"per-member score error: {exc}"
+            per_member_scores.append(pm_score)
+            per_member_detail.append({
+                "member": member,
+                "score": pm_score,
+                "reason": pm_reason,
+                "rubric": rubric_text,
+                "had_steps": bool(member_steps),
+            })
+        if per_member_scores:
+            dimension_scores["per_member"] = sum(per_member_scores) / len(per_member_scores)
+
+        # Workflow composite weights: default 0.4/0.4/0.2, overridable per run.
+        # The reducer sums only PRESENT dimensions, so a no-per_member item
+        # collapses to member_path + response (No-Bandaid: one reducer).
+        weights = body.dimension_weights or {"member_path": 0.4, "response": 0.4, "per_member": 0.2}
+        composite = weighted_mean(dimension_scores, weights)
+        return EvalScoreResponse(
+            composite=composite,
+            dimension_scores=dimension_scores,
+            detail={
+                "response_reason": reason,
+                "expected_member_path": expected_member_path,
+                "actual_member_path": actual_member_path,
+                "member_diff": member_diff,
+                "per_member": per_member_detail,
+            },
+        )
+
+    # --- Durable: response + (trajectory + tool_call) over the projected run_steps ---
     dimension_scores = {"response": score}
-    composite = score_composite(dimension_scores, weights=None)
+    actual_trajectory = body.actual_trajectory or []
+    expected_trajectory = item.get("expected_trajectory") or None
+    expected_steps = (expected_trajectory or {}).get("steps") or []
+    detail: dict[str, Any] = {
+        "response_reason": reason,
+        "expected_trajectory": expected_trajectory,
+        "actual_trajectory": actual_trajectory,
+        "tool_diffs": [],
+        "approvals": [],
+    }
+
+    if expected_trajectory and expected_steps:
+        match_mode = expected_trajectory.get("match_mode", "superset")
+        traj_score, traj_detail = score_trajectory(
+            actual_trajectory, expected_trajectory, match_mode,
+        )
+        tool_score, tool_detail = score_tool_calls(actual_trajectory, expected_steps)
+        dimension_scores["trajectory"] = traj_score
+        dimension_scores["tool_call"] = tool_score
+        detail["trajectory_detail"] = traj_detail
+        detail["tool_diffs"] = tool_detail.get("tool_diffs", [])
+        detail["approvals"] = tool_detail.get("approvals", [])
+    # else: reference-free durable → dimension_scores == {"response"} (graceful degrade)
+
+    # Durable composite weights: default 0.4/0.4/0.2, overridable per run. The
+    # reducer sums only the weights of PRESENT dimensions, so a degraded
+    # {response}-only item collapses to the response score (No-Bandaid: one reducer).
+    weights = body.dimension_weights or {"response": 0.4, "trajectory": 0.4, "tool_call": 0.2}
+    composite = weighted_mean(dimension_scores, weights)
     return EvalScoreResponse(
         composite=composite,
         dimension_scores=dimension_scores,
-        detail={"response_reason": reason},
+        detail=detail,
     )
 
 

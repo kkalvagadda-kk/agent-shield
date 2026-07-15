@@ -116,6 +116,10 @@ run_suite "Suite 66: PROD triggers (webhook+sched)" "suite-66-production-trigger
 run_suite "Suite 67: Deploy GC + drift reconcile"    "suite-67-deployment-gc-and-drift.sh"
 run_suite "Suite 68: Daemon run, no user input"      "suite-68-daemon-no-input.sh"
 run_suite "Suite 69: Workflow cost rollup"           "suite-69-workflow-cost-rollup.sh"
+run_suite "Suite 70: Daemon identity (WS-2 CP2)"     "suite-70-daemon-identity.sh"
+run_suite "Suite 71: Scheduled e2e (WS-3)"           "suite-71-scheduled-e2e.sh"
+run_suite "Suite 72: Eval v2 E-1 durable (no-fakes)" "suite-72-eval-v2-durable.sh"
+run_suite "Suite 73: Eval v2 E-5 workflow run-tree (no-fakes)" "suite-73-eval-v2-workflow.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

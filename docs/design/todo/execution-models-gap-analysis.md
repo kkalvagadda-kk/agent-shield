@@ -83,27 +83,15 @@ Each TODO below carries a **Parity** and a **Golden-path** line stating how it c
 
 **Design says:** Scheduled and event-driven agents alert on failure — email at launch; Slack/webhook/PagerDuty as future improvement.
 
-**Current state:** No alerting. Failed scheduled runs are logged to `agent_runs` but nobody is notified.
+**Current state:** shipped (email) — `alert_email`/`alert_on_failure` on `agent_triggers`; `alerting.dispatch_failure_alert` invoked from `internal.py::_dispatch_and_complete` on `status=failed` (the single shared dispatch path — scheduler and event-gateway both fire through it, so there is no per-service duplication); verified by suite-71 (T-S71-005). That test forces a scheduled run to fail and asserts the alert transport was invoked with the trigger's `alert_email`, and that a run with `alert_on_failure=false` does not alert. Studio's trigger Settings panel exposes both fields, and the Scheduled Overview surfaces an alert-config summary.
 
-**What to implement:**
+**Still future:** Slack webhook, PagerDuty, and alert-routing rules — richer transports layered on the same `dispatch_failure_alert` seam.
 
-1. **Schema:** Add `alert_on_failure BOOLEAN DEFAULT true` and `alert_email TEXT` to `agent_triggers` (migration 0039)
-2. **Scheduler change:** In `services/scheduler/main.py`, after a run completes with `status=failed`:
-   - Look up trigger's `alert_email`
-   - Send email via SMTP (use a simple `smtplib` or an existing email service)
-   - Log the alert
-3. **Event Gateway:** Same pattern — on failed run dispatch, alert
-4. **Studio UI:** Add alert config fields to the trigger settings panel (already in `Settings` tab)
-5. **Future:** Slack webhook, PagerDuty, alert routing rules
-
-**Files:**
-- `services/registry-api/alembic/versions/0039_trigger_alert_config.py` (new migration)
-- `services/scheduler/main.py` (add alert-on-failure after run completion)
-- `services/event-gateway/main.py` (same)
-- `studio/src/pages/AgentDetailPage.tsx` Settings tab (add alert_email field)
-
-**Parity:** Scheduler and event-gateway both send the alert — put the failure→alert logic in **one shared helper** (`alerting.dispatch_failure_alert` already exists) both call; don't duplicate per service.
-**Golden-path:** bash suite — force a scheduled run to fail → assert the alert transport was invoked with the trigger's `alert_email`.
+**Files (as built):**
+- `services/registry-api/alerting.py` (`dispatch_failure_alert` — the shared helper)
+- `services/registry-api/routers/internal.py` (`_dispatch_and_complete` invokes it on `status=failed`)
+- `agent_triggers.alert_email` / `agent_triggers.alert_on_failure` columns (no separate migration 0039 — folded into the trigger schema)
+- `studio/src/components/agent-detail/SettingsTab.tsx` (alert config fields) + `OverviewScheduled.tsx` (alert-config summary)
 
 ---
 

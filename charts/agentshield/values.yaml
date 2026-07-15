@@ -585,10 +585,11 @@ registry-api:
 
   image:
     repository: registry.internal/agentshield/registry-api
-    tag: "0.2.176"
+    # E-5: /eval/score mode=workflow + score_member_path
+    tag: "0.2.182"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.5"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.8"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   service:
@@ -614,7 +615,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.5"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.8"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   resources:
@@ -654,7 +655,7 @@ deploy-controller:
   # changes — existing agent pods keep their old tag until re-deployed.
   # Image tag used for the declarative-runner pods the controller provisions
   # for declarative/durable agents. Must be a real, built tag (not "latest").
-  declarativeRunnerTag: "0.1.44"
+  declarativeRunnerTag: "0.1.45"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -896,7 +897,8 @@ studio:
 
   image:
     repository: registry.internal/agentshield/studio
-    tag: "0.1.134"
+    # E-5: workflow dataset editor + run-tree result render
+    tag: "0.1.138"
     pullPolicy: IfNotPresent
 
   service:

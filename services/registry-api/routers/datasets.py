@@ -91,14 +91,25 @@ async def create_dataset(
     db: AsyncSession = Depends(get_db),
 ) -> PlaygroundDatasetResponse:
     caller = (user or {}).get("sub") or x_user_sub or "dev"
+    # `body.mode` is the authoring discriminator (reactive|durable|…). Persisting
+    # it is what makes a durable dataset actually durable — dropping it (the E-0
+    # bug) silently stored every dataset as reactive, so the eval mode/dataset
+    # guard never fired and the durable branch never ran. Item validation
+    # (incl. rejecting a malformed durable `expected_trajectory` with 422) runs
+    # in PlaygroundDatasetCreate's `_check_items` validator against this mode.
     ds = PlaygroundDataset(
         owner_user_id=caller,
         name=body.name,
+        mode=body.mode,
+        schema_version=body.schema_version,
         items=body.items,
     )
     db.add(ds)
     await db.flush()
-    logger.info("create_dataset: id=%s name=%s owner=%s", ds.id, ds.name, caller)
+    logger.info(
+        "create_dataset: id=%s name=%s owner=%s mode=%s items=%d",
+        ds.id, ds.name, caller, ds.mode, len(body.items),
+    )
     return PlaygroundDatasetResponse.model_validate(ds)
 
 
@@ -140,7 +151,22 @@ async def update_dataset(
     ds = await _resolve_dataset(dataset_id, caller, db, require_owner=True)
     if body.name is not None:
         ds.name = body.name
+    if body.mode is not None:
+        ds.mode = body.mode
     if body.items is not None:
+        # Re-validate the incoming items against the EFFECTIVE mode (the restated
+        # `body.mode`, else the dataset's stored mode). PlaygroundDatasetUpdate's
+        # validator only sees `body.mode`, so a PATCH that changes durable items
+        # without restating mode would validate them as reactive. Re-checking here
+        # against the persisted mode keeps a durable dataset's items validated as
+        # durable — a malformed `expected_trajectory` is rejected 422, not stored.
+        from schemas import _validate_dataset_items
+
+        effective_mode = body.mode or ds.mode
+        try:
+            _validate_dataset_items(body.items, effective_mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
         ds.items = body.items
     await db.flush()
     return PlaygroundDatasetResponse.model_validate(ds)

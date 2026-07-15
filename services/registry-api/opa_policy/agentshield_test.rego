@@ -25,6 +25,9 @@ base_agents := {"system:serviceaccount:agents-platform:agent-refunds-sa": {
 # Team grants: a tool the agent does NOT own but its team is granted.
 base_grants := {"platform": [{"name": "send_email", "risk": "high"}, {"name": "read_kb", "risk": "low"}]}
 
+# user_delegated fixture — carries a live principal ("alice") so these tests
+# exercise the risk gate under the WS-2 identity floor (user_identity_ok). The
+# floor's empty-principal deny is covered separately by the WS-2 truth-table tests.
 input_for(tool) := {
 	"sa_subject": subject,
 	"tool_name": tool,
@@ -32,7 +35,7 @@ input_for(tool) := {
 	"agent_class": "user_delegated",
 	"playground": false,
 	"sandbox": false,
-	"user_id": "",
+	"user_id": "alice",
 	"user_team": "",
 }
 
@@ -203,4 +206,102 @@ test_empty_bundle_denies if {
 	deny_reason == "agent_unauthenticated" with input as input_for("lookup_order")
 		with data.agents as {}
 		with data.grants as {}
+}
+
+# ─── WS-2 identity floor (user_identity_ok) truth table ──────────────────────
+# The floor is orthogonal to the risk gate: it only asserts a *live user is
+# present* for user_delegated runs; daemon runs act as their own identity.
+
+# Row 1 — daemon + empty user + schedule → floor holds → allow (risk unchanged).
+test_daemon_empty_user_identity_ok if {
+	i := {
+		"sa_subject": subject,
+		"tool_name": "lookup_order",
+		"args": {},
+		"agent_class": "daemon",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "",
+		"user_team": "",
+		"trigger_type": "schedule",
+	}
+	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
+	allow with input as i with data.agents as base_agents with data.grants as base_grants
+}
+
+# Row 2 — daemon + "alice" + manual → floor holds (present user honored, not capped).
+test_daemon_present_user_identity_ok if {
+	i := {
+		"sa_subject": subject,
+		"tool_name": "lookup_order",
+		"args": {},
+		"agent_class": "daemon",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "alice",
+		"user_team": "",
+		"trigger_type": "manual",
+	}
+	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
+	allow with input as i with data.agents as base_agents with data.grants as base_grants
+}
+
+# Row 3 — user_delegated + "alice" + manual → floor holds → allow.
+test_user_delegated_present_user_identity_ok if {
+	i := {
+		"sa_subject": subject,
+		"tool_name": "lookup_order",
+		"args": {},
+		"agent_class": "user_delegated",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "alice",
+		"user_team": "",
+		"trigger_type": "manual",
+	}
+	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
+	allow with input as i with data.agents as base_agents with data.grants as base_grants
+}
+
+# Row 4 — user_delegated + empty user + schedule → floor fails → deny (fail-closed).
+test_user_delegated_missing_user_denies if {
+	i := {
+		"sa_subject": subject,
+		"tool_name": "lookup_order",
+		"args": {},
+		"agent_class": "user_delegated",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "",
+		"user_team": "",
+		"trigger_type": "schedule",
+	}
+	not user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
+	not allow with input as i with data.agents as base_agents with data.grants as base_grants
+	deny_reason == "missing_user_identity" with input as i
+		with data.agents as base_agents
+		with data.grants as base_grants
+}
+
+# Regression — the risk-based require_approval is UNCHANGED by the identity floor.
+# A high-risk tool on a user_delegated run WITH a present user still gates on HITL
+# exactly as before (same scenario as test_high_risk_requires_approval, but with a
+# live user so the floor is satisfied and the risk gate is what we observe).
+test_identity_floor_leaves_require_approval_unchanged if {
+	i := {
+		"sa_subject": subject,
+		"tool_name": "issue_refund",
+		"args": {},
+		"agent_class": "user_delegated",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "alice",
+		"user_team": "",
+		"trigger_type": "manual",
+	}
+	allow with input as i with data.agents as base_agents with data.grants as base_grants
+	require_approval with input as i with data.agents as base_agents with data.grants as base_grants
+	reason == "require_approval_high_risk" with input as i
+		with data.agents as base_agents
+		with data.grants as base_grants
 }

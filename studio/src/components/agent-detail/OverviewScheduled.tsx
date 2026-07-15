@@ -1,10 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Clock, Play, Pause } from "lucide-react";
+import { Clock, Play, Pause, CalendarClock, Bell, BellOff } from "lucide-react";
 import {
   listTriggers,
   enableTrigger,
   disableTrigger,
   listDeploymentRuns,
+  getAgentHealth,
+  AgentHealthStatus,
   DeploymentContext,
 } from "../../api/registryApi";
 
@@ -28,6 +30,13 @@ function describeCron(expr: string | null): string {
   return expr;
 }
 
+// Rolled-up schedule-health badge styling (matches the last-run badge palette).
+const HEALTH_STYLES: Record<AgentHealthStatus, string> = {
+  healthy: "bg-green-100 text-green-700",
+  degraded: "bg-amber-100 text-amber-700",
+  failing: "bg-red-100 text-red-700",
+};
+
 export default function OverviewScheduled({ agentName, deploymentId, context }: Props) {
   const qc = useQueryClient();
 
@@ -39,6 +48,12 @@ export default function OverviewScheduled({ agentName, deploymentId, context }: 
     queryKey: ["deployment-runs-scheduled", deploymentId, context],
     queryFn: () => listDeploymentRuns(deploymentId, { context, limit: 10 }),
   });
+  // Mode-aware health signals: next_fire_at (croniter over the first enabled cron),
+  // last_run_status, missed_fires and a rolled-up `health` for mode=scheduled.
+  const { data: health } = useQuery({
+    queryKey: ["agent-health", agentName],
+    queryFn: () => getAgentHealth(agentName),
+  });
 
   const toggle = useMutation({
     mutationFn: ({ id, on }: { id: string; on: boolean }) =>
@@ -48,6 +63,9 @@ export default function OverviewScheduled({ agentName, deploymentId, context }: 
 
   const schedules = triggers.filter((t) => t.trigger_type === "schedule");
   const lastRun = runs[0];
+  // Alert config lives on the trigger; surface the first enabled schedule's config
+  // (fall back to the first schedule if none are enabled).
+  const alertTrigger = schedules.find((t) => t.enabled) ?? schedules[0];
 
   return (
     <div className="space-y-4">
@@ -83,6 +101,62 @@ export default function OverviewScheduled({ agentName, deploymentId, context }: 
           </div>
         </div>
       ))}
+
+      {/* Schedule health: next-fire + rolled-up health badge */}
+      {schedules.length > 0 && (
+        <div className="card p-5">
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-3">
+              <CalendarClock size={18} className="text-purple-600" />
+              <div>
+                <p className="text-sm font-semibold text-slate-700">Next Fire</p>
+                <p className="text-sm text-slate-600 mt-0.5">
+                  {health?.next_fire_at
+                    ? new Date(health.next_fire_at).toLocaleString()
+                    : "—"}
+                </p>
+                {typeof health?.missed_fires === "number" && health.missed_fires > 0 && (
+                  <p className="text-xs text-amber-600 mt-0.5">
+                    {health.missed_fires} missed fire{health.missed_fires === 1 ? "" : "s"}
+                  </p>
+                )}
+              </div>
+            </div>
+            {health?.health && (
+              <span
+                className={`badge text-xs capitalize ${HEALTH_STYLES[health.health]}`}
+                title="Rolled-up schedule health"
+              >
+                {health.health}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Alert-config summary */}
+      {schedules.length > 0 && (
+        <div className="card p-5">
+          <div className="flex items-center gap-3">
+            {alertTrigger?.alert_on_failure ? (
+              <Bell size={18} className="text-purple-600" />
+            ) : (
+              <BellOff size={18} className="text-slate-400" />
+            )}
+            <div>
+              <p className="text-sm font-semibold text-slate-700">Failure Alerts</p>
+              <p className="text-sm text-slate-600 mt-0.5">
+                {alertTrigger?.alert_on_failure ? "On" : "Off"}
+              </p>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {alertTrigger?.alert_email
+                  ? `Notifies ${alertTrigger.alert_email}`
+                  : "No alert email set"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Last run status */}
       <div className="card p-5">

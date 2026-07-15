@@ -20,17 +20,25 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_timeout_worker import _agent_pod_url
 from db import AsyncSessionLocal, get_db
+from identity import principal_display as _principal_display
 from models import AgentRun, Approval, ApprovalAuthority
 from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, PaginatedResponse
 
 # Roles that always have authority to see/decide production approvals,
 # even without a specific per-resource ApprovalAuthority record.
 _ADMIN_ROLES = {"platform_admin", "team_lead"}
+
+# WS-2 T011 — default reviewer role a DAEMON trigger-run's approval routes to when the
+# trigger carries no explicit approver-role config. The role literal is matched against
+# `user_team_assignments.role` (a caller holding this role may decide). T014 persists the
+# per-trigger override as `agent_triggers.approver_role`; until then every daemon approval
+# routes to this default (read via getattr so no column is required now).
+_DEFAULT_REVIEWER_SCOPE = "agent:reviewer"
 
 
 class ReopenRequest(BaseModel):
@@ -210,6 +218,142 @@ async def _has_authority_for_tool(caller: str, tool_name: str, db: AsyncSession)
     )
     result = await db.execute(q)
     return result.scalar_one_or_none() is not None
+
+
+async def _caller_roles(caller: str, db: AsyncSession) -> set[str]:
+    """The roles a caller holds (from `user_team_assignments`, same source as /me).
+
+    Used for the DAEMON reviewer-scope authority check: a caller may decide a
+    reviewer-routed approval only if they actually hold the routed reviewer role
+    (or an admin role). This reads the caller's real role — it does NOT infer
+    authority from a role record attached to the resource (fail-closed).
+    """
+    rows = (
+        await db.execute(
+            text("SELECT role FROM user_team_assignments WHERE user_sub = :sub"),
+            {"sub": caller},
+        )
+    ).all()
+    return {r[0] for r in rows if r[0]}
+
+
+async def _derive_reviewer_audit(
+    approval: Approval, requester_display: Optional[str], db: AsyncSession
+) -> tuple[Optional[str], Optional[str]]:
+    """Derive ``(reviewer_scope, principal_display)`` for an approval at READ time.
+
+    WS-2 T011 — scope is derived from the run's ``agent_class`` + the trigger's
+    approver-role config, NOT stored (data-model.md: "reviewer_scope NOT stored").
+
+    * ``reviewer_scope`` — the reviewer role a DAEMON (service-identity) trigger-run's
+      approval routes to (the trigger's ``approver_role`` config, else
+      ``agent:reviewer``). ``None`` for an interactive / user-delegated approval —
+      those keep the existing per-tool ``ApprovalAuthority`` path.
+    * ``principal_display`` — reuses ``identity.principal_display`` (single source of
+      the display string):
+        - daemon agent trigger-run  → ``service:{agent} on behalf of {armed_by}``
+        - daemon workflow member     → ``workflow:{wf} (service) on behalf of {armed_by}``
+        - otherwise                  → the requesting user's display.
+
+    ``approval.thread_id`` is the run id. A trigger-run parks its ``AgentRun`` at that
+    id (a workflow member parks its CHILD AgentRun, ``parent_run_id`` → the parent
+    workflow run). An interactive ``/chat`` approval's thread_id is a ``PlaygroundRun``
+    (no matching AgentRun) → the requester fallback.
+    """
+    from models import Agent, CompositeWorkflow, AgentTrigger
+
+    fallback = (None, requester_display)
+
+    try:
+        run_id = uuid.UUID(approval.thread_id)
+    except (ValueError, AttributeError, TypeError):
+        return fallback
+
+    run = (
+        await db.execute(select(AgentRun).where(AgentRun.id == run_id))
+    ).scalar_one_or_none()
+    if run is None:
+        return fallback  # PlaygroundRun (interactive) — not a service run
+
+    # Only a TRIGGER-run has no live caller and can act under a service identity;
+    # an interactive /chat run is 'manual' (caller present → caller identity).
+    if (run.trigger_type or "manual") == "manual":
+        return fallback
+
+    # Workflow member → authority is the WORKFLOW's class (D1), not the member's.
+    # The member parks its child AgentRun; walk to the parent workflow run.
+    trigger_run = run
+    if run.parent_run_id is not None:
+        parent = (
+            await db.execute(
+                select(AgentRun).where(AgentRun.id == run.parent_run_id)
+            )
+        ).scalar_one_or_none()
+        if parent is not None:
+            trigger_run = parent
+
+    workflow = None
+    if trigger_run.workflow_id is not None:
+        workflow = (
+            await db.execute(
+                select(CompositeWorkflow).where(
+                    CompositeWorkflow.id == trigger_run.workflow_id
+                )
+            )
+        ).scalar_one_or_none()
+
+    if workflow is not None:
+        agent_class = workflow.agent_class
+    else:
+        agent = (
+            await db.execute(
+                select(Agent).where(Agent.name == trigger_run.agent_name)
+            )
+        ).scalar_one_or_none()
+        agent_class = getattr(agent, "agent_class", None)
+
+    # A user_delegated trigger-run runs under the arming human — it is NOT routed to a
+    # reviewer role (keeps the existing per-tool path). Only a daemon → reviewer scope.
+    if agent_class != "daemon":
+        return fallback
+
+    # The authorizing human (armed_by) + reviewer-role config live on the trigger.
+    trig = None
+    if trigger_run.trigger_id is not None:
+        trig = (
+            await db.execute(
+                select(AgentTrigger).where(AgentTrigger.id == trigger_run.trigger_id)
+            )
+        ).scalar_one_or_none()
+    armed_by = getattr(trig, "armed_by", None)
+    # T014 will persist `agent_triggers.approver_role`; read via getattr so the default
+    # applies today (no column) and the configured role wins once T014 lands.
+    reviewer_scope = getattr(trig, "approver_role", None) or _DEFAULT_REVIEWER_SCOPE
+
+    if workflow is not None:
+        display = _principal_display(workflow_name=workflow.name, armed_by=armed_by)
+    else:
+        display = _principal_display(
+            agent_name=trigger_run.agent_name, armed_by=armed_by, is_service=True
+        )
+    return reviewer_scope, display
+
+
+async def _caller_can_review(
+    caller: str, approval: Approval, reviewer_scope: str, db: AsyncSession
+) -> bool:
+    """Fail-closed authority for a DAEMON reviewer-scoped approval.
+
+    A caller may decide only if they actually hold the routed reviewer role, OR an
+    admin role (platform_admin/team_lead — matching the existing admin-authority
+    pattern), OR an explicit per-tool ApprovalAuthority grant. No role → cannot decide.
+    """
+    roles = await _caller_roles(caller, db)
+    if reviewer_scope in roles:
+        return True
+    if roles & _ADMIN_ROLES:
+        return True
+    return await _has_authority_for_tool(caller, approval.tool_name, db)
 
 
 # ---------------------------------------------------------------------------
@@ -398,11 +542,18 @@ async def list_approvals(
     for r in rows:
         item = ApprovalResponse.model_validate(r)
         prov = provenance.get(r.thread_id)
+        requested_by = None
         if prov:
-            item.requested_by = prov.get("requested_by")
+            requested_by = prov.get("requested_by")
+            item.requested_by = requested_by
             item.requested_by_team = prov.get("requested_by_team")
             item.deployment_name = prov.get("deployment_name")
             item.environment = prov.get("environment")
+        # WS-2 T011 — reviewer scope + audit display (derived, not stored). Read by the
+        # Studio inbox (T012/T013) to render "service:X on behalf of Y" + filter by role.
+        item.reviewer_scope, item.principal_display = await _derive_reviewer_audit(
+            r, requested_by, db
+        )
         items.append(item)
 
     return PaginatedResponse(items=items, total=total)
@@ -532,7 +683,22 @@ async def get_approval(
     """Fetch a single approval. Reviewers call this first to get the current
     `version` field needed for the optimistic-lock PATCH."""
     approval = await _resolve(approval_id, db)
-    return ApprovalResponse.model_validate(approval)
+    item = ApprovalResponse.model_validate(approval)
+    # Provenance (requester) + WS-2 T011 reviewer scope / audit display — same
+    # enrichment as the list endpoint so a reviewer opening one approval sees
+    # "service:X on behalf of Y" and the routed reviewer role.
+    prov = (await _load_provenance([approval.thread_id], db)).get(approval.thread_id)
+    requested_by = None
+    if prov:
+        requested_by = prov.get("requested_by")
+        item.requested_by = requested_by
+        item.requested_by_team = prov.get("requested_by_team")
+        item.deployment_name = prov.get("deployment_name")
+        item.environment = prov.get("environment")
+    item.reviewer_scope, item.principal_display = await _derive_reviewer_audit(
+        approval, requested_by, db
+    )
+    return item
 
 
 # ---------------------------------------------------------------------------
@@ -554,9 +720,24 @@ async def decide_approval(
     (testing only). `version` must match current row version (optimistic lock)."""
     approval = await _resolve(approval_id, db)
 
-    # Authority check — only for production approvals
-    if approval.context == "production":
-        caller = x_user_sub or body.reviewer_id
+    # Authority check. A DAEMON trigger-run's approval is routed ASYNC to a reviewer
+    # role (WS-2 T011) — no live user is on the connection — so it is gated by the
+    # routed reviewer scope, NOT the per-tool ApprovalAuthority path. Deriving a
+    # non-None reviewer_scope IS the discriminator (explicit, no agent_class sniffing).
+    caller = x_user_sub or body.reviewer_id
+    reviewer_scope, _ = await _derive_reviewer_audit(approval, None, db)
+    if reviewer_scope is not None:
+        # Daemon approval → fail-closed reviewer-role authority. A caller not in the
+        # reviewer scope (nor an admin / explicit grantee) is REJECTED (403), never
+        # silently allowed. 'system' is the internal auto-actor (timeout worker).
+        if caller and caller != "system":
+            if not await _caller_can_review(caller, approval, reviewer_scope, db):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="not_authorized_to_decide",
+                )
+    elif approval.context == "production":
+        # Interactive / user-delegated production approval — existing per-tool path.
         if caller and caller != "system":
             has_auth = await _has_authority_for_tool(caller, approval.tool_name, db)
             if not has_auth:

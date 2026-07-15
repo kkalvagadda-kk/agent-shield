@@ -3,6 +3,7 @@ package agentshield
 # ─── Defaults ───────────────────────────────────────────────────────────────
 default allow = false
 default deny_reason = ""
+default user_identity_ok = false
 
 # ─── SA Identity Validation ─────────────────────────────────────────────────
 # Bidirectional validation:
@@ -42,6 +43,21 @@ grant_bypassed if {
 user_grant_satisfied if { user_has_grant }
 user_grant_satisfied if { grant_bypassed }
 
+# ─── Identity floor (WS-2) ───────────────────────────────────────────────────
+# daemon: no live user required (the trigger-run acts as the service identity).
+# user_delegated: a live user MUST be present — a missing principal is a DENY,
+#                 never a silent downgrade to the service identity (fail-closed).
+# Orthogonal to the risk / grant gates. Mirrors the authoritative registry-api
+# policy (services/registry-api/opa_policy/agentshield.rego).
+user_identity_ok if {
+    input.agent_class == "daemon"
+}
+
+user_identity_ok if {
+    input.agent_class == "user_delegated"
+    input.user_id != ""
+}
+
 # ─── Class A — Daemon / Autonomous ──────────────────────────────────────────
 # Daemon agents run as their own machine identity. No user context allowed.
 # If a user JWT is present on a daemon request it means routing error or injection.
@@ -50,6 +66,7 @@ allow if {
     sa_valid
     tool_registered
     not input.user_id  # daemon must not carry user identity
+    user_identity_ok
 }
 
 # ─── Class B — User-Delegated / OBO ─────────────────────────────────────────
@@ -61,6 +78,7 @@ allow if {
     tool_registered
     input.user_team != ""  # user context must be present
     user_grant_satisfied
+    user_identity_ok       # WS-2: a live user_id must also be present (fail-closed)
 }
 
 # ─── Deny Reasons ───────────────────────────────────────────────────────────
@@ -85,6 +103,21 @@ deny_reason = "user_context_missing" if {
     tool_registered
     input.agent_class == "user_delegated"
     input.user_team == ""
+}
+
+# ─── Identity floor (WS-2) — missing live principal on a user_delegated run ───
+# Fires only when every other gate passes but the identity floor fails, so it is
+# mutually exclusive with the deny_reasons above (user_context_missing keys on
+# user_team == ""; user_not_granted on not user_grant_satisfied) — otherwise two
+# complete-rule bodies could match one request and OPA would raise an
+# eval_conflict. Mirrors registry-api's `missing_user_identity`.
+deny_reason = "missing_user_identity" if {
+    sa_valid
+    tool_registered
+    input.agent_class == "user_delegated"
+    input.user_team != ""
+    user_grant_satisfied
+    input.user_id == ""
 }
 
 # Daemon agents must not carry user identity — presence of user_id indicates

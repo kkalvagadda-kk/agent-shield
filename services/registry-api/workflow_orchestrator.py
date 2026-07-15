@@ -132,27 +132,33 @@ async def _dispatch_durable_member(
     approval decision, not after a member-pod crash.
     """
     environment = await _resolve_agent_environment(agent_name)
-    from durable_dispatch import registry_internal_base
+    from durable_dispatch import dispatch_durable_run, registry_internal_base
     base = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080"
     callback_url = f"{registry_internal_base()}/api/v1/internal/runs/{child_id}/step-update"
-    body = {
-        "agent_name": agent_name,
-        "run_id": str(child_id),
-        "input_payload": {"message": message},
-        "callback_url": callback_url,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(f"{base}/run", json=body)
-        if resp.status_code not in (200, 201, 202):
-            return "failed", None, f"member /run returned {resp.status_code}: {resp.text[:300]}"
-    except httpx.ConnectError:
+    # PARITY: the `/run` POST literal lives ONLY in durable_dispatch.dispatch_durable_run
+    # (see its docstring — "here and nowhere else"). A workflow member is a durable run
+    # exactly like a top-level production/sandbox run; the SOLE difference is the runner
+    # target — the member's own deployed pod rather than the shared declarative-runner —
+    # which the shared dispatcher already exposes as an explicit `runner_url` arg. So we
+    # reuse it instead of hand-rolling a second POST (the 2026-07-11 HITL-retro drift root
+    # cause). run_id == child_id == thread_id, so the SDK-created Approval and the console
+    # resume correlate to this child.
+    ok, err = await dispatch_durable_run(
+        run_id=str(child_id),
+        agent_name=agent_name,
+        input_payload={"message": message},
+        callback_url=callback_url,
+        runner_url=base,
+        timeout_s=15.0,
+    )
+    if not ok:
+        # dispatch_durable_run returns a generic reason (bad status OR a network error);
+        # annotate with the likeliest cause — an undeployed member has no pod at {base}/run
+        # — without type-sniffing the returned error string.
         return "failed", None, (
-            f"agent '{agent_name}' appears undeployed (no pod at {base}/run). "
-            f"Deploy the agent before running the workflow."
+            f"member '{agent_name}' /run dispatch failed (agent may be undeployed at "
+            f"{base}/run): {err}"
         )
-    except Exception as exc:
-        return "failed", None, f"member /run dispatch failed: {exc}"
 
     # Poll the child run — the step-update callback writes its terminal status + output.
     deadline = time.monotonic() + 120.0
@@ -425,6 +431,18 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
         parent = (await s.execute(
             select(AgentRun.run_by, AgentRun.context).where(AgentRun.id == parent_run_id)
         )).first()
+        # D1 actor_chain (WS-2 T016): the child member run acts under the WORKFLOW's
+        # authority, not the member's own. That authority is carried by inheriting the
+        # parent workflow run's `run_by` — for a daemon workflow the parent run_by is the
+        # workflow's SERVICE identity (stamped in internal._start_workflow_run via
+        # resolve_workflow_principal), so every member child carries it too. The member's
+        # own `agent_class` is therefore ignored at the run-tree / audit layer. NOTE
+        # (deferred — identity-propagation initiative, same gap as T009): propagating the
+        # workflow's class + service identity onto each member POD's OPA input is NOT wired
+        # here — the member pod builds its own OPA input from its deploy-time env
+        # (AGENTSHIELD_AGENT_CLASS), so a member tool call still hits OPA with the member's
+        # class. T016 threads the authority through run_by (provable); the signed
+        # actor_chain token + pod OPA-input propagation are the separate initiative.
         parent_run_by = parent[0] if parent else None
         # Inherit the parent workflow run's context so a playground/test run yields
         # playground children (→ self-service inline approval), while a production

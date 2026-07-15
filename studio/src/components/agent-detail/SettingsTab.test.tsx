@@ -85,8 +85,9 @@ describe("SettingsTab", () => {
     const cronInput = await screen.findByPlaceholderText("* * * * *");
     expect((cronInput as HTMLInputElement).value).toBe("0 9 * * *");
 
-    // Timezone select pre-set
-    const tzSelect = screen.getByRole("combobox");
+    // Timezone select pre-set (first combobox in the row; the second is the
+    // WS-2 approver-role select).
+    const tzSelect = screen.getAllByRole("combobox")[0];
     expect((tzSelect as HTMLSelectElement).value).toBe("UTC");
 
     // Enabled checkbox
@@ -106,6 +107,43 @@ describe("SettingsTab", () => {
         "my-agent",
         "t1",
         expect.objectContaining({ cron_expression: "0 9 * * *", timezone: "UTC" })
+      )
+    );
+  });
+
+  it("sends approver_role when updating a schedule trigger (WS-2 T014)", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+    await screen.findByPlaceholderText("* * * * *");
+    await userEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() =>
+      expect(updateTrigger).toHaveBeenCalledWith(
+        "my-agent",
+        "t1",
+        expect.objectContaining({ approver_role: "agent:reviewer" })
+      )
+    );
+  });
+
+  it("shows the authorizing human (armed_by) on an armed trigger (WS-2 T014)", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...scheduleTrigger, armed_by: "75c7c8b3-armed-sub", approver_role: "team:reviewer" },
+    ]);
+    renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+    expect(await screen.findByText(/75c7c8b3-armed-sub/)).toBeInTheDocument();
+  });
+
+  it("sends approver_role when creating a schedule trigger (WS-2 T014)", async () => {
+    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    await userEvent.click(await screen.findByRole("button", { name: /new schedule trigger/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
+    await waitFor(() =>
+      expect(createTrigger).toHaveBeenCalledWith(
+        "my-agent",
+        expect.objectContaining({ trigger_type: "schedule", approver_role: "agent:reviewer" })
       )
     );
   });

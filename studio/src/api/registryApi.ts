@@ -1193,6 +1193,11 @@ export interface AgentTrigger {
   // Populated ONLY in the create response (shown once) for webhook triggers.
   token?: string | null;
   webhook_url?: string | null;
+  // WS-2 T014 — the reviewer role a DAEMON (service-identity) trigger-run's approval
+  // routes to. Only meaningful for daemon (scheduled) triggers; null = default scope.
+  approver_role?: string | null;
+  // WS-2 T014 — the human (Keycloak `sub`) who armed/created this trigger (audit).
+  armed_by?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1208,6 +1213,8 @@ export const createTrigger = async (
     input_payload?: Record<string, unknown> | null;
     alert_email?: string | null;
     alert_on_failure?: boolean;
+    // WS-2 T014 — daemon approver-role config, persisted on the trigger.
+    approver_role?: string | null;
   }
 ): Promise<AgentTrigger> => {
   const { data } = await http.post<AgentTrigger>(
@@ -1237,6 +1244,8 @@ export const updateTrigger = async (
     input_payload?: Record<string, unknown> | null;
     alert_email?: string | null;
     alert_on_failure?: boolean;
+    // WS-2 T014 — daemon approver-role config, persisted on update.
+    approver_role?: string | null;
   }
 ): Promise<AgentTrigger> => {
   const { data } = await http.patch<AgentTrigger>(
@@ -1408,14 +1417,27 @@ export interface ApprovalInboxItem {
   // approval to *this* run's step (WorkflowBuilderPage) rather than guessing by
   // agent_name. Always present (Approval.thread_id is NOT NULL).
   thread_id: string;
+  // WS-2 T012 — reviewer scope + audit display derived server-side (approvals.py
+  // `_derive_reviewer_audit`). `reviewer_scope` = the reviewer role a daemon
+  // (service-identity) trigger-run's approval routes to (e.g. "agent:reviewer");
+  // null for interactive/user-delegated approvals. `principal_display` reads like
+  // "service:X on behalf of Y" / "workflow:X (service) on behalf of Y".
+  reviewer_scope?: string | null;
+  principal_display?: string | null;
 }
 
 // `context` selects the isolation the approval was raised in. Omit → backend
 // defaults to `production` (the reviewer console). Pass `sandbox`/`playground`
 // to list the self-service approvals surfaced inline in the run panel.
+//
+// `reviewerScope` narrows the inbox to approvals routed to one reviewer role
+// (WS-2 T012/T013). The `GET /approvals/` endpoint does NOT accept a reviewer
+// scope query param today, so this is applied CLIENT-SIDE over the returned rows
+// (the list is already authority-scoped server-side). Omit → all scopes.
 export const listPendingApprovals = async (
   team?: string,
   context?: "production" | "playground" | "sandbox",
+  reviewerScope?: string,
 ): Promise<ApprovalInboxItem[]> => {
   const params: Record<string, string> = { status: "pending" };
   if (team) params.team = team;
@@ -1423,7 +1445,10 @@ export const listPendingApprovals = async (
   // Trailing slash = the canonical FastAPI path — avoids a 307 redirect that (behind
   // the TLS-terminating edge) downgrades to http:// and is blocked as mixed content.
   const { data } = await http.get<{ items: ApprovalInboxItem[] }>("/approvals/", { params });
-  return data.items;
+  const items = data.items;
+  return reviewerScope
+    ? items.filter((it) => it.reviewer_scope === reviewerScope)
+    : items;
 };
 
 export const decideApproval = async (

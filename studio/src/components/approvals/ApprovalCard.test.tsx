@@ -49,6 +49,34 @@ describe("ApprovalCard (M1 — the one approval body)", () => {
     expect(screen.queryByText(/"to":/)).not.toBeInTheDocument();
   });
 
+  it("renders the daemon principal_display when present (WS-2 T013)", () => {
+    render(
+      <ApprovalCard
+        data={{
+          toolName: "wire_transfer",
+          riskLevel: "high",
+          principalDisplay: "service:billing-agent on behalf of alice",
+        }}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+      />
+    );
+    expect(screen.getByTestId("approval-card-principal")).toHaveTextContent(
+      /service:billing-agent on behalf of alice/
+    );
+  });
+
+  it("hides the principal line when principal_display is null", () => {
+    render(
+      <ApprovalCard
+        data={{ toolName: "noop", riskLevel: "low", principalDisplay: null }}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+      />
+    );
+    expect(screen.queryByTestId("approval-card-principal")).not.toBeInTheDocument();
+  });
+
   it("fires onApprove / onDeny", async () => {
     const onApprove = vi.fn();
     const onDeny = vi.fn();

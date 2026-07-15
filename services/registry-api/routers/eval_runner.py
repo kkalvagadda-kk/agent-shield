@@ -199,6 +199,12 @@ async def create_eval_run(
     )
 
     # Launch the eval-runner K8s Job; fail fast if it cannot be created.
+    # The Job's MODE is the SCORING mode == dataset.mode (== EvalRun.mode above),
+    # NOT the executable's resolved_mode. For a durable dataset the 422 guard has
+    # already forced resolved_mode == dataset.mode == 'durable', so they agree; but
+    # passing dataset.mode keeps MODE unambiguously the scorer selector (the runner
+    # requests the durable RUN shape explicitly via execution_shape). resolved_mode
+    # is only the executable-shape used by the mismatch guard above.
     try:
         await create_eval_job(
             eval_run_id=str(eval_run.id),
@@ -206,7 +212,7 @@ async def create_eval_run(
             dataset_id=str(body.dataset_id),
             workflow_id=str(workflow_id) if workflow_id else None,
             agent_version_id=str(version_id) if version_id else None,
-            mode=resolved_mode,
+            mode=dataset.mode,
         )
         eval_run.status = "running"
     except Exception as exc:

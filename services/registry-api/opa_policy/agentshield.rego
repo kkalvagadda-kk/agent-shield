@@ -19,6 +19,7 @@ default allow := false
 default require_approval := false
 default reason := "default_deny"
 default deny_reason := ""
+default user_identity_ok := false
 
 # ─── Agent entry lookup ──────────────────────────────────────────────────────
 # Undefined when the SA subject is not registered in the bundle.
@@ -91,12 +92,27 @@ risk_allows if resolved_risk == "medium"
 
 risk_allows if resolved_risk == "high"
 
+# ─── Identity floor (WS-2) ───────────────────────────────────────────────────
+# daemon: no live user required (the trigger-run acts as the service identity).
+# user_delegated: a live user MUST be present — a missing principal is a DENY,
+#                 never a silent downgrade to the service identity (fail-closed).
+# Orthogonal to the risk-based require_approval gate below.
+user_identity_ok if {
+	input.agent_class == "daemon"
+}
+
+user_identity_ok if {
+	input.agent_class == "user_delegated"
+	input.user_id != ""
+}
+
 # ─── Final decision ──────────────────────────────────────────────────────────
 allow if {
 	identity_present
 	identity_matches
 	tool_in_set
 	risk_allows
+	user_identity_ok
 }
 
 # High risk is allowed but must pass through HITL.
@@ -126,6 +142,22 @@ deny_reason := "tool_risk_denied" if {
 	identity_matches
 	tool_in_set
 	not risk_allows
+}
+
+# Identity floor (WS-2): a user_delegated run with no live principal is a
+# fail-closed deny — the missing user is never downgraded to the service identity.
+# Guarded with the upstream gates so this stays MUTUALLY EXCLUSIVE with the
+# deny_reasons above (agent_unauthenticated / identity_mismatch / tool_not_granted
+# / tool_risk_denied); without the guards two bodies could match one request and
+# OPA would raise an eval_conflict. Net result is identical to the contract's
+# truth-table row 4 (all gates pass except the identity floor → this reason).
+deny_reason := "missing_user_identity" if {
+	identity_present
+	identity_matches
+	tool_in_set
+	risk_allows
+	input.agent_class == "user_delegated"
+	input.user_id == ""
 }
 
 # ─── reason (short human string; one value per decision) ─────────────────────

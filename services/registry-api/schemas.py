@@ -357,6 +357,14 @@ class ApprovalResponse(BaseModel):
     requested_by_team: str | None = None      # the requester's own team
     deployment_name: str | None = None
     environment: str | None = None
+    # WS-2 T011 — async reviewer routing + audit display (derived at read time, NOT stored).
+    # reviewer_scope: the reviewer role a DAEMON (service-identity) trigger-run's approval
+    #   is routed to ("agent:reviewer" default / the trigger's approver-role config); None
+    #   for an interactive/user-delegated approval (the existing tool-authority path).
+    # principal_display: audit label — "service:X on behalf of Y" (daemon agent),
+    #   "workflow:X (service) on behalf of Y" (daemon workflow member), else the requester.
+    reviewer_scope: str | None = None
+    principal_display: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -1128,13 +1136,45 @@ class ReactiveDatasetItem(_DatasetItemBase):
     expected_output: Optional[str] = None  # optional if a rubric is present
 
 
+# Trajectory match modes (Eval v2 E-1; e1/plan.md §2.2 — renamed agentevals set).
+TrajectoryMatchMode = Literal["exact", "ordered", "superset", "unordered"]
+
+
+class ExpectedTrajectoryStep(BaseModel):
+    """One expected tool step in a durable golden trajectory (data-model §2.2).
+
+    `args_match` is a partial dict-subset asserted present in the actual call args;
+    `expect_approval` asserts the step SHOULD park at a HITL gate.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    tool: str
+    args_match: Optional[dict[str, Any]] = None
+    expect_approval: Optional[bool] = None
+
+
+class ExpectedTrajectory(BaseModel):
+    """Golden trajectory scored vs the real `run_steps` under `match_mode`."""
+
+    model_config = ConfigDict(extra="allow")
+
+    match_mode: TrajectoryMatchMode = "superset"  # most forgiving default (§2.2)
+    steps: list[ExpectedTrajectoryStep] = Field(default_factory=list)
+
+
 class DurableDatasetItem(_DatasetItemBase):
-    """Trajectory + tool-call + HITL-arg review (data-model §2.2; scored WS-1)."""
+    """Trajectory + tool-call + HITL-arg review (data-model §2.2; scored WS-1).
+
+    `expected_trajectory` is now a STRUCTURED model (match_mode + typed steps), so a
+    malformed trajectory (e.g. a step missing `tool`) is rejected 422 at the door —
+    the discriminated union validates the variant, not runtime key-sniffing later.
+    """
 
     kind: Literal["durable"] = "durable"
     input_payload: Optional[dict[str, Any]] = None
     expected_output: Optional[str] = None
-    expected_trajectory: Optional[dict[str, Any]] = None
+    expected_trajectory: Optional[ExpectedTrajectory] = None
 
 
 class ScheduledDatasetItem(_DatasetItemBase):
@@ -1366,6 +1406,18 @@ class EvalScoreRequest(BaseModel):
     run_id: Optional[uuid.UUID] = None
     input: Optional[str] = None
     response: Optional[str] = None
+    # Eval v2 E-1 (durable): the projected run_steps → trajectory the durable
+    # branch scores (data-model §2/§3). Each entry: {step_number, name, status,
+    # tool?, args?, approval_id?}. `dimension_weights` overrides the durable
+    # default composite weights (0.4/0.4/0.2) when the eval run supplies them.
+    actual_trajectory: Optional[list[dict[str, Any]]] = None
+    dimension_weights: Optional[dict[str, float]] = None
+    # Eval v2 E-5 (workflow): the ordered member names the eval-runner extracted
+    # from the workflow run tree (child `agent_name`s, ordered by `started_at`)
+    # and, per member, that child's projected run_steps for the optional
+    # per-member rubric. Only the `mode=workflow` branch reads these.
+    member_path: Optional[list[str]] = None
+    per_member_steps: Optional[dict[str, list[dict[str, Any]]]] = None
 
 
 class EvalScoreResponse(BaseModel):
@@ -1543,6 +1595,9 @@ class AgentTriggerCreate(BaseModel):
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = Field(None, max_length=255)
     alert_on_failure: bool = True
+    # Reviewer scope a daemon trigger's approvals route to (WS-2 T011/T014).
+    # NULL falls back to the "agent:reviewer" default in the approval derivation.
+    approver_role: str | None = Field(None, max_length=256)
 
     @model_validator(mode="after")
     def _validate_trigger_fields(self) -> "AgentTriggerCreate":
@@ -1559,6 +1614,7 @@ class AgentTriggerUpdate(BaseModel):
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = Field(None, max_length=255)
     alert_on_failure: bool | None = None
+    approver_role: str | None = Field(None, max_length=256)
 
 
 class AgentTriggerResponse(BaseModel):
@@ -1574,6 +1630,9 @@ class AgentTriggerResponse(BaseModel):
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = None
     alert_on_failure: bool = True
+    # Reviewer scope a daemon trigger's approvals route to (WS-2 T011/T014);
+    # NULL means the "agent:reviewer" default applies.
+    approver_role: str | None = None
     # Plaintext webhook token — populated ONLY in the create response (shown once);
     # never persisted (only sha256 is) and absent from list/get responses.
     token: str | None = None
@@ -1620,6 +1679,9 @@ class WorkflowTriggerResponse(BaseModel):
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = None
     alert_on_failure: bool = True
+    # Reviewer scope a daemon workflow-trigger's approvals route to (WS-2 T011/T014);
+    # NULL means the "agent:reviewer" default applies.
+    approver_role: str | None = None
     # Plaintext webhook token — populated ONLY in the create/rotate-token response
     # (shown once, never persisted — only sha256 is stored).
     token: str | None = None
@@ -1873,6 +1935,9 @@ __all__ = [
     "ScheduledDatasetItem",
     "WebhookDatasetItem",
     "WorkflowDatasetItem",
+    "ExpectedTrajectory",
+    "ExpectedTrajectoryStep",
+    "TrajectoryMatchMode",
     # Eval Run (Phase 10.3)
     "EvalRunCreate",
     "EvalRunResultCreate",

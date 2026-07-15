@@ -22,6 +22,12 @@ export interface ApprovalCardData {
   /** WHO — the requester + their team. */
   requestedBy?: string | null;
   requestedByTeam?: string | null;
+  /**
+   * WHO (daemon) — the derived principal label for a service-identity run, e.g.
+   * "service:X on behalf of Y" (WS-2 T013). Shown in place of/alongside the
+   * requester when present; null on interactive/user-delegated approvals.
+   */
+  principalDisplay?: string | null;
   /** Inbox context — the agent that raised the gate. */
   agentName?: string | null;
   /** Inbox context — the durable step the gate parked at. */
@@ -84,7 +90,18 @@ export default function ApprovalCard({
         )}
       </div>
 
-      {/* WHO — who requested the call. */}
+      {/* WHO (daemon) — the service-identity principal for a daemon trigger-run. */}
+      {data.principalDisplay && (
+        <p
+          data-testid="approval-card-principal"
+          className="mt-1 text-[11px] text-slate-500"
+        >
+          Acting as{" "}
+          <span className="font-medium text-slate-600">{data.principalDisplay}</span>
+        </p>
+      )}
+
+      {/* WHO — who requested the call (interactive/user-delegated). */}
       {data.requestedBy && (
         <p className="mt-1 text-[11px] text-slate-500">
           Requested by{" "}

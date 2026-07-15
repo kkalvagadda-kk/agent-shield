@@ -10,10 +10,11 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import get_optional_user
 from db import AsyncSessionLocal
 from models import Agent, AgentTrigger
 from schemas import (
@@ -50,9 +51,14 @@ async def _get_agent(name: str, db: AsyncSession) -> Agent:
 async def create_trigger(
     name: str,
     body: AgentTriggerCreate,
+    x_user_sub: str | None = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentTrigger:
     agent = await _get_agent(name, db)
+    # The human who arms the trigger — authorizes the standing daemon run; audit
+    # reads "service:X on behalf of {armed_by}" (WS-2 T007/T008 producer).
+    armed_by = (user or {}).get("sub") or x_user_sub
     # Webhook triggers get a server-generated token; only its sha256 is stored.
     plaintext = None
     token_hash = None
@@ -69,6 +75,8 @@ async def create_trigger(
         alert_email=body.alert_email,
         alert_on_failure=body.alert_on_failure,
         token_hash=token_hash,
+        armed_by=armed_by,
+        approver_role=body.approver_role,
     )
     db.add(trigger)
     await db.commit()

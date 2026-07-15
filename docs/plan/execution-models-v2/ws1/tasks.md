@@ -61,24 +61,24 @@ T-S45-006 passes. Recorded in the gap ledger.
   link/dispatch error.
 - **Verify:** mapper import; suite-55 T-S55-003 (fail-closed) + park→decide→resume→complete.
 
-## [ ] T5 — Workflow D3: all-four-mode durable resume (`workflow_orchestrator.py`)
+## [X] T5 — Workflow D3: all-four-mode durable resume (`workflow_orchestrator.py`) — DONE (commit df17d55; suite-56 6/6 on 0.2.176 2026-07-14)
 - `_halt_for_approval` checkpoints the cursor (node for conditional/handoff; accumulator for supervisor);
   add `_run_{conditional,handoff,supervisor}_from`; `resume_orchestration` dispatches per `mode`.
-- **Verify:** suite-56 (4 modes park→resume→advance→complete; supervisor accumulator survives).
+- **Verify:** suite-56 (4 modes park→resume→advance→complete; supervisor accumulator survives). **suite-56 6/6 PASS** (T-S56-001..006: conditional/handoff/supervisor park+resume; supervisor accumulator survives).
 
-## [ ] T6 — Workflow D4: "+ Visibility" durable members via `/run`
+## [X] T6 — Workflow D4: "+ Visibility" durable members via `/run` — DONE (commit df17d55 + parity fix 2026-07-14)
 - `workflow_orchestrator._dispatch` — durable members via `/run` (parent_run_id=member run); reactive stay
   `/chat`. Child `run_steps` in the tree. **Documented limitation:** within-member crash-restart out of scope.
+- **Parity fix (2026-07-14):** `_dispatch_durable_member` no longer hand-rolls a second `/run` POST — it now calls the shared `durable_dispatch.dispatch_durable_run(..., runner_url=member_pod)`. The single `/run` literal invariant holds (grep-clean). Rides WS-2's first deploy.
 
-## [ ] T7 — Approval UI parity + inbox authority (Studio)
-- One `<ApprovalCard>` mounted by `HitlPanel`/`ConversationApprovalPanel`/`ApprovalsInboxPage` (M1);
-  inbox `agent:reviewer` gate. Vitest + typecheck.
+## [X] T7 — Approval UI parity + inbox authority (Studio) — DONE (commit bef17f5)
+- One `<ApprovalCard>` (`studio/src/components/approvals/ApprovalCard.tsx` + test) mounted by
+  `HitlPanel`/`ConversationApprovalPanel`/`ApprovalsInboxPage` (M1); inbox `agent:reviewer` gate. Vitest + typecheck.
 
-## [ ] T8 — E2E + Playwright + deploy
+## [X] T8 — E2E + Playwright + deploy — DONE (commit a304973; deployed 0.2.176/0.1.134/0.1.44)
 - `suite-55-durable-engine.sh` (declarative **and** SDK: park→approve→resume→complete; kill-pod→resume; real
-  steps), `suite-56-workflow-durable-modes.sh` (4 modes + member steps), register in `run-all.sh`;
-  `approvals-inbox.spec.ts`; bump registry-api + **declarative-runner** (changed here) + studio in BOTH files;
-  SDK ships via pip into agent images (rebuild note); `docs/experience/playground.md`.
+  steps), `suite-56-workflow-durable-modes.sh` (4 modes + member steps), registered in `run-all.sh`;
+  `approvals-inbox.spec.ts`; registry-api/declarative-runner/studio bumped in BOTH files; deployed.
 
 ## Gap ledger (WS-1)
 - Within-member crash-restart → deferred (full-nested follow-up). Daemon approver routing → WS-2. Inbox nav

@@ -155,6 +155,23 @@ resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarati
 **not-yet-wired (verify at deploy time):**
 - **Live-pod inline leg.** The Playwright spec stubs the trigger/tree/approvals/decide endpoints (no durable member pod parks a real sandbox approval on this cluster — same fixture boundary suite-55/56 accept). **Manual check:** run one of the seeded durable workflows (`flow-conditional` / `flow-handoff` / `flow-supervisor`, member `wf-payout` calls high-risk `refund_action`) from the builder run panel → confirm the parent parks at `awaiting_approval` → the inline card appears under the parked step → click Approve → confirm the run advances (no console visit). Its green Playwright run is deploy-gated — `bash scripts/studio-e2e.sh`.
 
+## Known gaps — WS-2 (durable daemon: identity + async approval routing)
+
+**Landed in this slice** (registry-api 0.2.178+ / studio 0.1.135; migrations 0061 `agent_triggers.armed_by` + 0062 `approver_role`): a daemon trigger run now carries a **service identity** as `run_by`, decided by one shared `resolve_principal` / `resolve_workflow_principal` helper (`services/registry-api/identity.py`) keyed on JWT-presence — `/chat` = the caller, a trigger run = the service identity (daemon) or the arming human (user_delegated). The OPA `user_identity_ok` floor allows daemon + empty user and denies user_delegated + empty user (`missing_user_identity`). A daemon run's parked approval routes to a reviewer scope (`agent:reviewer` by default, or the trigger's `approver_role`), renders `principal_display` (`"service:X on behalf of Y"` / `"workflow:X (service) on behalf of Y"`) in the Global Approvals Inbox, and a **non-reviewer decide is rejected 403**. `armed_by` (the authorizing human) is captured on trigger arm/create.
+
+**Acceptance proof:** **suite-70** (`scripts/e2e/suite-70-daemon-identity.sh`, 8/8 no-fakes — real daemon agent + workflow, real pods, real trigger run → real park→route→reject→resume) + Playwright `studio/e2e/approvals-inbox.spec.ts` (inbox card renders `"service:X on behalf of Y"`, reviewer-role filter, Approve fires `PATCH /approvals/{id}`, reload asserts decided) + the CP1/CP2 smoke scripts (`scripts/smoke-test-cp{1,2}-ws2-*.sh`).
+
+**deferred (intentional) — land in a later workstream:**
+- **Signed RCT / `actor_chain` cryptographic token verification.** WS-2 threads a plaintext `actor_chain` header for audit, but there is no signed request-context token minted + verified across service boundaries. Deferred to the **identity-propagation initiative**.
+- **Email/webhook daemon approval notification.** A parked daemon approval routes to the reviewer scope in the inbox, but nobody is proactively pinged (no email/webhook fan-out to the reviewer). Reviewers must watch the Global Approvals Inbox. Deferred to future.
+
+**optional / by-design (not-added):**
+- **Persisted `approvals.reviewer_scope` column.** The reviewer scope is **derived at read time** from `agent_class` + the trigger's `approver_role` — it is not stored on the `approvals` row. This is deliberate (no column, no drift between the stored scope and the trigger config); adding a persisted column is optional if a future read path needs it without the join.
+
+**not-yet-wired (debt):**
+- **Trigger-run OPA-input propagation to the pod** → **identity-propagation initiative.** registry-api decides identity + stamps `run_by`, but does **not** propagate `principal.user_id` / `trigger_type` onto the agent pod's SDK OPA input for a `/internal/runs/start` durable/reactive dispatch (`agent_class` **does** reach the pod via the deploy env `AGENTSHIELD_AGENT_CLASS`). Effect: a `user_delegated` trigger tool-call currently **over-denies** at the pod (`user_id=""` → `missing_user_identity`) — this is **fail-closed-safe, not a leak** — rather than presenting the arming human. The OPA rule + the `run_by` identity decision are proven (CP1c); end-to-end reason propagation is the deferred piece.
+- **Daemon workflow service-identity subject.** A daemon **workflow**'s audit principal uses a deterministic SA-name convention (`system:serviceaccount:production-<wf>:agent-<wf>-sa`) replicated across the service boundary (deploy-controller) rather than reading a stored `AgentIdentity` row. Cross-boundary naming drift risk. Low-severity — it is an **audit principal only** (the workflow parent orchestrates members and makes no tool calls itself), so a naming mismatch mis-labels the audit line, it does not mis-authorize a call.
+
 ---
 
 ## 0. Before you start

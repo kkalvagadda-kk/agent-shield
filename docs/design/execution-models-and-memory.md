@@ -503,6 +503,8 @@ Row exists → member is paused for HITL. No row → member completed normally (
 
 ## 5. Multi-Tenancy & Isolation
 
+> **⚠ Superseded + as-built (rev 2026-07-15).** The memory model in §5–§6 is **design-intent that the running code diverged from** (e.g. `thread_id = run_id` not `{team}:{agent}:{user}:{uuid}`; reads scoped by `(agent_name, thread_id)` with no `user_id`; `MemorySaver` fallback; dead pgvector). The authoritative, reconciled spec for context storage / cross-agent sharing / isolation is **[`context-storage-architecture.md`](./context-storage-architecture.md)** — it records the true as-built state, adds the `workflow_run` shared scope (a deliberate, controlled relaxation of §5.2's agent-isolation *within one workflow run*), authority-class-derived layered scopes, the statelessness invariant + `thread_id`-authorization hardening, the user-profile entity, and knowledge-bank RAG. Read that doc first; treat §5–§6 below as background intent.
+
 ### 5.1 Isolation Dimensions
 
 The platform is multi-tenant (many teams share the same cluster and database) and multi-user (many users share a team). Memory and conversation history must be isolated along both axes.

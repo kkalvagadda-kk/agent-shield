@@ -191,3 +191,48 @@ read by member OPA input).
 - **user_delegated-no-user is a DENY**, not a silent downgrade to service (fail-closed).
 - **OPA bundle** — if the rego ships via the bundle server (`infra/opa-bundle-server/policy.rego`), update
   that copy too and note the known "Bundle load Forbidden" governance item.
+
+## 9. T001 Re-grounding against the live tree (2026-07-14) — supersedes the plan's indicative specifics
+- **Alembic head = `0060`** (`0059_eval_v2_dataset_and_run_mode`, `0060_eval_v2_result_dimensions`). WS-2's
+  `armed_by` migration is **`0061`**, `down_revision="0060"` (NOT the doc's `00NN`/`0059`).
+- **Suite number = `suite-70-daemon-identity.sh`** — the tasks doc guessed `suite-61`, but **suite-61 is
+  taken** (eval-v2 E-0); suites exist through `suite-69`. Use **70**.
+- **`agent_runs.run_by`** = `models.py:1559` (`Mapped[str | None]`, `String(255)`). No new run column.
+- **`AgentTrigger`** = `models.py:1655`; `input_payload` = `:1694` — add `armed_by` right after it. No
+  `armed_by` column exists yet.
+- **OPA rego ships BOTH copies** — `services/registry-api/opa_policy/agentshield.rego` **and**
+  `infra/opa-bundle-server/policy.rego` (`configmap-policy.yaml` bundles it). **T004 is IN SCOPE** (mirror the rule).
+- **`agentshield.rego`** structure: `default allow := false` (:18), `allow if {` (:95), `require_approval if {`
+  (:103, untouched), `deny_reason` rules (:111+). `agent := data.agents[input.sa_subject]`.
+- **Service identity source (T007)** = `AgentIdentity` model / `agent_identities` table (`models.py:192`).
+  No existing `resolve_principal`/`Principal` — `identity.py` is a **new** module.
+- **`_dispatch`** = `workflow_orchestrator.py:70`; `_run_step` = `:418`; `_dispatch_durable_member` = `:115` (T016 extends the workflow member path).
+- **armed_by producers (T008)** = `routers/triggers.py:61` (agent trigger create) **and**
+  `routers/composite_workflows.py:574` (workflow trigger create) — both `AgentTrigger(...)` call sites.
+- **`/chat` (T010)** = `routers/chat.py:519` (`start_chat`, `Depends(require_user)`); `run_by=user_sub` already stamped at `:481`.
+
+## 10. T022 Verification sweep (2026-07-14) — WS-2 COMPLETE
+
+**Orphan-grep (each symbol has ≥1 live non-test caller/reader):**
+- `user_identity_ok` → `opa_policy/agentshield.rego` (allow conjunct + rule) + served in the deployed bundle.
+- `resolve_principal` → `identity.py` (def) · `routers/internal.py` (trigger path) · `routers/chat.py` (interactive).
+- `resolve_workflow_principal` → `identity.py` (def) · `routers/internal.py` (`_start_workflow_run`) · `workflow_orchestrator.py`.
+- `principal_display` → `identity.py` (def) · `routers/approvals.py` (audit) · `schemas.py` (response field).
+- `armed_by` → models · migration 0061 · triggers.py + composite_workflows.py (producers) · approvals.py + identity.py (readers).
+- `approver_role` → models · migration 0062 · triggers.py/composite_workflows.py (create+update) · schemas (req+resp) · approvals.py (reviewer_scope derive).
+- `reviewer_scope` → approvals.py (derive + 403 gate) · schemas.py (response) · Studio inbox filter.
+- `actor_chain` → **comments only** (no dead HTTP header) — pod-side propagation is the deferred identity-propagation initiative (gap ledger).
+
+**Static/tests:** `ast.parse` green on all touched registry-api files; `opa test services/registry-api/opa_policy/` = **19/19**; `cd studio && npm run typecheck` clean + `npm run test` **205/205**.
+
+**Cluster acceptance:** suite-70 **8/8** no-fakes (real `/internal/runs/start` prod door after the 0.2.179 `runner_url` fix) · Playwright `approvals-inbox.spec.ts` **2/2** · CP1 infra 3/3 + behaviour 7/7 · CP2b infra 5/5. Images: registry-api **0.2.179**, studio **0.1.135**, migrations at **0062**.
+
+**Real bug found & fixed during CP2:** durable **trigger** dispatch (`internal.py` `_dispatch_and_complete`) omitted `runner_url` → hit the non-existent shared `declarative-runner` Service → production trigger→single-agent durable runs never reached the pod. Fixed to target `{agent}-production.{ns}:8080` (mirrors reactive + playground + workflow-member callers); proven end-to-end by the re-run.
+
+## Definition-of-Done gate (WS-2)
+- [X] Real user journey proven: suite-70 drives real deploy→trigger→park→decide→resume; Playwright drives the real inbox Approve.
+- [X] Save→reload→assert: approver_role persists (trigger create/update → re-GET); armed_by persists; suite-70 re-reads committed run_by/approval rows.
+- [X] No orphan: §10 sweep — every symbol has a live caller; actor_chain is comment-only by design.
+- [X] Fail-closed governance: OPA `user_identity_ok` deny; user_delegated-no-armer refused; non-reviewer decide 403; dispatch failure marks run failed + alerts.
+- [X] Honest gap ledger: T021 (manual test plan) — RCT token + email notify deferred; OPA-input propagation + workflow SA-convention = debt.
+- [X] Image tags in BOTH files (registry-api 0.2.179 / studio 0.1.135); migrations 0061 + 0062.

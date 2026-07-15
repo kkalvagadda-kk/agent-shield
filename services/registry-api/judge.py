@@ -24,7 +24,8 @@ import logging
 import os
 import urllib.error
 import urllib.request
-from typing import Optional
+from collections import Counter
+from typing import Any, Optional
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,254 @@ def score_composite(dimension_scores: dict, weights: dict | None = None) -> floa
             return acc / total_w
     # equal-weight mean — also the weights-None and degenerate-weights fallback
     return sum(float(s) for s in dimension_scores.values()) / len(dimension_scores)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic durable scorers (Eval v2 E-1). PURE CODE — no LLM call. The
+# `/playground/eval/score` durable branch (T006) calls these on the projected
+# `actual_trajectory` (run_steps → trajectory, data-model §3), then reduces via
+# `weighted_mean`. The eval-runner durable branch (T009) is the transitive caller.
+# Trajectory/tool matching is mechanical, so it stays code (cheaper, reproducible,
+# no position/verbosity bias surface) — the LLM judge is reserved for `score_response`.
+# ---------------------------------------------------------------------------
+def _tool_list(steps: list[dict] | None) -> list[str]:
+    """Ordered tool names from a projected trajectory — steps whose boundary was a
+    tool call (`tool` present). Node-only / final-agent boundaries carry no tool
+    and are skipped (data-model §3)."""
+    return [str(s.get("tool")) for s in (steps or []) if s.get("tool")]
+
+
+def _lcs_len(a: list[str], b: list[str]) -> int:
+    """Longest common (order-preserving) subsequence length of two tool lists.
+
+    Used by the order-sensitive modes: the number of expected tools recoverable
+    from the actual run IN ORDER. A wrong-order run scores below its multiset
+    coverage because the out-of-order tool can't extend the subsequence.
+    """
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        cur = [0] * (len(b) + 1)
+        for j, y in enumerate(b, 1):
+            cur[j] = prev[j - 1] + 1 if x == y else max(prev[j], cur[j - 1])
+        prev = cur
+    return prev[len(b)]
+
+
+def _match_sequence(
+    expected: list[str],
+    actual: list[str],
+    match_mode: str = "superset",
+) -> tuple[float, dict]:
+    """Reduce two ordered NAME lists to a match score under one of four modes.
+
+    The shared ordered-list matcher for BOTH ``score_trajectory`` (tool-name
+    granularity, E-1) and ``score_member_path`` (member-name granularity, E-5) —
+    one matcher, two zoom levels (No-Bandaid: no forked matching logic).
+
+      - ``exact``     — same names, same order, no extras (actual == expected).
+      - ``ordered``   — expected names appear as an in-order subsequence (extras between OK).
+      - ``superset``  — every expected name present (multiset coverage; order + extras OK).
+      - ``unordered`` — same multiset, any order (missing AND extras both penalize).
+
+    Returns ``(score in [0,1], detail{missing[], extra[], order_ok, match_mode})``.
+    An empty ``expected`` (reference-free) is trivially satisfied → 1.0.
+    """
+    if not expected:
+        return 1.0, {"missing": [], "extra": list(actual), "order_ok": True, "match_mode": match_mode}
+
+    exp_ms, act_ms = Counter(expected), Counter(actual)
+    missing = sorted((exp_ms - act_ms).elements())   # expected names not covered by actual
+    extra = sorted((act_ms - exp_ms).elements())     # actual names beyond expected
+
+    if match_mode == "superset":
+        # coverage only; order + extras don't count against.
+        score = (len(expected) - len(missing)) / len(expected)
+        order_ok = True
+    elif match_mode == "unordered":
+        # same set, any order — missing AND extras both reduce the score.
+        matched = len(expected) - len(missing)
+        denom = len(expected) + len(extra)
+        score = (matched / denom) if denom else 1.0
+        order_ok = True
+    elif match_mode == "ordered":
+        # expected must appear as an in-order subsequence of actual; extras allowed.
+        lcs = _lcs_len(expected, actual)
+        score = lcs / len(expected)
+        order_ok = lcs == len(expected)
+    elif match_mode == "exact":
+        # identical list — order AND no-extras required.
+        lcs = _lcs_len(expected, actual)
+        denom = max(len(expected), len(actual))
+        score = (lcs / denom) if denom else 1.0
+        order_ok = actual == expected
+    else:
+        raise ValueError(f"unknown match_mode: {match_mode!r}")
+
+    return score, {"missing": missing, "extra": extra, "order_ok": order_ok, "match_mode": match_mode}
+
+
+def score_trajectory(
+    actual_steps: list[dict] | None,
+    expected_trajectory: dict | None,
+    match_mode: str = "superset",
+) -> tuple[float, dict]:
+    """Score the run's ordered tool trajectory against a golden one. Pure/deterministic.
+
+    Four match modes (e1/plan.md §2.2) over the ordered tool list:
+      - ``exact``     — same tools, same order, no extras (actual == expected).
+      - ``ordered``   — expected tools appear as an in-order subsequence (extras between OK).
+      - ``superset``  — every expected tool was called (multiset coverage; order + extras OK).
+      - ``unordered`` — same set of tools, any order (missing AND extras both penalize).
+
+    Returns ``(score in [0,1], detail{missing[], extra[], order_ok, match_mode})``.
+    An empty ``expected`` (reference-free durable) is trivially satisfied → 1.0.
+    """
+    steps = (expected_trajectory or {}).get("steps") or []
+    expected = [str(st.get("tool")) for st in steps if isinstance(st, dict) and st.get("tool")]
+    actual = _tool_list(actual_steps)
+    # Delegate to the shared ordered-list matcher (also used by score_member_path
+    # at member granularity) — one matcher, two zoom levels.
+    return _match_sequence(expected, actual, match_mode)
+
+
+def score_member_path(
+    actual_member_path: list[str] | None,
+    expected_member_path: list[str] | None,
+    match_mode: str = "ordered",
+) -> tuple[float, dict]:
+    """Score a workflow's member PATH (which members ran, in order) against a
+    golden member path. Pure/deterministic — the SAME ordered-list matcher as
+    ``score_trajectory`` (``_match_sequence``), one zoom level out: members
+    instead of tool steps (E-5, No-Bandaid reuse).
+
+    ``actual_member_path`` is the ordered child ``agent_name`` list the eval-runner
+    extracts from the workflow run tree; ``expected_member_path`` is the author's
+    golden order. Default ``ordered`` so a workflow that skips/reorders a member
+    scores ``<1.0`` even when the final answer is correct — the reason E-5 exists.
+
+    Returns ``(score in [0,1], member_diff{missing[], extra[], order_ok, match_mode})``.
+    An empty ``expected_member_path`` (reference-free) → 1.0.
+    """
+    expected = [str(m) for m in (expected_member_path or []) if m]
+    actual = [str(m) for m in (actual_member_path or []) if m]
+    return _match_sequence(expected, actual, match_mode)
+
+
+def _dict_subset(sub: Any, sup: Any) -> bool:
+    """True iff every key in ``sub`` is present in ``sup`` with an equal value
+    (recursive for nested dicts). An empty ``sub`` is trivially satisfied — no arg
+    assertion means only the tool's presence matters."""
+    if not isinstance(sub, dict):
+        return sub == sup
+    if not isinstance(sup, dict):
+        return False
+    for k, v in sub.items():
+        if k not in sup:
+            return False
+        if isinstance(v, dict):
+            if not _dict_subset(v, sup[k]):
+                return False
+        elif sup[k] != v:
+            return False
+    return True
+
+
+def _step_parked(step: dict) -> bool:
+    """True iff a projected actual step parked at a HITL gate — its
+    ``status == 'awaiting_approval'`` OR it carries a non-null ``approval_id``
+    (data-model §3). The two are checked with OR because a resumed run may
+    overwrite the parked step's live status back to completed while the
+    ``approval_id`` persists on the run_steps row (the durable step-update
+    callback records it) — approval_id is the durable evidence the gate fired."""
+    return step.get("status") == "awaiting_approval" or bool(step.get("approval_id"))
+
+
+def score_tool_calls(
+    actual_steps: list[dict] | None,
+    expected_steps: list[dict] | None,
+) -> tuple[float, dict]:
+    """Score per-tool-call correctness: tool-name exact match + ``args_match`` is a
+    dict-subset of the actual call args, plus HITL-arg (``expect_approval``) review.
+    Pure/deterministic (no LLM).
+
+    Each expected step is greedily matched to the first not-yet-consumed actual step
+    with the same tool name (in order). A step passes when its tool was found AND its
+    ``args_match`` subset is present in the actual args AND — when the expected step
+    sets ``expect_approval: true`` — the matched actual step actually PARKED at the
+    gate (``status == 'awaiting_approval'`` or a non-null ``approval_id``) with its
+    args satisfying ``args_match``. A gate expected to park that did NOT park fails
+    that step (fail-closed — never score an un-parked gate as a pass, E-1 T011).
+
+    Returns ``(score in [0,1], detail{tool_diffs[], approvals[]})`` — one
+    ``tool_diffs`` entry per expected step
+    (``{step, expected_args, actual_args, arg_match, tool_found}``) and one
+    ``approvals`` entry per ``expect_approval`` step
+    (``{step, expected, parked, args_matched}``, data-model §2).
+    """
+    expected_steps = expected_steps or []
+    if not expected_steps:
+        return 1.0, {"tool_diffs": [], "approvals": []}
+
+    actual_steps = actual_steps or []
+    used = [False] * len(actual_steps)
+    tool_diffs: list[dict] = []
+    approvals: list[dict] = []
+    passed = 0
+
+    for est in expected_steps:
+        etool = est.get("tool")
+        args_match = est.get("args_match") or {}
+        expect_approval = bool(est.get("expect_approval"))
+        match_idx = next(
+            (i for i, a in enumerate(actual_steps)
+             if not used[i] and a.get("tool") == etool),
+            None,
+        )
+        if match_idx is None:
+            tool_diffs.append({
+                "step": etool, "expected_args": args_match,
+                "actual_args": None, "arg_match": False, "tool_found": False,
+            })
+            # A tool that never ran cannot have parked — fail-closed for a gate.
+            if expect_approval:
+                approvals.append({
+                    "step": etool, "expected": True, "parked": False, "args_matched": False,
+                })
+            continue
+        used[match_idx] = True
+        actual_step = actual_steps[match_idx]
+        actual_args = actual_step.get("args") or {}
+        arg_ok = _dict_subset(args_match, actual_args)
+        tool_diffs.append({
+            "step": etool, "expected_args": args_match,
+            "actual_args": actual_args, "arg_match": arg_ok, "tool_found": True,
+        })
+        step_ok = arg_ok
+        if expect_approval:
+            parked = _step_parked(actual_step)
+            approvals.append({
+                "step": etool, "expected": True, "parked": parked, "args_matched": arg_ok,
+            })
+            # Fail-closed: an expect_approval step passes only if it PARKED with
+            # matching args. A gate that slipped through un-gated fails the step.
+            step_ok = step_ok and parked
+        if step_ok:
+            passed += 1
+
+    return passed / len(expected_steps), {"tool_diffs": tool_diffs, "approvals": approvals}
+
+
+def weighted_mean(dims: dict, weights: dict | None = None) -> float:
+    """Weighted mean of per-dimension scores — the durable composite reducer.
+
+    Thin alias over ``score_composite`` so the weighting math lives in ONE place
+    (No-Bandaid: no duplicated reducer). ``weights=None`` → equal weight; the
+    durable branch (T006) passes ``{response:0.4, trajectory:0.4, tool_call:0.2}``
+    or the eval run's ``dimension_weights`` override.
+    """
+    return score_composite(dims, weights)
 
 
 async def judge_for_eval(

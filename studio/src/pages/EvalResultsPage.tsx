@@ -20,7 +20,11 @@ import {
   createEvalRun,
   getEvalRun,
   getEvalRunResults,
+  listRunSteps,
+  isWorkflowDetail,
   EvalRunResult,
+  type StepUpdateEvent,
+  type EvalDetail,
 } from "../api/playgroundApi";
 import {
   patchVersion,
@@ -44,9 +48,10 @@ function scoreColor(score: number | null): string {
   return "bg-green-50 text-green-700";
 }
 
-// Eval v2 dimensions rendered per result. E-0 only populates `response`; the
-// others render "—" until their scorers land (E-1..E-5).
-const EVAL_DIMENSIONS = ["response", "trajectory", "side_effects", "filter", "member"] as const;
+// Eval v2 dimensions rendered per result. E-0 populates `response`; E-1 adds the
+// durable `trajectory` + `tool_call` scorers; the rest render "—" until their
+// scorers land (E-2..E-5).
+const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effects", "filter", "member_path"] as const;
 
 function DimensionScores({ scores }: { scores: Record<string, number> | null }) {
   return (
@@ -485,10 +490,356 @@ function ResultRow({
                   {r.judge_reasoning ?? "—"}
                 </p>
               </div>
+              {r.eval_detail && isWorkflowDetail(r.eval_detail) ? (
+                <WorkflowEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
+              ) : r.eval_detail ? (
+                <DurableEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
+              ) : null}
             </div>
           </td>
         </tr>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Durable (Eval v2 E-1) per-item evidence: trajectory dimensions render above;
+// this block shows the tool-diff panel, the expected-vs-actual step diff, the
+// HITL approvals, and a deep-link into the real run tree (StepTracker steps).
+// ---------------------------------------------------------------------------
+function DurableEvidence({
+  detail,
+  runId,
+}: {
+  detail: EvalDetail;
+  runId: string | null;
+}) {
+  const expectedSteps = detail.expected_trajectory?.steps ?? [];
+  const actualSteps = detail.actual_trajectory ?? [];
+  const toolDiffs = detail.tool_diffs ?? [];
+  const approvals = detail.approvals ?? [];
+
+  return (
+    <div data-testid="durable-evidence" className="space-y-3 pt-1">
+      {/* Expected vs actual step diff */}
+      {(expectedSteps.length > 0 || actualSteps.length > 0) && (
+        <div>
+          <p className="font-semibold text-slate-600 mb-1">
+            Trajectory (expected vs actual)
+            {detail.expected_trajectory?.match_mode && (
+              <span className="ml-2 text-[10px] font-normal text-slate-400 uppercase tracking-wide">
+                {detail.expected_trajectory.match_mode}
+              </span>
+            )}
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-white rounded p-2 border border-slate-100">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase mb-1">Expected</p>
+              {expectedSteps.length === 0 ? (
+                <p className="text-slate-300">—</p>
+              ) : (
+                <ol className="space-y-0.5">
+                  {expectedSteps.map((s, i) => (
+                    <li key={i} className="text-slate-700 flex items-center gap-1">
+                      <span className="text-slate-400">{i + 1}.</span>
+                      <span className="font-mono">{s.tool}</span>
+                      {s.expect_approval && (
+                        <span className="text-amber-500 text-[10px]">⚑ approval</span>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+            <div
+              data-testid="actual-trajectory"
+              className="bg-white rounded p-2 border border-slate-100"
+            >
+              <p className="text-[10px] font-semibold text-slate-400 uppercase mb-1">Actual</p>
+              {actualSteps.length === 0 ? (
+                <p className="text-slate-300">—</p>
+              ) : (
+                <ol className="space-y-0.5">
+                  {actualSteps.map((s, i) => (
+                    <li key={i} className="text-slate-700 flex items-center gap-1">
+                      <span className="text-slate-400">{s.step_number}.</span>
+                      <span className="font-mono">{s.tool ?? s.name}</span>
+                      {s.status === "awaiting_approval" && (
+                        <span className="text-amber-500 text-[10px]">⚑ parked</span>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tool-diff panel */}
+      {toolDiffs.length > 0 && (
+        <div data-testid="tool-diff-panel">
+          <p className="font-semibold text-slate-600 mb-1">Tool-call args diff</p>
+          <div className="overflow-x-auto">
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="text-slate-400 text-left">
+                  <th className="py-1 pr-3 font-medium">Step</th>
+                  <th className="py-1 pr-3 font-medium">Expected args</th>
+                  <th className="py-1 pr-3 font-medium">Actual args</th>
+                  <th className="py-1 font-medium">Match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {toolDiffs.map((d, i) => (
+                  <tr key={i} className="align-top border-t border-slate-100">
+                    <td className="py-1 pr-3 font-mono text-slate-700">{d.step}</td>
+                    <td className="py-1 pr-3 font-mono text-slate-500 whitespace-pre-wrap">
+                      {d.expected_args ? JSON.stringify(d.expected_args) : "—"}
+                    </td>
+                    <td className="py-1 pr-3 font-mono text-slate-500 whitespace-pre-wrap">
+                      {d.actual_args ? JSON.stringify(d.actual_args) : "—"}
+                    </td>
+                    <td className="py-1">
+                      {d.arg_match ? (
+                        <CheckCircle size={12} className="text-green-500" />
+                      ) : (
+                        <XCircle size={12} className="text-red-500" />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* HITL approvals */}
+      {approvals.length > 0 && (
+        <div data-testid="approvals-panel">
+          <p className="font-semibold text-slate-600 mb-1">HITL approvals</p>
+          <ul className="space-y-0.5">
+            {approvals.map((a, i) => (
+              <li key={i} className="flex items-center gap-2 text-slate-600">
+                <span className="font-mono">{a.step}</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded ${
+                    a.parked ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
+                  }`}
+                >
+                  {a.parked ? "parked" : "did not park"}
+                </span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded ${
+                    a.args_matched ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
+                  }`}
+                >
+                  args {a.args_matched ? "matched" : "mismatch"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Deep-link into the real run tree (StepTracker steps) */}
+      {runId && <RunStepsDeepLink runId={runId} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Workflow (Eval v2 E-5) per-item evidence: the member-path dimension renders in
+// the row above; this block shows the expected-vs-actual member path, the
+// member_diff (missing/extra/order), per-member rubric scores (each member's LLM
+// rubric score + the judge's reason + a had_steps flag when the child had no
+// run_steps to zoom into), and a deep-link into the workflow run tree via the
+// parent run_id (reuses the durable RunStepsDeepLink).
+// ---------------------------------------------------------------------------
+function WorkflowEvidence({
+  detail,
+  runId,
+}: {
+  detail: EvalDetail;
+  runId: string | null;
+}) {
+  const expected = detail.expected_member_path ?? [];
+  const actual = detail.actual_member_path ?? [];
+  const diff = detail.member_diff ?? null;
+  const perMember = detail.per_member ?? [];
+
+  return (
+    <div data-testid="workflow-evidence" className="space-y-3 pt-1">
+      {/* Expected vs actual member path */}
+      {(expected.length > 0 || actual.length > 0) && (
+        <div>
+          <p className="font-semibold text-slate-600 mb-1">
+            Member path (expected vs actual)
+            {diff?.match_mode && (
+              <span className="ml-2 text-[10px] font-normal text-slate-400 uppercase tracking-wide">
+                {diff.match_mode}
+              </span>
+            )}
+          </p>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-white rounded p-2 border border-slate-100">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase mb-1">Expected</p>
+              {expected.length === 0 ? (
+                <p className="text-slate-300">—</p>
+              ) : (
+                <ol className="space-y-0.5">
+                  {expected.map((m, i) => (
+                    <li key={i} className="text-slate-700 flex items-center gap-1">
+                      <span className="text-slate-400">{i + 1}.</span>
+                      <span className="font-mono">{m}</span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+            <div
+              data-testid="actual-member-path"
+              className="bg-white rounded p-2 border border-slate-100"
+            >
+              <p className="text-[10px] font-semibold text-slate-400 uppercase mb-1">Actual</p>
+              {actual.length === 0 ? (
+                <p className="text-slate-300">—</p>
+              ) : (
+                <ol className="space-y-0.5">
+                  {actual.map((m, i) => {
+                    const isExtra = diff?.extra?.includes(m);
+                    return (
+                      <li key={i} className="text-slate-700 flex items-center gap-1">
+                        <span className="text-slate-400">{i + 1}.</span>
+                        <span className="font-mono">{m}</span>
+                        {isExtra && (
+                          <span className="text-amber-500 text-[10px]">+ extra</span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </div>
+          </div>
+
+          {/* member_diff summary badges */}
+          {diff && (
+            <div data-testid="member-diff" className="flex flex-wrap items-center gap-1.5 mt-2">
+              <span
+                className={`text-[10px] px-1.5 py-0.5 rounded ${
+                  diff.order_ok ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
+                }`}
+              >
+                order {diff.order_ok ? "ok" : "wrong"}
+              </span>
+              {(diff.missing ?? []).length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-50 text-red-700">
+                  missing: {(diff.missing ?? []).join(", ")}
+                </span>
+              )}
+              {(diff.extra ?? []).length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">
+                  extra: {(diff.extra ?? []).join(", ")}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Per-member rubric scores + zoom */}
+      {perMember.length > 0 && (
+        <div data-testid="per-member-panel">
+          <p className="font-semibold text-slate-600 mb-1">Per-member evidence</p>
+          <div className="space-y-2">
+            {perMember.map((pm, i) => (
+              <div
+                key={i}
+                data-testid={`per-member-evidence-${i}`}
+                className="bg-white rounded p-2 border border-slate-100"
+              >
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="font-mono text-slate-700">{pm.member}</span>
+                  {typeof pm.score === "number" && (
+                    <span
+                      className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scoreColor(pm.score)}`}
+                    >
+                      {pm.score.toFixed(2)}
+                    </span>
+                  )}
+                </div>
+                {pm.rubric && (
+                  <p className="text-slate-500 italic mb-1">“{pm.rubric}”</p>
+                )}
+                {pm.reason && (
+                  <p className="text-slate-500 whitespace-pre-wrap mb-1">{pm.reason}</p>
+                )}
+                {pm.had_steps === false && (
+                  <p className="text-[10px] text-amber-500">
+                    no run_steps to zoom into — scored on the member's response only
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Deep-link into the workflow run tree (parent run_id) */}
+      {runId && <RunStepsDeepLink runId={runId} />}
+    </div>
+  );
+}
+
+// Resolving deep-link: on demand fetches the real `run_steps` for the durable
+// run (`GET /playground/runs/{id}/steps`) — the same substrate StepTracker and
+// the eval-runner read — and renders them read-only.
+function RunStepsDeepLink({ runId }: { runId: string }) {
+  const [open, setOpen] = useState(false);
+  const { data: steps, isLoading } = useQuery({
+    queryKey: ["run-steps", runId],
+    queryFn: () => listRunSteps(runId),
+    enabled: open,
+  });
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        data-testid="run-steps-deeplink"
+        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+      >
+        <Eye size={12} />
+        {open ? "Hide run tree" : "View run tree"}
+        <span className="font-mono text-slate-400">({runId.slice(0, 8)}…)</span>
+      </button>
+      {open && (
+        <div className="mt-2 bg-white rounded p-2 border border-slate-100">
+          {isLoading && (
+            <p className="text-slate-400 flex items-center gap-1">
+              <Loader2 size={12} className="animate-spin" />
+              Loading run steps…
+            </p>
+          )}
+          {steps && steps.length === 0 && (
+            <p className="text-slate-400">No run steps recorded.</p>
+          )}
+          {steps && steps.length > 0 && (
+            <ol className="space-y-0.5">
+              {steps.map((s: StepUpdateEvent) => (
+                <li key={s.step_number} className="text-slate-700 flex items-center gap-1">
+                  <span className="text-slate-400">{s.step_number}.</span>
+                  <span className="font-mono flex-1">{s.step_name}</span>
+                  <span className="text-[10px] text-slate-400">{s.status}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

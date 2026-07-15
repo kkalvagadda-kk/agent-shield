@@ -176,7 +176,10 @@ async def _drive(
     completion or an interrupt. Shared by run_durable + resume_durable — the ONE loop."""
     step = start_step
     final_text: str | None = None
-    open_tools: dict[str, int] = {}  # event run_id -> its step_number (in-flight tools)
+    # event run_id -> (step_number, tool_args) for in-flight tools. Args are only on
+    # the on_tool_start event (`data.input`); we carry them to on_tool_end so the
+    # completed step's `output` records the exact call the run made (Eval v2 E-1).
+    open_tools: dict[str, tuple[int, Any]] = {}
 
     try:
         async for event in graph.astream_events(input_state, config, version="v2"):
@@ -184,18 +187,25 @@ async def _drive(
             name = event.get("name", "") or ""
             if etype == "on_tool_start":
                 step += 1
-                open_tools[event.get("run_id", name)] = step
-                await emitter.emit(StepUpdate(step, f"tool:{name}", "running"))
-            elif etype == "on_tool_end":
-                s = open_tools.pop(event.get("run_id", name), None)
-                if s is None:
-                    step += 1
-                    s = step
-                out = (event.get("data") or {}).get("output")
+                args = (event.get("data") or {}).get("input")
+                open_tools[event.get("run_id", name)] = (step, args)
+                # Eval v2 E-1: carry {tool, args} on the tool-boundary output so the
+                # eval-runner can project run_steps → actual_trajectory (data-model §3).
                 await emitter.emit(StepUpdate(
-                    s, f"tool:{name}", "completed",
-                    output={"result": str(out)[:2000]} if out is not None else None,
+                    step, f"tool:{name}", "running", output={"tool": name, "args": args},
                 ))
+            elif etype == "on_tool_end":
+                entry = open_tools.pop(event.get("run_id", name), None)
+                if entry is None:
+                    step += 1
+                    s, args = step, None
+                else:
+                    s, args = entry
+                out = (event.get("data") or {}).get("output")
+                tool_output: dict[str, Any] = {"tool": name, "args": args}
+                if out is not None:
+                    tool_output["result"] = str(out)[:2000]
+                await emitter.emit(StepUpdate(s, f"tool:{name}", "completed", output=tool_output))
             elif etype == "on_chain_end":
                 ft = _final_text((event.get("data") or {}).get("output"))
                 if ft:
@@ -211,8 +221,12 @@ async def _drive(
     if intr is not None:
         step += 1
         approval_id = intr.get("approval_id")
+        # Eval v2 E-1: the parked-tool boundary also carries {tool, args} (the
+        # interrupt payload from hitl.require_approval) so expect_approval scoring
+        # can assert the presented args against args_match (data-model §3).
         await emitter.emit(StepUpdate(
             step, f"tool:{intr.get('tool', '')}", "awaiting_approval", approval_id=approval_id,
+            output={"tool": intr.get("tool", ""), "args": intr.get("args")},
         ))
         # Fail-closed: an interrupt with no approval_id is un-actionable (nobody can
         # decide it) — deny rather than park forever (bug-009 guard).

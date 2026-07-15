@@ -3,18 +3,44 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../../test/utils";
 import OverviewScheduled from "./OverviewScheduled";
-import type { AgentTrigger, AgentRunItem } from "../../api/registryApi";
+import type { AgentTrigger, AgentRunItem, AgentHealth } from "../../api/registryApi";
 
 vi.mock("../../api/registryApi", () => ({
   listTriggers: vi.fn(),
   listDeploymentRuns: vi.fn(),
   enableTrigger: vi.fn(),
   disableTrigger: vi.fn(),
+  getAgentHealth: vi.fn(),
 }));
 
-import { listTriggers, listDeploymentRuns, enableTrigger, disableTrigger } from "../../api/registryApi";
+import {
+  listTriggers,
+  listDeploymentRuns,
+  enableTrigger,
+  disableTrigger,
+  getAgentHealth,
+} from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
+const NEXT_FIRE = new Date(Date.now() + 3600_000).toISOString();
+
+const scheduledHealth: AgentHealth = {
+  agent_name: "my-agent",
+  mode: "scheduled",
+  health: "healthy",
+  p95_latency_ms: null,
+  error_rate: null,
+  runs_24h: null,
+  cost_24h: null,
+  awaiting_approval_count: null,
+  failed_24h: null,
+  avg_duration_ms: null,
+  last_run_status: "completed",
+  next_fire_at: NEXT_FIRE,
+  missed_fires: 0,
+  match_rate_24h: null,
+  rejected_count_24h: null,
+};
 
 const scheduleTrigger: AgentTrigger = {
   id: "t1",
@@ -62,6 +88,7 @@ describe("OverviewScheduled", () => {
       ...scheduleTrigger,
       enabled: false,
     });
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue(scheduledHealth);
   });
 
   it("shows empty schedule message when no triggers", async () => {
@@ -139,5 +166,71 @@ describe("OverviewScheduled", () => {
       expect(completed.length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("failed")).toBeInTheDocument();
     });
+  });
+
+  it("renders next-fire timestamp from getAgentHealth", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    expect(await screen.findByText(/next fire/i)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByText(new Date(NEXT_FIRE).toLocaleString())
+      ).toBeInTheDocument()
+    );
+  });
+
+  it("renders schedule health badge reflecting getAgentHealth", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...scheduledHealth,
+      health: "failing",
+    });
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    expect(await screen.findByText("failing")).toBeInTheDocument();
+  });
+
+  it("shows missed-fires warning when missed_fires > 0", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...scheduledHealth,
+      health: "degraded",
+      missed_fires: 3,
+    });
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    expect(await screen.findByText(/3 missed fires/i)).toBeInTheDocument();
+  });
+
+  it("shows alert-config summary with email and on state", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...scheduleTrigger, alert_on_failure: true, alert_email: "ops@example.com" },
+    ]);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    expect(await screen.findByText(/failure alerts/i)).toBeInTheDocument();
+    expect(screen.getByText("On")).toBeInTheDocument();
+    expect(screen.getByText(/notifies ops@example.com/i)).toBeInTheDocument();
+  });
+
+  it("shows alert-config summary off + no-email state", async () => {
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    expect(await screen.findByText(/failure alerts/i)).toBeInTheDocument();
+    expect(screen.getByText("Off")).toBeInTheDocument();
+    expect(screen.getByText(/no alert email set/i)).toBeInTheDocument();
+  });
+
+  it("does not render next-fire/health/alert cards when no schedule", async () => {
+    // default beforeEach: listTriggers resolves []
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/no schedule configured/i)).toBeInTheDocument()
+    );
+    expect(screen.queryByText(/next fire/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/failure alerts/i)).not.toBeInTheDocument();
   });
 });

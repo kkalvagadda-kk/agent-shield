@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
 from db import get_db
+from identity import resolve_principal
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
 
 deployment_chat_router = APIRouter(prefix="/api/v1/agents", tags=["deployment-chat"])
@@ -429,6 +430,7 @@ async def _create_traced_chat_run(
     agent: Agent,
     deployment: Deployment,
     user_sub: str,
+    run_by: str,
     preferred_username: str | None,
     caller_team: str | None,
     message: str,
@@ -478,7 +480,12 @@ async def _create_traced_chat_run(
         input=message,
         context=context,
         trigger_type="api",
-        run_by=user_sub,
+        # run_by is the resolved principal (WS-2 R3). For an interactive chat a JWT
+        # caller is always present, so resolve_principal returns the caller sub —
+        # identical to the old inline `run_by=user_sub`, but now via the single
+        # identity decision point (a daemon agent's /chat still runs under the
+        # caller: R3 floor, not a cap). user_id below stays the live human's sub.
+        run_by=run_by,
         team=agent.team,
         status="running",
         started_at=now,
@@ -585,12 +592,21 @@ async def start_chat(
 
     session_id = body.session_id or str(uuid.uuid4())
 
+    # -- Resolve the acting principal (WS-2 R3) -------------------------------
+    # Interactive run → a JWT caller is present, so pass caller=<jwt user> (never
+    # sniff agent_class). resolve_principal returns the caller as the principal for
+    # ANY agent class — a daemon agent's /chat run still runs under the caller
+    # (identity floor, not a cap). This is the same single decision point the
+    # trigger path uses with caller=None.
+    principal = await resolve_principal(agent, caller=caller, trigger=None, db=db)
+
     # -- Record the run + open the Langfuse trace (shared with deployment chat) --
     run, agent_run, trace_id = await _create_traced_chat_run(
         db,
         agent=agent,
         deployment=deployment,
         user_sub=user_sub,
+        run_by=principal.run_by,
         preferred_username=caller.get("preferred_username"),
         caller_team=caller_team,
         message=body.message,
@@ -779,6 +795,11 @@ async def start_deployment_chat(
     caller_team = await _caller_team(db, user_sub)
     session_id = body.session_id or str(uuid.uuid4())
 
+    # Same single identity decision as start_chat: caller-present → the caller is
+    # the principal (any agent class). Keeps run_by attribution consistent across
+    # both interactive entry points instead of re-deriving user_sub inline.
+    principal = await resolve_principal(agent, caller=caller, trigger=None, db=db)
+
     # Deployment-pinned chat is sandbox-only today. Use the shared helper so this
     # path gets the same Langfuse trace as start_chat — it previously created runs
     # with no trace, which is why deployment-pinned chats had an empty Trace column.
@@ -787,6 +808,7 @@ async def start_deployment_chat(
         agent=agent,
         deployment=deployment,
         user_sub=user_sub,
+        run_by=principal.run_by,
         preferred_username=caller.get("preferred_username"),
         caller_team=caller_team,
         message=body.message,

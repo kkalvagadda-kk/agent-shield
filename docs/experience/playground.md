@@ -139,7 +139,7 @@ This runs on **every** run — no developer action needed. On timeout `judge_sta
 
 ### Path 2 — Batch evaluation (Datasets → Eval Runs)
 
-**1. Create a dataset (mode-aware).** From the Playground left panel's "Manage Datasets / Eval" link (or `/playground/datasets`), click **New Dataset**. The modal has a **mode selector** that defaults to **`reactive`** (response correctness) — the only authorable mode today; the other modes (`durable`/`scheduled`/`webhook`/`workflow`) are reserved for later eval slices (E-1…E-5) and their item editors are disabled. A dataset's `mode` is stored on the row (`playground_datasets.mode`, back-filled to `reactive` for every pre-existing dataset). For reactive, items are one JSON object per line:
+**1. Create a dataset (mode-aware).** From the Playground left panel's "Manage Datasets / Eval" link (or `/playground/datasets`), click **New Dataset**. The modal has a **mode selector** that defaults to **`reactive`** (response correctness). Three modes are authorable today — `reactive`, `durable` (E-1), and `workflow` (E-5); the rest (`scheduled`/`webhook`) are reserved for later eval slices and their item editors stay disabled. A dataset's `mode` is stored on the row (`playground_datasets.mode`, back-filled to `reactive` for every pre-existing dataset). For reactive, items are one JSON object per line:
 
 ```json
 {"input": "What's the status of order 123?", "expected_output": "Order 123 is shipped."}
@@ -147,6 +147,22 @@ This runs on **every** run — no developer action needed. On timeout `judge_sta
 ```
 
 `input` is required; `expected_output` is optional but used by the judge for accuracy scoring. Items can also be seeded from saved playground runs (Path 1). The create endpoint validates each item against the dataset `mode` via a discriminated union — an item whose explicit `kind` disagrees with the mode is rejected `422` (an illegal `{mode, item-kind}` pair is unrepresentable).
+
+**Durable datasets (E-1).** Pick **`durable`** and the modal swaps to a structured **trajectory editor** — you're not scoring a single answer, you're scoring *which tools the agent called, in what order, with what args*. You author one durable item:
+- an **`input_payload`** (a JSON object fed to the durable run, e.g. `{"contract_url": "s3://demo/acme.pdf"}`),
+- a **match mode** — `exact` (same tools, same order, no extras) · `ordered` (expected tools appear in order, extras allowed) · `superset` (actual ⊇ expected, the default) · `unordered` (same set, any order),
+- an ordered list of **expected steps**. Each step is a **tool name**, an optional **`args match`** (a JSON dict-subset that must be present in the real call args — e.g. `{"project": "LEG"}`), and an **Expect approval** toggle (the step *should* park for HITL — a gate that never parks fails that step's tool-call dimension, fail-closed).
+
+Steps are optional: a **reference-free durable item** (payload only, no steps) is legal and degrades to scoring the final response against a rubric. The editor validates before it POSTs — a malformed `input_payload` or `args match` is rejected client-side, and the built `expected_trajectory` rides on the dataset `POST /playground/datasets` (`items[].expected_trajectory`), so it survives save → reload. The backend re-validates the durable variant and rejects a malformed item `422`.
+
+**Workflow datasets (E-5).** Pick **`workflow`** and the modal swaps to a structured **run-tree editor** — a workflow can produce the *right final answer while routing through the wrong members* (a supervisor that skipped triage, a conditional that took the wrong branch), so you score the **member path** (which members ran, in order — a trajectory at member granularity), not just the response. You author one workflow item:
+- an **`input_message`** fed to the workflow run,
+- an optional **`expected_output`** (scored on the response dimension),
+- a **member-path match mode** — the same four modes as durable (`exact`/`ordered`/`superset`/`unordered`), default **`ordered`**,
+- an ordered **expected member path** — the member (agent) names expected to run, in order (e.g. `intake → triage → resolver`),
+- optional **per-member rubrics** — a `{member: {rubric}}` map that zooms one level into that child's own run and scores its behavior against the rubric (e.g. `triage: "correctly routed to billing"`).
+
+The member path is optional: a **reference-free workflow item** (input only, no members) is legal and degrades to scoring the response. The editor validates before it POSTs — a missing input, a blank member row, or an incomplete per-member rubric is rejected client-side, and the built `expected_member_path` (+ `match_mode` + `per_member`) rides on the dataset `POST /playground/datasets` (`items[].expected_member_path`), so it survives save → reload. The backend re-validates the workflow variant and rejects a malformed item `422`.
 
 **2. Run Eval.** Click **Run Eval** on a dataset row. A modal asks for a target (a running sandbox agent deployment, or a workflow deployment). On confirm, `POST /api/v1/playground/eval-runs` creates an `EvalRun` (`status=pending`), resolves the run's interpretation **`mode`** from the executable (a workflow → `workflow`; an agent → its `execution_shape`, `reactive`|`durable`) and **rejects a `mode` mismatch against `dataset.mode` with `422`**, then **synchronously creates a real Kubernetes Batch Job** named `eval-{run_id[:8]}` in the `agentshield-platform` namespace with env vars `EVAL_RUN_ID`, `AGENT_NAME`, `DATASET_ID`, `MODE`, `REGISTRY_API_URL`. On success the run flips to `status=running`; if the Job can't be created the run is marked `failed` and the API returns 500. The UI redirects to `/playground/eval-runs/{id}`.
 
@@ -159,7 +175,19 @@ This runs on **every** run — no developer action needed. On timeout `judge_sta
 4. `POST /api/v1/playground/eval-runs/{id}/results` — records `{ dataset_item_idx, input_message, response, judge_score, judge_reasoning, passed, dimension_scores }` where `judge_score` is the composite (the gate input) and `dimension_scores` carries the per-dimension evidence (reactive → `{"response": composite}`)
 5. After all items, `PATCH /api/v1/playground/eval-runs/{id}` — sets `total_items`, `passed_count`, `failed_count`, `overall_score = passed/total`, `status=completed`. On a passing run (`overall_score >= 0.7`) the associated `AgentVersion.eval_passed` auto-sets `True` (the publish gate opens without a manual PATCH) — unchanged by E-0.
 
-**4. Review results.** `EvalResultsPage` (`/playground/eval-runs/{id}`) shows the aggregate header (overall score, pass rate, item count) and the per-item breakdown — input, response, a **composite score**, a **per-dimension score row** (`response`, `trajectory`, `side_effects`, `filter`, `member` — only `response` is populated in E-0; the others render `—` until their scorers land in E-1…E-5), a pass/fail badge, and a per-item Langfuse trace link.
+**4. Review results.** `EvalResultsPage` (`/playground/eval-runs/{id}`) shows the aggregate header (overall score, pass rate, item count) and the per-item breakdown — input, response, a **composite score**, a **per-dimension score row** (`response`, `trajectory`, `tool_call`, `side_effects`, `filter`, `member_path`), a pass/fail badge, and a per-item Langfuse trace link. Reactive items populate only `response`; durable items (E-1) populate `trajectory` + `tool_call`; workflow items (E-5) populate `member_path` (+ `response`); the remaining dimensions render `—` until their scorers land.
+
+**Durable result evidence.** Expand a durable row and, below the response/reasoning, a **durable evidence** panel renders from `eval_run_results.eval_detail`:
+- an **expected-vs-actual trajectory diff** — the authored steps (tool names, ⚑ for expect-approval) side-by-side with the real run's steps (from the run's `run_steps`, ⚑ for a step that actually parked), labelled with the match mode;
+- a **tool-call args diff** table (`eval_detail.tool_diffs`) — per step, the expected args-subset vs the actual call args and a ✓/✗ match;
+- a **HITL approvals** list (`eval_detail.approvals`) — per gated step, whether it `parked` and whether its `args matched`;
+- a **run-tree deep-link** — "View run tree (`{run_id}`…)" lazily fetches the real `GET /playground/runs/{run_id}/steps` (the same `run_steps` StepTracker reads) and renders them read-only, so you can trace the composite back to the exact durable run that produced it.
+
+**Workflow result evidence (E-5).** Expand a workflow row and a **workflow evidence** panel renders from `eval_run_results.eval_detail`:
+- an **expected-vs-actual member path** — the authored members side-by-side with the members that actually ran (extras flagged `+ extra`), labelled with the match mode;
+- a **member diff** summary (`eval_detail.member_diff`) — an `order ok`/`order wrong` badge plus `missing:`/`extra:` member chips;
+- a **per-member evidence** panel (`eval_detail.per_member`) — per rubric member, the backend emits `{member, score, reason, rubric, had_steps}`: the member's LLM rubric score, the rubric text, the judge's `reason`, and a `had_steps` flag; when the child recorded no run_steps to zoom into (`had_steps:false` — a reactive child, or a member that took no tool step) the rubric degrades to scoring the member's response only, surfaced with a "no run_steps to zoom into" note rather than silently passing;
+- a **run-tree deep-link** — the parent workflow `run_id` opens the real run steps (same control as the durable path), so you can trace the member-path score back to the exact workflow run tree that produced it.
 
 ### The full loop
 
@@ -249,8 +277,8 @@ Browser
 | SSE source | `sdk/agentshield_sdk/streaming.py` | Named SSE event format emitted by agent pod |
 | Judge / scorer library | `services/registry-api/judge.py` | Fire-and-forget LLM-as-Judge scorer + `score_response`/`score_composite` (the reactive scoring library behind `/eval/score`) |
 | Scoring door | `services/registry-api/routers/playground.py` | `POST /playground/eval/score` — mode dispatch |
-| Datasets page | `studio/src/pages/DatasetsPage.tsx` | Create dataset (mode selector), Run Eval modal |
-| Eval results page | `studio/src/pages/EvalResultsPage.tsx` | Aggregate + per-item eval breakdown |
+| Datasets page | `studio/src/pages/DatasetsPage.tsx` | Create dataset (mode selector + reactive/durable/workflow item editors), Run Eval modal |
+| Eval results page | `studio/src/pages/EvalResultsPage.tsx` | Aggregate + per-item eval breakdown; durable trajectory/tool-call evidence + workflow member-path/per-member evidence + run-tree deep-link |
 | Eval router | `services/registry-api/routers/eval_runner.py` | EvalRun CRUD, launches K8s Job |
 | K8s Job | `services/registry-api/k8s.py` | `create_eval_job()` — real Batch Job |
 
@@ -261,10 +289,35 @@ Browser
 - HITL resume via the playground overlay posts the decision to the registry-api, which must forward it to the agent pod's `POST /resume/{thread_id}` — this leg is not yet wired end-to-end.
 - `PlaygroundRun.output_text` is captured from `text_delta` events for the judge, but that column is not mapped in the SQLAlchemy model yet (pre-existing). Because of this, saved dataset items store only the `input`, not the response.
 - The eval-runner container image (`eval-runner:0.1.0`) is what actually iterates the dataset, calls the agent, and posts results. The registry-api only creates the Job; if that image is missing or the ServiceAccount lacks Jobs RBAC in `agentshield-platform`, the run is created but never progresses past `running`.
-- **Batch eval runs end-to-end (service identity + real judge).** The eval-runner authenticates as the `eval-runner` service identity, which is allowed to run any team's agent (the earlier ownership-403 is resolved), and scores each item through the one scoring door (`POST /playground/eval/score` → `judge.score_response`), so the eval results carry the real LLM-as-Judge composite rather than a keyword-match binary. Keyword matching survives only as a fallback when the door/judge is unavailable. For `mode=reactive` the composite is byte-identical to the pre-E-0 `judge_for_eval` (proven no-fakes by `scripts/e2e/suite-61-eval-mode-plumbing.sh`). Mode-specific scorers (trajectory / side-effect / filter / member-path) are deferred to E-1…E-5 behind the same door.
+- **Batch eval runs end-to-end (service identity + real judge).** The eval-runner authenticates as the `eval-runner` service identity, which is allowed to run any team's agent (the earlier ownership-403 is resolved), and scores each item through the one scoring door (`POST /playground/eval/score` → `judge.score_response`), so the eval results carry the real LLM-as-Judge composite rather than a keyword-match binary. Keyword matching survives only as a fallback when the door/judge is unavailable. For `mode=reactive` the composite is byte-identical to the pre-E-0 `judge_for_eval` (proven no-fakes by `scripts/e2e/suite-61-eval-mode-plumbing.sh`). **E-1 adds the `durable` dispatch** — `score_trajectory` (four match modes over the real `run_steps` tool sequence) + `score_tool_calls` (dict-subset args + `expect_approval` HITL assertion), reduced with `weighted_mean` (durable defaults `response 0.4 / trajectory 0.4 / tool_call 0.2`); these are pure/deterministic (no LLM) and read the real durable trajectory. The remaining mode-specific scorers (side-effect / filter / member-path) are deferred to E-2…E-5 behind the same door.
 - **Durable playground runs are now supported (Phase 2).** When a durable agent is selected, the center panel swaps to a RunLauncher (JSON payload editor + "Launch Run" button) and StepTracker (live step list via SSE). The flow: user enters a JSON payload → clicks "Launch Run" → `POST /playground/runs` with `execution_shape=durable` → registry-api dispatches to the declarative-runner's `POST /run` endpoint → runner posts step callbacks to `POST /playground/runs/{id}/step-update` → SSE stream emits `step_update` events → StepTracker renders live progress. HITL steps pause the run (`status=awaiting_approval`) and approval decisions resume via `POST /resume/{thread_id}`. Durable runs that exceed 10 minutes wall-clock or have stale approval windows are auto-cancelled by the timeout worker.
 - **Scheduled agents (Phase 3):** When a scheduled agent is selected (has schedule triggers), the center panel shows a RunNowPanel: cron expression + human-readable parse, timezone, and a "Run Now (Test Fire)" button that creates a playground run immediately. Useful for testing without waiting for the cron to tick.
 - **Event-driven agents (Phase 3):** When a webhook-triggered agent is selected, the center panel shows a TestTriggerPanel: filter configuration display (read-only), JSON payload editor, "Send Test Event" button that calls `POST /playground/test-event`. The endpoint evaluates the payload against configured `filter_conditions`; if matched, creates a run (shows in event log with run link); if filtered, shows reason. The filter engine supports operators: eq, neq, contains, gt, gte, lt, lte, exists, in, regex.
+
+## Who a run acts as — daemon identity & async approvals (WS-2)
+
+Not every run has a live person behind it. A scheduled (cron) or webhook run fires with no JWT — nobody is sitting there. Those are **daemon** runs, and they act as the agent's own **service identity**, not as any user. In the audit trail and on approval cards that reads as `"service:<agent> on behalf of <the human who armed the trigger>"` — the service does the work, but you can still see which person authorized it (`armed_by`, captured when the trigger was armed or created).
+
+The same daemon agent used interactively through chat still runs under **you**, the caller. That's the point of the R3 rule: identity is a floor, not a cap. A daemon agent doesn't drop to the service identity just because it *can* run headless — it only does so when there's genuinely no caller.
+
+**How identity gets decided.** One rule, keyed on whether a live caller (JWT) is present:
+
+- **`/chat`** — a caller is present, so the run acts as the caller (their `user_id` flows to OPA, `run_by` = the caller).
+- **A trigger run** (`/internal/runs/start`) — no caller. A **daemon** trigger acts as the service identity; a **user_delegated** trigger acts as the arming human.
+- **A user_delegated trigger with no arming human is refused** — the run fails closed rather than running as nobody. This is the OPA identity floor (`user_identity_ok`): daemon + empty user is allowed, user_delegated + empty user is denied with `missing_user_identity`.
+
+**Async reviewer routing.** When a daemon run hits an approval, there's no user in front of it to click Approve — so it parks and routes to a **reviewer role** in the **Global Approvals Inbox** (`/approvals`) instead of an inline overlay. The default scope is `agent:reviewer`; a trigger can override it with its own approver-role. The inbox card renders the `"service:X on behalf of Y"` principal so a reviewer knows what authorized the run. Only a reviewer (or an admin) can decide it — a decide from anyone outside the reviewer scope is rejected `403`. This is the async counterpart to the sandbox self-approve overlay: a human still gates the risky call, just not the same human who (never) started the run.
+
+## Operating a scheduled agent — the Scheduled Overview (WS-3)
+
+Once a scheduled agent is deployed, open a deployment and the **Overview** tab renders the scheduled operate surface (it switches on the presence of a schedule trigger). Beyond the schedule cards (cron + a human-readable parse, timezone, and an enable/disable toggle), the Overview rolls up the run-time signals you need to tell at a glance whether the schedule is healthy:
+
+- **Next fire** — the next time the cron will tick, computed server-side (`GET /agents/{name}/health`, croniter over the first enabled schedule). If the schedule has fallen behind, a small "N missed fires" line shows underneath.
+- **Schedule health** — a single rolled-up badge (**healthy** / **degraded** / **failing**) so you don't have to read the run history to know something's wrong.
+- **Last run** — the most recent run's status badge, when it started, and the trigger that fired it, with a recent-run history list below.
+- **Failure alerts** — an alert-config summary card reading the trigger's `alert_email` + `alert_on_failure`: whether failure alerts are On or Off and which address gets notified (or "No alert email set"). You edit both in the **Settings** tab's trigger row; the change persists on the trigger and survives a reload.
+
+A scheduled agent that is also **daemon + durable** runs headless under the agent's service identity (see the daemon-identity section above), so when one of its runs hits a high-risk tool it **parks** and routes **async to a reviewer** in the Global Approvals Inbox rather than blocking on a chat overlay — nobody is watching the cron tick. The reviewer approves from the inbox and the run resumes to completion. If a scheduled run fails and the trigger has `alert_on_failure` on, the shared `dispatch_failure_alert` transport emails the configured `alert_email`.
 
 ## Composite Workflow Builder
 

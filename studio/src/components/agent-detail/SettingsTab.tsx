@@ -13,6 +13,10 @@ interface Props {
 
 const COMMON_TZ = ["UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Asia/Kolkata"];
 const FILTER_OPS = ["eq", "neq", "contains", "gt", "gte", "lt", "lte", "exists", "in"];
+// WS-2 T014 — reviewer roles a daemon (scheduled) trigger-run's approval can route to.
+// "" = platform default (backend derives "agent:reviewer"). Only meaningful for
+// scheduled/daemon triggers (they run under the service identity, no interactive caller).
+const APPROVER_ROLES = ["agent:reviewer", "team:reviewer", "platform_admin"];
 interface FilterRow { field: string; op: string; value: string; }
 
 export default function SettingsTab({ agentName, memoryEnabled }: Props) {
@@ -110,6 +114,7 @@ function NewScheduleForm({ agentName, onDone }: { agentName: string; onDone: () 
   const [cron, setCron] = useState("0 9 * * 1");
   const [tz, setTz] = useState("UTC");
   const [alertEmail, setAlertEmail] = useState("");
+  const [approverRole, setApproverRole] = useState("agent:reviewer");
   const [payload, setPayload] = useState("");
   const payloadError = payload.trim() ? (() => { try { JSON.parse(payload); return null; } catch (e) { return e instanceof Error ? e.message : "parse error"; } })() : null;
   const create = useMutation({
@@ -119,6 +124,7 @@ function NewScheduleForm({ agentName, onDone }: { agentName: string; onDone: () 
         cron_expression: cron,
         timezone: tz,
         alert_email: alertEmail.trim() || null,
+        approver_role: approverRole || null,
         ...(payload.trim() ? { input_payload: JSON.parse(payload) } : {}),
       }),
     onSuccess: () => { toast.success("Schedule trigger created"); onDone(); },
@@ -145,6 +151,14 @@ function NewScheduleForm({ agentName, onDone }: { agentName: string; onDone: () 
         <input type="email" value={alertEmail} onChange={(e) => setAlertEmail(e.target.value)}
           placeholder="oncall@example.com"
           className="mt-1 w-full text-sm border border-slate-300 rounded px-2 py-1.5" />
+      </label>
+      <label className="block">
+        <span className="text-xs text-slate-500 uppercase">Approver role — who reviews this daemon run&apos;s approvals</span>
+        <select value={approverRole} onChange={(e) => setApproverRole(e.target.value)}
+          className="mt-1 w-full text-sm border border-slate-300 rounded px-2 py-1.5">
+          {APPROVER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <p className="text-xs text-slate-400 mt-0.5">Scheduled runs act under the agent&apos;s service identity — their approvals route to this reviewer role in the Approvals Inbox.</p>
       </label>
       <label className="block">
         <span className="text-xs text-slate-500 uppercase">Input payload — JSON job spec (optional)</span>
@@ -314,6 +328,8 @@ function TriggerRow({
     enabled: boolean;
     alert_email?: string | null;
     alert_on_failure?: boolean;
+    approver_role?: string | null;
+    armed_by?: string | null;
   };
   onSaved: () => void;
 }) {
@@ -322,6 +338,7 @@ function TriggerRow({
   const [enabled, setEnabled] = useState(trigger.enabled);
   const [alertEmail, setAlertEmail] = useState(trigger.alert_email ?? "");
   const [alertOnFailure, setAlertOnFailure] = useState(trigger.alert_on_failure ?? true);
+  const [approverRole, setApproverRole] = useState(trigger.approver_role ?? "agent:reviewer");
 
   const save = useMutation({
     mutationFn: () =>
@@ -331,6 +348,7 @@ function TriggerRow({
         enabled,
         alert_email: alertEmail.trim() === "" ? null : alertEmail.trim(),
         alert_on_failure: alertOnFailure,
+        approver_role: approverRole || null,
       }),
     onSuccess: () => {
       toast.success("Trigger updated");
@@ -363,6 +381,20 @@ function TriggerRow({
             ))}
           </select>
         </label>
+      </div>
+      <div className="border-t border-slate-100 pt-3 space-y-2">
+        <label className="block">
+          <span className="text-xs text-slate-500 uppercase">Approver role — reviewer scope for this daemon run&apos;s approvals</span>
+          <select value={approverRole} onChange={(e) => setApproverRole(e.target.value)}
+            className="mt-1 w-full text-sm border border-slate-300 rounded px-2 py-1.5">
+            {APPROVER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </label>
+        {trigger.armed_by && (
+          <p className="text-xs text-slate-400">
+            Armed by <span className="font-mono text-slate-500">{trigger.armed_by}</span>
+          </p>
+        )}
       </div>
       <div className="border-t border-slate-100 pt-3 space-y-2">
         <span className="text-xs text-slate-500 uppercase">Failure alerts</span>

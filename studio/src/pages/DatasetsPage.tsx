@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, type Dispatch, type SetStateAction } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Database, Loader2, Play, RefreshCw, Trash2, X } from "lucide-react";
+import { Database, Loader2, Play, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   createDataset,
@@ -9,10 +9,15 @@ import {
   deleteDataset,
   listDatasets,
   listEvalRuns,
+  type AnyDatasetItem,
   type DatasetItem,
   type DatasetMode,
+  type DurableDatasetItem,
   type EvalRun,
+  type ExpectedTrajectoryStep,
   type PlaygroundDataset,
+  type TrajectoryMatchMode,
+  type WorkflowDatasetItem,
 } from "../api/playgroundApi";
 import { listAllDeployments, listAllWorkflowDeployments } from "../api/registryApi";
 
@@ -25,6 +30,35 @@ export default function DatasetsPage() {
   const [dsName, setDsName] = useState("");
   const [dsMode, setDsMode] = useState<DatasetMode>("reactive");
   const [dsItems, setDsItems] = useState("");
+
+  // Durable item editor state (E-1). A durable dataset is authored as a single
+  // trajectory item: an input_payload + an optional expected_trajectory.
+  const [durInputPayload, setDurInputPayload] = useState("");
+  const [durMatchMode, setDurMatchMode] = useState<TrajectoryMatchMode>("superset");
+  const [durSteps, setDurSteps] = useState<DurableStepDraft[]>([]);
+
+  // Workflow item editor state (E-5). A workflow dataset is authored as a single
+  // run-tree item: an input + an ordered expected_member_path (+ optional
+  // per-member rubric), scored against the real workflow run tree.
+  const [wfInput, setWfInput] = useState("");
+  const [wfExpectedOutput, setWfExpectedOutput] = useState("");
+  const [wfMatchMode, setWfMatchMode] = useState<TrajectoryMatchMode>("ordered");
+  const [wfMemberPath, setWfMemberPath] = useState<string[]>([]);
+  const [wfPerMember, setWfPerMember] = useState<PerMemberDraft[]>([]);
+
+  const resetCreateForm = () => {
+    setDsName("");
+    setDsMode("reactive");
+    setDsItems("");
+    setDurInputPayload("");
+    setDurMatchMode("superset");
+    setDurSteps([]);
+    setWfInput("");
+    setWfExpectedOutput("");
+    setWfMatchMode("ordered");
+    setWfMemberPath([]);
+    setWfPerMember([]);
+  };
 
   // Run eval modal state
   const [evalDataset, setEvalDataset] = useState<PlaygroundDataset | null>(null);
@@ -53,14 +87,12 @@ export default function DatasetsPage() {
   });
 
   const createMutation = useMutation({
-    mutationFn: (body: { name: string; items: DatasetItem[]; mode: DatasetMode }) =>
+    mutationFn: (body: { name: string; items: AnyDatasetItem[]; mode: DatasetMode }) =>
       createDataset(body),
     onSuccess: () => {
       toast.success("Dataset created.");
       setShowCreate(false);
-      setDsName("");
-      setDsMode("reactive");
-      setDsItems("");
+      resetCreateForm();
       qc.invalidateQueries({ queryKey: ["playground-datasets"] });
     },
     onError: () => toast.error("Failed to create dataset."),
@@ -93,9 +125,9 @@ export default function DatasetsPage() {
       toast.error("Dataset name is required.");
       return;
     }
-    // E-0: only the reactive item editor is authorable. Other modes create an
-    // empty dataset (their item editors land in E-1+).
-    const items: DatasetItem[] = [];
+    // Reactive: one JSON object per line. Durable (E-1): a structured trajectory
+    // editor. Other modes create an empty dataset (their editors land later).
+    let items: AnyDatasetItem[] = [];
     if (dsMode === "reactive") {
       for (const line of dsItems.split("\n")) {
         const trimmed = line.trim();
@@ -107,6 +139,26 @@ export default function DatasetsPage() {
           return;
         }
       }
+    } else if (dsMode === "durable") {
+      const built = buildDurableItem(durInputPayload, durMatchMode, durSteps);
+      if ("error" in built) {
+        toast.error(built.error);
+        return;
+      }
+      items = [built.item];
+    } else if (dsMode === "workflow") {
+      const built = buildWorkflowItem(
+        wfInput,
+        wfExpectedOutput,
+        wfMatchMode,
+        wfMemberPath,
+        wfPerMember,
+      );
+      if ("error" in built) {
+        toast.error(built.error);
+        return;
+      }
+      items = [built.item];
     }
     createMutation.mutate({ name: dsName.trim(), items, mode: dsMode });
   };
@@ -241,11 +293,14 @@ export default function DatasetsPage() {
 
       {/* Create Dataset Modal */}
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          {/* max-h + overflow so a long form (workflow mode with several members +
+              per-member rubrics) never pushes the Create button below the fold on a
+              normal-height screen — the modal body scrolls instead of clipping. */}
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-slate-800">New Dataset</h2>
-              <button onClick={() => setShowCreate(false)} className="text-slate-400 hover:text-slate-600">
+              <button onClick={() => { setShowCreate(false); resetCreateForm(); }} className="text-slate-400 hover:text-slate-600">
                 <X size={18} />
               </button>
             </div>
@@ -295,6 +350,28 @@ export default function DatasetsPage() {
                     <code>expected_output</code>.
                   </p>
                 </div>
+              ) : dsMode === "durable" ? (
+                <DurableItemEditor
+                  inputPayload={durInputPayload}
+                  setInputPayload={setDurInputPayload}
+                  matchMode={durMatchMode}
+                  setMatchMode={setDurMatchMode}
+                  steps={durSteps}
+                  setSteps={setDurSteps}
+                />
+              ) : dsMode === "workflow" ? (
+                <WorkflowItemEditor
+                  input={wfInput}
+                  setInput={setWfInput}
+                  expectedOutput={wfExpectedOutput}
+                  setExpectedOutput={setWfExpectedOutput}
+                  matchMode={wfMatchMode}
+                  setMatchMode={setWfMatchMode}
+                  memberPath={wfMemberPath}
+                  setMemberPath={setWfMemberPath}
+                  perMember={wfPerMember}
+                  setPerMember={setWfPerMember}
+                />
               ) : (
                 <div>
                   <label className="label text-xs mb-1">Items</label>
@@ -306,14 +383,14 @@ export default function DatasetsPage() {
                     value=""
                   />
                   <p className="text-xs text-amber-600 mt-1">
-                    The <code>{dsMode}</code> item editor is coming in E-1. You can
+                    The <code>{dsMode}</code> item editor is coming later. You can
                     create an empty {dsMode} dataset now and add items later.
                   </p>
                 </div>
               )}
             </div>
             <div className="flex justify-end gap-2 mt-5">
-              <button onClick={() => setShowCreate(false)} className="btn-secondary text-sm">
+              <button onClick={() => { setShowCreate(false); resetCreateForm(); }} className="btn-secondary text-sm">
                 Cancel
               </button>
               <button
@@ -428,6 +505,468 @@ export default function DatasetsPage() {
       )}
     </div>
   );
+}
+
+// A single expected-trajectory step as edited in the form (args_match kept as
+// raw JSON text until validated on save).
+interface DurableStepDraft {
+  tool: string;
+  argsMatch: string;
+  expectApproval: boolean;
+}
+
+const MATCH_MODES: TrajectoryMatchMode[] = ["exact", "ordered", "superset", "unordered"];
+
+/**
+ * Structured editor for a durable dataset item (E-1): an `input_payload` plus an
+ * optional `expected_trajectory` (ordered tool steps with per-step `args_match`
+ * and an `expect_approval` HITL toggle). Rendered only when the dataset mode is
+ * `durable`. Validation happens on save (`buildDurableItem`).
+ */
+function DurableItemEditor({
+  inputPayload,
+  setInputPayload,
+  matchMode,
+  setMatchMode,
+  steps,
+  setSteps,
+}: {
+  inputPayload: string;
+  setInputPayload: (v: string) => void;
+  matchMode: TrajectoryMatchMode;
+  setMatchMode: (v: TrajectoryMatchMode) => void;
+  steps: DurableStepDraft[];
+  setSteps: Dispatch<SetStateAction<DurableStepDraft[]>>;
+}) {
+  const updateStep = (idx: number, patch: Partial<DurableStepDraft>) =>
+    setSteps((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const addStep = () =>
+    setSteps((prev) => [...prev, { tool: "", argsMatch: "", expectApproval: false }]);
+  const removeStep = (idx: number) =>
+    setSteps((prev) => prev.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label htmlFor="durable-input-payload" className="label text-xs mb-1">
+          Input Payload (JSON object)
+        </label>
+        <textarea
+          id="durable-input-payload"
+          aria-label="Durable input payload"
+          className="input text-xs font-mono h-24 resize-none"
+          placeholder={`{"contract_url": "s3://demo/acme.pdf"}`}
+          value={inputPayload}
+          onChange={(e) => setInputPayload(e.target.value)}
+        />
+        <p className="text-xs text-slate-400 mt-1">
+          Fed to the durable run as <code>input_payload</code>.
+        </p>
+      </div>
+
+      <div>
+        <label htmlFor="durable-match-mode" className="label text-xs mb-1">
+          Trajectory Match Mode
+        </label>
+        <select
+          id="durable-match-mode"
+          aria-label="Trajectory match mode"
+          className="input text-sm"
+          value={matchMode}
+          onChange={(e) => setMatchMode(e.target.value as TrajectoryMatchMode)}
+        >
+          {MATCH_MODES.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-slate-400 mt-1">
+          How the expected tool sequence is compared to the real run steps.
+        </p>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="label text-xs">Expected Trajectory Steps</label>
+          <button
+            type="button"
+            onClick={addStep}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            <Plus size={12} />
+            Add step
+          </button>
+        </div>
+        {steps.length === 0 ? (
+          <p className="text-xs text-slate-400">
+            No steps — a reference-free durable item scored on the response only.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {steps.map((s, i) => (
+              <div
+                key={i}
+                data-testid={`durable-step-${i}`}
+                className="rounded-lg border border-slate-200 p-2 space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-slate-400 w-4">{i + 1}.</span>
+                  <input
+                    aria-label={`Step ${i + 1} tool`}
+                    className="input text-xs flex-1"
+                    placeholder="tool name (e.g. jira_create)"
+                    value={s.tool}
+                    onChange={(e) => updateStep(i, { tool: e.target.value })}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove step ${i + 1}`}
+                    onClick={() => removeStep(i)}
+                    className="text-slate-400 hover:text-red-500"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <input
+                  aria-label={`Step ${i + 1} args match`}
+                  className="input text-xs font-mono"
+                  placeholder={`args match (JSON, optional) e.g. {"project": "LEG"}`}
+                  value={s.argsMatch}
+                  onChange={(e) => updateStep(i, { argsMatch: e.target.value })}
+                />
+                <label className="flex items-center gap-2 text-xs text-slate-600">
+                  <input
+                    type="checkbox"
+                    aria-label={`Step ${i + 1} expect approval`}
+                    checked={s.expectApproval}
+                    onChange={(e) => updateStep(i, { expectApproval: e.target.checked })}
+                  />
+                  Expect approval (HITL — this step should park)
+                </label>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Validate + assemble the durable dataset item from the trajectory editor.
+ * Rejects a malformed `input_payload` or `args_match` before any POST — a
+ * reference-free durable item (no steps) is legal and degrades to the response
+ * dimension server-side.
+ */
+export function buildDurableItem(
+  inputPayloadStr: string,
+  matchMode: TrajectoryMatchMode,
+  steps: DurableStepDraft[],
+): { item: DurableDatasetItem } | { error: string } {
+  const trimmedPayload = inputPayloadStr.trim();
+  if (!trimmedPayload) {
+    return { error: "Input payload is required for a durable item." };
+  }
+  let inputPayload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(trimmedPayload);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: "Input payload must be a JSON object." };
+    }
+    inputPayload = parsed as Record<string, unknown>;
+  } catch {
+    return { error: "Input payload is not valid JSON." };
+  }
+
+  const builtSteps: ExpectedTrajectoryStep[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    const tool = s.tool.trim();
+    if (!tool) {
+      return { error: `Step ${i + 1}: tool name is required.` };
+    }
+    const step: ExpectedTrajectoryStep = { tool };
+    const rawArgs = s.argsMatch.trim();
+    if (rawArgs) {
+      try {
+        const parsed = JSON.parse(rawArgs);
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          return { error: `Step ${i + 1}: args match must be a JSON object.` };
+        }
+        step.args_match = parsed as Record<string, unknown>;
+      } catch {
+        return { error: `Step ${i + 1}: args match is not valid JSON.` };
+      }
+    }
+    if (s.expectApproval) step.expect_approval = true;
+    builtSteps.push(step);
+  }
+
+  const item: DurableDatasetItem = { kind: "durable", input_payload: inputPayload };
+  if (builtSteps.length > 0) {
+    item.expected_trajectory = { match_mode: matchMode, steps: builtSteps };
+  }
+  return { item };
+}
+
+// A single per-member expectation as edited in the form.
+interface PerMemberDraft {
+  member: string;
+  rubric: string;
+}
+
+/**
+ * Structured editor for a workflow dataset item (E-5): an `input` plus an ordered
+ * `expected_member_path` (which members should run, in order) with a `match_mode`,
+ * an optional `expected_output`, and an optional `per_member` rubric map. Rendered
+ * only when the dataset mode is `workflow`. Validation happens on save
+ * (`buildWorkflowItem`), which is what sends `expected_member_path` on the POST.
+ */
+function WorkflowItemEditor({
+  input,
+  setInput,
+  expectedOutput,
+  setExpectedOutput,
+  matchMode,
+  setMatchMode,
+  memberPath,
+  setMemberPath,
+  perMember,
+  setPerMember,
+}: {
+  input: string;
+  setInput: (v: string) => void;
+  expectedOutput: string;
+  setExpectedOutput: (v: string) => void;
+  matchMode: TrajectoryMatchMode;
+  setMatchMode: (v: TrajectoryMatchMode) => void;
+  memberPath: string[];
+  setMemberPath: Dispatch<SetStateAction<string[]>>;
+  perMember: PerMemberDraft[];
+  setPerMember: Dispatch<SetStateAction<PerMemberDraft[]>>;
+}) {
+  const updateMember = (idx: number, value: string) =>
+    setMemberPath((prev) => prev.map((m, i) => (i === idx ? value : m)));
+  const addMember = () => setMemberPath((prev) => [...prev, ""]);
+  const removeMember = (idx: number) =>
+    setMemberPath((prev) => prev.filter((_, i) => i !== idx));
+
+  const updatePerMember = (idx: number, patch: Partial<PerMemberDraft>) =>
+    setPerMember((prev) => prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+  const addPerMember = () =>
+    setPerMember((prev) => [...prev, { member: "", rubric: "" }]);
+  const removePerMember = (idx: number) =>
+    setPerMember((prev) => prev.filter((_, i) => i !== idx));
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label htmlFor="workflow-input" className="label text-xs mb-1">
+          Input Message
+        </label>
+        <textarea
+          id="workflow-input"
+          aria-label="Workflow input message"
+          className="input text-xs h-20 resize-none"
+          placeholder="e.g. My refund for order 123 never arrived"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+        />
+        <p className="text-xs text-slate-400 mt-1">
+          Fed to the workflow run as <code>input_message</code>.
+        </p>
+      </div>
+
+      <div>
+        <label htmlFor="workflow-expected-output" className="label text-xs mb-1">
+          Expected Output (optional)
+        </label>
+        <textarea
+          id="workflow-expected-output"
+          aria-label="Workflow expected output"
+          className="input text-xs h-16 resize-none"
+          placeholder="The workflow's final answer (scored on the response dimension)."
+          value={expectedOutput}
+          onChange={(e) => setExpectedOutput(e.target.value)}
+        />
+      </div>
+
+      <div>
+        <label htmlFor="workflow-match-mode" className="label text-xs mb-1">
+          Member-Path Match Mode
+        </label>
+        <select
+          id="workflow-match-mode"
+          aria-label="Member path match mode"
+          className="input text-sm"
+          value={matchMode}
+          onChange={(e) => setMatchMode(e.target.value as TrajectoryMatchMode)}
+        >
+          {MATCH_MODES.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <p className="text-xs text-slate-400 mt-1">
+          How the expected member path is compared to the members that actually ran.
+        </p>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="label text-xs">Expected Member Path (in order)</label>
+          <button
+            type="button"
+            onClick={addMember}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            <Plus size={12} />
+            Add member
+          </button>
+        </div>
+        {memberPath.length === 0 ? (
+          <p className="text-xs text-slate-400">
+            No members — a reference-free workflow item scored on the response only.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {memberPath.map((m, i) => (
+              <div
+                key={i}
+                data-testid={`member-${i}`}
+                className="flex items-center gap-2"
+              >
+                <span className="text-xs text-slate-400 w-4">{i + 1}.</span>
+                <input
+                  aria-label={`Member ${i + 1} name`}
+                  className="input text-xs flex-1"
+                  placeholder="member (agent) name — e.g. triage"
+                  value={m}
+                  onChange={(e) => updateMember(i, e.target.value)}
+                />
+                <button
+                  type="button"
+                  aria-label={`Remove member ${i + 1}`}
+                  onClick={() => removeMember(i)}
+                  className="text-slate-400 hover:text-red-500"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="label text-xs">Per-Member Rubric (optional)</label>
+          <button
+            type="button"
+            onClick={addPerMember}
+            className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+          >
+            <Plus size={12} />
+            Add rubric
+          </button>
+        </div>
+        {perMember.length === 0 ? (
+          <p className="text-xs text-slate-400">
+            No per-member rubric — members are scored at the path + response level.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {perMember.map((p, i) => (
+              <div
+                key={i}
+                data-testid={`per-member-${i}`}
+                className="rounded-lg border border-slate-200 p-2 space-y-2"
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    aria-label={`Per-member ${i + 1} name`}
+                    className="input text-xs flex-1"
+                    placeholder="member name (e.g. triage)"
+                    value={p.member}
+                    onChange={(e) => updatePerMember(i, { member: e.target.value })}
+                  />
+                  <button
+                    type="button"
+                    aria-label={`Remove per-member ${i + 1}`}
+                    onClick={() => removePerMember(i)}
+                    className="text-slate-400 hover:text-red-500"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+                <input
+                  aria-label={`Per-member ${i + 1} rubric`}
+                  className="input text-xs"
+                  placeholder="rubric — e.g. correctly routed to billing"
+                  value={p.rubric}
+                  onChange={(e) => updatePerMember(i, { rubric: e.target.value })}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Validate + assemble the workflow dataset item from the run-tree editor. Rejects a
+ * missing input, a blank member row, or an incomplete per-member rubric before any
+ * POST. A reference-free item (no members) is legal and degrades to the response
+ * dimension server-side. This is the function that puts `expected_member_path` on
+ * the POST body (the save→reload round-trip).
+ */
+export function buildWorkflowItem(
+  inputStr: string,
+  expectedOutputStr: string,
+  matchMode: TrajectoryMatchMode,
+  memberPath: string[],
+  perMember: PerMemberDraft[],
+): { item: WorkflowDatasetItem } | { error: string } {
+  const input = inputStr.trim();
+  if (!input) {
+    return { error: "Input message is required for a workflow item." };
+  }
+
+  const members: string[] = [];
+  for (let i = 0; i < memberPath.length; i++) {
+    const name = memberPath[i].trim();
+    if (!name) {
+      return { error: `Member ${i + 1}: name is required.` };
+    }
+    members.push(name);
+  }
+
+  const perMemberMap: Record<string, { rubric: string }> = {};
+  for (let i = 0; i < perMember.length; i++) {
+    const member = perMember[i].member.trim();
+    const rubric = perMember[i].rubric.trim();
+    if (!member) {
+      return { error: `Per-member rubric ${i + 1}: member name is required.` };
+    }
+    if (!rubric) {
+      return { error: `Per-member rubric for "${member}": rubric text is required.` };
+    }
+    perMemberMap[member] = { rubric };
+  }
+
+  const item: WorkflowDatasetItem = { kind: "workflow", input_message: input };
+  const expectedOutput = expectedOutputStr.trim();
+  if (expectedOutput) item.expected_output = expectedOutput;
+  if (members.length > 0) {
+    item.expected_member_path = members;
+    item.match_mode = matchMode;
+  }
+  if (Object.keys(perMemberMap).length > 0) item.per_member = perMemberMap;
+  return { item };
 }
 
 function DatasetEvalRuns({ runs, navigate }: { runs: EvalRun[]; navigate: (path: string) => void }) {

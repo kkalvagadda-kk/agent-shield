@@ -3,6 +3,23 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - eval-runner:0.1.7 (Eval v2 E-1 FIX — durable trajectory projection now COLLAPSES one logical
+#     tool call's consecutive same-tool run_steps into a single entry (_collapse_tool_calls in
+#     eval-runner/main.py). A gated call parks as TWO rows — running(no appr) then
+#     awaiting_approval(appr_id) — so one-entry-per-row projection put the park evidence on a
+#     different entry than the tool's first `running` boundary, and score_tool_calls greedy-matched
+#     the expect_approval step to the un-parked `running` entry → parked:false for a real park (E-1
+#     scoring bug surfaced by suite-72 T-S72-004b). Collapse folds a call's in-flight `running` prefix
+#     into its terminal disposition, carrying the sticky approval_id; distinct completed calls are NOT
+#     merged. Fix is projection-only (judge.py unchanged; the score door consumes actual_trajectory).)
+#   - registry-api:0.2.180 / eval-runner:0.1.6 / studio:0.1.137 (Eval v2 Phase E-1 P1+P2 — durable
+#     trajectory + tool-call code scorers. judge.py gains PURE-CODE score_trajectory (4 match modes
+#     exact|ordered|superset|unordered over the ordered run_steps tool list) + score_tool_calls (tool-name
+#     exact + args_match dict-subset) + weighted_mean (alias over score_composite). schemas.py: DurableDatasetItem
+#     now has a STRUCTURED ExpectedTrajectory (match_mode + typed steps → malformed trajectory 422s at the door);
+#     EvalScoreRequest carries actual_trajectory + dimension_weights. sdk/durable.py: tool-boundary + parked-tool
+#     StepUpdate.output now carries {tool, args} so the runner can project run_steps → actual_trajectory
+#     (data-model §3). Scorers deterministic (no LLM); consumed by the /eval/score durable branch (T006). No migration.)
 #   - registry-api:0.2.176 (WORKFLOW COST ROLLUP — a workflow parent run makes no LLM calls of its own, so
 #     reading cost from its own Langfuse trace always yielded NULL and every workflow row showed Cost "—".
 #     The cost-backfill sweep now rolls member (child) costs up onto the parent once the children are costed
@@ -193,12 +210,15 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
-REGISTRY_API_TAG="0.2.176"
+# E-5: /eval/score mode=workflow + score_member_path (registry-api); eval-runner
+# walks the workflow run tree → member path + per-member steps → mode=workflow
+# score; studio workflow dataset editor + run-tree result render.
+REGISTRY_API_TAG="0.2.182"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.134"
-EVAL_RUNNER_TAG="0.1.5"
-DECLARATIVE_RUNNER_TAG="0.1.44"
+STUDIO_TAG="0.1.138"
+EVAL_RUNNER_TAG="0.1.8"
+DECLARATIVE_RUNNER_TAG="0.1.45"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -230,7 +250,7 @@ fi
 #     -n agentshield-platform
 
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (production chat resume-stream + remove dead playground_approvals decide)"
+echo "  → registry-api:${REGISTRY_API_TAG} (WS-2 CP2 + fix: durable trigger dispatch now targets the agent's own pod (runner_url) not the non-existent shared declarative-runner Service — production trigger→single-agent durable runs reach the pod; plus reviewer_scope/principal_display/403, migration 0062 approver_role, daemon workflow identity)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
@@ -242,7 +262,7 @@ docker build -t "registry.internal/agentshield/deploy-controller:${DEPLOY_CONTRO
 echo "  → declarative-runner:${DECLARATIVE_RUNNER_TAG} (fix HITL resume: Command(resume=) + streaming resume endpoint)"
 docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_RUNNER_TAG}" -f services/declarative-runner/Dockerfile .
 
-echo "  → studio:${STUDIO_TAG} (CatalogChatPage HITL: approval_requested handler + resume-stream reconnect)"
+echo "  → studio:${STUDIO_TAG} (WS-3 scheduled operate surface: OverviewScheduled now renders next-fire + rolled-up schedule-health badge from getAgentHealth, plus an alert-config summary (alert_email/alert_on_failure) from the trigger)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
 echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"
