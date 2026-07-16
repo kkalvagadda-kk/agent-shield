@@ -42,11 +42,12 @@ What POC-0/1 did **not** do is make any of it *visible*. The memory works; the p
 
 **Goal** (architecture doc §10): every chat/eval surface shows *which agent* said what, so a multi-agent workflow reads as a real multi-speaker conversation. Without this, the POC-1 shared thread is invisible. **Priority fix: `CatalogChatPage`**, which runs workflows but collapses the whole run into one final-output bubble (throws away `children`).
 
-### 3.1 Backend — the SSE stream must carry the author
-Today the chat proxy emits `{"type":"token","content":...}` with **no agent identity** (`registry-api/routers/chat.py::_proxy_agent_stream`, ~L458). For a workflow run, deltas from different members must be attributable.
-- Add `author` to token frames (`{"type":"token","content":...,"author":"<agent_name>"}`) and a member-boundary frame (`{"type":"agent_start","author":...}`) so the client opens a new labeled bubble per speaker.
-- The author is known to the orchestrator at dispatch (`workflow_orchestrator.py`); thread the current member `agent_name` through the stream translation. Single-agent chat sets `author = agent name` (the degenerate one-speaker case — same code path, not a fork).
-- **Persisted source of truth = the POC-1 shared transcript.** Rows already carry `agent_name` + `message_kind`, so a reload rehydrates attributed bubbles from `GET /memory?scope=workflow_run&thread_id=...` — no new storage.
+### 3.1 Backend & attribution source — corrected against the running code (2026-07-16 `/plan`)
+**The original premise ("thread author through the workflow stream") does not match the code.** Workflow member deltas do **not** stream through the chat SSE proxy: `workflow_orchestrator.py::_run_step` dispatches each member via `POST /chat` (full output collected into child `AgentRun` rows) or `_dispatch_durable_member` (`POST /run` + poll) — never streamed; `CatalogChatPage` learns results by polling `getWorkflowRunTree`. `_proxy_agent_stream` (`registry-api/routers/chat.py`) is used **only** by single-agent chat (`stream_chat` / `stream_deployment_chat`). So attribution has two distinct sources, not one stream:
+- **Single-agent chat (one speaker):** add `author` to the proxy's token frames (`{"type":"token","content":...,"author":"<agent_name>"}`) + an `{"type":"agent_start","author":...}` boundary. Meaningful only here. (`ChatPane` reads raw runner `text_delta` on the playground transport and derives author client-side from its `agentName` prop — a second transport; don't unify.)
+- **Workflow (N speakers):** attribution rides on the **run-tree `children[]`** (live structural view, already carries per-member `agent_name`/`output`/`trace_id`/`cost`) + the **`scope=workflow_run` transcript reload** (`GET /memory?scope=workflow_run&thread_id=...`, rows carry `agent_name`+`message_kind`) — **no invented streaming path**.
+- `AttributedBubble`/the reducer take an explicit `author`, so single-agent is the **degenerate one-speaker case of the same component**, not a fork (No-Bandaid).
+- Grounded plan + task breakdown: `docs/plan/context-storage-poc-2/`.
 
 ### 3.2 Frontend — labeled bubbles across the three surfaces
 - Add `author?: string` to the three local `Message` types: `ChatPane.tsx:8`, `AgentChatPage.tsx:17`, `CatalogChatPage.tsx:10`.
