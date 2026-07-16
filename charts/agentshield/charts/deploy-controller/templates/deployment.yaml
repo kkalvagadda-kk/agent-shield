@@ -69,6 +69,12 @@ spec:
               value: "INFO"
             - name: DECLARATIVE_RUNNER_IMAGE
               value: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+            # Pull secrets for the AGENT pods the controller creates in agents-*.
+            # Those pods run under a per-agent SA (machine identity), so a secret
+            # on the namespace default SA does not reach them — the controller
+            # must put it on the pod spec. Empty on kind (images side-loaded).
+            - name: AGENT_IMAGE_PULL_SECRETS
+              value: "{{ range $i, $s := ((.Values.global).imagePullSecrets | default list) }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
             # Namespace-qualified: the controller injects this host into agent
             # pods that run in OTHER namespaces (agents-*), where a bare service
             # name does not resolve. The langchain callback handler + SDK tracer

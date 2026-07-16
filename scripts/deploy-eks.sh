@@ -30,6 +30,16 @@
 #     at v1; cluster serves v1alpha2/3). v1.7.5 works.
 #  6. The internal-NLB annotations must exist at Service CREATION (scheme is
 #     immutable) -> EnvoyProxy CRD + GatewayClass parametersRef (in the chart).
+#  7. AGENT pods don't use the namespace default SA — they run under a per-agent
+#     SA (machine identity), so patching default's imagePullSecrets does NOT
+#     reach them and every agent ImagePullBackOffs with "no basic auth
+#     credentials". deploy-controller >=0.1.38 puts imagePullSecrets on the pod
+#     spec via AGENT_IMAGE_PULL_SECRETS (chart: global.imagePullSecrets).
+#     Invisible on kind, which side-loads images and needs no auth at all.
+#  8. infra/ is NOT part of the chart. opa-bundle-server + the opa-sidecar-config
+#     ConfigMap + playground RBAC are applied separately (step 3b). Without the
+#     ConfigMap every agent pod hangs in ContainerCreating; the controller only
+#     self-creates it on the PRODUCTION path, never for sandbox deploys.
 #
 # RESTORING A BACKUP AFTERWARDS: see the note at the bottom — you MUST scale the
 # DB clients to 0 first or the restore SILENTLY half-applies.
@@ -50,7 +60,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
 REGISTRY_API_TAG="0.2.186"
-DEPLOY_CONTROLLER_TAG="0.1.37"
+DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
 DECLARATIVE_RUNNER_TAG="0.1.49"
 STUDIO_TAG="0.1.140"
 SCHEDULER_TAG="0.1.1"
@@ -149,6 +159,30 @@ for ns in "$NS" agents-platform agentshield-playground; do
 done
 echo "  3 namespaces + pull secret + SA patched"
 echo "  NOTE: the ECR token expires in ~12h. Re-run this step to refresh it."
+# NOTE: patching the *default* SA does NOT cover agent pods — they run under a
+# per-agent SA (machine identity). Their pull secret comes from the controller's
+# AGENT_IMAGE_PULL_SECRETS env (chart: global.imagePullSecrets), deploy-controller
+# >= 0.1.38. Older controllers => agents ImagePullBackOff "no basic auth credentials".
+
+# ── Step 3b: cluster infra the chart does NOT own ────────────────────────────
+# These live in infra/ and are applied by deploy-cpe2e.sh, so they are easy to
+# miss on a fresh cluster. Both are load-bearing:
+#  - opa-bundle-server: nginx that serves the policy bundle registry-api builds;
+#    every agent's OPA sidecar polls it.
+#  - opa-sidecar-config: mounted into each agent pod's OPA sidecar. MISSING => the
+#    pod hangs forever in ContainerCreating ("configmap opa-sidecar-config not
+#    found"). The controller only self-creates it on the PRODUCTION path
+#    (production_reconciler), never for sandbox deploys.
+#  - playground-runner: ClusterRole+Binding letting registry-api drive playground
+#    pods/jobs.
+echo ""
+echo "[3b/7] Cluster infra (OPA bundle server + sidecar config + playground RBAC)..."
+kubectl apply -f infra/opa-bundle-server/configmap-nginx-conf.yaml >/dev/null
+kubectl apply -f infra/opa-bundle-server/service.yaml >/dev/null
+kubectl apply -f infra/opa-bundle-server/deployment.yaml >/dev/null
+kubectl apply -f infra/opa-bundle-server/configmap-opa-config.yaml >/dev/null
+kubectl apply -f infra/rbac/playground-runner-clusterrole.yaml >/dev/null
+echo "  opa-bundle-server + opa-sidecar-config + playground-runner applied"
 
 # ── Step 4: platform secrets ─────────────────────────────────────────────────
 echo ""
@@ -251,10 +285,25 @@ else
 fi
 echo "  controller Available"
 
+TMP_DEP_ERR="$(mktemp)"
+trap 'rm -f "$TMP_DEP_ERR"' EXIT
+
 # ── Step 6: deploy (two-phase for publicUrl) ─────────────────────────────────
 echo ""
 echo "[6/7] Helm deploy..."
-helm dependency update "$CHART" >/dev/null 2>&1 || true   # local sub-chart version mismatch is non-fatal
+# Re-vendor sub-charts. This MUST NOT be best-effort: helm renders the packaged
+# .tgz in charts/, not your edited directory, so a stale .tgz means `helm upgrade`
+# silently applies OLD templates. It is deceptive rather than loud — image TAGS
+# still update (the old template reads .Values.image.tag), so the rollout reports
+# success while your template change never shipped. Fail here instead.
+if ! helm dependency update "$CHART" 2>"$TMP_DEP_ERR"; then
+  echo "ERROR: helm dependency update failed — sub-chart .tgz would be STALE." >&2
+  echo "       Deploying now would silently apply old templates. Common cause:" >&2
+  echo "       Chart.yaml pins a sub-chart version that differs from its" >&2
+  echo "       charts/<name>/Chart.yaml version (that aborts the whole update)." >&2
+  cat "$TMP_DEP_ERR" >&2
+  exit 1
+fi
 helm upgrade --install "$RELEASE" "$CHART" -f "$VALUES" -n "$NS" --timeout 15m
 
 echo ""

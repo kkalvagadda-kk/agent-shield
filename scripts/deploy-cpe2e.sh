@@ -243,7 +243,10 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   deploy the current committed tags and assert their rollout.
 REGISTRY_API_TAG="0.2.186"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.37"
+# 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
+# they run under a per-agent SA, so a secret on the default SA never reached
+# them and any private-registry pull failed with "no basic auth credentials".
+DEPLOY_CONTROLLER_TAG="0.1.38"
 STUDIO_TAG="0.1.140"
 EVAL_RUNNER_TAG="0.1.10"
 DECLARATIVE_RUNNER_TAG="0.1.49"

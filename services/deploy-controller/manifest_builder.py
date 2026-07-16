@@ -7,6 +7,23 @@ _OPA_CONFIG_CM = "opa-sidecar-config"
 _OPA_CONFIG_NS = "agentshield-platform"
 
 
+def _image_pull_secrets() -> list:
+    """Pull secrets for agent pods, from AGENT_IMAGE_PULL_SECRETS (comma-separated).
+
+    Agent pods run under a per-agent ServiceAccount (machine identity), not the
+    namespace default, so a pull secret attached to the default SA does NOT
+    apply to them — it has to be on the pod spec. Empty (the default) yields no
+    imagePullSecrets, which is correct for clusters that side-load images
+    locally (kind) or use a public/anonymous registry.
+    """
+    raw = os.environ.get("AGENT_IMAGE_PULL_SECRETS", "")
+    return [
+        k8s_client.V1LocalObjectReference(name=n)
+        for n in (s.strip() for s in raw.split(","))
+        if n
+    ]
+
+
 def build_service(
     agent_name: str,
     environment: str,
@@ -372,6 +389,7 @@ def build_deployment(
         spec=k8s_client.V1PodSpec(
             # Phase 9.1: run pod under the per-agent SA (provisions projected token)
             service_account_name=sa_name,
+            image_pull_secrets=_image_pull_secrets() or None,
             containers=[agent_container, opa_container],
             volumes=volumes,
         ),

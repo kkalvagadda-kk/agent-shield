@@ -652,8 +652,9 @@ deploy-controller:
   image:
     repository: registry.internal/agentshield/deploy-controller
     # Context Storage POC-0 (T005): injects DIRECT_DATABASE_URL +
-    # AGENTSHIELD_DEPLOYMENT_ID into agent pods. Unchanged in POC-1 (stays 0.1.37).
-    tag: "0.1.37"
+    # AGENTSHIELD_DEPLOYMENT_ID into agent pods.
+    # 0.1.38: sets imagePullSecrets on agent pods (private-registry pulls).
+    tag: "0.1.38"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
