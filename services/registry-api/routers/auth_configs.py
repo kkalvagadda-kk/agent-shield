@@ -20,9 +20,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from crypto import encrypt_json
+from crypto import decrypt_json, encrypt_json
 from db import get_db
-from k8s import delete_secret, upsert_secret
+from k8s import delete_secret, secret_exists, upsert_secret
 from models import AuthConfig, MCPServer, Tool
 from schemas import AuthConfigCreate, AuthConfigResponse, AuthConfigUpdate, PaginatedResponse
 
@@ -134,8 +134,69 @@ async def get_auth_config_secret_ref(
     config_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    """Return the K8s secret name, RE-MATERIALIZING it from the DB if it has vanished.
+
+    The DB is the source of truth and the K8s Secret is a derived cache — that is what
+    `credentials_encrypted` is FOR (see `create_auth_config`: "Durable source of truth:
+    encrypt into the DB … Runtime materialization: the K8s secret pods mount"). Until
+    this endpoint, nothing ever read the durable copy back: the Secret was written ONLY
+    at auth-config create/update, so once it was gone it was gone, and re-entering the
+    credential by hand was the only recovery. The intent was right; the loop was open.
+
+    That cost a live demo. `serper-dev` pointed at `auth-config-<id>` which did not
+    exist (an older Secret held the key under a stale id — DB-restore drift). The agent
+    sent the literal `{{serper_api_key}}` to Serper and got a 403 — because FOUR layers
+    each failed quietly: no re-materialize (here), a best-effort copy in
+    `tool_secrets.py`, `envFrom … optional: true` (K8s silently skips a missing Secret),
+    and `_substitute_vars` passing an unresolved `{{var}}` through verbatim.
+
+    This is the right seam: deploy-controller ALREADY calls this immediately before
+    copying the Secret into the agent's namespace, so the heal happens exactly when it
+    is needed, on the deploy path, with **no plaintext on the wire** (only the name) and
+    no change to deploy-controller. It is also where an external secret store (Vault /
+    ASM) will plug in: swap the `decrypt_json` read for the store's read and every other
+    layer stays put.
+
+    Fail-LOUD, deliberately: if the row has no durable copy to heal from we 409 rather
+    than return a name that resolves to nothing. A caller that gets a name assumes the
+    Secret exists; handing back a phantom is how the placeholder reached Serper.
+    """
     config = await _get_auth_config(config_id, db)
-    return {"id": str(config.id), "k8s_secret_ref": config.k8s_secret_ref}
+
+    if not config.k8s_secret_ref:
+        return {"id": str(config.id), "k8s_secret_ref": None}
+
+    if await secret_exists(config.k8s_secret_ref, _PLATFORM_NAMESPACE):
+        return {"id": str(config.id), "k8s_secret_ref": config.k8s_secret_ref}
+
+    if not config.credentials_encrypted:
+        logger.error(
+            "auth_config %s: k8s secret %s is MISSING and there is no durable copy to "
+            "re-materialize from — the credential must be re-entered",
+            config.id, config.k8s_secret_ref,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"AuthConfig '{config.name}' has no stored credentials and its Kubernetes "
+                f"secret '{config.k8s_secret_ref}' does not exist. Re-enter the credential "
+                f"— returning the name would hand out a reference that resolves to nothing, "
+                f"and the agent would send the unsubstituted placeholder to the upstream API."
+            ),
+        )
+
+    logger.warning(
+        "auth_config %s: k8s secret %s was MISSING — re-materializing from the DB",
+        config.id, config.k8s_secret_ref,
+    )
+    await upsert_secret(
+        config.k8s_secret_ref, _PLATFORM_NAMESPACE, decrypt_json(config.credentials_encrypted)
+    )
+    return {
+        "id": str(config.id),
+        "k8s_secret_ref": config.k8s_secret_ref,
+        "rematerialized": True,
+    }
 
 
 # ---------------------------------------------------------------------------
