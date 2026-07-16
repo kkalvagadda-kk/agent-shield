@@ -670,7 +670,7 @@ deploy-controller:
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
   # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
   # load/save + shared workflow transcript are all baked into this image.
-  declarativeRunnerTag: "0.1.53"
+  declarativeRunnerTag: "0.1.54"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

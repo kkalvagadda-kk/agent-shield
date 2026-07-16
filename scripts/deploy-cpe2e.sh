@@ -272,7 +272,7 @@ DEPLOY_CONTROLLER_TAG="0.1.38"
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
 STUDIO_TAG="0.1.142"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.53"
+DECLARATIVE_RUNNER_TAG="0.1.54"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
