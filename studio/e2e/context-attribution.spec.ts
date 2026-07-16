@@ -1,4 +1,10 @@
-import { test, expect, type Browser, type Page } from "@playwright/test";
+import {
+  test,
+  expect,
+  request as pwRequest,
+  type Browser,
+  type APIRequestContext,
+} from "@playwright/test";
 
 // ---------------------------------------------------------------------------
 // context-attribution.spec.ts  (context-storage POC-2)
@@ -13,6 +19,18 @@ import { test, expect, type Browser, type Page } from "@playwright/test";
 //       (agent) name, tied to the distinct agent_name values the run tree poll
 //       actually returned.
 //
+//       This test is SELF-CONTAINED: instead of scanning the catalog and hoping
+//       to land on a clean multi-member workflow (the old version hit
+//       trigger-demo-flow, which renders a single fallback bubble), beforeAll
+//       builds its OWN guaranteed 2-member workflow via the REST API — create +
+//       deploy two reactive memory-enabled agents, compose them into a sequential
+//       workflow, snapshot a passing version, and publish it to the catalog — then
+//       drives the Catalog chat on the resulting artifact. Mirrors the exact bodies
+//       suite-75 Section A uses (scripts/e2e/suite-75-context-storage.sh) plus the
+//       version → publish → admin-approve promotion path
+//       (services/registry-api/routers/composite_workflows.py::publish_workflow +
+//       routers/admin.py::approve_publish_request).
+//
 //   (b) Toggle save → reload → assert — the WorkflowBuilder first-save modal
 //       exposes "Share context between agents" (composite `memory_enabled`).
 //       We set it to a NON-default value (uncheck → false), save (POST
@@ -25,17 +43,26 @@ import { test, expect, type Browser, type Page } from "@playwright/test";
 //   Boundary (same as workflows.spec / hitl-deployment-chat.spec): we assert UI
 //   WIRING + PERSISTENCE + the network calls, NOT agent-execution completion.
 //   Few agent pods are warm, so a full multi-member run may not finish; test (a)
-//   SKIPS gracefully when no reachable/completing multi-agent workflow exists.
+//   SKIPS gracefully (only) when its own workflow never produces a terminal run
+//   tree with ≥2 completed children.
 // ---------------------------------------------------------------------------
 
 const TS = Date.now();
 const TOGGLE_AGENT = `e2e-ctx-agent-${TS}`;
 const TOGGLE_WORKFLOW = `e2e-ctx-wf-${TS}`;
 
-// Optional override: point test (a) straight at a known published multi-agent
-// workflow artifact (mirrors hitl-deployment-chat.spec's DEP_ID override so the
-// spec survives an env where catalog discovery finds nothing).
-const WF_ARTIFACT = process.env.CTX_E2E_WORKFLOW_ARTIFACT || "";
+// Header-auth identity for the REST fixture setup (same admin the browser logs in
+// as — platform-admin's real Keycloak sub — so created_by matches and the browser
+// can trigger the run it navigates to). Mirrors webhook-public-url.spec's ADMIN.
+const ADMIN = {
+  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
+  "X-User-Team": "platform",
+};
+// The REST API is reachable at the same origin the browser uses (Studio's nginx
+// proxies /api/v1 → registry-api); baseURL comes from PLAYWRIGHT_BASE_URL.
+const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
+const INSTR =
+  "You are a helpful assistant with memory. Reply in one short sentence.";
 
 // ---------------------------------------------------------------------------
 // Shared helpers (mirror workflows.spec.ts)
@@ -83,107 +110,201 @@ async function deleteAgentViaUI(browser: Browser, agentName: string): Promise<vo
   }
 }
 
-// Reach a multi-agent workflow's Catalog production chat. Returns the chat page
-// (already navigated) or null if none is discoverable in this env → the caller
-// skips. Discovery: env override first, else scan the catalog for a card whose
-// type badge is "workflow" and open its /chat surface.
-async function openWorkflowChat(page: Page): Promise<boolean> {
-  let artifactId = WF_ARTIFACT;
-  if (!artifactId) {
-    await page.goto("/catalog");
-    await page.waitForLoadState("networkidle");
-    // Catalog cards are <Link to="/catalog/{id}"> containing a <span class="badge">
-    // with the artifact type. Pick the first whose badge reads "workflow".
-    const wfCard = page
-      .locator('a[href^="/catalog/"]', {
-        has: page.locator("span.badge", { hasText: /^workflow$/i }),
-      })
-      .first();
-    if ((await wfCard.count()) === 0) return false;
-    const href = await wfCard.getAttribute("href");
-    if (!href) return false;
-    artifactId = href.split("/catalog/")[1];
-  }
-
-  await page.goto(`/catalog/${artifactId}/chat`);
-  await page.waitForLoadState("networkidle");
-  // The composite input enables once the artifact resolves (input is disabled
-  // while `!agentName`). If it never enables, the artifact isn't reachable/visible.
-  const input = page.getByRole("textbox");
-  try {
-    await expect(input).toBeEnabled({ timeout: 15_000 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // (a) Attributed workflow bubbles in the Catalog production chat
+//
+// Self-contained: beforeAll builds a KNOWN 2-member workflow via the REST API and
+// publishes it to the catalog, so the test drives a clean multi-member run instead
+// of scanning the catalog and landing on a single-bubble fallback.
 // ---------------------------------------------------------------------------
-test("catalog workflow chat renders ≥2 attributed member bubbles", async ({ page }) => {
-  const reached = await openWorkflowChat(page);
-  test.skip(!reached, "no reachable multi-agent workflow chat in this env");
+test.describe("catalog workflow attribution", () => {
+  let api: APIRequestContext;
+  // Populated by beforeAll only when the whole fixture came up; empty string ⇒
+  // the test skips for a genuine environment gap (no LLM provider for the team).
+  let artifactId = "";
+  let workflowId = "";
+  let skipReason = "";
+  const agentA = `e2e-ctx-mem-a-${TS}`;
+  const agentB = `e2e-ctx-mem-b-${TS}`;
+  const wfName = `e2e-ctx-catwf-${TS}`;
+  const createdAgents: string[] = [];
 
-  // Wait for a run-tree poll that carries ≥2 members and has reached a terminal
-  // state — that's when CatalogChatPage renders the per-member attributed bubbles.
-  const treeResp = page.waitForResponse(
-    async (r) => {
-      if (!/\/api\/v1\/workflows\/[^/]+\/runs\/[^/]+\/tree/.test(r.url())) return false;
-      if (r.request().method() !== "GET") return false;
-      try {
-        const j = await r.json();
-        const terminal = j?.parent?.status === "completed" || j?.parent?.status === "failed";
-        return terminal && Array.isArray(j?.children) && j.children.length >= 2;
-      } catch {
-        return false;
+  test.beforeAll(async () => {
+    api = await pwRequest.newContext({
+      baseURL: API_BASE,
+      ignoreHTTPSErrors: true,
+      extraHTTPHeaders: ADMIN,
+    });
+
+    // An LLM provider is required to build a runnable agent. Its genuine absence
+    // in a stripped env is the ONE legitimate setup skip (mirrors suite-75).
+    const prov = await api.get("/api/v1/llm-providers/", { params: { team: "platform" } });
+    expect(prov.ok(), `list llm-providers: ${prov.status()}`).toBeTruthy();
+    const provJson = await prov.json();
+    const provItems = Array.isArray(provJson) ? provJson : provJson.items ?? [];
+    const pid = provItems[0]?.id;
+    if (!pid) {
+      skipReason = "no LLM provider for team platform";
+      return;
+    }
+
+    // 1. two distinct reactive, memory-enabled agents (suite-75 Section A body).
+    for (const name of [agentA, agentB]) {
+      const c = await api.post("/api/v1/agents/", {
+        data: {
+          name,
+          team: "platform",
+          agent_type: "declarative",
+          execution_shape: "reactive",
+          memory_enabled: true,
+          metadata: { instructions: INSTR, llm_provider_id: pid, tools: [] },
+        },
+      });
+      expect(c.ok(), `create agent ${name}: ${c.status()} ${await c.text()}`).toBeTruthy();
+      createdAgents.push(name);
+      // 2. deploy each to sandbox (request must be accepted; the pod actually
+      //    reaching Ready is the capacity boundary handled in the test body).
+      const d = await api.post(`/api/v1/agents/${name}/deploy`, {
+        data: { environment: "sandbox" },
+      });
+      expect(d.ok(), `deploy agent ${name}: ${d.status()} ${await d.text()}`).toBeTruthy();
+    }
+
+    // 3. a composite workflow (sequential, share-context on).
+    const wf = await api.post("/api/v1/workflows", {
+      data: {
+        name: wfName,
+        team: "platform",
+        orchestration: "sequential",
+        execution_shape: "reactive",
+        memory_enabled: true,
+      },
+    });
+    expect(wf.ok(), `create workflow: ${wf.status()} ${await wf.text()}`).toBeTruthy();
+    workflowId = (await wf.json()).id;
+
+    // 4. add BOTH agents as ordered members.
+    for (let i = 0; i < createdAgents.length; i++) {
+      const g = await api.get(`/api/v1/agents/${createdAgents[i]}`);
+      expect(g.ok(), `get agent ${createdAgents[i]}: ${g.status()}`).toBeTruthy();
+      const agentId = (await g.json()).id;
+      const m = await api.post(`/api/v1/workflows/${workflowId}/members`, {
+        data: { agent_id: agentId, position: i + 1 },
+      });
+      expect(m.ok(), `add member ${createdAgents[i]}: ${m.status()} ${await m.text()}`).toBeTruthy();
+    }
+
+    // 5. snapshot a version (eval_passed opens the publish eval gate — this is a
+    //    fixture, so we set it directly rather than running a real eval).
+    const ver = await api.post(`/api/v1/workflows/${workflowId}/versions`, {
+      data: { eval_passed: true, notes: "e2e attribution fixture" },
+    });
+    expect(ver.ok(), `create version: ${ver.status()} ${await ver.text()}`).toBeTruthy();
+    const versionId = (await ver.json()).id;
+
+    // 6. submit the publish request.
+    const pub = await api.post(`/api/v1/workflows/${workflowId}/publish`, {
+      data: { version_id: versionId },
+    });
+    expect(pub.ok(), `publish workflow: ${pub.status()} ${await pub.text()}`).toBeTruthy();
+    const prId = (await pub.json()).publish_request_id;
+
+    // 7. admin-approve → materializes the catalog PublishedArtifact (type=workflow,
+    //    source_id=workflowId). Grant to team platform so it's catalog-visible.
+    const appr = await api.post(`/api/v1/admin/publish-requests/${prId}/approve`, {
+      data: { grantee_teams: ["platform"] },
+    });
+    expect(appr.ok(), `approve publish: ${appr.status()} ${await appr.text()}`).toBeTruthy();
+    artifactId = (await appr.json()).artifact_id;
+    expect(artifactId, "approve should return a catalog artifact_id").toBeTruthy();
+  });
+
+  test.afterAll(async () => {
+    // Best-effort cleanup so the catalog/cluster don't accumulate fixtures.
+    if (api) {
+      if (workflowId) await api.delete(`/api/v1/workflows/${workflowId}`).catch(() => {});
+      for (const name of createdAgents) {
+        await api.delete(`/api/v1/agents/${name}`).catch(() => {});
       }
-    },
-    { timeout: 50_000 }
-  );
+      await api.dispose().catch(() => {});
+    }
+  });
 
-  // Sending a message on a workflow artifact triggers POST /workflows/{id}/runs.
-  const runResp = page.waitForResponse(
-    (r) =>
-      /\/api\/v1\/workflows\/[^/]+\/runs$/.test(r.url()) && r.request().method() === "POST",
-    { timeout: 20_000 }
-  );
+  test("catalog workflow chat renders ≥2 attributed member bubbles", async ({ page }) => {
+    test.skip(!artifactId, skipReason || "workflow fixture did not come up");
+    // The multi-member run poll can take ~90s; the default 60s test timeout is
+    // too tight, so extend it (setup already ran in beforeAll).
+    test.setTimeout(140_000);
 
-  await page.getByRole("textbox").fill("Run the workflow end to end.");
-  await page.locator('button[type="submit"]').click();
+    // Drive the real Catalog production chat on OUR published workflow artifact.
+    await page.goto(`/catalog/${artifactId}/chat`);
+    await page.waitForLoadState("networkidle");
+    const input = page.getByRole("textbox");
+    // Input enables once the artifact resolves (disabled while `!agentName`).
+    await expect(input).toBeEnabled({ timeout: 15_000 });
 
-  // The run must actually kick off; if the trigger itself fails, that's a real bug.
-  const started = await runResp;
-  expect([200, 201, 202]).toContain(started.status());
+    // Wait for a run-tree poll that carries ≥2 members and has reached a terminal
+    // state — that's when CatalogChatPage renders the per-member attributed bubbles.
+    const treeResp = page.waitForResponse(
+      async (r) => {
+        if (!/\/api\/v1\/workflows\/[^/]+\/runs\/[^/]+\/tree/.test(r.url())) return false;
+        if (r.request().method() !== "GET") return false;
+        try {
+          const j = await r.json();
+          const terminal = j?.parent?.status === "completed" || j?.parent?.status === "failed";
+          return terminal && Array.isArray(j?.children) && j.children.length >= 2;
+        } catch {
+          return false;
+        }
+      },
+      { timeout: 90_000 }
+    );
 
-  // A completing multi-member run needs warm pods; when none are, the tree poll
-  // never reaches ≥2 terminal children → skip (same "few pods" boundary).
-  let children: Array<{ agent_name?: string }> = [];
-  try {
-    const resp = await treeResp;
-    const tree = await resp.json();
-    children = tree.children ?? [];
-  } catch {
-    test.skip(true, "no completing multi-member workflow run available (few warm pods)");
-    return;
-  }
+    // Sending a message on a workflow artifact triggers POST /workflows/{id}/runs.
+    const runResp = page.waitForResponse(
+      (r) =>
+        /\/api\/v1\/workflows\/[^/]+\/runs$/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 20_000 }
+    );
 
-  const names = Array.from(
-    new Set(children.map((c) => c.agent_name).filter((n): n is string => !!n))
-  );
-  expect(names.length).toBeGreaterThanOrEqual(2);
+    await input.fill("Run the workflow end to end.");
+    await page.locator('button[type="submit"]').click();
 
-  // Each member name is rendered as an AttributedBubble label (colored dot + name)
-  // in the messages area — the run no longer collapses into one final-output blob.
-  const messages = page.locator("div.overflow-y-auto");
-  for (const name of names) {
-    await expect(messages.getByText(name, { exact: true }).first()).toBeVisible();
-  }
-  // The attribution color dots (span.w-2.h-2.rounded-full precede each label) —
-  // at least one per member bubble.
-  await expect(
-    messages.locator("span.w-2.h-2.rounded-full").nth(1)
-  ).toBeVisible();
+    // The run must actually kick off; if the trigger itself fails, that's a real bug.
+    const started = await runResp;
+    expect([200, 201, 202]).toContain(started.status());
+
+    // A completing multi-member run needs warm pods; when the two agent pods never
+    // warm up, the tree poll never reaches ≥2 terminal children → capacity skip
+    // (same "few warm pods" boundary suite-75 accepts). A run that COMPLETES but
+    // renders missing bubbles is NOT skipped — it falls through and FAILS below.
+    let children: Array<{ agent_name?: string }> = [];
+    try {
+      const resp = await treeResp;
+      const tree = await resp.json();
+      children = tree.children ?? [];
+    } catch {
+      test.skip(true, "no completing multi-member run — few warm pods");
+      return;
+    }
+
+    const names = Array.from(
+      new Set(children.map((c) => c.agent_name).filter((n): n is string => !!n))
+    );
+    expect(names.length).toBeGreaterThanOrEqual(2);
+
+    // Each member name is rendered as an AttributedBubble label (colored dot + name)
+    // in the messages area — the run no longer collapses into one final-output blob.
+    const messages = page.locator("div.overflow-y-auto");
+    for (const name of names) {
+      await expect(messages.getByText(name, { exact: true }).first()).toBeVisible();
+    }
+    // The attribution color dots (span.w-2.h-2.rounded-full precede each label) —
+    // at least one per member bubble.
+    await expect(
+      messages.locator("span.w-2.h-2.rounded-full").nth(1)
+    ).toBeVisible();
+  });
 });
 
 // ---------------------------------------------------------------------------
