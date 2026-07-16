@@ -77,7 +77,10 @@ envoy-gateway:
     hostname: ""          # wildcard — match any Host (the ELB DNS)
     langfuseHostname: ""  # no langfuse listener (langfuse disabled)
     tls:
-      enabled: false      # HTTP-only first bring-up; self-signed TLS is a follow-up
+      enabled: true       # REQUIRED for login: Keycloak PKCE needs a secure
+                          # context (Web Crypto), so plain http can't log in.
+      secretName: gateway-tls   # minted by scripts/deploy-eks.sh (self-signed,
+                                # wildcard SAN *.elb.us-west-2.amazonaws.com)
   envoyProxy:
     serviceType: LoadBalancer
     serviceAnnotations:
