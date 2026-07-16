@@ -33,8 +33,23 @@ _RESUME_TIMEOUT_SECONDS = 5
 _DURABLE_RUN_TTL_MINUTES = 10
 
 
-def _agent_pod_url(agent_name: str, team: str, environment: str = "production") -> str:
-    """Derive the agent pod's K8s cluster-internal service URL."""
+def _agent_pod_url(agent_name: str, team: str, environment: str) -> str:
+    """Derive the agent pod's K8s cluster-internal service URL.
+
+    `environment` is REQUIRED — it used to default to "production", and both callers
+    omitted it, so every sandbox/playground approval resume POSTed to a
+    `{agent}-production` Service that does not exist for a sandbox-only agent. httpx
+    raised, the caller swallowed it into a `logger.warning`, and the approval row was
+    still marked resolved — so the reviewer saw "approved" while the agent was never
+    resumed and its run hung until TTL. Fail-silent, exactly like the rest of this
+    class of bug.
+
+    The default is removed rather than corrected: a wrong default is invisible at the
+    call site, while a missing argument is a TypeError at import/CI. Callers must
+    resolve the real environment (`_resolve_agent_environment`) and say which one they
+    mean — the No-Bandaid rule ("when sandbox and production share infrastructure they
+    must pass explicit identifiers, never rely on a default").
+    """
     svc_name = f"{agent_name}-{environment}"
     namespace = f"agents-{team}"
     return f"http://{svc_name}.{namespace}.svc.cluster.local:8080"
@@ -42,7 +57,13 @@ def _agent_pod_url(agent_name: str, team: str, environment: str = "production") 
 
 async def _notify_agent(agent_name: str, team: str, thread_id: str, approval_id: str) -> None:
     """POST /resume/{thread_id} to the agent pod with a timed_out decision."""
-    base_url = _agent_pod_url(agent_name, team)
+    # Resolve the agent's ACTUAL running environment — a sandbox agent has no
+    # `{agent}-production` Service, so the old default silently DNS-failed and the
+    # timeout was recorded without the agent ever being told.
+    from workflow_orchestrator import _resolve_agent_environment
+
+    environment = await _resolve_agent_environment(agent_name)
+    base_url = _agent_pod_url(agent_name, team, environment)
     url = f"{base_url}/resume/{thread_id}"
     payload = {
         "decision": "timed_out",

@@ -3,6 +3,24 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.192 / eval-runner:0.1.13 (Eval v2 E-6 — REGRESSION GATE + PER-RUN PASS POLICY.
+#     (1) THE E-0 ORPHANS GET BOTH ENDS. `eval_runs.pass_threshold` / `dimension_weights` shipped in E-0
+#         (migration 0059) with NO writer and NO reader — the column was NULL in EVERY row ever written, so
+#         every downstream `if run.pass_threshold is not None` was a branch that could not execute.
+#         `EvalRunCreate` now accepts both (422 on a threshold outside 0..1 or a NEGATIVE weight, which would
+#         silently INVERT a composite); `create_eval_run` defaults the threshold from EVAL_PASS_THRESHOLD at
+#         the SINGLE write site, so the column is never NULL again and no consumer needs a fallback of its own.
+#     (2) ONE THRESHOLD, NOT FOUR. The publish threshold existed FOUR times across THREE services (the gate;
+#         the eval-runner's per-item verdict; the Studio's verdict AND its colour band), each defaulting to
+#         0.7 — so they agreed and nothing ever errored. Wiring a per-run threshold to the gate alone would
+#         have made the product LIE: a 0.85 run at threshold 0.9 renders "passed" and marks every item passed
+#         while the gate silently refuses to publish. Now: the gate reads effective_pass_threshold(run), and
+#         the runner resolves the run's policy ONCE (_RUN_PASS_THRESHOLD) for all five per-item verdicts and
+#         threads dimension_weights into the score body — so the DOOR keeps ONE weights source (no run_id→
+#         column second path + precedence chain, which is the priority-fallthrough that let MODE=webhook fall
+#         through to the reactive tail and deliver real side effects under a plausible PASS).
+#     (3) THE PRE-BUILD SOURCE TIER (below) now makes an unbumped tag, a drifted filter engine, and an
+#         unguarded/missing suite UNDEPLOYABLE. suite-80 is the live regression gate.)
 #   - eval-runner:0.1.7 (Eval v2 E-1 FIX — durable trajectory projection now COLLAPSES one logical
 #     tool call's consecutive same-tool run_steps into a single entry (_collapse_tool_calls in
 #     eval-runner/main.py). A gated call parks as TWO rows — running(no appr) then
@@ -266,11 +284,11 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.191"
+REGISTRY_API_TAG="0.2.193"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.143"
-EVAL_RUNNER_TAG="0.1.12"
+STUDIO_TAG="0.1.145"
+EVAL_RUNNER_TAG="0.1.13"
 DECLARATIVE_RUNNER_TAG="0.1.49"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
@@ -302,16 +320,44 @@ fi
 #     registry-api=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
 #     -n agentshield-platform
 
-# Pre-build gate: `filter_engine.py` is duplicated in event-gateway (the real webhook
-# hop) and registry-api (`/playground/test-event`, the door an E-4 webhook eval scores
-# the filter through). They MUST be byte-identical — the gateway's ReDoS hardening once
-# went un-back-ported for months, leaving registry-api running an unbounded regex and any
-# webhook eval grading a decision production never makes. Gating BEFORE the build makes
-# divergent engines undeployable rather than merely detectable. Fails loudly with a diff.
-bash "$(dirname "${BASH_SOURCE[0]}")/check-filter-engine-parity.sh"
+# ── PRE-BUILD SOURCE GATES (Eval v2 E-6) ─────────────────────────────────────
+# This is the choke point: the deploy-script-only rule means EVERY service change
+# runs this script, so a gate here is the one gate guaranteed to execute. Putting
+# the cluster-free checks BEFORE the build makes their failure modes UNDEPLOYABLE
+# rather than merely detectable — enforcement, not discipline.
+#
+# `run-fast-gates.sh --source-only` is pure grep + git-log (~5s, no cluster, no
+# docker, no node). It runs, among others, the filter-engine parity gate that used
+# to be invoked directly here — the same script, now one tier up, NOT a second copy.
+# It also gates:
+#   * tag ⇄ content coupling — a tag is a CLAIM ABOUT CONTENT. E-3's code never ran
+#     for an entire slice because a tag was never bumped: both tag files agreed on a
+#     stale tag and the cluster faithfully matched it, so every check stayed green
+#     while the feature was absent. This now fails the DEPLOY, by name.
+#   * suite guards + the registration census — run-all.sh's run_suite() returns 0 for
+#     a MISSING file, so deleting a suite made the runner GREENER. (It caught a real
+#     one: suite-46 was registered but had never been committed.)
+#   * the E-6 orphan sweep — every producer has a reader; one threshold, not four.
+#
+# Deliberately NOT here: pytest and npm. The source tier must stay in the SECONDS
+# range or it gets bypassed, and a bypassed gate is worse than none because it reads
+# as protection. Those live in the full tier: `bash scripts/e2e/run-fast-gates.sh`.
+if ! bash "$(dirname "${BASH_SOURCE[0]}")/e2e/run-fast-gates.sh" --source-only; then
+  echo ""
+  echo "❌ DEPLOY BLOCKED — the pre-build source gates failed (see above)."
+  echo ""
+  echo "   These gates are cluster-free and take ~5 seconds; each one exists because"
+  echo "   the corresponding failure ALREADY shipped here silently. In particular, an"
+  echo "   unbumped tag means the image is never rebuilt and the cluster keeps running"
+  echo "   the OLD code while every check stays green (docs/bugs/e3-never-ran-tag-not-bumped.md)."
+  echo ""
+  echo "   Fix the named gate and re-run. Do NOT comment this out to get a deploy through:"
+  echo "   a deploy that ships code the tag does not describe is the bug, not the gate."
+  exit 1
+fi
 
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (E-4 P1-P4: webhook eval — D2 ONE run door (test-event stops hand-building a 2nd PlaygroundRun: now threads eval_mode + dispatches durable + traces), launch guard opens for mode=webhook, /eval/score webhook branch with score_filter + score_injection and a safety veto on filter errors / fired forbidden tools)"
+echo "  → registry-api:${REGISTRY_API_TAG} (E-6: per-run pass policy — EvalRunCreate accepts pass_threshold/dimension_weights (422 on out-of-range / negative weight), create_eval_run defaults the threshold at the single write site so the E-0 column is never NULL again, and the eval_passed gate reads effective_pass_threshold(run) instead of the global constant)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
@@ -326,7 +372,7 @@ docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_
 echo "  → studio:${STUDIO_TAG} (WS-3 scheduled operate surface: OverviewScheduled now renders next-fire + rolled-up schedule-health badge from getAgentHealth, plus an alert-config summary (alert_email/alert_on_failure) from the trigger)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
-echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"
+echo "  → eval-runner:${EVAL_RUNNER_TAG} (E-6: resolves the RUN's pass policy once at startup — _RUN_PASS_THRESHOLD drives all five per-item verdicts (was the env global) and _RUN_DIMENSION_WEIGHTS rides the score body, so the door keeps ONE weights source. Fails LOUDLY if it cannot read its own policy rather than scoring against a threshold nobody chose)"
 docker build -t "registry.internal/agentshield/eval-runner:${EVAL_RUNNER_TAG}" services/eval-runner/
 
 echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"

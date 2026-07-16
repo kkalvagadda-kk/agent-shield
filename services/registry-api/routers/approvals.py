@@ -140,14 +140,17 @@ async def _resume_and_advance(
         pass  # thread_id is not a durable run id → fall through to chat/workflow resume
 
     try:
-        if is_durable:
-            # Hit the agent's ACTUAL deployed pod (env-aware) — the -production default
-            # DNS-fails for a sandbox/playground agent (same wrong-target as the workflow path).
-            from workflow_orchestrator import _resolve_agent_environment, _team_namespace
-            env = await _resolve_agent_environment(agent_name)
-            pod_url = f"http://{agent_name}-{env}.{_team_namespace(team)}.svc.cluster.local:8080"
-        else:
-            pod_url = _agent_pod_url(agent_name, team)
+        # Hit the agent's ACTUAL deployed pod. This is env-aware for BOTH shapes: the
+        # durable branch was fixed here while the reactive branch kept calling
+        # `_agent_pod_url` with its `-production` default — so a sandbox/playground
+        # REACTIVE approval resolved to a Service that does not exist, httpx raised,
+        # the except below swallowed it into a warning, and the row was still marked
+        # resolved. Half a fix on one of two branches is how this whole class of bug
+        # survives; resolve once, use for both.
+        from workflow_orchestrator import _resolve_agent_environment
+
+        env = await _resolve_agent_environment(agent_name)
+        pod_url = _agent_pod_url(agent_name, team, env)
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(f"{pod_url}/resume/{thread_id}", json=resume_body)
         member_status = "completed" if resp.status_code == 200 else "failed"
