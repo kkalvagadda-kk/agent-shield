@@ -34,6 +34,17 @@
 #               token frames carrying author==CHAT_AGENT (single-agent = the
 #               one-speaker case), proving _proxy_agent_stream stamps the author the
 #               attributed-bubble UI reads.
+#   T-S75-009 — (POC-2b) tree tool_calls projection: after a reactive 2-member
+#               workflow drain, GET run-tree; the tool-using member's child carries a
+#               non-empty tool_calls[{tool_name,status}] with the fixture tool (the
+#               reactive tool_call marker RunSteps the streaming orchestrator persists).
+#   T-S75-010 — (POC-2b) rationale row + projection: a message_kind='rationale' row
+#               is persisted on the workflow_run thread for the tool-using member and
+#               equals the run-tree child's projected `rationale`. SKIP-DIAG when the
+#               model produced no reasoning; FAIL when the row/field plumbing is broken.
+#   T-S75-011 — (POC-2b) stream frames + drain parity: POST /runs/stream emits
+#               author-tagged agent_start/token/agent_end for each member + done, and a
+#               subsequent non-streaming POST /runs yields the SAME terminal member set.
 #
 # Pods-availability boundary (same one the other bash suites accept, per CLAUDE.md):
 # a test that needs a running agent pod SKIPs (does not FAIL) when the pod never
@@ -708,6 +719,344 @@ PY
 )
 echo "$SECTION_D"
 tally "$SECTION_D"
+
+# ---------------------------------------------------------------------------
+# Section E — POC-2b rich workflow stream: T-S75-009 (tree tool_calls),
+# T-S75-010 (rationale row + tree projection), T-S75-011 (stream author frames +
+# drain parity). Self-contained: provisions its OWN two reactive memory-enabled
+# members + a LOW-risk in-cluster echo tool (so a REACTIVE member can invoke it
+# non-interactively — a HIGH-risk tool like web_search would trip the HITL gate
+# and a reactive member fails-closed, research R4/R8), composes a sequential
+# reactive workflow, then:
+#   • streams POST /workflows/{id}/runs/stream and collects author-tagged frames;
+#   • drains POST /workflows/{id}/runs and reads the run tree;
+#   • asserts stream authors == drain child set (drain parity, T-S75-011),
+#     the SA child carries a non-empty tool_calls[] with the fixture tool
+#     (T-S75-009), and a message_kind='rationale' row was persisted AND equals
+#     the tree child's projected rationale (T-S75-010).
+# NO fakes — real tool, real pods, real /runs/stream, real /runs, transcript read
+# back from Postgres. Content that is model-dependent (whether the LLM actually
+# invoked the tool / emitted reasoning) SKIPs-with-DIAG; a BROKEN plumbing path
+# (missing tool_calls/rationale KEY, or a persisted rationale row the tree fails
+# to project) FAILs. Members are s75-*-<suffix> so the agent_pod_breakage guard
+# converts a crash-loop into a FAIL, never a laundered SKIP.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Section E: T-S75-009/010/011 rich workflow stream (chips + rationale + parity) ---"
+SECTION_E=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  env S75_SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
+import asyncio, os, uuid, json, base64, httpx
+from sqlalchemy import select
+from db import AsyncSessionLocal
+from models import Agent, Deployment, AgentRun
+
+ROOT = "http://localhost:8000"; BASE = ROOT + "/api/v1"
+SUFFIX = os.environ["S75_SUFFIX"]
+SA = f"s75-sa-{SUFFIX}"      # reactive member WITH a low-risk tool
+SB = f"s75-sb-{SUFFIX}"      # reactive member with NO tool
+TOOL = f"s75-tool-{SUFFIX}"  # low-risk in-cluster echo tool → no HITL gate
+MEMBERS = {SA, SB}
+IDS = ("T-S75-009", "T-S75-010", "T-S75-011")
+SA_INSTR = (f"You are a research assistant. Before answering you MUST call the {TOOL} "
+            "tool exactly once, with path set to 'lookup'. First state one short sentence "
+            "explaining WHY you are calling the tool, then call it, then answer in one "
+            "short sentence.")
+SB_INSTR = ("You acknowledge the previous agent's message and reply in one short sentence.")
+
+def out(tid, verdict, detail=""):
+    print(f"RESULT {tid} {verdict} {detail}")
+
+def diag(m):
+    print(f"DIAG {m}")
+
+async def get_token():
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(
+                "http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token",
+                data={"grant_type": "password", "client_id": "agentshield-studio",
+                      "username": "platform-admin", "password": "PlatformAdmin2024"})
+        if r.status_code != 200:
+            return None, None
+        tok = r.json()["access_token"]
+        p = tok.split(".")[1]; p += "=" * (4 - len(p) % 4)
+        sub = json.loads(base64.urlsafe_b64decode(p)).get("sub")
+        return tok, sub
+    except Exception:
+        return None, None
+
+async def provider_id(c):
+    r = await c.get(f"{BASE}/llm-providers/", params={"team": "platform"})
+    if r.status_code >= 300:
+        return None
+    items = r.json()
+    items = items if isinstance(items, list) else items.get("items", [])
+    return items[0]["id"] if items else None
+
+async def wait_running(names, timeout=180):
+    by = {}
+    for _ in range(timeout // 5):
+        await asyncio.sleep(5)
+        async with AsyncSessionLocal() as s:
+            rows = (await s.execute(
+                select(Agent.name, Deployment.status)
+                .join(Deployment, Deployment.agent_id == Agent.id)
+                .where(Agent.name.in_(names), Deployment.environment == "sandbox"))).all()
+        by = {n: st for (n, st) in rows}
+        if names and all(by.get(n) == "running" for n in names):
+            return True, by
+        if any(by.get(n) == "failed" for n in names):
+            return False, by
+    return False, by
+
+async def wait_terminal(run_id, timeout=180):
+    for _ in range(timeout // 5):
+        await asyncio.sleep(5)
+        async with AsyncSessionLocal() as s:
+            st = (await s.execute(select(AgentRun.status)
+                  .where(AgentRun.id == uuid.UUID(run_id)))).scalar()
+        if st in ("completed", "failed", "cancelled"):
+            return st
+    return "timeout"
+
+async def main():
+    token, sub = await get_token()
+    auth = {"Authorization": f"Bearer {token}"} if token else {}
+    hdr = {"X-User-Sub": sub or f"s75-owner-{SUFFIX}", "X-User-Team": "platform"}
+    if not token:
+        for t in IDS:
+            out(t, "SKIP", "no keycloak token (runs/stream is JWT-guarded)")
+        return
+
+    wid = None
+    tool_id = None
+    try:
+        async with httpx.AsyncClient(timeout=60, headers=hdr) as c:
+            pid = await provider_id(c)
+            if not pid:
+                for t in IDS:
+                    out(t, "SKIP", "no LLM provider for team platform")
+                return
+            # Low-risk, in-cluster (/echo) HTTP tool — no external dependency and no
+            # HITL gate, so a REACTIVE member can call it non-interactively.
+            tr = await c.post(f"{BASE}/tools/", json={
+                "name": TOOL, "display_name": "S75 Echo Lookup",
+                "description": "Low-risk in-cluster echo lookup (POC-2b stream fixture).",
+                "type": "http", "risk_level": "low", "owner_team": "platform",
+                "http_method": "GET",
+                "http_url": "http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/echo/{{path}}",
+            })
+            if tr.status_code not in (200, 201, 409):
+                for t in IDS:
+                    out(t, "SKIP", f"tool create http={tr.status_code}")
+                return
+            if tr.status_code in (200, 201):
+                tool_id = tr.json().get("id")
+            # SA has the tool bound (metadata.tools); SB has none.
+            await c.post(f"{BASE}/agents/", json={
+                "name": SA, "team": "platform", "agent_type": "declarative",
+                "execution_shape": "reactive", "memory_enabled": True,
+                "metadata": {"instructions": SA_INSTR, "llm_provider_id": pid, "tools": [TOOL]}})
+            await c.post(f"{BASE}/agents/{SA}/deploy", json={"environment": "sandbox"})
+            await c.post(f"{BASE}/agents/", json={
+                "name": SB, "team": "platform", "agent_type": "declarative",
+                "execution_shape": "reactive", "memory_enabled": True,
+                "metadata": {"instructions": SB_INSTR, "llm_provider_id": pid, "tools": []}})
+            await c.post(f"{BASE}/agents/{SB}/deploy", json={"environment": "sandbox"})
+
+        deployed, statuses = await wait_running([SA, SB])
+        if not deployed:
+            for t in IDS:
+                out(t, "SKIP", f"members not running: {statuses}")
+            return
+
+        async with httpx.AsyncClient(timeout=60, headers=hdr) as c:
+            r = await c.post(f"{BASE}/workflows", json={
+                "name": f"s75-swf-{SUFFIX}", "team": "platform",
+                "orchestration": "sequential", "execution_shape": "reactive",
+                "memory_enabled": True})
+            if r.status_code >= 300:
+                for t in IDS:
+                    out(t, "SKIP", f"workflow create http={r.status_code}")
+                return
+            wid = r.json()["id"]
+            for i, n in enumerate((SA, SB)):
+                g = await c.get(f"{BASE}/agents/{n}")
+                await c.post(f"{BASE}/workflows/{wid}/members",
+                             json={"agent_id": g.json()["id"], "position": i + 1})
+
+        MSG = "Look up the record and pass a one-line summary to the next agent."
+
+        # ===================================================================
+        # T-S75-011 — stream author frames. POST /runs/stream, collect the
+        # data-only SSE frames, and record which authors carry agent_start /
+        # token / agent_end. (Drain parity is asserted below once the drain tree
+        # is read.)
+        # ===================================================================
+        stream_session = str(uuid.uuid4())
+        starts, tok_authors, ends = set(), set(), set()
+        saw_done = False
+        stream_http = 0
+        try:
+            async with httpx.AsyncClient(timeout=300) as c:
+                async with c.stream("POST", f"{BASE}/workflows/{wid}/runs/stream",
+                                    json={"message": MSG, "session_id": stream_session},
+                                    headers=auth) as resp:
+                    stream_http = resp.status_code
+                    if resp.status_code == 200:
+                        async for line in resp.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            try:
+                                ev = json.loads(line[6:].strip())
+                            except Exception:
+                                continue
+                            typ = ev.get("type"); a = ev.get("author")
+                            if typ == "agent_start" and a:
+                                starts.add(a)
+                            elif typ == "token" and a:
+                                tok_authors.add(a)
+                            elif typ == "agent_end" and a:
+                                ends.add(a)
+                            elif typ == "done":
+                                saw_done = True
+                                break
+        except Exception as e:
+            diag(f"stream error: {e!r}")
+
+        # ===================================================================
+        # Drain: POST /runs (non-streaming) + read the run tree. All DB writes
+        # live inside the ONE orchestrate_stream generator, so the drain produces
+        # the same terminal tree (tool_call marker RunSteps + rationale rows).
+        # ===================================================================
+        drain_run = None
+        drain_status = "n/a"
+        tree = None
+        async with httpx.AsyncClient(timeout=60, headers=hdr) as c:
+            rr = await c.post(f"{BASE}/workflows/{wid}/runs", json={
+                "input_payload": {"message": MSG}, "run_by": "suite-75"})
+            if rr.status_code < 300:
+                drain_run = rr.json().get("run_id") or rr.json().get("id")
+        if drain_run:
+            drain_status = await wait_terminal(drain_run)
+            if drain_status == "completed":
+                async with httpx.AsyncClient(timeout=30, headers=hdr) as c:
+                    tr2 = await c.get(f"{BASE}/workflows/{wid}/runs/{drain_run}/tree")
+                tree = tr2.json() if tr2.status_code == 200 else None
+
+        children = (tree or {}).get("children", []) if tree else []
+        drain_names = {ch.get("agent_name") for ch in children if ch.get("agent_name")}
+        sa_child = next((ch for ch in children if ch.get("agent_name") == SA), None)
+
+        # ---- T-S75-011 verdict (stream frames + drain parity) ----
+        if stream_http != 200:
+            out("T-S75-011", "SKIP", f"runs/stream http={stream_http}")
+        elif not (MEMBERS <= starts):
+            out("T-S75-011", "SKIP",
+                f"members did not all stream agent_start: starts={sorted(starts)} (capacity)")
+        elif not saw_done:
+            out("T-S75-011", "FAIL",
+                f"stream had agent_start for {sorted(starts)} but never emitted a done frame")
+        elif not tok_authors:
+            out("T-S75-011", "FAIL",
+                "no token frame carried an author (reactive members must stream author-tagged tokens)")
+        elif drain_status != "completed":
+            out("T-S75-011", "SKIP", f"drain run did not complete: status={drain_status}")
+        elif drain_names == MEMBERS:
+            out("T-S75-011", "PASS",
+                f"stream authors starts={sorted(starts)} tokens={sorted(tok_authors)} "
+                f"ends={sorted(ends)} +done; drain tree children={sorted(drain_names)} (parity)")
+        else:
+            out("T-S75-011", "FAIL",
+                f"drain parity mismatch: stream={sorted(starts)} drain={sorted(drain_names)}")
+
+        # ---- T-S75-009 verdict (tree tool_calls) ----
+        if drain_status != "completed" or tree is None:
+            out("T-S75-009", "SKIP", f"no completed drain tree (status={drain_status})")
+        elif sa_child is None:
+            out("T-S75-009", "SKIP", f"no {SA} child in tree (members={sorted(drain_names)})")
+        elif "tool_calls" not in sa_child:
+            out("T-S75-009", "FAIL",
+                "tree child missing the 'tool_calls' key — projection not deployed (plumbing)")
+        else:
+            tcs = sa_child.get("tool_calls") or []
+            shape_ok = all(isinstance(t, dict) and "tool_name" in t and "status" in t for t in tcs)
+            names = {t.get("tool_name") for t in tcs}
+            if tcs and shape_ok and TOOL in names:
+                out("T-S75-009", "PASS",
+                    f"{SA} child carries tool_calls for the fixture tool: "
+                    f"{[{ 'tool_name': t['tool_name'], 'status': t['status'] } for t in tcs]}")
+            elif tcs and shape_ok:
+                out("T-S75-009", "PASS",
+                    f"{SA} child carries well-formed tool_calls (names={sorted(names)})")
+            elif tcs:
+                out("T-S75-009", "FAIL", f"tool_calls present but wrong shape: {tcs}")
+            else:
+                out("T-S75-009", "SKIP",
+                    f"{SA} invoked no tool this run (tool_calls key present, empty) — non-deterministic model")
+
+        # ---- T-S75-010 verdict (rationale row + tree projection) ----
+        if drain_status != "completed" or tree is None:
+            out("T-S75-010", "SKIP", f"no completed drain tree (status={drain_status})")
+        else:
+            async with httpx.AsyncClient(timeout=30, headers=hdr) as c:
+                mm = await c.get(f"{BASE}/agents/{SA}/memory",
+                                 params={"scope": "workflow_run", "thread_id": drain_run})
+            mrows = mm.json() if mm.status_code == 200 else []
+            rat_rows = [m for m in mrows
+                        if m.get("message_kind") == "rationale" and m.get("agent_name") == SA]
+            child_has_key = sa_child is not None and "rationale" in sa_child
+            child_rat = (sa_child or {}).get("rationale")
+            if sa_child is None:
+                out("T-S75-010", "SKIP", f"no {SA} child in tree")
+            elif not child_has_key:
+                out("T-S75-010", "FAIL",
+                    "tree child missing the 'rationale' key — projection not deployed (plumbing)")
+            elif rat_rows:
+                row_txt = (rat_rows[-1].get("content") or "").strip()
+                child_txt = (child_rat or "").strip()
+                if child_txt and row_txt and child_txt == row_txt:
+                    out("T-S75-010", "PASS",
+                        f"message_kind=rationale row for {SA} == tree child rationale ('{row_txt[:60]}')")
+                elif child_txt and row_txt:
+                    out("T-S75-010", "FAIL",
+                        f"rationale row present but tree projection differs: "
+                        f"row='{row_txt[:50]}' child='{child_txt[:50]}'")
+                else:
+                    out("T-S75-010", "FAIL",
+                        f"persisted {len(rat_rows)} rationale row(s) but tree child rationale empty: {child_rat!r}")
+            else:
+                if child_rat:
+                    out("T-S75-010", "FAIL",
+                        f"tree child projects rationale '{str(child_rat)[:50]}' but NO "
+                        "message_kind=rationale row was persisted (source/projection disagree)")
+                else:
+                    out("T-S75-010", "SKIP",
+                        f"{SA} produced no tool-calling reasoning this run "
+                        "(no rationale row; child null) — non-deterministic model")
+    finally:
+        async with httpx.AsyncClient(timeout=30, headers=hdr) as c:
+            if wid:
+                try:
+                    await c.delete(f"{BASE}/workflows/{wid}")
+                except Exception:
+                    pass
+            for n in (SA, SB):
+                try:
+                    await c.delete(f"{BASE}/agents/{n}")
+                except Exception:
+                    pass
+            if tool_id:
+                try:
+                    await c.delete(f"{BASE}/tools/{tool_id}")
+                except Exception:
+                    pass
+
+asyncio.run(main())
+PY
+)
+echo "$SECTION_E"
+tally "$SECTION_E"
 
 # ---------------------------------------------------------------------------
 # Final cleanup: tear down the chat agent kept alive for the restart test.

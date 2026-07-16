@@ -263,16 +263,16 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   The repo is committed at the FINAL (CP2) tags below; scripts/checkpoints/*-deploy.sh
 #   deploy the current committed tags and assert their rollout.
 # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
-REGISTRY_API_TAG="0.2.189"
+REGISTRY_API_TAG="0.2.190"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
 # they run under a per-agent SA, so a secret on the default SA never reached
 # them and any private-registry pull failed with "no basic auth credentials".
 DEPLOY_CONTROLLER_TAG="0.1.38"
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
-STUDIO_TAG="0.1.142"
+STUDIO_TAG="0.1.143"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.54"
+DECLARATIVE_RUNNER_TAG="0.1.55"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

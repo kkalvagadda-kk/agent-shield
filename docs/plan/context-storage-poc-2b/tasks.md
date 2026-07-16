@@ -161,19 +161,19 @@
 - **Deps**: T010, T011, T012.
 - **Verify**: `cd studio && npm run test`
 
-### T016 — backend e2e: suite-75 T-S75-009/010/011
+### T016 [X] — backend e2e: suite-75 T-S75-009/010/011
 - **Files**: Modify `scripts/e2e/suite-75-context-storage.sh`
 - **Adds**: reuse Section A's `s75-wa`/`s75-wb` reactive agents + sequential workflow; create a **low-risk** HTTP tool (`risk_level:"low"`) `s75-tool-{suffix}` via `POST /tools` and attach to `s75-wa` via `POST /agents/{name}/tools`. `T-S75-011` (stream parity): `POST /runs/stream` collect frames, assert `agent_start`/`token`/`agent_end` each carry an `author` in `{s75-wa,s75-wb}` + final `done`; then drain `POST /runs` + poll tree, assert same child agent_names. `T-S75-009` (tree tool_calls): after drain, `GET .../tree`, assert `s75-wa` child's `tool_calls` non-empty `{tool_name,status}`. `T-S75-010` (rationale row): `GET /agents/s75-wa/memory?scope=workflow_run&thread_id={run_id}`, assert a `message_kind="rationale"` row for `s75-wa` and the tree child's `rationale` equals it; SKIP (DIAG) if the model produced no reasoning, but FAIL if the row/field plumbing is broken. Follow the `agent_pod_breakage` guard (justified SKIP, never launder broken pods).
 - **Acceptance**: `bash -n` clean; the three IDs in the tally; PASS or justified capacity-SKIP against CP1.
 - **Deps**: T009 (deployed at CP1).
 - **Verify**: `bash -n scripts/e2e/suite-75-context-storage.sh && grep -n "T-S75-009\|T-S75-010\|T-S75-011" scripts/e2e/suite-75-context-storage.sh`
 
-### T017 — browser e2e: rich console Playwright spec
-- **Files**: Create `studio/e2e/context-rich-console.spec.ts`
+### T017 [X] — browser e2e: rich console Playwright spec
+- **Files**: Create `studio/e2e/poc2b-rich-console.spec.ts`
 - **Adds**: model on `context-attribution.spec.ts`. `beforeAll` (REST, ADMIN `X-User-Sub: 75c7c8b3-…`): create reactive memory-enabled `researcher`/`answerer`; create a **low-risk** HTTP tool, attach to `researcher`; compose a `sequential` reactive `memory_enabled` workflow, add both members, snapshot `eval_passed:true`, publish, admin-approve → `artifactId`. Test: (1) console shell — header `/· \d+ agents/` + shared-thread subtitle; (2) `page.waitForResponse('/workflows/*/runs/stream')` registered before send; (3) progressive reveal — `researcher` bubble visible while `answerer` absent, then both with avatar+name; (4) a `ToolCallChip` with the researcher's tool under its bubble; (5) rationale toggle — amber box visible, click off hides, on re-shows (SKIP-DIAG if model produced no rationale); (6) save→reload→survives — reload reads tree/`/memory` (`waitForResponse`), bubbles+rationale rehydrate from backend. Capacity boundary: `test.skip` if pods never warm; a completed-but-wrong render → FAIL.
 - **Acceptance**: passes or capacity-skips against CP2 Studio; asserts wiring + persistence + `waitForResponse('/runs/stream')`.
 - **Deps**: T014 (deployed at CP2).
-- **Verify**: `cd studio && npx tsc --noEmit && ls e2e/context-rich-console.spec.ts`
+- **Verify**: `cd studio && npx tsc --noEmit && ls e2e/poc2b-rich-console.spec.ts`
 
 ---
 
@@ -215,7 +215,7 @@ Checkpoints are gates, not code tasks. Each writes executable `scripts/`; deploy
 - **Exit**: studio 0.1.143 serving the new CatalogChatPage.
 
 ### [CP2b] — Frontend browser smoke (after [CP2a], T017, T018)
-- **Writes**: `scripts/checkpoints/poc-2b-cp2-smoke.sh` — `cd studio && npm run typecheck && npm run test` (Vitest green), then `bash scripts/studio-e2e.sh` filtered to `context-rich-console.spec.ts` (Playwright green or capacity-skip).
+- **Writes**: `scripts/checkpoints/poc-2b-cp2-smoke.sh` — `cd studio && npm run typecheck && npm run test` (Vitest green), then `bash scripts/studio-e2e.sh` filtered to `poc2b-rich-console.spec.ts` (Playwright green or capacity-skip).
 - **Gate**: Vitest 100% green; Playwright proves progressive reveal + chip + rationale toggle + save→reload (or capacity-skips with no assertion failure).
 - **Verify**: `bash -n scripts/checkpoints/poc-2b-cp2-smoke.sh && bash scripts/checkpoints/poc-2b-cp2-smoke.sh`
 

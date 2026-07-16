@@ -64,10 +64,10 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.189"   # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
+REGISTRY_API_TAG="0.2.190"   # 0.2.190: POC-2b live workflow member streaming + tool-call chips + rationale projection
 DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.54"   # 0.1.54: TEMPORARY OPA governance bypass for POC demo — REVERT (task #16)
-STUDIO_TAG="0.1.142"   # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle + workflow-poll members-settle race fix
+DECLARATIVE_RUNNER_TAG="0.1.55"   # 0.1.55: POC-2b rationale capture (_extract_tool_rationale -> message_kind=rationale); still carries OPA bypass (task #16)
+STUDIO_TAG="0.1.143"   # 0.1.143: POC-2b rich workflow console (live streaming bubbles, avatars, tool chips, rationale toggle)
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
 PYTHON_EXECUTOR_TAG="0.1.0"
