@@ -309,15 +309,30 @@ async def ready():
     else:
         checks["langfuse"] = "disabled"
 
-    # Postgres (via checkpointer)
+    # Postgres — probe with psycopg, the SAME driver the checkpointer serves on.
+    #
+    # This used to import asyncpg, which the runner does not install. The
+    # ModuleNotFoundError was swallowed by `except Exception` and reported as
+    # "unreachable" — blaming the database for a packaging fault. It stayed
+    # dormant because this branch is gated on DIRECT_DATABASE_URL, which was
+    # empty until POC-0 (T005) began injecting it; from then on every agent pod
+    # failed readiness forever while /health cheerfully returned 200.
+    #
+    # Probing a driver the serving path does not use is the wrong test anyway: it
+    # can pass while the checkpointer's own driver is broken (exactly what a
+    # readiness probe exists to catch).
     if cfg.DIRECT_DATABASE_URL:
         try:
-            import asyncpg  # type: ignore[import]
-            conn = await asyncpg.connect(
-                cfg.DIRECT_DATABASE_URL.replace("+asyncpg", ""), timeout=2
+            import psycopg  # the checkpointer's driver — see sdk/checkpointer.py
+
+            conn = await psycopg.AsyncConnection.connect(
+                cfg.DIRECT_DATABASE_URL.replace("+asyncpg", ""), connect_timeout=2
             )
             await conn.close()
             checks["postgres"] = "ok"
+        except ModuleNotFoundError as e:
+            # A missing driver is a build defect, not an outage. Say so, loudly.
+            checks["postgres"] = f"driver-missing:{e.name}"
         except Exception:
             checks["postgres"] = "unreachable"
     else:
