@@ -79,14 +79,20 @@ Architecture doc §9. Team-scoped **Knowledge Base** + **Sources** (file upload)
 
 ## 6. POC-5 — Conversation list + continue + memory viewer  *(BUILD LAST)*
 
+> **Full design:** [`context-storage-poc-5-conversations.md`](./context-storage-poc-5-conversations.md) — the authoritative POC-5 doc (three surfaces, menu change, deployment Overview tab, env handling, verification). This section is the roadmap-level summary.
+
 Architecture doc §11 (line 339). The two-part conversation UX: **new** (fresh session, clean) vs **continue** (reopen a past conversation, keep talking with prior turns as context). Build **both** surfaces (team decision): an in-chat sidebar on `AgentChatPage` **and** the standalone `preview/ConversationsPage.tsx` wired to real data.
 
 **Continue already works** — reusing a prior `session_id` on the next `/chat` POST makes the runner load that thread's earlier turns as context (`declarative-runner/main.py::_load_memory_context`), and `GET /memory?thread_id=...&scope=agent` rehydrates the UI. The **only new backend piece is a list-conversations query.**
 
 - **Backend:** `memory.list_conversations(user_id, agent_name?, deployment_id?)` — aggregate over `agent_memory` grouped by `thread_id`: `title` = first user message `(array_agg(content ORDER BY message_index) FILTER (WHERE role='user'))[1]`, `message_count`, `last_activity = max(created_at)`, `session_id`, `agent_name`. Surface via the `ConversationStore` port. Two `require_user`, caller-scoped endpoints: `GET /agents/{name}/memory/conversations?deployment_id=` (sidebar) and `GET /me/conversations` (cross-agent, standalone). New `ConversationSummary` schema. **Title = first user message; Haiku titling deferred to POC-1b.**
 - **Frontend:** `listConversations` / `listMyConversations` in `registryApi.ts`. `AgentChatPage`: make `sessionId` resettable (`AgentChatPage.tsx:68`), add a left `ConversationSidebar` ("New conversation" + list); New → new uuid + clear messages; Select → set sessionId to `thread_id` + seed `messages` from `listMemory(thread_id)`. Wire `preview/ConversationsPage.tsx` to real data; its Continue button opens `AgentChatPage` seeded on that `thread_id`.
-- **Prove:** reload → conversation still listed → click → prior transcript rehydrates → follow-up continues with context (recall a turn-1 fact). Playwright + suite-75 T-S75-007 (per-thread summaries, ownership-scoped) + T-S75-008 (`/me/conversations`). Image bumps: registry-api + studio.
-- **Deferred:** same sidebar on `CatalogChatPage` (identical pattern); admin `MemoryTab` per-user privacy → Tighten S9.
+- **Three surfaces (all reuse the same list + resume machinery — the `ConversationSidebar` component and the `GET /agents/{name}/memory/conversations?deployment_id=` / `/me/conversations` endpoints):**
+  1. **Standalone `Conversations` page** — promoted out of the demo-only *Context Preview* section into the real nav as a top-level item; cross-agent (`/me/conversations`) with an **All / Sandbox / Production** in-page filter (env carried on each `ConversationSummary`). One nav entry + in-page filter, not two links (contrast the Prod/Sandbox Dashboard split — deliberately different to avoid nav clutter).
+  2. **Docked `History` panel** inside each chat console — `AgentChatPage` (sandbox) and `CatalogChatPage` (production consumer). Same sidebar component; deployment-scoped list.
+  3. **`Conversations` tab on `DeploymentOverviewPage`** (route `/agents/:name/d/:depId`) — a new tab beside the existing **Overview · Runs · Memory** (`DeploymentOverviewPage.tsx`, `type Tab`). Scoped to *that* deployment via `deployment_id`; **works identically in sandbox and production**. Layout: conversation list in a left sidebar → click a conversation → its transcript rehydrates in a chat pane with a live reply box, so the user continues on the same thread. Distinct from the adjacent **Memory** tab (operator inspect/delete lens, `MemoryTab.tsx`): same store, `Conversations` = user resume, `Memory` = admin manage.
+- **Prove:** reload → conversation still listed → click → prior transcript rehydrates → follow-up continues with context (recall a turn-1 fact) — on **each** of the three surfaces, in both environments. Playwright + suite-75 T-S75-007 (per-thread summaries, ownership-scoped) + T-S75-008 (`/me/conversations`) + T-S75-009 (deployment-scoped tab, sandbox & production). Image bumps: registry-api + studio.
+- **Deferred:** admin `MemoryTab` per-user privacy → Tighten S9.
 
 ---
 
