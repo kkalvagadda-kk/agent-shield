@@ -58,6 +58,46 @@ echo "  Pod:     $API_POD"
 echo "  Suffix:  $SUFFIX   Session: $SESSION"
 echo ""
 
+# "The agent pod isn't up" is NOT automatically a capacity skip — that conflation
+# is how a broken build reports green. CLAUDE.md permits SKIP when the dev cluster
+# has no room for another agent pod; it does NOT permit skipping a pod that is
+# CrashLoopBackOff/ImagePullBackOff, which is a CODE or CONFIG defect.
+#
+# This check lives in bash on purpose: the assertions run INSIDE the registry-api
+# pod (kubectl exec), where there is no kubectl binary and the SA cannot list pods
+# anyway. Only out here do we have cluster vision.
+#
+# Real cost of getting this wrong: a run reported "0 passed, 0 failed, 5 skipped"
+# and exited 0 while every agent was crash-looping on a broken psycopg extra and
+# an unresolvable DB host. It proved nothing and looked green.
+agent_pod_breakage() {
+  # Scoped to THIS run's suffix: agents from earlier runs linger in the cluster,
+  # and blaming a fresh run for a stale pod's crash loop is its own false alarm.
+  kubectl get pods -n "$AGENTS_NAMESPACE" -o json 2>/dev/null | S75_SUFFIX="$SUFFIX" python3 -c '
+import json, os, sys
+BROKEN = {"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull",
+          "CreateContainerConfigError", "RunContainerError", "InvalidImageName"}
+SUFFIX = os.environ.get("S75_SUFFIX", "")
+out = []
+try:
+    items = json.load(sys.stdin).get("items", [])
+except Exception:
+    sys.exit(0)          # no cluster vision -> stay silent, fall back to SKIP
+for p in items:
+    n = p["metadata"]["name"]
+    if not (n.startswith("s75-") and SUFFIX and SUFFIX in n):
+        continue
+    for cs in p.get("status", {}).get("containerStatuses") or []:
+        w = (cs.get("state") or {}).get("waiting") or {}
+        if w.get("reason") in BROKEN:
+            out.append("%s/%s %s: %s" % (n, cs["name"], w["reason"],
+                                         (w.get("message") or "")[:110]))
+        elif cs.get("restartCount", 0) >= 3:
+            out.append("%s/%s keeps exiting (restarts=%d)" % (n, cs["name"], cs["restartCount"]))
+print("; ".join(out))
+' 2>/dev/null
+}
+
 # Tally RESULT lines emitted by the in-pod python programs.
 tally() {
   local block="$1"
@@ -70,7 +110,23 @@ tally() {
         case "$verdict" in
           PASS) echo "  PASS: $tid — $detail"; PASS=$((PASS + 1)) ;;
           FAIL) echo "  FAIL: $tid — $detail"; FAIL=$((FAIL + 1)) ;;
-          SKIP) echo "  SKIP: $tid — $detail"; SKIP=$((SKIP + 1)) ;;
+          SKIP)
+            # Only a pod-availability SKIP is suspect; others (no LLM provider,
+            # no token) are genuine environment gaps.
+            case "$detail" in
+              *"not running"*|*"no running deployment"*|*"not restarted/Ready"*|*"not deployed"*)
+                local brk; brk="$(agent_pod_breakage)"
+                if [ -n "$brk" ]; then
+                  echo "  FAIL: $tid — agent pods are BROKEN, not capacity-starved: $brk"
+                  FAIL=$((FAIL + 1))
+                else
+                  echo "  SKIP: $tid — $detail (no pod breakage seen: capacity)"
+                  SKIP=$((SKIP + 1))
+                fi
+                ;;
+              *) echo "  SKIP: $tid — $detail"; SKIP=$((SKIP + 1)) ;;
+            esac
+            ;;
         esac
         ;;
       "DIAG "*) echo "    ${line#DIAG }" ;;
@@ -135,6 +191,10 @@ async def provider_id(c):
     return items[0]["id"] if items else None
 
 async def wait_running(names, timeout=180):
+    """-> (ok, statuses). A `failed` status is reported verbatim so the bash
+    layer can tell a real breakage from a capacity skip (it has kubectl; this
+    program runs INSIDE the registry-api pod, which has neither kubectl nor RBAC
+    to list agent pods)."""
     by = {}
     for _ in range(timeout // 5):
         await asyncio.sleep(5)
