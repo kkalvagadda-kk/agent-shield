@@ -12,6 +12,34 @@
 
 ---
 
+## Known gaps (context-storage POC-2b rich console) — 2026-07-16
+
+POC-2b shipped: live multi-agent workflow console (progressive member streaming via
+`POST /workflows/{id}/runs/stream` over a shared orchestrator generator; tool-call chips;
+rationale reused from the model's own prompt-injected reasoning — no Haiku call; console
+shell + avatars; citation slot deferred to POC-4). Deployed on EKS: registry-api 0.2.190 /
+declarative-runner 0.1.55 / studio 0.1.143.
+
+**Proven:** backend live on EKS via `suite-75` **T-S75-009/010/011** (CP1 smoke PASS —
+stream/drain author parity, tree `tool_calls`, `message_kind='rationale'` row written +
+returned per child); frontend logic via **288 Vitest** (typecheck clean — CatalogChatPage
+live console + reload-from-tree, ToolCallChip, AttributedBubble slots + degenerate
+single-agent parity, stream reducer author-routing); the deployed studio:0.1.143 bundle
+verified to contain the console code.
+
+**Gap — browser Playwright gate: env-blocked (debt, NOT skipped-to-pass).**
+`studio/e2e/poc2b-rich-console.spec.ts` is written and drives the real journey (fixed 3 real
+fixture bugs: deploy members to sandbox+**production** since catalog chat is prod; production
+deploy needs a version snapshot with `eval_passed=true`; `beforeAll` timeout raised for the
+readiness poll). It is blocked by a shared-host harness issue: `studio-e2e.sh` "gateway mode"
+binds to whatever answers `:8443`, and on this shared machine `:8443` is repeatedly taken by
+another session's port-forward to the **kind dev cluster** (old pre-POC-2b studio 0.1.147).
+Forcing `:8443`→EKS serves the correct POC-2b bundle, but the **EKS-gateway Keycloak SSO
+redirect does not complete in-test** (the same auth completes against kind), matching the
+pre-existing cluster-wide Playwright auth failures. Re-run when `:8443`→EKS can be held and
+the EKS gateway KC session is resolved. **This is the same class as the pre-existing
+production-catalog workflow Playwright gap (test-124).**
+
 ## Known gaps (context-storage POC-0/1) — 2026-07-15
 
 Shipped this slice: cross-agent conversation context. POC-0 = an agent that remembers
