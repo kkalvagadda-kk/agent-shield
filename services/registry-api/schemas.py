@@ -1448,6 +1448,37 @@ class EvalRunCreate(BaseModel):
     dataset_id: uuid.UUID
     sandbox_deployment_id: Optional[uuid.UUID] = None
     workflow_deployment_id: Optional[uuid.UUID] = None
+    # Eval v2 E-6: the per-run PASS POLICY (the writer for E-0's two columns —
+    # `eval_runs.pass_threshold` / `eval_runs.dimension_weights`, which had NO
+    # writer and NO reader and were therefore NULL in every row ever written).
+    #
+    # `pass_threshold` is left None here on purpose: `create_eval_run` defaults it
+    # from the platform-wide EVAL_PASS_THRESHOLD at the SINGLE write site, so the
+    # column is never NULL on a new row and no downstream consumer (the gate, the
+    # runner's per-item verdict, the UI) needs a fallback of its own. One number,
+    # one owner, three readers.
+    pass_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # NULL = "use the scorer branch's default weights", which the door already
+    # implements as `body.dimension_weights or <defaults>`.
+    dimension_weights: Optional[dict[str, float]] = None
+
+    @field_validator("dimension_weights")
+    @classmethod
+    def _weights_non_negative(
+        cls, v: Optional[dict[str, float]]
+    ) -> Optional[dict[str, float]]:
+        """Reject a negative weight at the door (422) rather than let it silently
+        invert a composite — a negative weight makes a BETTER dimension score
+        LOWER the composite, which reads as a legitimate failure and is
+        undiscoverable from the outside."""
+        if v is None:
+            return v
+        bad = {k: w for k, w in v.items() if w < 0}
+        if bad:
+            raise ValueError(
+                f"dimension_weights must all be >= 0; got negative weights: {bad}"
+            )
+        return v
 
 
 class EvalRunResultCreate(BaseModel):

@@ -46,6 +46,26 @@ EVAL_PASS_THRESHOLD = 0.7
 router = APIRouter(prefix="/api/v1/playground", tags=["eval-runner"])
 
 
+def effective_pass_threshold(run: EvalRun) -> float:
+    """Eval v2 E-6: THE publish threshold for one run — the single resolution.
+
+    The threshold used to exist four times across three services (this gate, the
+    eval-runner's per-item verdict, and the Studio's verdict + colour band), each
+    defaulting to 0.7. They agreed, so nothing ever errored — and a per-run
+    threshold wired to only the gate would have made the product LIE: a 0.85 run
+    with `pass_threshold=0.9` would render "passed" and mark every item passed,
+    while the gate silently refused to publish.
+
+    `run.pass_threshold` is defaulted from the platform default at the single API
+    write site (`create_eval_run`), so it is non-NULL on every row written since
+    E-6. The None arm covers pre-E-6 rows only — the one legitimate fallback in
+    the design, kept because those rows really do exist in the live DB.
+    """
+    if run.pass_threshold is not None:
+        return float(run.pass_threshold)
+    return EVAL_PASS_THRESHOLD
+
+
 async def _resolve_eval_run(
     eval_run_id: uuid.UUID, db: AsyncSession
 ) -> EvalRun:
@@ -354,6 +374,23 @@ async def create_eval_run(
         # natural mode (`_resolve_eval_mode`) only feeds the compatibility guard's
         # diagnostic above; it is never the scorer selector.
         mode=dataset.mode,
+        # Eval v2 E-6: the PASS POLICY, written HERE and only here.
+        #
+        # E-0 added `pass_threshold`/`dimension_weights` with a forward promise and
+        # neither a writer nor a reader — the column was NULL in every row ever
+        # written, which made every downstream `if run.pass_threshold is not None`
+        # a dead branch. The platform default is applied at this SINGLE write site,
+        # so the column is NEVER NULL on a new row and the gate / the runner's
+        # per-item verdict / the UI all read one resolved number instead of each
+        # re-declaring 0.7 (which is exactly how four copies of the threshold came
+        # to exist across three services).
+        pass_threshold=(
+            body.pass_threshold
+            if body.pass_threshold is not None
+            else EVAL_PASS_THRESHOLD
+        ),
+        # NULL stays meaningful: "use the scorer branch's default weights".
+        dimension_weights=body.dimension_weights,
         status="pending",
         started_at=datetime.now(tz=timezone.utc),
     )
@@ -514,13 +551,21 @@ async def update_eval_run(
             status=body.status,
             overall_score=body.overall_score,
         )
+    # Eval v2 E-6: resolve the run's pass policy ONCE, here, and use it for BOTH
+    # gate arms and BOTH log lines below.
+    #
+    # Two independent `if run.pass_threshold is not None` expressions would
+    # re-create — inside a single function — the very copy problem E-6 exists to
+    # kill (the publish threshold had been re-declared four times across three
+    # services, all defaulting to 0.7, so they agreed and nothing ever errored).
+    effective_threshold = effective_pass_threshold(run)
     # Auto-promote: if this run completed with a passing score, mark the
     # associated AgentVersion as eval_passed=True so the publish gate opens
     # without requiring a manual PATCH.
     if (
         body.status == "completed"
         and run.overall_score is not None
-        and run.overall_score >= EVAL_PASS_THRESHOLD
+        and run.overall_score >= effective_threshold
         and run.agent_version_id is not None
     ):
         ver_result = await db.execute(
@@ -531,13 +576,13 @@ async def update_eval_run(
             version.eval_passed = True
             logger.info(
                 "auto-set eval_passed=True for version %s (score=%.2f >= %.2f)",
-                version.id, run.overall_score, EVAL_PASS_THRESHOLD,
+                version.id, run.overall_score, effective_threshold,
             )
     # Auto-promote workflow version
     if (
         body.status == "completed"
         and run.overall_score is not None
-        and run.overall_score >= EVAL_PASS_THRESHOLD
+        and run.overall_score >= effective_threshold
         and run.workflow_version_id is not None
     ):
         wv_result = await db.execute(
@@ -548,7 +593,7 @@ async def update_eval_run(
             wf_version.eval_passed = True
             logger.info(
                 "auto-set eval_passed=True for workflow version %s (score=%.2f >= %.2f)",
-                wf_version.id, run.overall_score, EVAL_PASS_THRESHOLD,
+                wf_version.id, run.overall_score, effective_threshold,
             )
     await db.flush()
     logger.info(

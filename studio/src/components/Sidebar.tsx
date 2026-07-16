@@ -26,16 +26,32 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { listAgents } from "../api/registryApi";
+import { listAgents, listPendingApprovals } from "../api/registryApi";
+import { STUDIO_BUILD } from "../lib/build";
 import type { LucideIcon } from "lucide-react";
 
 // ── Nav item groups ──────────────────────────────────────────────────────────
+
+// A nav item carries a `badgeKey` rather than a live number: the item lists are
+// module constants, and the count is per-render state. The key names WHICH live count
+// the item wants; `Sidebar` resolves keys → counts in exactly one place. Matching on
+// `to === "/approvals"` instead would couple the badge to a route string.
+type BadgeKey = "approvals";
 
 interface NavItem {
   label: string;
   to: string;
   end?: boolean;
   icon: LucideIcon;
+  badgeKey?: BadgeKey;
+  // The testid is a LITERAL, never assembled (`${badgeKey}-badge`) at render time.
+  // Why this is load-bearing and not style: the E-3 bug (docs/bugs/e3-never-ran-tag-
+  // not-bumped.md) is only caught by grepping the SERVED bundle for a marker, and a
+  // runtime-composed string does not exist in those bytes to be found — the guard
+  // reports "0 occurrences" for working code, and the next person deletes the guard
+  // rather than the bug. A testid that cannot be grepped in the shipped artifact
+  // cannot prove the artifact shipped.
+  badgeTestId?: string;
 }
 
 const BUILD_ITEMS: NavItem[] = [
@@ -52,7 +68,7 @@ const EVALUATE_ITEMS: NavItem[] = [
 
 const CATALOG_ITEMS: NavItem[] = [
   { label: "Marketplace",  to: "/catalog",     icon: Store },
-  { label: "Approvals",    to: "/approvals",   icon: ClipboardCheck },
+  { label: "Approvals",    to: "/approvals",   icon: ClipboardCheck, badgeKey: "approvals", badgeTestId: "approvals-badge" },
   { label: "Deployments",  to: "/deployments", icon: Rocket },
 ];
 
@@ -110,11 +126,15 @@ function SideLink({
   label,
   end = false,
   icon: Icon,
+  badge,
+  badgeTestId,
 }: {
   to: string;
   label: string;
   end?: boolean;
   icon?: LucideIcon;
+  badge?: number;
+  badgeTestId?: string;
 }) {
   return (
     <NavLink
@@ -129,7 +149,18 @@ function SideLink({
       }
     >
       {Icon && <Icon size={18} strokeWidth={1.8} className="shrink-0" />}
-      {label}
+      <span className="flex-1 truncate">{label}</span>
+      {/* Hidden at 0 on purpose: an always-on chip reading "0" is noise, and noise
+          trains operators to stop looking at the badge that is supposed to summon
+          them. The pill lives INSIDE the NavLink, so clicking it routes. */}
+      {badge != null && badge > 0 && (
+        <span
+          data-testid={badgeTestId}
+          className="shrink-0 min-w-[18px] px-1.5 py-0.5 rounded-full bg-amber-500 text-slate-900 text-[11px] font-semibold leading-none text-center"
+        >
+          {badge}
+        </span>
+      )}
     </NavLink>
   );
 }
@@ -189,6 +220,21 @@ export default function Sidebar() {
     staleTime: 60_000,
   });
 
+  // WS-6 — the pending-approvals count. Reuses the EXISTING producer that the inbox
+  // page already reads; the count is `.length`. A `getPendingApprovalsCount` wrapper
+  // over the same GET would be a second path to one fact — exactly the drift this
+  // slice exists to delete. On error `data` is undefined → count 0 → no badge, so an
+  // approvals outage costs the badge, never the navigation.
+  const { data: pendingApprovals } = useQuery({
+    queryKey: ["sidebar-pending-approvals"],
+    queryFn: () => listPendingApprovals(),
+    refetchInterval: 30_000,
+  });
+
+  const badgeCounts: Record<BadgeKey, number> = {
+    approvals: pendingApprovals?.length ?? 0,
+  };
+
   const myTeamGrants = useMemo(() => {
     const myTeam = (sidebarTeams ?? []).find((t: any) =>
       t.members?.some((m: any) => m.user_sub === user?.sub)
@@ -218,7 +264,15 @@ export default function Sidebar() {
         </div>
         <div className="leading-tight">
           <p className="text-white font-semibold text-sm tracking-tight">AgentShield</p>
-          <p className="text-slate-400 text-xs">Studio</p>
+          <p className="text-slate-400 text-xs">
+            Studio{" "}
+            {/* The build marker's first reader. Rendering it is what makes a stale
+                bundle observable — to a human glancing at the nav, and to a test
+                grepping the SERVED bytes. See studio/src/lib/build.ts. */}
+            <span data-testid="studio-build" title={`Studio build ${STUDIO_BUILD}`} className="text-slate-500">
+              {STUDIO_BUILD}
+            </span>
+          </p>
         </div>
       </div>
 
@@ -268,7 +322,15 @@ export default function Sidebar() {
         <SectionHeader label="Catalog" />
         <div className="space-y-0.5">
           {CATALOG_ITEMS.map((i) => (
-            <SideLink key={i.to} to={i.to} label={i.label} end={false} icon={i.icon} />
+            <SideLink
+              key={i.to}
+              to={i.to}
+              label={i.label}
+              end={false}
+              icon={i.icon}
+              badge={i.badgeKey ? badgeCounts[i.badgeKey] : undefined}
+              badgeTestId={i.badgeTestId}
+            />
           ))}
         </div>
 

@@ -9,6 +9,32 @@ external contract.
 > **No migration.** Every item reuses existing tables/workers. WS-6 is a **parity + polish** slice, not a
 > data-model slice.
 
+> ## ⚠️ OUTCOME (2026-07-15) — this plan was re-grounded against live code and was WRONG in five places. Read `ws6/tasks.md` first; it is the corrected source of truth.
+>
+> **Of this plan's six items, two were already shipped, one would have been a regression, and the
+> most important bug in the area is one the plan never saw.**
+>
+> | This plan says | Live truth |
+> |---|---|
+> | **[TODO-3]** `eval_passed` auto-gate — record it as a satisfied precondition (`eval_runner.py:309,326`) | **Already shipped AND already recorded** as `✅ RESOLVED` in the gap-analysis. The only deliverable was a ledger line already on the page. **Task deleted; no work.** The `:309,326` citation was drift (real sites ≈ `:576`/`:593`, and moving — cite the **symbol** `auto-set eval_passed=True`). |
+> | **[TODO-7]** the worker sweeps production; extend it to sweep sandbox | **BACKWARDS.** `_sweep_stale_durable_runs()` sweeps **`PlaygroundRun`** — the *sandbox* table — with **no environment predicate at all**. There is no production-only scoping to extend, and the table has no `environment` column to scope by. Building `_sweep_once(scope)` would have **manufactured a parameter for a distinction the data model does not draw**. **Task deleted; no code.** |
+> | **[WS-0 OQ-10]** fold `WORKFLOW_REACTIVE_TIMEOUT_S` into the timeout worker — "one mechanism, not a constant + a worker" | **REJECTED — it would be a REGRESSION.** The reactive cap is an **in-request `asyncio.wait_for`** holding the caller's HTTP connection; the worker is a **60s-poll background sweep** of abandoned rows. A background poll **cannot** cap an in-request await — folding them leaves a reactive caller hanging up to 60s past its own cap. Two mechanisms sharing the word "timeout". The "collapse the fork" instinct is right in general and **wrong here**: *identical vocabulary is not a shared concern.* |
+> | **[TODO-4]** the `Overview*` set is shared and **`AgentDetailPage` uses them** | **Half wrong — right fork, wrong counterpart.** `AgentDetailPage` has **zero** `Overview*` refs. The sole consumer was **`DeploymentOverviewPage`**. And the fork had **already drifted**: `CatalogDetailPage`'s inline copy had **no event-driven branch** (and a `scheduled` branch that was unreachable dead code, because it dispatched on the stored 2-value `execution_shape` while `scheduled`/`event_driven` are **derived from triggers**). The drift this plan predicts in the abstract had already happened in the concrete. |
+> | `studio/src/components/layout/*` (nav); add `getPendingApprovalsCount` | **Neither exists nor is needed.** No `components/layout/` directory — the nav is `Sidebar.tsx`, and the Approvals **item already shipped**; only the count was missing. A count wrapper over the same GET would be **a second path to one fact** — the very thing this slice deletes. Reuse `listPendingApprovals`. (Wire note: `GET /approvals/` returns an **`{items,total}` envelope**, not the `ApprovalInboxItem[]` this plan implies — the *client* unwraps it.) |
+> | suite `61`; tags `0.2.191`/`0.1.144` | suite **79** (61 is taken). Shipped studio is **`0.1.145`**, not `0.1.144`: `0.1.144` deployed with the badge testid **composed at runtime**, so the literal never existed in the served bundle and the content grep read **0 occurrences for working code** — Vitest passed throughout and could never have caught it. Only the served-bundle grep could. |
+> | (silent) | **THE REAL BUG, unseen by this plan.** `_agent_pod_url(..., environment="production")` is **parameterized but never threaded** — both call sites take the default. Sandbox Services are `{agent}-sandbox`, so **every sandbox approval resume POSTs to a non-existent `-production` pod**, and the error is **swallowed to a `logger.warning`** while the row is marked resolved. `approvals.py` already works around it inline for one branch, with a comment naming the bug — **one concern, two builders, one fixed and one not.** 🔴 **STILL OPEN** (owned by another lane); filed as **TODO-8** in the gap-analysis. |
+>
+> **What actually shipped (studio `0.1.145`):** `OverviewForShape` (explicit map, fail-closed on an
+> unknown shape) mounted by **both** pages with the inline fork **deleted** and **event-driven
+> restored to the catalog**; the Sidebar approvals badge; `__STUDIO_BUILD` given its **first reader
+> in 67 tags**. Gates: `suite-79` **5/5** (registered), Vitest **318**, Playwright **5/5** across
+> the two WS-6 specs, CP2 infra **4/4** + behaviour **5/5**. **No migration** (head still `0064`) —
+> the plan's one clean call.
+>
+> **What did NOT ship: Phases 2–3 + CP1 (the plan's own MVP gate).** The pod-URL resolver is
+> unwritten and the sandbox resume bug is **live**. suite-79 **deliberately** omits its assertions
+> rather than stub the seam the bug lives in.
+>
 > ⚠️ **Plan status — design stable, specifics indicative.** The architecture, sequencing, and locked
 > decisions (D1–D4, R1–R3, parity gates, gap ledger) here are **stable and reviewable now** — that is what
 > writing ahead buys. The execution specifics — `file:line`, migration numbers, image tags, orphan-greps,

@@ -5,9 +5,14 @@ import App from "./App";
 import { AuthContext, buildAuthValue } from "./contexts/AuthContext";
 import { initKeycloak, getParsedToken } from "./lib/keycloak";
 import { getMe } from "./api/registryApi";
+import { STUDIO_BUILD } from "./lib/build";
 
+// Build marker for console/debug use. Sourced from lib/build.ts (the one definition)
+// rather than a hand-typed literal here — that literal drifted 67 tags behind
+// STUDIO_TAG because nothing read it. The Sidebar renders the same constant as
+// `data-testid="studio-build"`, which is what makes a stale bundle visible.
 // @ts-expect-error build version marker
-window.__STUDIO_BUILD = "0.1.76";
+window.__STUDIO_BUILD = STUDIO_BUILD;
 const root = createRoot(document.getElementById("root")!);
 
 initKeycloak()

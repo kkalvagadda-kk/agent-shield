@@ -32,7 +32,12 @@ if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit
 echo "=== Suite 66: PRODUCTION triggers — webhook + scheduled (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
-DRIVER=/tmp/s66_driver.py; OUTFILE=/tmp/s66_out.txt
+# Per-invocation paths (the suite-74 lesson): a fixed /tmp/s66_out.txt lets two
+# overlapping invocations (a retry, a second operator, a CI re-run against the same pod)
+# share a result file and silently read each OTHER's results.
+RUN_TAG="$(date +%s)$$"
+DRIVER="/tmp/s66_driver_${RUN_TAG}.py"
+OUTFILE="/tmp/s66_out_${RUN_TAG}.txt"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, uuid, httpx
 from sqlalchemy import select, desc
@@ -97,16 +102,33 @@ async def main():
         async with httpx.AsyncClient(timeout=30) as gwc:
             fired=await gwc.post(f"{GW}/hooks/workflow/{WFN}/{token}", json={"message":"What is the capital of France?"})
         p,kids=await run_of(WFN,"webhook",40)
-        out["001_webhook_fires_prod_run"]= bool(fired.status_code in (200,202) and p and p.status=="completed" and p.context=="production" and len(kids)>=2 and all(k.status=="completed" for k in kids))
+        out["T-S66-001 webhook_fires_prod_run"]= bool(fired.status_code in (200,202) and p and p.status=="completed" and p.context=="production" and len(kids)>=2 and all(k.status=="completed" for k in kids))
         # SCHEDULE (every minute) — delete immediately after firing once
         sch=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"schedule","name":"s66-sched","cron_expression":"* * * * *","input_payload":{"message":"What is 2+2?"}})).json()
         p2,kids2=await run_of(WFN,"schedule",30)  # ~90s for reload+fire
-        out["002_scheduler_fires_prod_run"]= bool(p2 and p2.status=="completed" and p2.context=="production" and len(kids2)>=2 and all(k.status=="completed" for k in kids2))
+        out["T-S66-002 scheduler_fires_prod_run"]= bool(p2 and p2.status=="completed" and p2.context=="production" and len(kids2)>=2 and all(k.status=="completed" for k in kids2))
         # CRITICAL: delete the every-minute schedule trigger so it stops firing
         try: await c.delete(f"/workflows/{wid}/triggers/{sch['id']}")
         except Exception: pass
-        if not out.get("002_scheduler_fires_prod_run"): out["_diag_sched"]=f"sched run={getattr(p2,'status',None)}"
+        if not out.get("T-S66-002 scheduler_fires_prod_run"): out["_diag_sched"]=f"sched run={getattr(p2,'status',None)}"
+    except Exception as exc:
+        # FAIL LOUD (the suite-74 lesson). Without this, a bare try/finally records only
+        # the cases reached BEFORE the crash and the bash summary (PASS>0, FAIL==0) reports
+        # the suite GREEN while silently dropping every remaining case — a partial run must
+        # never look like a pass, least of all one gating PRODUCTION triggers.
+        import traceback
+        out["T-S66-999 driver ran every case without crashing"]=False
+        out["_diag_crash"]=(f"driver CRASHED mid-run — cases after this point never ran: "
+                            f"{type(exc).__name__}: {exc} :: {traceback.format_exc()[-400:]}")
     finally:
+        # write results BEFORE cleanup (the suite-69 lesson), then tear down. Cleanup here
+        # deletes the every-minute schedule trigger and can itself hang or raise; results
+        # recorded up to this point must survive it. This is also what prints SUITE-66-DONE
+        # on the SKIP paths (which `return` from the try).
+        for k,v in out.items():
+            if k.startswith("_"): print("DIAG",k,v)
+            else: print(("PASS" if v else "FAIL"), k)
+        print("SUITE-66-DONE", flush=True)
         try:
             if wid:
                 for t in (await c.get(f"/workflows/{wid}/triggers")).json():
@@ -115,10 +137,6 @@ async def main():
             for n in NAMES: await c.delete(f"/agents/{n}")
         except Exception: pass
         await c.aclose()
-    for k,v in out.items():
-        if k.startswith("_"): print("DIAG",k,v)
-        else: print(("PASS" if v else "FAIL"), k)
-    print("SUITE-66-DONE")
 asyncio.run(main())
 PY
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
@@ -132,7 +150,41 @@ done
 RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- cat "$OUTFILE" 2>/dev/null | grep -vE "Internal error occurred|langfuse.com" || true)
 echo "$RESULT"; echo ""
 if [ -z "$DONE" ]; then echo "❌ Suite 66 INCONCLUSIVE (driver did not finish in the poll window)"; exit 1; fi
-if echo "$RESULT" | grep -q "^FAIL"; then echo "❌ Suite 66 FAILED (a production trigger did not fire a completed run)"; exit 1; fi
+# SKIP is an env limit, not a half-run: the driver returned before recording ANY case, so
+# it is checked BEFORE the census (which would otherwise report both cases missing).
 if echo "$RESULT" | grep -q "^SKIP"; then echo "⚠️  Suite 66 SKIPPED (env limit). Not a pass."; exit 0; fi
-if ! echo "$RESULT" | grep -q "PASS 001_webhook_fires_prod_run"; then echo "❌ Suite 66 INCONCLUSIVE"; exit 1; fi
+
+# grep -c exits 1 on zero matches, which `set -e` would treat as a suite error.
+PASS=$(echo "$RESULT" | grep -c "^PASS" || true)
+FAIL=$(echo "$RESULT" | grep -c "^FAIL" || true)
+
+# Completeness gate (the suite-74 lesson): a suite that silently stops early must NEVER
+# read as green. FAIL=0 is only a pass if every gate assertion actually RAN — an exception,
+# an early return, or a truncated result file otherwise produces "0 failures" on a half-run
+# gate, and this gate is what says "production triggers are proven". The schedule case
+# (002) runs LAST and is the one a mid-driver death drops, leaving webhook-only green.
+# REQUIRED_IDS is the ONE source of truth; add a case here and nowhere else.
+REQUIRED_IDS="001 002"
+MISSING=""
+for id in $REQUIRED_IDS; do
+  echo "$RESULT" | grep -q "T-S66-$id" || MISSING="$MISSING T-S66-$id"
+done
+if [ -n "$MISSING" ]; then
+  echo "FAIL  T-S66-COMPLETE every gate assertion ran  |  NEVER RAN:$MISSING — a gate that stops early is not a pass"
+  FAIL=$((FAIL+1))
+  echo "  --- driver log tail (why it stopped) ---"
+  kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$OUTFILE" 2>/dev/null | sed 's/^/    /' || true
+else
+  echo "PASS  T-S66-COMPLETE every gate assertion ran (001-002, none skipped)"
+  PASS=$((PASS+1))
+fi
+
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  rm -f "$DRIVER" "$OUTFILE" 2>/dev/null || true
+
+echo ""
+echo "=== suite-66 summary: PASS=$PASS FAIL=$FAIL ==="
+if [ "$FAIL" -ne 0 ]; then echo "❌ Suite 66 FAILED (a production trigger did not fire a completed run)"; exit 1; fi
+if [ "$PASS" -eq 0 ]; then echo "❌ Suite 66 INCONCLUSIVE (no assertions ran)"; exit 1; fi
+if ! echo "$RESULT" | grep -q "PASS T-S66-001"; then echo "❌ Suite 66 INCONCLUSIVE"; exit 1; fi
 echo "✅ Suite 66 PASSED — production webhook + scheduled triggers proven end-to-end"

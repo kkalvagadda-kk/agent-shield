@@ -12,6 +12,32 @@
 
 ---
 
+## Known gaps — Eval v2 E-6 (regression gate + per-run pass policy) · 2026-07-15
+
+**Shipped + proven (`suite-80`, 12 PASS / 1 FAIL — the FAIL is the ledgered UI gap below):**
+the E-0 columns `eval_runs.pass_threshold` / `dimension_weights` finally have **both** a
+writer and a reader (they were NULL in every row ever written); the publish threshold is
+**one** number the gate and the eval-runner's per-item verdict both read; and the headline
+Eval v2 claim is asserted for the first time — **T-S80-005**: on a real durable run a
+dropped **trajectory** (`0.0`) fails the gate while the **response** is still correct
+(`1.0`), composite `0.4 < 0.7`, `eval_passed` stays `False`; the golden baseline then flips
+it `True` on the same agent (T-S80-002), and the **same** composite `0.85` publishes at
+threshold `0.7` but not at `0.9` (T-S80-003).
+
+| Item | Status | Note |
+|---|---|---|
+| **The Studio still re-declares the publish threshold** (`EvalResultsPage.tsx:51` colour band, `:194` verdict) | **not-yet-wired (debt) — ACTIVE PRODUCT BUG** | E-6's tasks T006/T007/T020–T022 own this, but `studio/**` was assigned to a **concurrent WS-6 agent** this session, so E-6 did not touch it. **Consequence today: the product lies.** A run with `pass_threshold=0.9` scoring `0.85` renders **"passed"** in the UI while the gate refuses to publish — the backend now honours a per-run threshold the UI does not read. `suite-80` **T-S80-000b fails by design** until this lands; it is the single red in an otherwise green suite. `EvalRunResponse` already returns `pass_threshold` — only the TS type omits it. |
+| Per-run pass policy on the **launch surface** (threshold + weight inputs) | **not-yet-wired (debt)** | The API accepts + persists + validates it (422 on out-of-range / negative weight — proven in `suite-80` T-S80-001); no UI control authors it yet, so today it is API-only. Same WS-6 ownership boundary. |
+| Playwright journey for the pass policy (`eval-v2-regression.spec.ts`) | **not-yet-wired (debt)** | Blocked on the two rows above — there is no UI control to drive. DoD #1/#2 for this surface are carried by `suite-80`'s API-level save→reload (T-S80-001) until then. |
+| `run_suite()` returns **0 for a missing suite file** (`run-all.sh:38-41`) | **deferred (intentional)** | *"Don't count missing future suites as failures"* — so deleting or renaming any suite makes the runner **greener**. Not changed here: suites are being registered concurrently by other workstreams and altering the runner's failure contract mid-flight would break their landings. `scripts/check-suite-guards.sh` closes the hole from the **outside** and fails just as loudly. **It already caught a real one:** `suite-46-chat-deployment-pinning.sh` was registered at `run-all.sh:95` but had **never been committed** — it lived only in a stash, so run-all.sh had been silently skipping it and reporting green since 2026-07-11. Restored from stash `9aa948a` (158 lines; the `_deployment_for_run` / `_pinned_deployment` functions it tests still exist). **It has not been run on a cluster** — that is the next open item for whoever owns chat pinning. |
+| The **63 bash-only suites** are outside the guard meta-gate's reach | **deferred (intentional)** | The crash-loud + ID-census guards are defined over the **driver + result-file** pattern (15 suites). The rest are plain bash+curl with no driver process to crash-wrap and no results file to census. Asserting the guards over all 78 would be a gate satisfiable only by rewriting 63 suites — a gate nobody runs, which is worse than none because it reads as protection. They are **reported by name** on every run of `check-suite-guards.sh`, never silently excluded. |
+| event-gateway **sub-chart vs top-level tag pin disagree** (`values.yaml:132-138` = `0.1.3`, sub-chart = `0.1.2`) | **deferred (intentional)** | They disagree **on purpose**: the sub-chart is shadowed by a stale packaged `.tgz`, so a sub-chart edit silently no-ops and the top-level pin wins. `check-tag-content-coupling.sh` encodes **which pin is authoritative per service** rather than "all pins agree" — the latter would false-fail on a correct tree and be disabled within a day. |
+| Judge calibration / human-agreement study | **deferred (intentional)** | Out of scope; E-6 applies known bias-mitigation practice, not new research. |
+| Flaky-judge retry / quorum on the LLM dims | **not-yet-hardened (debt, low)** | Deterministic dims (trajectory/tool_call/filter) are stable; the LLM `response` dim may need retry/quorum if CI flakiness shows. Not seen across suite-80's runs (`response` scored `1.0` consistently). |
+| "Run the real regression eval in CI" (the plan's open row) | **RESOLVED — not a gap** | There is no CI here and the real suites structurally cannot run on a hosted runner (they need a live cluster, deployed pods, real LLM keys). Resolved by tiering: the cluster-free gates run **pre-build inside `deploy-cpe2e.sh`** (the one command guaranteed to execute on every service change), with `.github/workflows/fast-gates.yml` as a **secondary** net calling the same script. Every gate it runs is already enforced by the deploy hook, so if Actions is never adopted nothing is lost. |
+
+---
+
 ## Production hardening (P1–P4) — execution modes PROVEN in production (2026-07-14)
 
 The execution modes WS-1 delivered were only proven for **sandbox/playground**. This
@@ -257,6 +283,53 @@ resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarati
 
 **not-yet-wired (verify at deploy time):**
 - **Live-pod inline leg.** The Playwright spec stubs the trigger/tree/approvals/decide endpoints (no durable member pod parks a real sandbox approval on this cluster — same fixture boundary suite-55/56 accept). **Manual check:** run one of the seeded durable workflows (`flow-conditional` / `flow-handoff` / `flow-supervisor`, member `wf-payout` calls high-risk `refund_action`) from the builder run panel → confirm the parent parks at `awaiting_approval` → the inline card appears under the parked step → click Approve → confirm the run advances (no console visit). Its green Playwright run is deploy-gated — `bash scripts/studio-e2e.sh`.
+
+---
+
+### WS-6 part 2 — operate-surface parity (studio 0.1.145, 2026-07-15)
+
+**Landed in this slice** (studio-only; no backend, no migration): **one** `OverviewForShape`
+dispatcher (explicit shape→component map, fail-closed + `console.error` on an unknown shape) mounted
+by **both** `DeploymentOverviewPage` and `CatalogDetailPage` — the catalog's inline overview fork is
+**deleted**, which **restored event-driven to the catalog** (the fork had only 3 of 4 branches, and
+its `scheduled` branch was unreachable dead code). Plus the Sidebar **approvals-count badge**
+(reusing `listPendingApprovals`; **no new endpoint**) and `STUDIO_BUILD` — one definition, **two
+readers** (`window.__STUDIO_BUILD` + a visible `data-testid="studio-build"`), after **67 tags** as an
+unread orphan. Proven by `suite-79` (5/5: fork-convergence grep, served-bundle content,
+five-way tag⇄content agreement, live badge producer), Vitest **318** green
+(`OverviewForShape.test.tsx`, `CatalogDetailPage.test.tsx`, `Sidebar.test.tsx`), and Playwright
+`catalog-overview-parity.spec.ts` (2/2 — the **same** shared testid on **both** pages, the parity
+proof) + `approvals-badge.spec.ts` (3/3, real backend, no `page.route` stubs).
+
+**🔴 not-yet-wired (DEBT — the MVP gate of this slice's own plan, and a LIVE bug):**
+- **Agent pod-URL resolution is still broken for sandbox.** `_agent_pod_url`'s
+  `environment="production"` default is **never threaded** by either call site, so a **sandbox**
+  approval's `/resume` still POSTs to a **non-existent `-production` pod**, and the `RequestError`
+  is still **swallowed to a `logger.warning`** — the approval row is marked resolved while the agent
+  was never resumed. `agent_endpoints.py` (the specified one-resolver fix) **does not exist**.
+  Not built because `services/registry-api/**` was owned by a concurrent lane. Full spec + fix in
+  `docs/design/todo/execution-models-gap-analysis.md` **TODO-8**. **suite-79 deliberately does not
+  assert it** — a gate for unwritten code either fails honestly or invites a stub, and a stub in
+  this seam is the fake that hides this exact bug. **WS-6's green does NOT mean this is fixed.**
+
+**deferred (intentional):**
+- **The badge's non-zero count is not exercised end-to-end in a browser.** This cluster had **0**
+  pending approvals, so `approvals-badge.spec.ts` took the "0 ⇒ no badge" branch and suite-79's
+  `T-S79-003` status-filter assertion was **vacuous over an empty list** (the suite says so in its
+  own output rather than implying more). The count>0 path is covered by `Sidebar.test.tsx` (Vitest,
+  mocked N). Exercising it live needs a real parked approval, which needs a deployed agent pod with
+  a high-risk tool — the same fixture boundary the other UI specs accept.
+- **`docs/experience/playground.md` deliberately NOT updated.** WS-6 changes no playground SSE
+  event, endpoint, panel, or routing rule; the badge and Overview dispatcher are outside its covered
+  surface. Recorded here rather than left as an unexplained skip of the CLAUDE.md §3 check.
+
+**pre-existing breakage found (NOT caused by WS-6, NOT fixed here):**
+- **`studio/e2e/deployment-overview.spec.ts` is stale and fails.** It navigates to
+  `/agents/:name/deploy`, a route that **no longer exists** (deploy is now a modal on
+  `AgentDetailPage` — `App.tsx:61` says so), and its create helper waits for `/agents/{name}` while
+  the wizard navigates to the agent **list**. Both stale paths were copied into
+  `catalog-overview-parity.spec.ts` at first draft and made it fail; the new spec drives the real
+  modal instead. The old spec needs the same treatment.
 
 ## Known gaps — WS-2 (durable daemon: identity + async approval routing)
 

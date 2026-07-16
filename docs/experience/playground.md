@@ -257,7 +257,7 @@ An incompatible pair is rejected **`422`** naming both the dataset's mode and th
 **3. eval-runner Job executes.** For each dataset item the Job (`services/eval-runner/main.py`):
 1. Starts a playground run via `POST /api/v1/playground/runs` (same governed flow as interactive) — the eval-runner authenticates as `X-User-Sub: eval-runner`, a service identity that is allowed to run any team's agent. It sends **`eval_mode: "record"`** for an item carrying `expected_side_effects` (E-2) and **`"live"`** otherwise; the flag persists on the run (`playground_runs.eval_mode`) so it survives a HITL park and is re-sent on the resume dispatch
 2. Collects the response by consuming `GET /playground/runs/{run_id}/stream` (`text_delta` until `done`)
-3. **Scores through the one scoring door** — `POST /api/v1/playground/eval/score` with `{mode, item, input, response}`. For `mode=reactive` this calls `judge.score_response` (the real LLM-as-Judge, reference-based against `expected_output`) and reduces to a composite via `judge.score_composite`, returning `{composite, dimension_scores: {"response": x}, detail}` where `composite == x` — byte-identical to the pre-E-0 `judge_for_eval`. Keyword matching is a **fallback only** when the door/judge is unavailable (never gated on mode). `passed = composite >= 0.7`.
+3. **Scores through the one scoring door** — `POST /api/v1/playground/eval/score` with `{mode, item, input, response}`. For `mode=reactive` this calls `judge.score_response` (the real LLM-as-Judge, reference-based against `expected_output`) and reduces to a composite via `judge.score_composite`, returning `{composite, dimension_scores: {"response": x}, detail}` where `composite == x` — byte-identical to the pre-E-0 `judge_for_eval`. Keyword matching is a **fallback only** when the door/judge is unavailable (never gated on mode). `passed = composite >= ` **the run's own `pass_threshold`** (E-6 — resolved once at runner startup from `GET /playground/eval-runs/{id}`, not a hardcoded `0.7`; the runner **fails loudly** rather than score against a threshold nobody chose).
    For `mode=durable` the runner projects the real `run_steps` into an `actual_trajectory` **and** (E-2) into `recorded_side_effects[]`, posts both, and the door adds the deterministic **`side_effect`** dimension (`judge.score_side_effects`, weight `0.2`) for an item carrying `expected_side_effects`. Durable dims are deterministic — **no keyword fallback**; a door failure is fail-closed. An item that asserts a required call but recorded **none** is recorded **failed** before the door is even called (fail-closed — the side effect is unverifiable).
    For `mode=scheduled` (E-3) the runner resolves the agent's **inner shape** once (`GET /agents/{name}` → `execution_shape`) and fires each item's **job spec** through the same sandbox run door in the identical production scheduled shape — `input_payload=job_spec`, `trigger_type="schedule"`, `trigger_payload=job_spec`, `eval_mode="record"` iff the item asserts side effects. A **durable-inner** run is polled to terminal and projected with the *same* `_project_trajectory` / `_project_recorded_side_effects` helpers the durable branch uses; a reactive-inner run scores response only. It is **fail-closed on every path that cannot be scored on a real run** — an unresolvable inner shape, a reactive-inner item asserting side effects (it would deliver for real — refused *before* the run is created), a run-create failure, a poll timeout, an empty trajectory, or a required-but-missing recording. E-3 writes **no new scorer and no new dispatch**: the job spec rides the shared path, and the door reuses `score_response`/`score_trajectory`/`score_tool_calls`/`score_side_effects` verbatim.
    For `mode=webhook` (E-4) the runner fires each item's **synthetic event** (`trigger_payload`) at the agent's **real webhook filter** through the real `POST /playground/test-event` door, and scores the **decision that door returns**. The door runs the real `filter_engine.evaluate_filters` against the trigger's real `filter_conditions`, from a copy `scripts/check-filter-engine-parity.sh` keeps **byte-identical** to the event-gateway's (the gate runs inside `deploy-cpe2e.sh` *before* either image builds, so divergent engines are undeployable) — the decision scored is therefore the decision production makes. **A correctly-filtered event runs nothing**: the runner scores the filter and returns, creating no run at all (`eval_run_results.run_id` stays `NULL` — the durable evidence that the filter did its job). Only a **match** drives the action, off the `run_id` the door returns, under `eval_mode="record"` whenever the item asserts side effects **or carries an injection probe** (a probe always records — the question it asks is whether a forbidden *write* fired, and a live delivery would answer it by really moving the money). E-4 adds **no filter code**: the runner has no `evaluate_filters` of its own and never re-decides.
@@ -269,7 +269,41 @@ An incompatible pair is rejected **`422`** naming both the dataset's mode and th
 > (delivering real side effects), skipped the trigger/filter entirely, and recorded a plausible
 > `{"response": x}` **pass** — a missing branch failed *safe-looking* rather than loudly. It is now a hard error
 > by construction (gated by `suite-77` `T-S77-010`).
-5. After all items, `PATCH /api/v1/playground/eval-runs/{id}` — sets `total_items`, `passed_count`, `failed_count`, `overall_score = passed/total`, `status=completed`. On a passing run (`overall_score >= 0.7`) the associated `AgentVersion.eval_passed` auto-sets `True` (the publish gate opens without a manual PATCH) — unchanged by E-0.
+5. After all items, `PATCH /api/v1/playground/eval-runs/{id}` — sets `total_items`, `passed_count`, `failed_count`, `overall_score = passed/total`, `status=completed`. On a passing run (`overall_score >= ` **the run's `pass_threshold`**, E-6 — the platform default `0.7` unless the launch specified one) the associated `AgentVersion.eval_passed` auto-sets `True` (the publish gate opens without a manual PATCH). The gate **mechanism** is unchanged since E-0: one scalar, one wire — E-6 made the number configurable behind it, never a second gate.
+
+### The per-run pass policy (E-6) — one threshold, three readers
+
+A launch may carry its own **`pass_threshold`** (0–1) and **`dimension_weights`**, persisted on the
+eval run. A team can require *"trajectory ≥ 0.9 for this durable agent"* by weighting `trajectory`
+heavily and raising the threshold, without changing anything global.
+
+- **Unspecified ⇒ the platform default** (`0.7`) is written **at launch**, so the run always records
+  the threshold it was actually judged by. (Before E-6 the column was NULL in every row ever written.)
+- **Validated at the door:** a threshold outside `0–1` and any **negative** weight are **422**. A
+  negative weight would make a *better* dimension score *lower* the composite — a failure that reads
+  as legitimate and is undiscoverable from the outside.
+- **`dimension_weights` is NULL-means-defaults** — each mode's branch keeps its own default profile.
+  Weights only re-weight the dimensions that were actually **scored**: an absent dimension is never
+  folded in, and a **zero-weighted** dimension is excluded rather than counted as `0.0`.
+- **The same number is read by all three consumers** — the publish gate, the eval-runner's per-item
+  `passed` verdict, and (once the Studio half lands — see the E-6 gap ledger) the UI's verdict and
+  colour band. This is the point: a threshold that reached the gate but not the per-item verdict or
+  the UI would make the product **lie** — a run scoring `0.85` under `pass_threshold=0.9` would render
+  **"passed"** and mark every item passed while the gate silently refused to publish.
+
+> **A veto is still not a weight.** `dimension_weights` cannot re-open what the safety veto closes:
+> a webhook item with a real **filter error** (`filter == 0.0`) or a really-fired forbidden tool
+> (`asr == 1.0`) composites to **`0.0`** even under a profile that gives those dimensions **zero
+> weight**. Exact facts gate; fuzzy signals (the light `must_refuse` keyword check) cost weight.
+
+### The regression gate (E-6) — a pinned dataset, re-run
+
+A **pinned** dataset re-run against a later version is what turns a one-off eval into a regression
+gate. The headline it exists to catch: **a dropped trajectory fails the gate even when the response
+is still correct** — the regression a response-only gate would happily publish. Proven on a real run
+(`suite-80` T-S80-005): the agent still answered correctly (`response 1.0`) but no longer took the
+pinned tool step (`trajectory 0.0`), so the composite fell to `0.4` and `eval_passed` stayed `False`;
+the golden baseline then flipped it `True` on the same agent.
 
 **4. Review results.** `EvalResultsPage` (`/playground/eval-runs/{id}`) shows the aggregate header (overall score, pass rate, item count) and the per-item breakdown — input, response, a **composite score**, a **per-dimension score row** (`response`, `trajectory`, `tool_call`, `side_effect`, `filter`, `injection`, `member_path`), a pass/fail badge, and a per-item Langfuse trace link. Reactive items populate only `response`; durable items (E-1) populate `trajectory` + `tool_call`, plus `side_effect` (E-2) when the item asserted side effects; scheduled items (E-3) populate `side_effect` (the headline) plus `trajectory` + `tool_call` for a durable-inner schedule; workflow items (E-5) populate `member_path` (+ `response`); webhook items (E-4) populate `filter` (the headline) plus the action dims **only on a match**, and `injection` when the item carried a probe. A `—` is **not a zero** — it means the dimension was not scored for that item, which is why a correctly-filtered event shows `filter: 1.00` and `—` everywhere else.
 

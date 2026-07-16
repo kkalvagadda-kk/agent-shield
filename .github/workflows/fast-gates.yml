@@ -1,0 +1,135 @@
+# ---------------------------------------------------------------------------
+# Fast gates — the CLUSTER-FREE tier of the regression gate (Eval v2 E-6).
+#
+# THIS ACTION IS DELIBERATELY SECONDARY.
+#
+# This repo has never had CI, and it structurally cannot have the useful kind:
+# every real e2e suite needs a live cluster, deployed agent pods, and real LLM
+# provider keys. A hosted runner has none of those, so "run the real regression
+# eval in CI" is not implementable and is NOT attempted here. Proposing it would
+# be a CI nobody can run — worse than none, because it reads as protection.
+#
+# What IS free on a hosted runner is the cluster-free tier, so that is all this
+# runs — by calling THE SAME SCRIPT the deploy hook calls. No CI-only fork: a
+# gate that behaves differently in CI than on a developer's machine is a second
+# implementation of the gate, and two implementations drift (that is the exact
+# class `check-filter-engine-parity.sh` exists to police).
+#
+# EVERY GATE BELOW IS ALREADY ENFORCED WITHOUT THIS FILE.
+# `scripts/deploy-cpe2e.sh` runs `run-fast-gates.sh --source-only` pre-build, and
+# the deploy script runs on every service change — so an unbumped tag, a drifted
+# filter engine, and an unguarded suite are already UNDEPLOYABLE. If GitHub
+# Actions is never adopted here, nothing is lost. This is a convenience net that
+# catches the same things earlier, on a PR, for free.
+#
+# The SLOW tier (scripts/e2e/run-all.sh, incl. suite-80's real eval Jobs) stays
+# human/on-demand against a real cluster. It is not run here and should not be.
+# ---------------------------------------------------------------------------
+name: fast-gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  source-gates:
+    name: source tier (tag⇄content, suite guards, filter parity, orphan sweep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The tag⇄content coupling gate compares, per service, the last source
+          # change against the last tag bump using GIT HISTORY (`git log -1
+          # --format=%ct -- <dir>` vs the tag var's last change in
+          # deploy-cpe2e.sh). A shallow clone has no history to compare, so the
+          # gate would silently degrade to "everything looks fresh" — a green
+          # that means nothing. Full history is load-bearing, not incidental.
+          fetch-depth: 0
+
+      - name: Run the source tier
+        # The SAME script deploy-cpe2e.sh runs pre-build. Seconds; no cluster,
+        # no docker, no node.
+        run: bash scripts/e2e/run-fast-gates.sh --source-only
+
+  studio-gates:
+    name: studio (typecheck + Vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: studio/package-lock.json
+
+      - name: Install
+        working-directory: studio
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: studio
+        # NOTE: studio/tsconfig.json includes only "src", so e2e/*.spec.ts is NOT
+        # typechecked here. A typo in a Playwright spec passes this step and fails
+        # at runtime — the browser E2E is a separate, human-run gate.
+        run: npm run typecheck
+
+      - name: Vitest
+        working-directory: studio
+        run: npm run test
+
+  pytest:
+    name: pytest (python 3.12 — the interpreter the service actually runs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 is NOT a style choice — it is the gate.
+          #
+          # services/registry-api/models.py uses SQLAlchemy `Mapped[str | None]`
+          # annotations, which require >=3.10, so the affected test modules carry a
+          # version skipif. On an older interpreter pytest reports
+          # "74 passed, 59 skipped" AND EXITS 0 — green, while 44% of the suite
+          # never ran. A fast tier that silently skips is precisely the bug class
+          # this phase exists to close, so the interpreter is pinned to the one the
+          # Dockerfile ships. `run-fast-gates.sh` achieves the same locally by
+          # running pytest in a throwaway container off the real registry-api image.
+          python-version: '3.12'
+
+      - name: Install deps
+        working-directory: services/registry-api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Run tests
+        working-directory: services/registry-api
+        env:
+          DATABASE_URL: postgresql+asyncpg://u:p@h:5432/d
+          DIRECT_DATABASE_URL: postgresql+psycopg://u:p@h:5432/d
+          KEYCLOAK_URL: http://kc:80
+        run: python -m pytest tests -q
+
+      - name: Fail if any test SKIPPED
+        working-directory: services/registry-api
+        env:
+          DATABASE_URL: postgresql+asyncpg://u:p@h:5432/d
+          DIRECT_DATABASE_URL: postgresql+psycopg://u:p@h:5432/d
+          KEYCLOAK_URL: http://kc:80
+        # The whole point. On 3.12 nothing should skip for interpreter reasons, so a
+        # skip here means either a genuinely unmet precondition or that the version
+        # guard is mis-set — both worth a red build. Without this step the job would
+        # go green on a run that skipped half the suite, which is the failure mode
+        # being fixed, reproduced inside its own fix.
+        run: |
+          out="$(python -m pytest tests -q 2>&1 | tail -1)"
+          echo "$out"
+          case "$out" in
+            *skipped*)
+              echo "::error::pytest SKIPPED tests on python 3.12 — a fast tier that silently skips is the bug this gate closes. Investigate the skipif conditions."
+              exit 1 ;;
+          esac

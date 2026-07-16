@@ -124,6 +124,9 @@ run_suite "Suite 74: Eval v2 E-2 side-effect record/mock (no-fakes)" "suite-74-e
 run_suite "Suite 75: Eval v2 E-3 scheduled job_spec eval (no-fakes)" "suite-75-eval-v2-scheduled.sh"
 run_suite "Suite 76: WS-4 webhook client-id + allowlist + HMAC signing (no-fakes)" "suite-76-webhook-client-signing.sh"
 run_suite "Suite 77: Eval v2 E-4 webhook filter+action+injection (no-fakes)" "suite-77-eval-v2-webhook.sh"
+# 78 is WS-5's slot (claimed concurrently) — left deliberately unused rather than renumbered.
+run_suite "Suite 79: WS-6 operate parity — one Overview dispatcher + served-bundle proof" "suite-79-operate-parity.sh"
+run_suite "Suite 80: Eval v2 E-6 regression gate + per-run threshold (no-fakes)" "suite-80-eval-v2-regression.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

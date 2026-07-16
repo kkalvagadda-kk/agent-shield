@@ -83,11 +83,16 @@ echo "=== Suite 72: Eval v2 E-1 NO-FAKES durable trajectory + tool-call gate ===
 echo "  Pod: $API_POD"
 echo ""
 
-DRIVER=/tmp/s72_driver.py
-OUTFILE=/tmp/s72_out.txt
+# Per-invocation paths (the suite-74 lesson): a fixed /tmp/s72_out.txt lets two
+# overlapping invocations (a retry, a second operator, a CI re-run against the same
+# pod) share a result file and silently read each OTHER's results.
+RUN_TAG="$(date +%s)$$"
+DRIVER="/tmp/s72_driver_${RUN_TAG}.py"
+OUTFILE="/tmp/s72_out_${RUN_TAG}.txt"
+RUNLOG="/tmp/s72_run_${RUN_TAG}.log"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  bash -c "rm -f $OUTFILE /tmp/s72_run.log; cat > $DRIVER" <<'PY'
-import asyncio, json, uuid
+  bash -c "rm -f $OUTFILE $RUNLOG; cat > $DRIVER" <<'PY'
+import asyncio, json, os, uuid
 import httpx
 from sqlalchemy import select, desc, text
 from db import AsyncSessionLocal
@@ -98,7 +103,7 @@ ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 SFX = uuid.uuid4().hex[:8]
 AGENT = f"s72-durable-{SFX}"
-OUT = "/tmp/s72_out.txt"
+OUT = os.environ["S72_OUT"]
 
 # The agent MUST call two real platform HTTP tools in a fixed order so the real
 # run_steps carry a deterministic tool trajectory: get_weather (http/LOW) then
@@ -459,6 +464,16 @@ async def main():
         rec("T-S72-006 durable dataset survives save→reload with its steps", ds_ok,
             f"reload mode/items/item0-steps ok={ds_ok}")
 
+    except Exception as exc:
+        # FAIL LOUD (the suite-74 lesson). Without this, a bare try/finally writes only
+        # the cases recorded BEFORE the crash and the bash summary (PASS>0, FAIL==0)
+        # reports the suite GREEN while silently dropping every remaining case — a
+        # partial run must never look like a pass. The driver is detached with nohup, so
+        # its non-zero exit is never seen; the result file is the only channel.
+        import traceback
+        rec("T-S72-999 driver ran every case without crashing", False,
+            f"driver CRASHED mid-run — cases after this point never ran: "
+            f"{type(exc).__name__}: {exc} :: {traceback.format_exc()[-400:]}")
     finally:
         # write results BEFORE cleanup (suite-69 lesson), then tear down.
         lines = []
@@ -486,7 +501,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+4 durable runs+park/approve can take ~10-20 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app nohup python3 $DRIVER > /tmp/s72_run.log 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S72_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 360); do   # up to ~30 min
@@ -499,7 +514,7 @@ done
 
 if [ -z "$FOUND" ]; then
   echo "ERROR: no driver result file after ~30 min — last log lines:"
-  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -50 /tmp/s72_run.log 2>/dev/null || true
+  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -50 "$RUNLOG" 2>/dev/null || true
   echo "❌ Suite 72 FAILED (driver did not report)"
   exit 1
 fi
@@ -517,6 +532,32 @@ while IFS= read -r line; do
   esac
 done <<< "$RES"
 
+# Completeness gate (the suite-74 lesson): a suite that silently stops early must NEVER
+# read as green. FAIL=0 is only a pass if every gate assertion actually RAN — an
+# exception, an early return, or a truncated result file otherwise produces "0 failures"
+# on a half-run gate. REQUIRED_IDS is the ONE source of truth for "did the gate run in
+# full"; a hardcoded case COUNT was tried alongside this in suite-74 and immediately
+# drifted — and a count cannot say WHICH case vanished. Add a case here and nowhere else.
+# (T-S72-run is deliberately absent: it is recorded only on an eval-run launch FAILURE,
+# so a green run never emits it.)
+REQUIRED_IDS="000 001 002 003 004a 004b 005 006"
+MISSING=""
+for id in $REQUIRED_IDS; do
+  echo "$RES" | grep -q "T-S72-$id" || MISSING="$MISSING T-S72-$id"
+done
+if [ -n "$MISSING" ]; then
+  echo "FAIL  T-S72-COMPLETE every gate assertion ran  |  NEVER RAN:$MISSING — a gate that stops early is not a pass"
+  FAIL=$((FAIL+1))
+  echo "  --- driver log tail (why it stopped) ---"
+  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
+else
+  echo "PASS  T-S72-COMPLETE every gate assertion ran (000-006 incl. 004a/004b, none skipped)"
+  PASS=$((PASS+1))
+fi
+
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  rm -f "$DRIVER" "$OUTFILE" "$RUNLOG" 2>/dev/null || true
+
 echo ""
 echo "=== suite-72 summary: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -ne 0 ]; then
@@ -527,4 +568,4 @@ if [ "$PASS" -eq 0 ]; then
   echo "❌ Suite 72 INCONCLUSIVE (no assertions ran)"
   exit 1
 fi
-echo "✅ Suite 72 PASSED"
+echo "✅ Suite 72 PASSED ($PASS assertions, all $(echo $REQUIRED_IDS | wc -w | tr -d ' ') required cases reported)"

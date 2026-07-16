@@ -11,10 +11,9 @@ import {
 } from "../api/registryApi";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
 import MemoryTab from "../components/agent-detail/MemoryTab";
-import OverviewDurable from "../components/agent-detail/OverviewDurable";
-import OverviewEventDriven from "../components/agent-detail/OverviewEventDriven";
-import OverviewReactive from "../components/agent-detail/OverviewReactive";
-import OverviewScheduled from "../components/agent-detail/OverviewScheduled";
+import OverviewForShape, {
+  resolveOverviewShape,
+} from "../components/agent-detail/OverviewForShape";
 import RunsTab from "../components/agent-detail/RunsTab";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -93,9 +92,14 @@ export default function DeploymentOverviewPage() {
   const st = STATUS[deployment.status] ?? { label: deployment.status, cls: "bg-slate-100 text-slate-600" };
   const version = versions.find((v) => v.id === deployment.version_id);
   const deploymentName = deployment.name ?? name!;
-  const hasSchedule = triggers.some((t) => t.trigger_type === "schedule");
-  const hasWebhook = triggers.some((t) => t.trigger_type === "webhook");
-  const isReactive = !hasWebhook && !hasSchedule && agent?.execution_shape !== "durable";
+  // WS-6 — one resolver, one dispatcher. The shape decides BOTH which overview mounts
+  // and whether the Chat action is offered, so it must be derived exactly once.
+  const overviewShape = resolveOverviewShape({
+    hasWebhook: triggers.some((t) => t.trigger_type === "webhook"),
+    hasSchedule: triggers.some((t) => t.trigger_type === "schedule"),
+    executionShape: agent?.execution_shape,
+  });
+  const isReactive = overviewShape === "reactive";
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8">
@@ -153,16 +157,14 @@ export default function DeploymentOverviewPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === "overview" &&
-        (hasWebhook ? (
-          <OverviewEventDriven agentName={name!} deploymentId={deployment.id} context={context} />
-        ) : hasSchedule ? (
-          <OverviewScheduled agentName={name!} deploymentId={deployment.id} context={context} />
-        ) : agent?.execution_shape === "durable" ? (
-          <OverviewDurable agentName={name!} deploymentId={deployment.id} context={context} />
-        ) : (
-          <OverviewReactive agentName={name!} deploymentId={deployment.id} context={context} />
-        ))}
+      {activeTab === "overview" && (
+        <OverviewForShape
+          shape={overviewShape}
+          agentName={name!}
+          deploymentId={deployment.id}
+          context={context}
+        />
+      )}
       {activeTab === "runs" && <RunsTab deploymentId={deployment.id} context={context} />}
       {activeTab === "memory" && <MemoryTab agentName={name!} deploymentId={depId} />}
     </div>

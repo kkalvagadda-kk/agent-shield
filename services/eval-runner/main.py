@@ -41,7 +41,34 @@ MODE = os.environ.get("MODE", "reactive")
 
 _JUDGE_POLL_TIMEOUT = float(os.environ.get("JUDGE_POLL_TIMEOUT", "45"))
 _JUDGE_POLL_INTERVAL = float(os.environ.get("JUDGE_POLL_INTERVAL", "3"))
+# Eval v2 E-6: this survives ONLY as the fallback for a run whose `pass_threshold`
+# column is NULL — i.e. rows written BEFORE E-6 gave the column a writer. It must
+# have NO other reader; every per-item verdict reads `_RUN_PASS_THRESHOLD` below.
+# (Before E-6 this was one of FOUR independent declarations of the publish
+# threshold across three services, all defaulting to 0.7 — so they agreed, nothing
+# ever errored, and a per-run threshold wired to only one of them would have made
+# the product lie.)
 _JUDGE_PASS_THRESHOLD = float(os.environ.get("JUDGE_PASS_THRESHOLD", "0.7"))
+
+# ---------------------------------------------------------------------------
+# Eval v2 E-6 — the run's PASS POLICY, resolved ONCE at startup (D1/D2).
+#
+# The runner reads the run's threshold + weights exactly once and threads them:
+#   * `_RUN_PASS_THRESHOLD` → every per-item `passed` verdict (five sites).
+#   * `_RUN_DIMENSION_WEIGHTS` → the score body, so the DOOR keeps ONE weights
+#     source (`body.dimension_weights`). Making the door ALSO resolve
+#     run_id→column would give one value two sources and a precedence rule —
+#     the priority-fallthrough anti-pattern that let MODE=webhook fall through
+#     to the reactive tail and deliver real side effects under a plausible PASS.
+# ---------------------------------------------------------------------------
+# NaN, deliberately, NOT the global default: `_resolve_run_policy` sets this before
+# any item is scored and raises if it cannot. Seeding it with 0.7 would mean a code
+# path that somehow skipped resolution scores every item against a threshold nobody
+# chose — the silent-degradation this whole slice exists to remove. Every comparison
+# against NaN is False, so an unresolved policy FAILS CLOSED and is visible, instead
+# of manufacturing a plausible PASS.
+_RUN_PASS_THRESHOLD: float = float("nan")
+_RUN_DIMENSION_WEIGHTS: dict[str, float] | None = None
 
 
 _WORKFLOW_POLL_TIMEOUT = float(os.environ.get("WORKFLOW_POLL_TIMEOUT", "180"))
@@ -82,18 +109,23 @@ async def _call_score_api(
     in which case the caller falls back to keyword matching. For `mode=reactive`
     the composite is byte-identical to the legacy `judge_for_eval` score.
     """
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "item": {
+            "input_message": input_text,
+            "expected_output": expected_output,
+        },
+        "input": input_text,
+        "response": response_text,
+    }
+    # E-6/D1: same one-source rule as the run-shaped caller above — the runner
+    # supplies the run's weights; the door never resolves them itself.
+    if _RUN_DIMENSION_WEIGHTS:
+        payload["dimension_weights"] = _RUN_DIMENSION_WEIGHTS
     try:
         resp = await client.post(
             "/api/v1/playground/eval/score",
-            json={
-                "mode": mode,
-                "item": {
-                    "input_message": input_text,
-                    "expected_output": expected_output,
-                },
-                "input": input_text,
-                "response": response_text,
-            },
+            json=payload,
             headers={"X-User-Sub": "eval-runner"},
             timeout=40.0,
         )
@@ -430,6 +462,12 @@ async def _call_score_api_run(
         # scored by `judge.score_side_effects` (the `side_effect` dim).
         "recorded_side_effects": recorded_side_effects,
     }
+    # E-6/D1: the run's per-run weights, supplied by the RUNNER so the door keeps a
+    # single weights source (`body.dimension_weights or <branch defaults>`). Omitted
+    # when NULL so the door's existing `or <defaults>` stays the one default rule —
+    # sending an explicit null would be a second way to say the same thing.
+    if _RUN_DIMENSION_WEIGHTS:
+        payload["dimension_weights"] = _RUN_DIMENSION_WEIGHTS
     if actual_trajectory is not None:
         payload["actual_trajectory"] = actual_trajectory
     if matched is not None:
@@ -560,7 +598,7 @@ async def _run_durable_item(
         )
 
     composite, dimension_scores, detail = scored
-    passed = composite >= _JUDGE_PASS_THRESHOLD
+    passed = composite >= _RUN_PASS_THRESHOLD
     logger.info(
         "item=%d durable scored composite=%.2f dims=%s passed=%s",
         idx, composite, dimension_scores, passed,
@@ -864,7 +902,7 @@ async def _run_scheduled_item(
         )
 
     composite, dimension_scores, detail = scored
-    passed = composite >= _JUDGE_PASS_THRESHOLD
+    passed = composite >= _RUN_PASS_THRESHOLD
     logger.info(
         "item=%d scheduled scored composite=%.2f dims=%s passed=%s",
         idx, composite, dimension_scores, passed,
@@ -1095,7 +1133,7 @@ async def _run_webhook_item(
         )
 
     composite, dimension_scores, detail = scored
-    passed = composite >= _JUDGE_PASS_THRESHOLD
+    passed = composite >= _RUN_PASS_THRESHOLD
     logger.info(
         "item=%d webhook scored composite=%.2f dims=%s matched=%s passed=%s",
         idx, composite, dimension_scores, matched, passed,
@@ -1303,7 +1341,7 @@ async def _run_workflow_item_scored(
         )
 
     composite, dimension_scores, detail = scored
-    passed = composite >= _JUDGE_PASS_THRESHOLD
+    passed = composite >= _RUN_PASS_THRESHOLD
     logger.info(
         "item=%d workflow scored composite=%.2f dims=%s member_path=%s passed=%s",
         idx, composite, dimension_scores, member_path, passed,
@@ -1413,7 +1451,7 @@ async def _run_reactive_item(
         score_result = await _call_score_api(client, "reactive", input_text, response_text, expected)
         if score_result is not None:
             score, dimension_scores, reasoning = score_result
-            passed = score >= _JUDGE_PASS_THRESHOLD
+            passed = score >= _RUN_PASS_THRESHOLD
             reasoning = f"llm-judge (eval-mode): {reasoning}"
         else:
             norm_expected = " ".join(_strip_markdown(expected).lower().split())
@@ -1493,8 +1531,53 @@ def _resolve_item_handler(inner_shape: str | None) -> _ItemHandler | None:
     return handlers.get(MODE)
 
 
+async def _resolve_run_policy(client: httpx.AsyncClient) -> None:
+    """Eval v2 E-6: read THIS run's pass policy once, into the two module globals.
+
+    FAIL LOUDLY. An eval that cannot read its own pass policy must not silently
+    fall back to 0.7 and report a verdict it cannot justify — every item's
+    `passed` flag and the run's `overall_score` (the number the publish gate
+    reads) would then be computed against a threshold nobody chose. Crashing the
+    Job is visible; a wrong-but-plausible PASS is not.
+    """
+    global _RUN_PASS_THRESHOLD, _RUN_DIMENSION_WEIGHTS
+    try:
+        resp = await client.get(
+            f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}",
+            headers=_EVAL_HEADERS,
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        run = resp.json()
+    except Exception as exc:
+        logger.error(
+            "eval_run=%s: CANNOT READ THE RUN'S PASS POLICY (%s) — refusing to score. "
+            "Falling back to a default threshold would report verdicts against a "
+            "threshold nobody chose.",
+            EVAL_RUN_ID, exc,
+        )
+        raise
+
+    # The column is defaulted at the single API write site, so it is non-NULL on
+    # every row written since E-6. The None arm covers pre-E-6 rows only — the one
+    # legitimate fallback in the design.
+    raw = run.get("pass_threshold")
+    _RUN_PASS_THRESHOLD = float(raw) if raw is not None else _JUDGE_PASS_THRESHOLD
+    _RUN_DIMENSION_WEIGHTS = run.get("dimension_weights")
+    logger.info(
+        "eval_run=%s pass policy: threshold=%.3f (source=%s) weights=%s",
+        EVAL_RUN_ID,
+        _RUN_PASS_THRESHOLD,
+        "run.pass_threshold" if raw is not None else "JUDGE_PASS_THRESHOLD (legacy NULL row)",
+        _RUN_DIMENSION_WEIGHTS or "branch defaults",
+    )
+
+
 async def run_eval() -> None:
     async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=120.0) as client:
+        # 0. Eval v2 E-6: resolve the run's pass policy BEFORE any item is scored.
+        await _resolve_run_policy(client)
+
         # 1. Fetch dataset
         ds_resp = await client.get(f"/api/v1/playground/datasets/{DATASET_ID}")
         ds_resp.raise_for_status()

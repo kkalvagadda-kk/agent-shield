@@ -88,9 +88,15 @@ echo ""
 # ─────────────────────────────────────────────────────────────────────────────
 echo "--- T-S71-001..005: real scheduled daemon agent + workflow + alerting ---"
 
-DRIVER=/tmp/s71_driver.py; OUTFILE=/tmp/s71_out.txt
-kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "rm -f $OUTFILE /tmp/s71_run.log; cat > $DRIVER" <<'PY'
-import asyncio, uuid, httpx
+# Per-invocation paths (the suite-74 lesson): a fixed /tmp/s71_out.txt lets two
+# overlapping invocations (a retry, a second operator, a CI re-run against the same pod)
+# share a result file and silently read each OTHER's results.
+RUN_TAG="$(date +%s)$$"
+DRIVER="/tmp/s71_driver_${RUN_TAG}.py"
+OUTFILE="/tmp/s71_out_${RUN_TAG}.txt"
+RUNLOG="/tmp/s71_run_${RUN_TAG}.log"
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "rm -f $OUTFILE $RUNLOG; cat > $DRIVER" <<'PY'
+import asyncio, os, uuid, httpx
 from datetime import datetime, timezone
 from sqlalchemy import select, desc, text
 from db import AsyncSessionLocal
@@ -101,6 +107,7 @@ from identity import workflow_service_subject
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
 HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
+OUT = os.environ["S71_OUT"]
 SFX = uuid.uuid4().hex[:6]
 AGENT = f"s71-agent-{SFX}"
 FAILAGENT = f"s71-fail-{SFX}"
@@ -203,7 +210,9 @@ async def create_daemon_agent(c, name, pid, tools):
 async def main():
     sa_subject = None
     approval_id = None
-    async with httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0) as c:
+    mode_results = {}   # hoisted: the finally-write references it even on an early crash
+    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0)
+    try:
         pid = await prov(c)
 
         # ═══ FIXTURE: real daemon+durable agent, deployed to PRODUCTION ═══════════
@@ -506,9 +515,19 @@ async def main():
         ok5 = bool(pr and pr.status == "failed" and nr and nr.status == "failed")
         record("T-S71-005 alerting precondition: BOTH scheduled runs REALLY failed (dispatch fail-closed)", ok5, d5)
 
+    except Exception as exc:
+        # FAIL LOUD (the suite-74 lesson). Without this, a bare run writes only the cases
+        # recorded BEFORE the crash and the bash summary (PASS>0, FAIL==0) reports the
+        # suite GREEN while silently dropping every remaining case — a partial run must
+        # never look like a pass.
+        import traceback
+        record("T-S71-999 driver ran every case without crashing", False,
+               f"driver CRASHED mid-run — cases after this point never ran: "
+               f"{type(exc).__name__}: {exc} :: {traceback.format_exc()[-400:]}")
+    finally:
         # write results BEFORE cleanup (suite-69 lesson) + emit ALERT_* for bash grep
         passed = sum(1 for _, v, _ in results if v)
-        with open("/tmp/s71_out.txt", "w") as f:
+        with open(OUT, "w") as f:
             for name, v, detail in results:
                 f.write(f"{'PASS' if v else 'FAIL'}  {name}  |  {detail}\n")
             f.write(f"OBSERVED  agent_sa={sa_subject}  approval_id={approval_id}\n")
@@ -531,13 +550,14 @@ async def main():
                 await s.commit()
         except Exception:
             pass
+        await c.aclose()
 
 asyncio.run(main())
 PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume+4 modes+alert — can take many min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app nohup python3 $DRIVER > /tmp/s71_run.log 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 300); do   # up to ~25 min (prod deploy + park + resume + 4 workflow modes + alert)
   sleep 5
@@ -549,7 +569,7 @@ done
 RES=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- cat "$OUTFILE" 2>/dev/null || true)
 if [ -z "$RES" ]; then
   echo "ERROR: no driver result file — last log lines:"
-  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -60 /tmp/s71_run.log 2>/dev/null || true
+  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -60 "$RUNLOG" 2>/dev/null || true
   echo ""
   echo "=== suite-71 summary: PASS=$PASS FAIL=(driver did not report) ==="
   echo "SUITE 71 FAILED"
@@ -569,6 +589,36 @@ while IFS= read -r line; do
     *) [ -n "$line" ] && echo "  $line" ;;
   esac
 done <<< "$RES"
+
+# Completeness gate (the suite-74 lesson): a suite that silently stops early must NEVER
+# read as green. FAIL=0 is only a pass if every gate assertion actually RAN — an
+# exception, an early return, or a truncated result file otherwise produces "0 failures"
+# on a half-run gate. REQUIRED_IDS is the ONE source of truth for "did the gate run in
+# full"; a hardcoded case COUNT was tried alongside this in suite-74 and immediately
+# drifted — and a count cannot say WHICH case vanished. Add a case here and nowhere else.
+# The trailing space in the grep is load-bearing: this suite has sub-lettered IDs, and a
+# bare "T-S71-001" would also match "T-S71-001a" — so a crashed 001c could hide behind 001a.
+REQUIRED_IDS="000 001a 001b 001c 002a 002b 002c 003 004 005"
+MISSING=""
+for id in $REQUIRED_IDS; do
+  echo "$RES" | grep -q "T-S71-$id " || {
+    # T-S71-000 is asserted by the bash parity-grep layer above, not the in-pod driver.
+    # (T-S71-005a/b are likewise bash-layer, below; they are the observable half of 005 —
+    # 005's driver-side precondition is censused here, and that bash layer emits an
+    # ok/bad on every path, so it cannot silently vanish.)
+    if [ "$id" = "000" ]; then continue; fi
+    MISSING="$MISSING T-S71-$id"
+  }
+done
+if [ -n "$MISSING" ]; then
+  echo "FAIL  T-S71-COMPLETE every gate assertion ran  |  NEVER RAN:$MISSING — a gate that stops early is not a pass"
+  FAIL=$((FAIL+1))
+  echo "  --- driver log tail (why it stopped) ---"
+  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
+else
+  echo "PASS  T-S71-COMPLETE every gate assertion ran (000-005, none skipped)"
+  PASS=$((PASS+1))
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # T-S71-005 (log observable) — the REAL alerting effect in dev (SMTP_HOST unset)
@@ -601,7 +651,11 @@ else
   bad "T-S71-005a/b alert log observable" "driver did not emit ALERT_POS/ALERT_NEG (emails)"
 fi
 
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  rm -f "$DRIVER" "$OUTFILE" "$RUNLOG" 2>/dev/null || true
+
 echo ""
 echo "=== suite-71 summary: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -ne 0 ]; then echo "SUITE 71 FAILED"; exit 1; fi
+if [ "$PASS" -eq 0 ]; then echo "SUITE 71 INCONCLUSIVE (no assertions ran)"; exit 1; fi
 echo "SUITE 71 PASSED"
