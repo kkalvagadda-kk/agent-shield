@@ -13,11 +13,19 @@ import {
 } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 import ConversationApprovalPanel from "../components/chat/ConversationApprovalPanel";
+import AttributedBubble from "../components/chat/AttributedBubble";
+import { routeToken, openAuthorBubble } from "../lib/chatStream";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  author?: string;
 }
+
+// Factory for a fresh assistant bubble, optionally attributed to `author`. Used
+// both to seed the pending bubble and by the stream reducers (routeToken /
+// openAuthorBubble) to open new bubbles as authored frames arrive.
+const mk = (author?: string): Message => ({ role: "assistant", content: "", author });
 
 interface PendingApproval {
   approvalId: string | null;
@@ -112,18 +120,15 @@ export default function AgentChatPage() {
     const source = new EventSource(resumeUrl);
     esRef.current = source;
 
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    setMessages((prev) => [...prev, mk(name)]);
 
     source.onmessage = (event) => {
       try {
         const d = JSON.parse(event.data);
-        if (d.type === "token") {
-          setMessages((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            copy[copy.length - 1] = { ...last, content: last.content + d.content };
-            return copy;
-          });
+        if (d.type === "agent_start") {
+          setMessages((prev) => openAuthorBubble(prev, d.author, mk));
+        } else if (d.type === "token") {
+          setMessages((prev) => routeToken(prev, d.author, d.content, mk));
         } else if (d.type === "done") {
           source.close();
           esRef.current = null;
@@ -297,7 +302,7 @@ export default function AgentChatPage() {
         ? await startDeploymentChat(name, depId, { message: userMsg, session_id: sessionId })
         : await startAgentChat(name, { message: userMsg, session_id: sessionId, context: "playground" });
 
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, mk(name)]);
 
       const kc = getKeycloak();
       if (kc?.authenticated) {
@@ -315,13 +320,10 @@ export default function AgentChatPage() {
       source.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "token") {
-            setMessages((prev) => {
-              const copy = [...prev];
-              const last = copy[copy.length - 1];
-              copy[copy.length - 1] = { ...last, content: last.content + data.content };
-              return copy;
-            });
+          if (data.type === "agent_start") {
+            setMessages((prev) => openAuthorBubble(prev, data.author, mk));
+          } else if (data.type === "token") {
+            setMessages((prev) => routeToken(prev, data.author, data.content, mk));
           } else if (data.type === "approval_requested") {
             source.close();
             esRef.current = null;
@@ -443,20 +445,14 @@ export default function AgentChatPage() {
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div
-                className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap ${
-                  m.role === "user"
-                    ? "bg-blue-600 text-white rounded-br-sm"
-                    : "bg-slate-100 text-slate-800 rounded-bl-sm"
-                }`}
-              >
-                {m.content}
-                {m.role === "assistant" && isStreaming && i === messages.length - 1 && (
-                  <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
-                )}
-              </div>
-            </div>
+            <AttributedBubble
+              key={i}
+              role={m.role}
+              content={m.content}
+              author={m.author}
+              showLabel={false}
+              streaming={m.role === "assistant" && isStreaming && i === messages.length - 1}
+            />
           ))}
           <div ref={bottomRef} />
         </div>

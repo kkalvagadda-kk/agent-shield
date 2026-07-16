@@ -593,7 +593,8 @@ registry-api:
     # through the lean LLM-context path (load_context), which dropped message_index
     # and forced deployment_id IS NULL (excluded deployment-tagged rows). Restore
     # row metadata through the Turn port + reconcile the deployment filter.
-    tag: "0.2.188"
+    # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
+    tag: "0.2.189"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -912,7 +913,8 @@ studio:
   image:
     repository: registry.internal/agentshield/studio
     # E-2: rebuilt alongside the eval-v2 slice
-    tag: "0.1.140"
+    # POC-2: per-agent attributed bubbles + eval transcript + share-context toggle
+    tag: "0.1.142"
     pullPolicy: IfNotPresent
 
   service:

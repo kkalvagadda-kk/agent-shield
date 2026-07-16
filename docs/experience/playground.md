@@ -470,3 +470,86 @@ member A's turn, and a supervisor sees a worker's reasoning, not just its final 
 - **String-passing is now a fallback.** The old behavior — passing only the previous member's
   final output string as the next member's `message` — is retained as a fallback; the real
   cross-member context now flows through the shared transcript.
+
+## Per-agent attribution — who said what (context-storage POC-2)
+
+POC-1 made members *share* a transcript; POC-2 makes it **visible**. Every chat and eval
+surface now shows which agent said what, so a multi-agent workflow reads as a real
+multi-speaker conversation instead of one anonymous blob. One presentational component backs
+all of it: `AttributedBubble` (`studio/src/components/chat/AttributedBubble.tsx`) renders a
+role-styled bubble with an optional agent-name label + a deterministic color dot from
+`agentColor` (`studio/src/lib/agentColor.ts`, same name → same color across reloads). Pass no
+`author` (or `showLabel={false}`) and it's the plain unlabeled bubble it always was — single
+agent is the degenerate one-speaker case, not a separate code path.
+
+### The streaming author frames (single-agent chat only)
+
+The single-agent chat proxy (`_proxy_agent_stream` in `services/registry-api/routers/chat.py`)
+now names the speaker on the wire. Right after the upstream agent returns `200`, before the
+first token, it emits **one** frame:
+
+```json
+{"type": "agent_start", "author": "refund-agent"}
+```
+
+and every token frame carries the same `author`:
+
+```json
+{"type": "token", "content": "Hello", "author": "refund-agent"}
+```
+
+`author` is the agent name (the `{name}` path param). `done` / `error` / `approval_requested`
+are unchanged, and a client that ignores `author` behaves exactly as before. The resume stream
+(`resume_stream_chat`, after a HITL approval) tags its tokens the same way. This rides
+`stream_chat` and `stream_deployment_chat` — the AgentChatPage and CatalogChatPage single-agent
+surfaces.
+
+**Why only single-agent.** Workflow members are **not** streamed to the client — the
+orchestrator dispatches each member server-side (`POST /chat` or `POST /run`) and collects the
+output; the browser learns member results only by polling the run tree. So streaming attribution
+is meaningful only for the one-speaker case; workflow attribution rides the run tree + the
+shared transcript instead (below). We did not invent a workflow streaming path that doesn't
+exist.
+
+### Attributed bubbles across the three surfaces
+
+- **AgentChatPage** (`/agents/{name}/chat`) and the **single-agent path of CatalogChatPage**
+  (`/catalog/{id}/chat`) consume the `agent_start` / `author` frames through the shared stream
+  reducer (`routeToken` / `openAuthorBubble` in `studio/src/lib/chatStream.ts`): a token appends
+  to the matching-author assistant bubble, a new author opens a new bubble. Single-agent chat
+  passes `showLabel={false}`, so it stays unlabeled — the plumbing is uniform, the label is a
+  caller decision.
+- **ChatPane** (playground) reads a *different* contract — the raw named runner events
+  (`text_delta`) off `/playground/runs/{id}/stream`, which carry no author — so it derives the
+  author client-side from the selected-agent prop and renders through `AttributedBubble`
+  (chips + safety block kept in the `children` slot). Also single-speaker, also unlabeled.
+- **CatalogChatPage workflow path** is the priority fix. A completed workflow turn now keeps the
+  **full `WorkflowRunTree`** (not just the parent's final output) and renders each
+  `tree.children[i]` as its own labeled `AttributedBubble` — `author = child.agent_name`, colored
+  dot, plus a compact step view (status badge · latency · View-Trace) — in run order, followed by
+  the parent's final-output summary bubble. A two-member run shows two labeled member bubbles in
+  distinct colors, not one collapsed answer.
+
+### Eval shared-thread transcript (EvalResultsPage)
+
+An expanded eval result row now has a collapsible **Conversation transcript**
+(`ConversationTranscript` in `studio/src/pages/EvalResultsPage.tsx`). Opening it lazily fetches
+`listMemory(memberName, {thread_id: run_id, scope: 'workflow_run', limit: 200})` — the
+`scope=workflow_run` read drops the per-agent filter so **every** member's turns come back on the
+one shared thread — and renders them as `AttributedBubble` rows in `message_index` order. So a
+workflow eval item replays as the real multi-speaker conversation that produced the score.
+`{memberName}` must be a real Agent (the `/agents/{name}/memory` endpoint 404s on a workflow
+name), so the page resolves a member from the eval detail's member path and only mounts the
+transcript when both a member and a `run_id` resolve — a single-agent/reactive item with no
+member renders nothing extra (no error).
+
+### "Share context between agents" toggle (WorkflowBuilder)
+
+The WorkflowBuilder first-save modal now has a **Share context between agents** checkbox
+(helper text: "Members see each other's turns in a shared conversation thread.") bound to the
+composite's `memory_enabled` field. It defaults on, loads from `workflow.memory_enabled` when an
+existing workflow opens, and is sent in **both** save calls — `createCompositeWorkflow` (first
+save) and `updateCompositeWorkflowApi` (resave). This is the on/off switch for the whole shared
+transcript. Per-session vs per-run scope is **not** a control — scope is derived from the
+entrypoint (chat → per-session, run → per-run) — and the "share rationale" toggle waits on the
+rationale summarizer (both recorded in the gap ledger).

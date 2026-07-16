@@ -379,6 +379,7 @@ async def _proxy_agent_stream(
     user_id: str = "",
     user_team: str = "",
     deployment_id: str = "",
+    author: str = "",
 ) -> AsyncGenerator[str, None]:
     """Proxy the live agent pod's /chat/stream SSE output.
 
@@ -439,6 +440,11 @@ async def _proxy_agent_stream(
                     yield _emit({"type": "done", "run_id": run_id})
                     return
 
+                # POC-2 attribution: open a fresh labeled assistant bubble for
+                # this speaker before the first token (single-agent = the
+                # degenerate one-speaker case). See contracts/sse-frames.md.
+                yield _emit({"type": "agent_start", "author": author})
+
                 current_event: Optional[str] = None
                 current_data: Optional[str] = None
 
@@ -456,7 +462,7 @@ async def _proxy_agent_stream(
                                 payload = {}
 
                             if current_event == "text_delta":
-                                yield _emit({"type": "token", "content": payload.get("content", "")})
+                                yield _emit({"type": "token", "content": payload.get("content", ""), "author": author})
                             elif current_event == "done":
                                 yield _emit({"type": "done", "run_id": run_id})
                             elif current_event == "error":
@@ -787,7 +793,7 @@ async def stream_chat(
             service_url, run.input_message or "", run_id,
             conversation_id=conversation_id, trace_id=trace_id,
             user_id=run.user_id or "", user_team=owner_team,
-            deployment_id=deployment_id,
+            deployment_id=deployment_id, author=name,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -977,7 +983,7 @@ async def stream_deployment_chat(
             service_url, run.input_message or "", run_id,
             conversation_id=conversation_id, trace_id=trace_id,
             user_id=run.user_id or "", user_team=owner_team,
-            deployment_id=deployment_id,
+            deployment_id=deployment_id, author=name,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -1119,7 +1125,9 @@ async def resume_stream_chat(
 
                                 if current_event == "text_delta":
                                     output_parts.append(payload.get("content", ""))
-                                    yield _emit({"type": "token", "content": payload.get("content", "")})
+                                    # POC-2: resume is a one-speaker continuation of
+                                    # the same agent — attribute to {name}.
+                                    yield _emit({"type": "token", "content": payload.get("content", ""), "author": name})
                                 elif current_event == "done":
                                     yield _emit({"type": "done", "run_id": run_id})
                                 elif current_event == "error":

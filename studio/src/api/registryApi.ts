@@ -1543,11 +1543,19 @@ export interface MemoryMessage {
   session_id: string | null;
   user_id: string | null;
   created_at: string;
+  message_kind?: string; // 'user' | 'agent_output' | 'rationale'
+  scope?: string; // 'agent' | 'workflow_run'
 }
 
 export const listMemory = async (
   agentName: string,
-  params?: { thread_id?: string; deployment_id?: string; limit?: number; offset?: number }
+  params?: {
+    thread_id?: string;
+    scope?: string;
+    deployment_id?: string;
+    limit?: number;
+    offset?: number;
+  }
 ): Promise<MemoryMessage[]> => {
   const resp = await http.get(`/agents/${agentName}/memory`, { params });
   return resp.data;

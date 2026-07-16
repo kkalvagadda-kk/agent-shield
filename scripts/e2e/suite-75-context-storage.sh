@@ -30,6 +30,10 @@
 #               run resumes + completes — proving per-member durable resume still
 #               keys off thread_id=child_id and the orthogonal shared conversation_id
 #               did NOT clobber the checkpoint.
+#   T-S75-007 — SSE per-agent attribution (POC-2): a /chat turn on CHAT_AGENT emits
+#               token frames carrying author==CHAT_AGENT (single-agent = the
+#               one-speaker case), proving _proxy_agent_stream stamps the author the
+#               attributed-bubble UI reads.
 #
 # Pods-availability boundary (same one the other bash suites accept, per CLAUDE.md):
 # a test that needs a running agent pod SKIPs (does not FAIL) when the pod never
@@ -246,6 +250,39 @@ async def chat_turn(agent, message, session_id, auth):
         diag(f"stream error agent={agent}: {e!r}")
     return 200, text, sess
 
+async def chat_turn_authored(agent, message, session_id, auth):
+    # Like chat_turn, but returns the set of `author` values seen on token frames
+    # (POC-2 per-agent attribution). Reads the SAME data-only frames the browser
+    # consumes — see routers/chat.py::_proxy_agent_stream, which now stamps
+    # {"type":"token","content":...,"author":<agent name>}. Returns
+    # (http_status, token_authors:set).
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(f"{BASE}/agents/{agent}/chat",
+                         json={"message": message, "session_id": session_id,
+                               "context": "playground"}, headers=auth)
+    if r.status_code != 200:
+        return r.status_code, set()
+    body = r.json()
+    stream_url = ROOT + body["stream_url"]
+    authors = set()
+    try:
+        async with httpx.AsyncClient(timeout=120) as c:
+            async with c.stream("GET", stream_url, headers=auth) as resp:
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        ev = json.loads(line[6:].strip())
+                    except Exception:
+                        continue
+                    if ev.get("type") == "token" and ev.get("author"):
+                        authors.add(ev["author"])
+                    if ev.get("type") in ("done", "error"):
+                        break
+    except Exception as e:
+        diag(f"stream error (authored) agent={agent}: {e!r}")
+    return 200, authors
+
 def memory_ordered(rows):
     # rows: list of memory messages. Returns (ok, reason). ok if message_index is
     # present, strictly increasing, and has no duplicate.
@@ -313,6 +350,28 @@ async def main():
                 else:
                     out("T-S75-001", "FAIL",
                         f"http={st2} rows={len(rows)} ordered={ordered}({reason})")
+
+        # ===================================================================
+        # T-S75-007 — SSE token frames carry `author` (POC-2 attribution). Start a
+        # fresh /chat turn on CHAT_AGENT, read the real data-only SSE stream, and
+        # assert ≥1 token frame is stamped author==CHAT_AGENT (single-agent = the
+        # one-speaker case). Same guards as T-S75-001 (no token / not deployed → SKIP).
+        # ===================================================================
+        if not token:
+            out("T-S75-007", "SKIP", "no keycloak token (consumer /chat is JWT-guarded)")
+        elif not deployed:
+            out("T-S75-007", "SKIP", f"chat agent not running: {statuses.get(CHAT_AGENT)}")
+        else:
+            st7, authors7 = await chat_turn_authored(
+                CHAT_AGENT, "Say hello in one short sentence.", str(uuid.uuid4()), auth)
+            if st7 != 200:
+                out("T-S75-007", "SKIP", f"chat http={st7} (no running deployment?)")
+            elif CHAT_AGENT in authors7:
+                out("T-S75-007", "PASS",
+                    f"token frames attributed to author={CHAT_AGENT}")
+            else:
+                out("T-S75-007", "FAIL",
+                    f"no token frame carried author=={CHAT_AGENT}; authors seen={sorted(authors7)}")
 
         # ===================================================================
         # T-S75-006 — cross-thread conversation LIST (Memory-tab regression guard)

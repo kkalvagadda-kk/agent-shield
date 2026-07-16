@@ -18,7 +18,12 @@ vi.mock("../lib/keycloak", () => ({
 vi.mock("../api/playgroundApi", () => ({ submitRunFeedback: vi.fn().mockResolvedValue({}) }));
 
 import { getCatalogDetail } from "../api/catalogApi";
-import { startAgentChat, getChatApprovalStatus } from "../api/registryApi";
+import {
+  startAgentChat,
+  getChatApprovalStatus,
+  triggerWorkflowRun,
+  getWorkflowRunTree,
+} from "../api/registryApi";
 import { submitRunFeedback } from "../api/playgroundApi";
 
 class MockEventSource {
@@ -153,4 +158,61 @@ describe("CatalogChatPage — deployment pinning", () => {
       )
     );
   });
+});
+
+describe("CatalogChatPage — workflow per-member attribution", () => {
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    mock(getCatalogDetail).mockResolvedValue({
+      artifact: {
+        name: "trigger-demo-flow",
+        type: "workflow",
+        description: "demo workflow",
+        source_id: "wf-1",
+      },
+      deployments: [{ status: "running", version_label: "v1" }],
+    });
+    mock(triggerWorkflowRun).mockResolvedValue({ run_id: "run-w" });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  // Regression guard for the poll race the live Playwright journey caught: the
+  // PARENT run flips terminal a poll before the CHILD rows record, so a naive
+  // "return on parent terminal" captured a child-less tree and collapsed the run
+  // into ONE unlabeled bubble. The poll must wait for the members to appear.
+  it("waits for members to populate after the parent is terminal, then renders one attributed bubble per member", async () => {
+    mock(getWorkflowRunTree)
+      // First poll: parent already terminal but children not recorded yet.
+      .mockResolvedValueOnce({
+        parent: { status: "completed", output: "final summary" },
+        children: [],
+      })
+      // Subsequent polls: the members are now present.
+      .mockResolvedValue({
+        parent: { status: "completed", output: "final summary" },
+        children: [
+          { id: "c1", agent_name: "member-a", output: "A did its part", status: "completed" },
+          { id: "c2", agent_name: "member-b", output: "B did its part", status: "completed" },
+        ],
+      });
+
+    const user = userEvent.setup();
+    renderChat();
+
+    // findByPlaceholderText(/message/i) resolves only once the artifact has loaded
+    // and the input is enabled (agentName set) — grabbing the still-"Loading agent..."
+    // textbox would type into a disabled field and never send.
+    const input = await screen.findByPlaceholderText(/message/i);
+    await user.type(input, "run it");
+    await user.keyboard("{Enter}");
+
+    // The child-less first tree must NOT collapse the turn: once children settle
+    // (~a poll later) each member renders as its own attributed label.
+    await screen.findByText("member-a", {}, { timeout: 12000 });
+    await screen.findByText("member-b", {}, { timeout: 12000 });
+    expect(triggerWorkflowRun).toHaveBeenCalledWith(
+      "wf-1",
+      expect.objectContaining({ trigger_type: "api" })
+    );
+  }, 15000);
 });

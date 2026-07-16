@@ -10,6 +10,7 @@ import {
   Eye,
   Filter,
   Loader2,
+  MessageSquare,
   Play,
   RotateCcw,
   Send,
@@ -30,12 +31,14 @@ import {
 } from "../api/playgroundApi";
 import { tokenizeArgsForDisplay } from "../lib/piiTokenize";
 import {
+  listMemory,
   patchVersion,
   patchWorkflowVersion,
   publishAgent,
   publishWorkflow,
 } from "../api/registryApi";
 import TraceDrawer from "../components/playground/TraceDrawer";
+import AttributedBubble from "../components/chat/AttributedBubble";
 
 const STATUS_CHIP: Record<string, string> = {
   pending: "bg-amber-100 text-amber-700",
@@ -395,6 +398,14 @@ function ResultRow({
   // (dimension_scores = {response: composite}); prefer an explicit composite
   // when the backend supplies one.
   const composite = r.composite ?? r.judge_score;
+  // POC-2 T014 — resolve a real MEMBER agent name for the shared-thread transcript.
+  // `/agents/{name}/memory` 404s on a non-Agent name and a workflow name is NOT an
+  // Agent, so pull the first member the run actually visited (actual_member_path),
+  // falling back to any per-member evidence. null → no transcript section is rendered.
+  const memberName =
+    r.eval_detail?.actual_member_path?.[0] ??
+    r.eval_detail?.per_member?.[0]?.member ??
+    null;
   return (
     <>
       <tr
@@ -500,6 +511,11 @@ function ResultRow({
               ) : r.eval_detail ? (
                 <DurableEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
               ) : null}
+              {/* POC-2 T014 — shared workflow-run transcript (all members, one thread).
+                  Guard: only when we have both a parent run id and a real member name. */}
+              {r.run_id && memberName && (
+                <ConversationTranscript runId={r.run_id} memberName={memberName} />
+              )}
             </div>
           </td>
         </tr>
@@ -947,6 +963,84 @@ function RunStepsDeepLink({ runId }: { runId: string }) {
                 </li>
               ))}
             </ol>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// POC-2 T014 — shared workflow-run transcript. On demand, reads the whole
+// conversation thread for the parent run (`GET /agents/{member}/memory?
+// scope=workflow_run&thread_id={run_id}`) — `scope=workflow_run` drops the
+// agent filter so EVERY member's turns come back on the one thread — and
+// renders them as attributed bubbles in message_index order, so a multi-member
+// workflow reads as a real multi-speaker conversation. `{member}` MUST be a real
+// Agent (the endpoint 404s on a workflow name); the caller resolves it from the
+// run's actual member path and only mounts this when both it and run_id exist.
+// ---------------------------------------------------------------------------
+function ConversationTranscript({
+  runId,
+  memberName,
+}: {
+  runId: string;
+  memberName: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const { data: messages, isLoading } = useQuery({
+    queryKey: ["conversation-transcript", runId, memberName],
+    queryFn: () =>
+      listMemory(memberName, {
+        thread_id: runId,
+        scope: "workflow_run",
+        limit: 200,
+      }),
+    enabled: open,
+  });
+
+  const ordered = messages
+    ? [...messages].sort((a, b) => a.message_index - b.message_index)
+    : [];
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        data-testid="conversation-transcript-toggle"
+        className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+      >
+        <MessageSquare size={12} />
+        {open ? "Hide conversation transcript" : "Conversation transcript"}
+      </button>
+      {open && (
+        <div
+          data-testid="conversation-transcript"
+          className="mt-2 bg-white rounded p-3 border border-slate-100"
+        >
+          {isLoading && (
+            <p className="text-slate-400 flex items-center gap-1">
+              <Loader2 size={12} className="animate-spin" />
+              Loading transcript…
+            </p>
+          )}
+          {messages && ordered.length === 0 && (
+            <p data-testid="transcript-empty" className="text-slate-400">
+              No shared transcript for this run
+            </p>
+          )}
+          {ordered.length > 0 && (
+            <div className="space-y-2">
+              {ordered.map((row) => (
+                <AttributedBubble
+                  key={row.id}
+                  role={row.role}
+                  content={row.content}
+                  author={row.agent_name}
+                  showLabel
+                />
+              ))}
+            </div>
           )}
         </div>
       )}

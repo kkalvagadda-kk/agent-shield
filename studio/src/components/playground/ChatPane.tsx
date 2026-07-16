@@ -4,10 +4,12 @@ import { getRunTrace, startPlaygroundRun, submitRunFeedback } from "../../api/pl
 import { toast } from "sonner";
 import TraceDrawer from "./TraceDrawer";
 import SafetyDetails, { SafetyResult } from "./SafetyDetails";
+import AttributedBubble from "../chat/AttributedBubble";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  author?: string;
   chips?: { type: "tool_start" | "tool_end"; label: string; id?: string }[];
   safetyBlock?: SafetyResult;
 }
@@ -93,7 +95,9 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
             const updated = [...prev];
             const last = updated[updated.length - 1];
             if (last.role === "assistant") {
-              updated[updated.length - 1] = { ...last, content: last.content + content };
+              // Playground stream is single-agent: attribute the bubble to the
+              // selected agent (prop). Raw runner events carry no `author`.
+              updated[updated.length - 1] = { ...last, content: last.content + content, author: agentName ?? undefined };
             }
             return updated;
           });
@@ -259,36 +263,34 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
           </div>
         )}
         {messages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div
-              className={`max-w-[70%] rounded-lg px-3 py-2 text-sm ${
-                msg.role === "user"
-                  ? "bg-blue-600 text-white"
-                  : "bg-slate-100 text-slate-800"
-              }`}
-            >
-              {msg.chips && msg.chips.length > 0 && (
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {msg.chips.map((chip, ci) => (
-                    <span
-                      key={ci}
-                      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-mono ${
-                        chip.type === "tool_end"
-                          ? "bg-green-100 text-green-700"
-                          : "bg-blue-100 text-blue-700"
-                      }`}
-                    >
-                      {chip.label}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {msg.content || (msg.role === "assistant" && running && i === messages.length - 1 ? (
-                <Loader2 size={14} className="animate-spin text-slate-400" />
-              ) : null)}
-              {msg.safetyBlock && <SafetyDetails result={msg.safetyBlock} />}
-            </div>
-          </div>
+          <AttributedBubble
+            key={i}
+            role={msg.role}
+            content={msg.content}
+            author={msg.author}
+            showLabel={false}
+          >
+            {msg.chips && msg.chips.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-2">
+                {msg.chips.map((chip, ci) => (
+                  <span
+                    key={ci}
+                    className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-mono ${
+                      chip.type === "tool_end"
+                        ? "bg-green-100 text-green-700"
+                        : "bg-blue-100 text-blue-700"
+                    }`}
+                  >
+                    {chip.label}
+                  </span>
+                ))}
+              </div>
+            )}
+            {!msg.content && msg.role === "assistant" && running && i === messages.length - 1 && (
+              <Loader2 size={14} className="animate-spin text-slate-400" />
+            )}
+            {msg.safetyBlock && <SafetyDetails result={msg.safetyBlock} />}
+          </AttributedBubble>
         ))}
       </div>
 

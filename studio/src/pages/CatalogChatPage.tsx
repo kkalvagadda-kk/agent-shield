@@ -1,18 +1,118 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Loader2, Send, ShieldAlert, ThumbsUp, ThumbsDown } from "lucide-react";
+import { ArrowLeft, Bot, Eye, Loader2, Send, ShieldAlert, ThumbsUp, ThumbsDown } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
-import { startAgentChat, triggerWorkflowRun, getWorkflowRunTree, getChatApprovalStatus } from "../api/registryApi";
+import {
+  startAgentChat,
+  triggerWorkflowRun,
+  getWorkflowRunTree,
+  getChatApprovalStatus,
+  type WorkflowRunTree,
+} from "../api/registryApi";
 import { submitRunFeedback } from "../api/playgroundApi";
 import { getKeycloak } from "../lib/keycloak";
+import AttributedBubble from "../components/chat/AttributedBubble";
+import { routeToken, openAuthorBubble } from "../lib/chatStream";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  // The speaking agent for this bubble. Undefined = single-speaker (unlabeled).
+  // A workflow member turn carries the member's agent name here.
+  author?: string;
+  // A completed workflow turn carries its full run tree so each member renders
+  // as its own attributed bubble (the whole run no longer collapses to one
+  // final-output bubble). Undefined for plain single-agent turns.
+  tree?: WorkflowRunTree;
   // Present on a completed assistant turn so the user can rate it. Production
   // feedback is the signal the observability dashboard cares about most.
   runId?: string;
+}
+
+// Local copies of the run-tree row helpers (mirrors WorkflowBuilderPage). Kept
+// local so this consumer surface stays self-contained; they are pure and tiny.
+function statusBadgeCls(status: string): string {
+  switch (status) {
+    case "running":
+      return "bg-blue-100 text-blue-700";
+    case "completed":
+      return "bg-green-100 text-green-700";
+    case "failed":
+      return "bg-red-100 text-red-700";
+    case "awaiting_approval":
+      return "bg-amber-100 text-amber-700";
+    case "queued":
+    case "pending":
+    default:
+      return "bg-slate-100 text-slate-600";
+  }
+}
+
+function fmtLatency(ms: number | null): string {
+  if (ms === null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// A completed workflow turn: each member renders as its own attributed bubble
+// (with a compact status/latency/trace step view), followed by the parent's
+// final-output summary bubble. Falls back to a single parent bubble when the
+// run tree has no children (empty/absent members).
+function WorkflowTurn({ tree }: { tree: WorkflowRunTree }) {
+  const { parent, children } = tree;
+
+  if (children.length === 0) {
+    const content =
+      parent.output ||
+      (parent.error_message
+        ? `Workflow failed: ${parent.error_message}`
+        : "Workflow completed.");
+    return <AttributedBubble role="assistant" content={content} showLabel={false} />;
+  }
+
+  return (
+    <>
+      {children.map((child) => (
+        <AttributedBubble
+          key={child.id}
+          role="assistant"
+          author={child.agent_name}
+          content={child.output || ""}
+          showLabel
+        >
+          <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-200/70">
+            <span
+              className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full capitalize ${statusBadgeCls(
+                child.status,
+              )}`}
+            >
+              {child.status}
+            </span>
+            <span className="text-[10px] text-slate-400">{fmtLatency(child.latency_ms)}</span>
+            {child.trace_url && (
+              <a
+                href={child.trace_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-[10px] text-blue-600 hover:text-blue-800 font-medium"
+              >
+                <Eye size={11} /> View Trace
+              </a>
+            )}
+          </div>
+        </AttributedBubble>
+      ))}
+      {parent.output && (
+        <AttributedBubble key="__summary" role="assistant" content={parent.output} showLabel={false} />
+      )}
+      {parent.error_message && (
+        <p key="__error" className="text-xs text-red-600 px-1">
+          {parent.error_message}
+        </p>
+      )}
+    </>
+  );
 }
 
 interface PendingApproval {
@@ -152,29 +252,46 @@ export default function CatalogChatPage() {
     };
   }, [pendingApproval, agentName, connectResumeStream]);
 
-  const pollWorkflowResult = useCallback(async (workflowId: string, runId: string) => {
-    const maxAttempts = 60;
-    for (let i = 0; i < maxAttempts; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const tree = await getWorkflowRunTree(workflowId, runId);
-        if (tree.parent.status === "completed") {
-          return tree.parent.output || "Workflow completed successfully.";
+  // Poll until the workflow run reaches a terminal state, then hand back the
+  // FULL run tree (parent + per-member children) — attribution comes from the
+  // children, so we no longer collapse the run to just the parent output.
+  // Returns null on timeout (still running).
+  const pollWorkflowResult = useCallback(
+    async (workflowId: string, runId: string): Promise<WorkflowRunTree | null> => {
+      const maxAttempts = 60;
+      // The PARENT run flips terminal before the per-member CHILD rows finish
+      // recording their outputs, so a naive "return on parent terminal" can capture
+      // a child-less tree and collapse the run into one unlabeled bubble (the exact
+      // regression this attribution work exists to remove). Once the parent is
+      // terminal, return as soon as members appear; if it stays child-less, allow a
+      // short settle window before accepting a genuinely member-less run.
+      const MAX_SETTLE = 3;
+      let settlePolls = 0;
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        try {
+          const tree = await getWorkflowRunTree(workflowId, runId);
+          const terminal =
+            tree.parent.status === "completed" || tree.parent.status === "failed";
+          if (terminal) {
+            if (tree.children.length > 0 || settlePolls >= MAX_SETTLE) {
+              return tree;
+            }
+            settlePolls++;
+          }
+        } catch {
+          // keep polling
         }
-        if (tree.parent.status === "failed") {
-          return `Workflow failed: ${tree.parent.error_message || "unknown error"}`;
-        }
-      } catch {
-        // keep polling
       }
-    }
-    return "Workflow is still running. Check the Runs tab for results.";
-  }, []);
+      return null;
+    },
+    [],
+  );
 
   const sendWorkflowMessage = useCallback(async (userMsg: string) => {
     if (!artifact?.source_id) return;
     setIsStreaming(true);
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    setMessages((prev) => [...prev, { role: "assistant", content: "Running workflow…" }]);
 
     try {
       const kc = getKeycloak();
@@ -186,17 +303,16 @@ export default function CatalogChatPage() {
         run_by: userSub,
       });
 
-      setMessages((prev) => {
-        const copy = [...prev];
-        copy[copy.length - 1] = { role: "assistant", content: "Running workflow..." };
-        return copy;
-      });
-
-      const output = await pollWorkflowResult(artifact.source_id, result.run_id);
+      const tree = await pollWorkflowResult(artifact.source_id, result.run_id);
 
       setMessages((prev) => {
         const copy = [...prev];
-        copy[copy.length - 1] = { role: "assistant", content: output };
+        copy[copy.length - 1] = tree
+          ? { role: "assistant", content: tree.parent.output || "", tree }
+          : {
+              role: "assistant",
+              content: "Workflow is still running. Check the Runs tab for results.",
+            };
         return copy;
       });
     } catch (err) {
@@ -226,8 +342,6 @@ export default function CatalogChatPage() {
         ...(activeDeployment?.id ? { deployment_id: activeDeployment.id } : {}),
       });
 
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
-
       const kc = getKeycloak();
       if (kc?.authenticated) {
         await kc.updateToken(10);
@@ -239,19 +353,17 @@ export default function CatalogChatPage() {
         : res.stream_url;
 
       const source = new EventSource(streamUrl);
+      // Each assistant bubble is opened/extended by the stream reducers, keyed
+      // on the frame's `author`. Single-agent is the degenerate one-speaker case
+      // (author undefined) — the same code a workflow member turn would use.
+      const mk = (author?: string): Message => ({ role: "assistant", content: "", author });
 
       source.onmessage = (event) => {
         const d = JSON.parse(event.data);
-        if (d.type === "token") {
-          setMessages((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            copy[copy.length - 1] = {
-              ...last,
-              content: last.content + d.content,
-            };
-            return copy;
-          });
+        if (d.type === "agent_start") {
+          setMessages((prev) => openAuthorBubble(prev, d.author, mk));
+        } else if (d.type === "token") {
+          setMessages((prev) => routeToken(prev, d.author, d.content, mk));
         } else if (d.type === "approval_requested") {
           source.close();
           setIsStreaming(false);
@@ -262,12 +374,19 @@ export default function CatalogChatPage() {
             runId: res.run_id,
           });
           setMessages((prev) => {
-            const copy = [...prev];
+            // Make sure there is an assistant bubble to carry the notice (there
+            // may be none yet if approval fires before any token).
+            const base = openAuthorBubble(prev, d.author, mk);
+            const copy = [...base];
             const last = copy[copy.length - 1];
-            copy[copy.length - 1] = {
-              ...last,
-              content: last.content || `Requesting approval to use tool: ${d.tool || d.tool_name || "unknown"}`,
-            };
+            if (last && last.role === "assistant") {
+              copy[copy.length - 1] = {
+                ...last,
+                content:
+                  last.content ||
+                  `Requesting approval to use tool: ${d.tool || d.tool_name || "unknown"}`,
+              };
+            }
             return copy;
           });
         } else if (d.type === "done") {
@@ -398,24 +517,22 @@ export default function CatalogChatPage() {
             )}
           </div>
         )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            <div
-              className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap ${
-                m.role === "user"
-                  ? "bg-blue-600 text-white rounded-br-sm"
-                  : "bg-slate-100 text-slate-800 rounded-bl-sm"
-              }`}
+        {messages.map((m, i) => {
+          // A completed workflow turn expands into one attributed bubble per
+          // member (plus the final-output summary) via its stored run tree.
+          if (m.tree) {
+            return <WorkflowTurn key={i} tree={m.tree} />;
+          }
+          // Every other bubble (user, single-agent assistant, workflow status)
+          // is a single-speaker bubble — no author label.
+          return (
+            <AttributedBubble
+              key={i}
+              role={m.role}
+              content={m.content}
+              showLabel={false}
+              streaming={m.role === "assistant" && isStreaming && i === messages.length - 1}
             >
-              {m.content}
-              {m.role === "assistant" &&
-                isStreaming &&
-                i === messages.length - 1 && (
-                  <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
-                )}
               {m.role === "assistant" && m.runId && (
                 <div className="flex items-center gap-1 mt-2 pt-2 border-t border-slate-200">
                   <span className="text-[11px] text-slate-400 mr-1">Helpful?</span>
@@ -441,9 +558,9 @@ export default function CatalogChatPage() {
                   </button>
                 </div>
               )}
-            </div>
-          </div>
-        ))}
+            </AttributedBubble>
+          );
+        })}
         <div ref={bottomRef} />
       </div>
 

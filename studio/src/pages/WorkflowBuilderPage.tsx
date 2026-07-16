@@ -109,6 +109,7 @@ export default function WorkflowBuilderPage() {
   const [saveOrchestration, setSaveOrchestration] = useState<WorkflowOrchestration>('sequential');
   const [saveShape, setSaveShape] = useState<'reactive' | 'durable'>('reactive');
   const [saveClass, setSaveClass] = useState<'user_delegated' | 'daemon'>('user_delegated');
+  const [saveMemoryEnabled, setSaveMemoryEnabled] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const qc = useQueryClient();
 
@@ -165,6 +166,7 @@ export default function WorkflowBuilderPage() {
       setSaveOrchestration(workflow.orchestration);
       setSaveShape(workflow.execution_shape);
       setSaveClass(workflow.agent_class);
+      setSaveMemoryEnabled(workflow.memory_enabled ?? true);
       // Layered layout keyed on the edge graph so a conditional FORK (one node
       // with multiple outgoing edges) fans its targets across rows/columns
       // instead of collapsing onto a single row that reads as a linear chain.
@@ -289,6 +291,7 @@ export default function WorkflowBuilderPage() {
         orchestration: saveOrchestration,
         execution_shape: saveShape,
         agent_class: saveClass,
+        memory_enabled: saveMemoryEnabled,
       });
       for (let i = 0; i < store.nodes.length; i++) {
         const node = store.nodes[i];
@@ -338,6 +341,7 @@ export default function WorkflowBuilderPage() {
       await updateCompositeWorkflowApi(compositeWorkflowId, {
         orchestration: saveOrchestration,
         agent_class: saveClass,
+        memory_enabled: saveMemoryEnabled,
       });
       // Replace members: remove existing, re-add current canvas nodes (with role/routing).
       for (const m of workflow?.members ?? []) {
@@ -1006,6 +1010,22 @@ export default function WorkflowBuilderPage() {
                   Sequential follows the edge chain. Conditional routes on edge conditions.
                   Supervisor needs a member with role “supervisor”. Handoff follows each agent’s
                   handoff signal.
+                </p>
+              </div>
+
+              {/* Shared context (memory) */}
+              <div>
+                <label className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={saveMemoryEnabled}
+                    onChange={(e) => setSaveMemoryEnabled(e.target.checked)}
+                  />
+                  <span className="label mb-0">Share context between agents</span>
+                </label>
+                <p className="mt-1 text-xs text-slate-400">
+                  Members see each other’s turns in a shared conversation thread.
                 </p>
               </div>
 

@@ -49,6 +49,41 @@ Tagged **deferred (intentional)** vs **debt (follow-up)**:
 
 ---
 
+## Known gaps (context-storage POC-2) — 2026-07-16
+
+Shipped this slice: per-agent **attribution** — the POC-1 shared transcript made visible.
+`agent_start` + `author` SSE frames on the single-agent chat proxy; a shared `AttributedBubble`
+(deterministic per-agent color) wired into AgentChatPage, ChatPane, and CatalogChatPage (a
+workflow run renders one labeled bubble per member from the run tree, no longer a single
+final-output blob); an expandable `scope=workflow_run` shared-thread transcript on
+EvalResultsPage; and a "Share context between agents" (`memory_enabled`) toggle in the
+WorkflowBuilder first-save modal. Journey proof = `studio/e2e/context-attribution.spec.ts`
+(attributed member bubbles + toggle save→reload→assert) + `suite-75` T-S75-007 (token frames
+carry `author`).
+
+**⚠ OPEN — live workflow-attribution journey UNCONFIRMED (not-yet-verified debt, NOT deferred).** `suite-75` T-S75-007 proves the backend `author` frames live, and Vitest proves the render logic (incl. `CatalogChatPage.test.tsx` "workflow per-member attribution" which reproduces the parent-terminal-before-children **race** — fixed in `pollWorkflowResult` with a members-settle window, studio 0.1.142). BUT the Playwright test `context-attribution.spec.ts:124` (real multi-member workflow in the **production Catalog chat**) still FAILS live against `trigger-demo-flow`: the page renders a single fallback bubble (parent output, a conversational QA reply), not per-member bubbles, even though Playwright observes a `/tree` response with ≥2 named children. Root cause NOT nailed — likely that `trigger-demo-flow`'s run tree doesn't yield ≥2 *completed named* children within the page's poll/settle window (or that workflow behaves single-member in production catalog chat). **Needs:** a known-good multi-member workflow fixture (or run-tree timing analysis) to confirm the per-member view live. Field mapping verified correct (`AgentRunItem.agent_name`, no transform). Separately, 9 pre-existing Playwright specs fail on a cluster-wide `createAgentViaUI` `waitForURL` timeout + an `agent-graphs` locator flake — **not POC-2** (also fails `agents`/`deployment-overview`/`eval-mode`); test 201 (toggle) dies in that same shared setup, so toggle persistence is proven by CP3b wiring + Vitest, not the live spec.
+
+Tagged **deferred (intentional)**:
+
+- **Per-session vs per-run memory scope choice** — *deferred (intentional)*. The WorkflowBuilder
+  ships only the `memory_enabled` on/off toggle. There is no per-session/per-run control because
+  there is no backing column — scope is **entrypoint-derived** (chat → per-session, run →
+  per-run; arch doc §5.4). No parallel field was invented for the modal.
+- **"Share rationale between agents" toggle** — *deferred (intentional)* to POC-1b. Sharing a
+  member's *reasoning* (not just its output) depends on the Haiku rationale summarizer
+  (`agent_memory.message_kind='rationale'`), which builds after POC-4. Only "share context"
+  (`memory_enabled`) ships now.
+- **AgentChat/ChatPane reload-seeding of prior turns** — *deferred (intentional)* to POC-5. The
+  single-agent chat surfaces do NOT rehydrate earlier messages from the transcript on reload
+  (no conversation-continue in the browser). POC-2's reload proof is the backend transcript
+  (`suite-75`) + the toggle persistence round-trip, not in-page message rehydration.
+- **Per-member context-scope on the member `routing` bag** — *deferred (intentional)*. The
+  `WorkflowPropertiesPanel` member `routing` config (arch doc §10) does not yet carry a
+  per-member context-scope; every member still reads the full shared transcript. Not in POC-2
+  scope.
+
+---
+
 ## Production hardening (P1–P4) — execution modes PROVEN in production (2026-07-14)
 
 The execution modes WS-1 delivered were only proven for **sandbox/playground**. This
