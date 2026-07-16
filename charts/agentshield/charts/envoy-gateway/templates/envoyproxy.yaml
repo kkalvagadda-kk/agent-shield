@@ -1,0 +1,23 @@
+{{- if and .Values.enabled .Values.envoyProxy }}
+# EnvoyProxy customizes the Service the Envoy Gateway controller auto-creates for
+# the Gateway. Referenced from the GatewayClass via parametersRef (gatewayclass.yaml).
+# On AWS this is how we make the gateway LoadBalancer an INTERNAL NLB (annotations
+# must be present at Service creation — scheme is immutable afterwards).
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: {{ .Values.gatewayClass.name }}-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "envoy-gateway.labels" . | nindent 4 }}
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: {{ .Values.envoyProxy.serviceType | default "LoadBalancer" }}
+        {{- with .Values.envoyProxy.serviceAnnotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+{{- end }}

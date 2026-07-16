@@ -129,7 +129,7 @@ dependencies:
 
   # ── API gateway (local sub-chart; STUB — no templates yet, disabled by default) ──
   - name: envoy-gateway
-    version: "0.1.0"
+    version: "0.2.0"
     repository: "file://charts/envoy-gateway"
     condition: envoy-gateway.enabled
 

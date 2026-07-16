@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: deploy-controller
-          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: IfNotPresent
           env:
             - name: REGISTRY_API_URL
@@ -68,7 +68,7 @@ spec:
             - name: LOG_LEVEL
               value: "INFO"
             - name: DECLARATIVE_RUNNER_IMAGE
-              value: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+              value: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
             # Namespace-qualified: the controller injects this host into agent
             # pods that run in OTHER namespaces (agents-*), where a bare service
             # name does not resolve. The langchain callback handler + SDK tracer

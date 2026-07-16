@@ -41,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: event-gateway
-          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/event-gateway:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/event-gateway:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           ports:
             - name: http

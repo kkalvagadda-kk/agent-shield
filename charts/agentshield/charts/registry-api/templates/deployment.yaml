@@ -46,7 +46,7 @@ spec:
               done
               echo "Keycloak is up — agentshield realm will be created by the realm-init-job post-install hook"
         - name: alembic-migrate
-          image: "{{ include "registry-api.imageRegistry" . }}/agentshield/registry-api:{{ .Values.image.tag | default "latest" }}"
+          image: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/registry-api:{{ .Values.image.tag | default "latest" }}"
           command: ["alembic", "upgrade", "head"]
           env:
             - name: DATABASE_URL
@@ -96,7 +96,7 @@ spec:
               value: {{ .Values.redisUrl | default (printf "redis://%s-redis-master:6379/0" .Release.Name) | quote }}
       containers:
         - name: registry-api
-          image: "{{ include "registry-api.imageRegistry" . }}/agentshield/registry-api:{{ .Values.image.tag | default "latest" }}"
+          image: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/registry-api:{{ .Values.image.tag | default "latest" }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
           ports:
             - name: http
