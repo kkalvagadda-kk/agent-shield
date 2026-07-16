@@ -204,21 +204,35 @@ echo "  9 platform secrets"
 # hostname in the region (the ELB name is a single DNS label), so we can mint the
 # cert up-front. Self-signed => browser warning; click through and the secure
 # context is still valid. Swap in a real cert (or ACM + DNS) for anything real.
+#
+# CN is a fixed short string, NOT the hostname: X.509 caps CN at 64 bytes and an
+# ELB DNS name is ~77 (`openssl req` then dies with "string too long"). Identity
+# lives in the SAN, which has no length cap and is the only field browsers have
+# honoured since Chrome 58 / RFC 2818 deprecated CN matching.
 echo ""
 echo "[4b/7] Gateway TLS cert (self-signed, wildcard SAN)..."
 if kubectl get secret gateway-tls -n "$NS" >/dev/null 2>&1; then
   echo "  gateway-tls already exists — keeping it (delete it to regenerate)"
 else
   TLSDIR="$(mktemp -d)"
-  openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
-    -keyout "$TLSDIR/tls.key" -out "$TLSDIR/tls.crt" \
-    -subj "/CN=*.elb.${REGION}.amazonaws.com/O=AgentShield" \
-    -addext "subjectAltName=DNS:*.elb.${REGION}.amazonaws.com" 2>/dev/null
+  # stderr goes to a file, not /dev/null: openssl's progress dots are stderr, so
+  # blanket-suppressing it also hides real errors (that masked the CN overflow).
+  if ! openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+      -keyout "$TLSDIR/tls.key" -out "$TLSDIR/tls.crt" \
+      -subj "/CN=AgentShield Gateway/O=AgentShield" \
+      -addext "subjectAltName=DNS:*.elb.${REGION}.amazonaws.com" \
+      -addext "basicConstraints=critical,CA:FALSE" \
+      -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+      -addext "extendedKeyUsage=serverAuth" 2>"$TLSDIR/err"; then
+    echo "ERROR: openssl failed to build the gateway cert:" >&2
+    grep -i "error" "$TLSDIR/err" >&2 || cat "$TLSDIR/err" >&2
+    rm -rf "$TLSDIR"; exit 1
+  fi
   kubectl create secret tls gateway-tls \
     --cert="$TLSDIR/tls.crt" --key="$TLSDIR/tls.key" -n "$NS" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   rm -rf "$TLSDIR"
-  echo "  gateway-tls created (self-signed, *.elb.${REGION}.amazonaws.com)"
+  echo "  gateway-tls created (self-signed, SAN *.elb.${REGION}.amazonaws.com)"
 fi
 
 # ── Step 5: Envoy Gateway controller ─────────────────────────────────────────
