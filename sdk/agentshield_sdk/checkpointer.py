@@ -59,6 +59,15 @@ async def get_checkpointer():
             conninfo=conninfo,
             max_size=10,
             open=False,  # avoid opening the async pool in the constructor
+            # Liveness-check every connection before handing it out, and recycle
+            # idle ones, so a connection that Postgres (or the mesh) closed while
+            # the pod sat idle is transparently replaced. Without this the pool
+            # returns a dead [BAD] connection and the next checkpointer op fails
+            # with "server closed the connection unexpectedly" — e.g. a workflow
+            # member run 500s after an idle period even though Postgres is healthy.
+            check=AsyncConnectionPool.check_connection,
+            max_idle=120.0,
+            max_lifetime=1800.0,
             kwargs={"autocommit": True, "prepare_threshold": 0},
         )
         await _pool.open()

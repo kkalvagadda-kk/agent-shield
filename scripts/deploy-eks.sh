@@ -66,7 +66,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
 REGISTRY_API_TAG="0.2.189"   # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
 DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.52"
+DECLARATIVE_RUNNER_TAG="0.1.53"
 STUDIO_TAG="0.1.142"   # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle + workflow-poll members-settle race fix
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

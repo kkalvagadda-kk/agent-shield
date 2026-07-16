@@ -21,7 +21,7 @@
 #     message_index/created_at through both scope branches + cache (redis key bumped v2), Turn port copies
 #     them, serializer emits real values; deployment filter reconciled with the write (filter when provided,
 #     no forced NULL). No migration. Re-run suite-75 → T-S75-001/002/004 PASS.)
-#   - declarative-runner:0.1.52 (in ECR; _save_memory_turn now logs status+body on any 4xx/5xx instead of
+#   - declarative-runner:0.1.53 (checkpointer pool liveness-check: AsyncConnectionPool gains check=check_connection + max_idle/max_lifetime so a stale pooled conn Postgres closed while the pod idled is replaced, not handed to LangGraph — fixes "server closed the connection unexpectedly" 500 on a workflow member run after idle. + 0.1.52 _save_memory_turn loud-log.)
 #     swallowing a fire-and-forget POST — the silent-500 that hid the missing-column write failure. Rides
 #     the next agent redeploy; not required for the read-path asserts above.)
 #   - eval-runner:0.1.7 (Eval v2 E-1 FIX — durable trajectory projection now COLLAPSES one logical
@@ -272,7 +272,7 @@ DEPLOY_CONTROLLER_TAG="0.1.38"
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
 STUDIO_TAG="0.1.142"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.52"
+DECLARATIVE_RUNNER_TAG="0.1.53"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
