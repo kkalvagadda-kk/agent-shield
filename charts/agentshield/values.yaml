@@ -611,7 +611,7 @@ registry-api:
     # /playground/test-event evaluates filters identically to the production webhook
     # hop. The two copies are gated byte-identical by check-filter-engine-parity.sh,
     # which runs inside deploy-cpe2e.sh BEFORE either image builds.
-    tag: "0.2.197"
+    tag: "0.2.200"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from crypto import decrypt_json
+from agent_config import build_config_snapshot
 from db import get_db
 from observability_backend import get_observability_backend
 from k8s import upsert_secret
@@ -426,12 +427,7 @@ async def deploy_agent(
         )
         latest_version = latest_result.scalar_one_or_none()
 
-        metadata = agent.metadata_ or {}
-        config_snapshot = {
-            "instructions": metadata.get("instructions"),
-            "tools": metadata.get("tools", []),
-            "llm_provider_id": metadata.get("llm_provider_id"),
-        }
+        config_snapshot = build_config_snapshot(agent)
 
         # Auto-snapshot tools from agent_tools join table (authoritative bindings)
         bound_tools_result = await db.execute(
