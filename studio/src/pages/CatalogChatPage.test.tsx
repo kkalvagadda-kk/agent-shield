@@ -8,9 +8,10 @@ import CatalogChatPage from "./CatalogChatPage";
 vi.mock("../api/catalogApi", () => ({ getCatalogDetail: vi.fn() }));
 vi.mock("../api/registryApi", () => ({
   startAgentChat: vi.fn(),
-  triggerWorkflowRun: vi.fn(),
   getWorkflowRunTree: vi.fn(),
+  getCompositeWorkflow: vi.fn(),
   getChatApprovalStatus: vi.fn(),
+  workflowRunStreamUrl: (id: string) => `/api/v1/workflows/${id}/runs/stream`,
 }));
 vi.mock("../lib/keycloak", () => ({
   getKeycloak: () => ({ authenticated: true, token: "tok", updateToken: vi.fn() }),
@@ -21,10 +22,33 @@ import { getCatalogDetail } from "../api/catalogApi";
 import {
   startAgentChat,
   getChatApprovalStatus,
-  triggerWorkflowRun,
+  getCompositeWorkflow,
   getWorkflowRunTree,
 } from "../api/registryApi";
 import { submitRunFeedback } from "../api/playgroundApi";
+
+// Build a Response-like whose body streams the given frames as SSE `data:`
+// records, so we can drive the workflow console's fetch+ReadableStream reader.
+function sseResponse(frames: unknown[]) {
+  const enc = new TextEncoder();
+  const chunks = frames.map((f) => enc.encode(`data: ${JSON.stringify(f)}\n\n`));
+  let i = 0;
+  return {
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (i < chunks.length) {
+              return Promise.resolve({ value: chunks[i++], done: false });
+            }
+            return Promise.resolve({ value: undefined, done: true });
+          },
+        };
+      },
+    },
+  };
+}
 
 class MockEventSource {
   static instances: MockEventSource[] = [];
@@ -160,59 +184,122 @@ describe("CatalogChatPage — deployment pinning", () => {
   });
 });
 
-describe("CatalogChatPage — workflow per-member attribution", () => {
+describe("CatalogChatPage — workflow live console", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     MockEventSource.instances = [];
+    sessionStorage.clear();
     mock(getCatalogDetail).mockResolvedValue({
       artifact: {
-        name: "trigger-demo-flow",
+        name: "refund-flow",
         type: "workflow",
         description: "demo workflow",
         source_id: "wf-1",
       },
       deployments: [{ status: "running", version_label: "v1" }],
     });
-    mock(triggerWorkflowRun).mockResolvedValue({ run_id: "run-w" });
+    mock(getCompositeWorkflow).mockResolvedValue({
+      id: "wf-1",
+      name: "refund-flow",
+      member_count: 2,
+      orchestration: "sequential",
+    });
+    fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        { type: "agent_start", author: "member-a" },
+        { type: "token", author: "member-a", content: "A did its part" },
+        { type: "tool_call", author: "member-a", tool: "lookup", status: "ok" },
+        { type: "rationale", author: "member-a", content: "checking the record first" },
+        { type: "agent_end", author: "member-a" },
+        { type: "agent_start", author: "member-b" },
+        { type: "token", author: "member-b", content: "B did its part" },
+        { type: "agent_end", author: "member-b" },
+        { type: "done", run_id: "run-w" },
+      ]),
+    );
+    (globalThis as unknown as { fetch: typeof fetchMock }).fetch = fetchMock;
   });
   afterEach(() => vi.useRealTimers());
 
-  // Regression guard for the poll race the live Playwright journey caught: the
-  // PARENT run flips terminal a poll before the CHILD rows record, so a naive
-  // "return on parent terminal" captured a child-less tree and collapsed the run
-  // into ONE unlabeled bubble. The poll must wait for the members to appear.
-  it("waits for members to populate after the parent is terminal, then renders one attributed bubble per member", async () => {
-    mock(getWorkflowRunTree)
-      // First poll: parent already terminal but children not recorded yet.
-      .mockResolvedValueOnce({
-        parent: { status: "completed", output: "final summary" },
-        children: [],
-      })
-      // Subsequent polls: the members are now present.
-      .mockResolvedValue({
-        parent: { status: "completed", output: "final summary" },
-        children: [
-          { id: "c1", agent_name: "member-a", output: "A did its part", status: "completed" },
-          { id: "c2", agent_name: "member-b", output: "B did its part", status: "completed" },
-        ],
-      });
+  it("renders the console shell (member count + shared-thread subtitle + rationale toggle)", async () => {
+    renderChat();
+    // Shell header carries "· N agents" and the shared-thread subtitle.
+    await screen.findByText(/·\s*2\s*agents/);
+    expect(screen.getByText(/shared conversation/i)).toBeInTheDocument();
+    expect(screen.getByText(/Show rationale/i)).toBeInTheDocument();
+  });
 
+  // The headline 2b-0 journey: the live SSE stream opens on the /runs/stream
+  // endpoint and each member frame drives its own attributed bubble, with a
+  // tool chip + amber rationale, via the SAME author-keyed reducers.
+  it("streams member frames into per-author bubbles with tool chip + rationale", async () => {
     const user = userEvent.setup();
     renderChat();
 
-    // findByPlaceholderText(/message/i) resolves only once the artifact has loaded
-    // and the input is enabled (agentName set) — grabbing the still-"Loading agent..."
-    // textbox would type into a disabled field and never send.
     const input = await screen.findByPlaceholderText(/message/i);
     await user.type(input, "run it");
     await user.keyboard("{Enter}");
 
-    // The child-less first tree must NOT collapse the turn: once children settle
-    // (~a poll later) each member renders as its own attributed label.
-    await screen.findByText("member-a", {}, { timeout: 12000 });
-    await screen.findByText("member-b", {}, { timeout: 12000 });
-    expect(triggerWorkflowRun).toHaveBeenCalledWith(
-      "wf-1",
-      expect.objectContaining({ trigger_type: "api" })
+    // Both members render as their own attributed bubble (name label).
+    await screen.findByText("member-a", {}, { timeout: 8000 });
+    await screen.findByText("member-b", {}, { timeout: 8000 });
+    // The tool chip and the member's rationale surface under member-a.
+    expect(screen.getByText("lookup")).toBeInTheDocument();
+    expect(screen.getByText(/checking the record first/)).toBeInTheDocument();
+
+    // The stream opened the POST /runs/stream endpoint with the message body.
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/workflows/wf-1/runs/stream",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining("run it"),
+      }),
     );
-  }, 15000);
+  }, 12000);
+
+  it("hides the amber rationale box when the Show-rationale toggle is off", async () => {
+    const user = userEvent.setup();
+    const { container } = renderChat();
+
+    const input = await screen.findByPlaceholderText(/message/i);
+    await user.type(input, "run it");
+    await user.keyboard("{Enter}");
+    await screen.findByText(/checking the record first/, {}, { timeout: 8000 });
+    expect(container.querySelector(".bg-amber-50")).not.toBeNull();
+
+    // Toggle Show-rationale off → the amber boxes disappear.
+    await user.click(screen.getByLabelText(/Show rationale/i));
+    await waitFor(() => expect(container.querySelector(".bg-amber-50")).toBeNull());
+  }, 12000);
+
+  // save→reload→survives: a fresh mount rehydrates the last run's per-member
+  // bubbles (with tool_calls + rationale) straight from the backend tree — not
+  // from the client store — via the stored run id.
+  it("rehydrates member bubbles + tool chip + rationale from the backend on reload", async () => {
+    sessionStorage.setItem("wf-lastrun-art-1", "run-w");
+    mock(getWorkflowRunTree).mockResolvedValue({
+      parent: { status: "completed", output: "final summary" },
+      children: [
+        {
+          id: "c1",
+          agent_name: "member-a",
+          output: "A did its part",
+          status: "completed",
+          latency_ms: 120,
+          tool_calls: [{ tool_name: "lookup", status: "ok" }],
+          rationale: "checking the record first",
+        },
+      ],
+    });
+
+    renderChat();
+
+    // The member bubble, its tool chip, and its rationale all come from the tree
+    // read (getWorkflowRunTree), proving the persisted round-trip.
+    await screen.findByText("member-a", {}, { timeout: 10000 });
+    expect(screen.getByText("lookup")).toBeInTheDocument();
+    expect(screen.getByText(/checking the record first/)).toBeInTheDocument();
+    expect(getWorkflowRunTree).toHaveBeenCalledWith("wf-1", "run-w");
+  }, 12000);
 });

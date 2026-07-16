@@ -1,9 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { routeToken, openAuthorBubble, type Attributed } from "./chatStream";
+import {
+  routeToken,
+  openAuthorBubble,
+  attachToolCall,
+  attachRationale,
+  type AttributedRich,
+} from "./chatStream";
 
-// Surfaces extend Attributed with their own fields; the reducer must preserve
-// them (spread), which we prove by carrying an extra `id`.
-interface Msg extends Attributed {
+// Surfaces extend AttributedRich with their own fields; the reducer must
+// preserve them (spread), which we prove by carrying an extra `id`.
+interface Msg extends AttributedRich {
   id?: string;
 }
 
@@ -77,5 +83,56 @@ describe("openAuthorBubble", () => {
     const start: Msg[] = [{ role: "assistant", content: "", author: "refund-agent" }];
     const next = openAuthorBubble(start, "refund-agent", mk);
     expect(next).toBe(start);
+  });
+});
+
+describe("attachToolCall", () => {
+  it("appends a tool call to the open bubble for the matching author", () => {
+    const start: Msg[] = [{ role: "assistant", content: "on it", author: "researcher" }];
+    const next = attachToolCall(start, "researcher", { tool_name: "web", status: "ok" }, mk);
+    expect(next).toHaveLength(1);
+    expect(next[0].toolCalls).toEqual([{ tool_name: "web", status: "ok" }]);
+    // content preserved, input not mutated
+    expect(next[0].content).toBe("on it");
+    expect(start[0].toolCalls).toBeUndefined();
+  });
+
+  it("accumulates multiple tool calls on the same bubble", () => {
+    let msgs: Msg[] = [{ role: "assistant", content: "", author: "researcher" }];
+    msgs = attachToolCall(msgs, "researcher", { tool_name: "a", status: "ok" }, mk);
+    msgs = attachToolCall(msgs, "researcher", { tool_name: "b", status: "error" }, mk);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].toolCalls).toEqual([
+      { tool_name: "a", status: "ok" },
+      { tool_name: "b", status: "error" },
+    ]);
+  });
+
+  it("opens a new bubble when the tool call's author differs", () => {
+    const start: Msg[] = [{ role: "assistant", content: "hi", author: "researcher" }];
+    const next = attachToolCall(start, "answerer", { tool_name: "x", status: "ok" }, mk);
+    expect(next).toHaveLength(2);
+    expect(next[1].author).toBe("answerer");
+    expect(next[1].toolCalls).toEqual([{ tool_name: "x", status: "ok" }]);
+    expect(next[0]).toBe(start[0]);
+  });
+});
+
+describe("attachRationale", () => {
+  it("sets the rationale on the open bubble for the matching author", () => {
+    const start: Msg[] = [{ role: "assistant", content: "answer", author: "researcher" }];
+    const next = attachRationale(start, "researcher", "because reasons", mk);
+    expect(next).toHaveLength(1);
+    expect(next[0].rationale).toBe("because reasons");
+    expect(next[0].content).toBe("answer");
+    expect(start[0].rationale).toBeUndefined();
+  });
+
+  it("opens a new bubble when the rationale's author differs", () => {
+    const start: Msg[] = [{ role: "assistant", content: "a", author: "researcher" }];
+    const next = attachRationale(start, "answerer", "why", mk);
+    expect(next).toHaveLength(2);
+    expect(next[1].author).toBe("answerer");
+    expect(next[1].rationale).toBe("why");
   });
 });

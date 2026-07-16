@@ -108,42 +108,42 @@
 
 ## Band 3 — Frontend reducers, components, API types [2b-i / 2b-iii / 2b-iv]
 
-### T010 [P] — frontend: pure stream reducers for chips + rationale
+### T010 [X] [P] — frontend: pure stream reducers for chips + rationale
 - **Files**: Modify `studio/src/lib/chatStream.ts`
 - **Adds**: `interface AttributedRich extends Attributed { toolCalls?; rationale? }`; `attachToolCall(messages, author, toolCall, make)` and `attachRationale(messages, author, rationale, make)` — reuse `isOpenAssistantFor`: update the open assistant bubble for `author` immutably, else append `make(author)` seeded with the field. `routeToken`/`openAuthorBubble` untouched; no React import.
 - **Acceptance**: `attachToolCall`/`attachRationale` present, pure; consumed by T014 + tested by T015.
 - **Deps**: none.
 - **Verify**: `cd studio && npx tsc --noEmit -p tsconfig.json 2>&1 | grep chatStream || echo "chatStream typecheck clean"`
 
-### T011 [P] — frontend: ToolCallChip component
+### T011 [X] [P] — frontend: ToolCallChip component
 - **Files**: Create `studio/src/components/chat/ToolCallChip.tsx`
 - **Adds**: `export default function ToolCallChip({ tool, status? })` — mock chip (`Database` icon + `called <code>{tool}</code>`, `inline-flex bg-slate-100 rounded-md px-2 py-1 text-xs text-slate-500`); red tint (`text-red-600`) when `status==="error"`.
 - **Acceptance**: renders the tool name; used by `AttributedBubble` (T012).
 - **Deps**: none.
 - **Verify**: `cd studio && npm run typecheck 2>&1 | tail -3`
 
-### T012 — frontend: AttributedBubble rich slots
+### T012 [X] — frontend: AttributedBubble rich slots
 - **Files**: Modify `studio/src/components/chat/AttributedBubble.tsx`
 - **Adds**: props `avatar?`, `toolCalls?`, `rationale?`, `showRationale?` (default true), `citations?`. Render order: tinted `Bot` avatar next to name → `ToolCallChip` row above content → amber `rationale` box (`Lightbulb`, `text-amber-700 bg-amber-50 border-amber-100`) when truthy AND `showRationale!==false` → existing content box → `citations` chip row (empty in POC-2b). **Degenerate guard**: no author/`showLabel===false`/no rich props → DOM byte-identical to today. Keep `children`.
 - **Acceptance**: single-agent render unchanged (Vitest degenerate case); rich slots render only when their prop is set.
 - **Deps**: T011.
 - **Verify**: `cd studio && npm run typecheck 2>&1 | tail -3`
 
-### T013 [P] — frontend: API types for stream + rich tree children
+### T013 [X] [P] — frontend: API types for stream + rich tree children
 - **Files**: Modify `studio/src/api/registryApi.ts`
 - **Adds**: `AgentRunItem` gains `tool_calls?: { tool_name:string; status:string }[]` and `rationale?: string | null`; `export interface WorkflowStreamFrame {...}`; `export const workflowRunStreamUrl = (workflowId) => \`/api/v1/workflows/${workflowId}/runs/stream\`` (FULL path — the page's `fetch` is not the axios instance). No `triggerWorkflowRun`-style helper.
 - **Acceptance**: `WorkflowStreamFrame`/`tool_calls`/`rationale` present; consumed by T014; typecheck clean.
 - **Deps**: none.
 - **Verify**: `cd studio && npm run typecheck 2>&1 | tail -3`
 
-### T014 — frontend: CatalogChatPage live workflow console
+### T014 [X] — frontend: CatalogChatPage live workflow console
 - **Files**: Modify `studio/src/pages/CatalogChatPage.tsx`
 - **Adds**: extend `Message` with `toolCalls?`/`rationale?`/`citations?`. **Replace `sendWorkflowMessage`** with a `fetch(POST /api/v1/workflows/{id}/runs/stream, {bearer, body:{message, session_id}})` + `response.body.getReader()` reader splitting on `\n\n`, parsing `data:` JSON to `WorkflowStreamFrame`, driving `agent_start`→`openAuthorBubble`, `token`→`routeToken`, `tool_call`→`attachToolCall`, `rationale`→`attachRationale`, `agent_end`→no-op, `done`→stop, `error`→append. Keep `pollWorkflowResult`/`WorkflowTurn` for reload only; upgrade `WorkflowTurn` to render each child's `tool_calls`/`rationale` via `AttributedBubble` gated on `showRationale`. Console shell (header `"{name} · {N} agents"`, subtitle, blue attribution info-bar + Show-rationale checkbox). Single-agent `sendAgentMessage` gains a `tool_call`→`attachToolCall` branch. Pass `avatar` to member bubbles.
 - **Acceptance**: workflow chat opens `/runs/stream` (network), renders per-member bubbles progressively + chips + amber rationale toggled by the checkbox; all new symbols from T009/T010/T012/T013 consumed here; single-agent chat unchanged apart from live chips.
 - **Deps**: T009, T010, T012, T013.
 - **Verify**: `cd studio && npm run typecheck 2>&1 | tail -3 && grep -n "runs/stream\|attachToolCall\|attachRationale\|showRationale" src/pages/CatalogChatPage.tsx`
 
-### T021 [P] — No-orphan gate: frontend symbols
+### T021 [X] [P] — No-orphan gate: frontend symbols
 - **Files**: (verification only — no source edits)
 - **Adds**: nothing; asserts each new frontend symbol has a live reader. Greps: `ToolCallChip` imported by `AttributedBubble.tsx` AND `CatalogChatPage.tsx`; `attachToolCall`/`attachRationale` called in `CatalogChatPage.tsx`; `WorkflowStreamFrame`/`workflowRunStreamUrl` referenced in `CatalogChatPage.tsx`; `AttributedBubble` rich slots (`avatar`/`rationale`/`citations`) referenced by the page.
 - **Acceptance**: every grep returns ≥1 hit.
@@ -154,7 +154,7 @@
 
 ## Band 4 — Tests (component + backend e2e + browser e2e)
 
-### T015 — frontend: Vitest for slots + reducers
+### T015 [X] — frontend: Vitest for slots + reducers
 - **Files**: Create `studio/src/components/chat/AttributedBubble.test.tsx`, Create `studio/src/components/chat/ToolCallChip.test.tsx`, Create (or extend) `studio/src/lib/chatStream.test.ts`
 - **Adds**: `AttributedBubble.test.tsx` — (a) degenerate single-agent DOM parity, (b) author+avatar renders name+Bot, (c) `toolCalls` renders `ToolCallChip`, (d) `rationale`+`showRationale` toggles amber box, (e) `citations=[]` renders no chip row. `ToolCallChip.test.tsx` — renders tool name; error status tints red. `chatStream.test.ts` — `routeToken`/`openAuthorBubble` route by author (two authors → two bubbles); `attachToolCall`/`attachRationale` attach to the matching author's open bubble and open a new one when the author differs.
 - **Acceptance**: `npm run test` green; no existing spec regressed.

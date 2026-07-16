@@ -67,3 +67,60 @@ export function openAuthorBubble<M extends Attributed>(
   }
   return [...messages, make(author)];
 }
+
+/** A single tool call the member pod reported (POC-2b tool-call chip). */
+export interface ToolCall {
+  tool_name: string;
+  status: string; // "ok" | "error"
+}
+
+/** Attributed bubble enriched with the POC-2b rich slots (tool chips + the
+ *  member's one-line rationale). Surfaces still extend this with their own
+ *  fields via the generic `M`. Both fields are optional so a single-agent
+ *  bubble that never sets them is byte-identical to a plain `Attributed`. */
+export interface AttributedRich extends Attributed {
+  toolCalls?: ToolCall[];
+  rationale?: string | null;
+}
+
+/**
+ * Attach a `tool_call` frame to the open assistant bubble for `author`
+ * (appending to its `toolCalls` list); if the last bubble is not an open
+ * assistant bubble for that author, open a new one seeded with the tool call.
+ * Pure/immutable — returns a new array. Reuses `isOpenAssistantFor` so the
+ * single-speaker (`author` undefined) case never forks.
+ */
+export function attachToolCall<M extends AttributedRich>(
+  messages: M[],
+  author: string | undefined,
+  toolCall: ToolCall,
+  make: (author?: string) => M
+): M[] {
+  const last = messages[messages.length - 1];
+  if (last && isOpenAssistantFor(last, author)) {
+    const updated: M = { ...last, toolCalls: [...(last.toolCalls ?? []), toolCall] };
+    return [...messages.slice(0, -1), updated];
+  }
+  const fresh: M = { ...make(author), toolCalls: [toolCall] };
+  return [...messages, fresh];
+}
+
+/**
+ * Set the `rationale` on the open assistant bubble for `author`; if the last
+ * bubble is not an open assistant bubble for that author, open a new one seeded
+ * with the rationale. Pure/immutable — returns a new array.
+ */
+export function attachRationale<M extends AttributedRich>(
+  messages: M[],
+  author: string | undefined,
+  rationale: string,
+  make: (author?: string) => M
+): M[] {
+  const last = messages[messages.length - 1];
+  if (last && isOpenAssistantFor(last, author)) {
+    const updated: M = { ...last, rationale };
+    return [...messages.slice(0, -1), updated];
+  }
+  const fresh: M = { ...make(author), rationale };
+  return [...messages, fresh];
+}

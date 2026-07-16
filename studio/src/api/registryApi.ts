@@ -751,6 +751,25 @@ export const getWorkflowRunTree = async (
   return data;
 };
 
+// POC-2b: a single frame from the live workflow stream (SSE). The workflow
+// stream is consumed via `fetch` + a ReadableStream reader (EventSource is
+// GET-only and the stream needs a POST body), so it is NOT the axios instance.
+export interface WorkflowStreamFrame {
+  type: "agent_start" | "token" | "tool_call" | "rationale" | "agent_end" | "done" | "error";
+  author?: string;
+  content?: string;
+  tool?: string;
+  status?: string;
+  run_id?: string;
+  message?: string;
+}
+
+// FULL path (includes the /api/v1 prefix) because the page's fetch is not the
+// axios instance that carries the baseURL. Auth is an Authorization: Bearer
+// header on the fetch, not a token query param.
+export const workflowRunStreamUrl = (workflowId: string): string =>
+  `/api/v1/workflows/${workflowId}/runs/stream`;
+
 export const listWorkflowRuns = async (
   workflowId: string,
   params?: { limit?: number; offset?: number; status?: string },
@@ -1389,6 +1408,11 @@ export interface AgentRunItem {
   production_deployment_id: string | null;
   sandbox_deployment_id: string | null;
   workflow_deployment_id: string | null;
+  // POC-2b: projected onto workflow run-tree children so the reload/history path
+  // rehydrates the same tool chips + rationale the live stream showed. Absent on
+  // non-workflow run rows (default empty / null).
+  tool_calls?: { tool_name: string; status: string }[];
+  rationale?: string | null;
 }
 
 export const listAgentRuns = async (params?: {
