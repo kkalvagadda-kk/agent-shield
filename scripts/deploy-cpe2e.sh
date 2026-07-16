@@ -3,6 +3,27 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.188 (Context Storage — fix Memory-tab regression: restore cross-thread
+#     conversation LIST. POC-0 made GET /agents/{name}/memory return [] whenever thread_id was
+#     omitted ("the legacy cross-thread list isn't a store operation") — but the Studio Memory tab
+#     loads with NO thread selected and derives its thread list FROM those rows, so the tab blanked
+#     for every agent, even memory-enabled ones. Fix: thread_id is an OPTIONAL filter again — no
+#     thread_id → ConversationStore.list_recent (new port method + memory.list_recent) returns the
+#     agent's recent rows across conversations as full ORM rows (row metadata intact). deployment_id/
+#     user_id filter only when provided (no forced NULL). suite-75 T-S75-006 guards it. No migration.)
+#   - registry-api:0.2.187 (Context Storage — fix GET /agents/{name}/memory READ regression. POC-0 wiring
+#     re-routed the transcript API through ConversationStore.load → memory.load_context, a path built to
+#     inject a bounded LLM-context window (lean Turn={role,content}; legacy deployment_id IS NULL default).
+#     Two symptoms, one cause: (1) message_index dropped by the lean Turn → serializer hardcoded None;
+#     (2) forced deployment_id IS NULL excluded every deployment-tagged row once POC-0 began tagging writes,
+#     so external reads (Studio MemoryTab, suite-75) got rows=0. The runner dodged both (it passes
+#     deployment_id + only reads role/content). Fix at the layer POC-0 broke: load_context carries
+#     message_index/created_at through both scope branches + cache (redis key bumped v2), Turn port copies
+#     them, serializer emits real values; deployment filter reconciled with the write (filter when provided,
+#     no forced NULL). No migration. Re-run suite-75 → T-S75-001/002/004 PASS.)
+#   - declarative-runner:0.1.52 (in ECR; _save_memory_turn now logs status+body on any 4xx/5xx instead of
+#     swallowing a fire-and-forget POST — the silent-500 that hid the missing-column write failure. Rides
+#     the next agent redeploy; not required for the read-path asserts above.)
 #   - eval-runner:0.1.7 (Eval v2 E-1 FIX — durable trajectory projection now COLLAPSES one logical
 #     tool call's consecutive same-tool run_steps into a single entry (_collapse_tool_calls in
 #     eval-runner/main.py). A gated call parks as TWO rows — running(no appr) then
@@ -241,7 +262,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #       was NOT re-touched in POC-1 → stays 0.1.37.
 #   The repo is committed at the FINAL (CP2) tags below; scripts/checkpoints/*-deploy.sh
 #   deploy the current committed tags and assert their rollout.
-REGISTRY_API_TAG="0.2.186"
+REGISTRY_API_TAG="0.2.188"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
 # they run under a per-agent SA, so a secret on the default SA never reached
@@ -249,7 +270,7 @@ SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.38"
 STUDIO_TAG="0.1.140"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.51"
+DECLARATIVE_RUNNER_TAG="0.1.52"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"

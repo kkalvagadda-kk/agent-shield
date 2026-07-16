@@ -47,7 +47,10 @@ def _get_redis():
 
 def _redis_key(agent_name: str, thread_id: str, deployment_id: str | None = None) -> str:
     suffix = deployment_id or "global"
-    return f"memory:{agent_name}:{thread_id}:{suffix}"
+    # v2: cached entries now carry row metadata (message_index/created_at). The
+    # version prefix invalidates pre-fix entries that held only {role, content},
+    # so a cache hit can't serve a metadata-less transcript to the read API.
+    return f"memory:v2:{agent_name}:{thread_id}:{suffix}"
 
 
 async def save_turn(
@@ -167,6 +170,10 @@ async def load_context(
                 "content": r.content,
                 "agent_name": r.agent_name,
                 "message_kind": r.message_kind,
+                # Row-level metadata the transcript API (AgentMemoryResponse) needs.
+                # The runner's context-injection read ignores these extra keys.
+                "message_index": r.message_index,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
         ]
@@ -192,15 +199,27 @@ async def load_context(
         q = q.where(AgentMemory.user_id == user_id)
     if deployment_id:
         q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
-    else:
-        q = q.where(AgentMemory.deployment_id.is_(None))
+    # When deployment_id is absent, add NO deployment predicate. thread_id (session)
+    # + user_id already scope the read. The pre-POC default forced deployment_id
+    # IS NULL — correct only while writes were untagged; once POC-0 began tagging
+    # every write with a real deployment_id, that default excluded every row an
+    # external caller (Studio MemoryTab, e2e suite) could read. The read must
+    # reconcile with the write's scoping, not assume legacy NULL rows.
 
     result = await db.execute(
         q.order_by(AgentMemory.message_index.desc()).limit(window)
     )
     rows = list(reversed(result.scalars().all()))
 
-    messages = [{"role": r.role, "content": r.content} for r in rows]
+    messages = [
+        {
+            "role": r.role,
+            "content": r.content,
+            "message_index": r.message_index,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in rows
+    ]
 
     # Warm cache
     if redis and messages:
@@ -211,6 +230,39 @@ async def load_context(
             pass
 
     return messages
+
+
+async def list_recent(
+    db: AsyncSession,
+    *,
+    agent_name: str,
+    deployment_id: str | None = None,
+    user_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Cross-thread recent rows for an agent, newest-first (by created_at).
+
+    Restores the pre-POC transcript-list contract that the Memory tab relies on
+    to enumerate an agent's conversations: `thread_id` is an OPTIONAL filter, not a
+    requirement. A per-thread transcript read is `load_context` (conversation-keyed,
+    ordered by message_index); this is the "which conversations exist" read, ordered
+    by wall-clock across threads. Returns full ORM rows so the router can serialize
+    row metadata (id/message_index/created_at) — no lossy Turn projection.
+
+    Scoping mirrors load_context: filter by deployment_id / user_id ONLY when given
+    (never force IS NULL). Cross-user visibility for the agent-owner view matches the
+    prior behavior; per-user privacy scoping is a Tighten concern (S9)."""
+    import uuid as _uuid
+
+    q = select(AgentMemory).where(AgentMemory.agent_name == agent_name)
+    if user_id:
+        q = q.where(AgentMemory.user_id == user_id)
+    if deployment_id:
+        q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
+    q = q.order_by(AgentMemory.created_at.desc()).limit(limit).offset(offset)
+    result = await db.execute(q)
+    return list(result.scalars().all())
 
 
 async def search_memory(

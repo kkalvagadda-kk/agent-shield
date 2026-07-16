@@ -111,13 +111,20 @@ async def list_memory(
                              every member's tagged rows come back in index order.
     """
     await _get_agent_or_404(name, db)
-    if not thread_id:
-        # The transcript store is conversation-keyed; a transcript read needs a
-        # thread_id. (The legacy cross-thread "list all" view is not a store
-        # operation — see the memory-api contract.)
-        return []
-
     store = get_conversation_store()
+
+    if not thread_id:
+        # No thread selected → list the agent's recent rows across conversations so
+        # the Memory tab can enumerate its threads. thread_id is an OPTIONAL filter,
+        # not a requirement (POC-0 wrongly made it mandatory and returned [], which
+        # regressed the tab — it derives its thread list from these rows). Full ORM
+        # rows → row metadata (id/message_index/created_at) serialized losslessly.
+        rows = await store.list_recent(
+            db, agent_name=name, deployment_id=deployment_id,
+            user_id=user_id, limit=limit, offset=offset,
+        )
+        return [AgentMemoryResponse.model_validate(r) for r in rows]
+
     turns = await store.load(
         db,
         conversation_id=thread_id,
@@ -130,10 +137,9 @@ async def list_memory(
     if offset:
         turns = turns[offset:]
 
-    # The store returns message-level Turns (role/content/+author/message_kind),
-    # not row metadata; enrich with the router-known conversation keys so the
-    # response carries thread_id/scope/agent_name. id/message_index/created_at are
-    # row-level and absent on a transcript read (see AgentMemoryResponse).
+    # The store returns Turns carrying role/content/+author/message_kind and the
+    # row-level metadata the transcript response promises (message_index/created_at);
+    # enrich with the router-known conversation keys (thread_id/scope/agent_name).
     return [
         AgentMemoryResponse(
             id=None,
@@ -141,11 +147,11 @@ async def list_memory(
             thread_id=thread_id,
             role=t["role"],
             content=t["content"],
-            message_index=None,
+            message_index=t.get("message_index"),
             message_kind=t.get("message_kind")
             or ("user" if t["role"] == "user" else "agent_output"),
             scope=scope,
-            created_at=None,
+            created_at=t.get("created_at"),
         )
         for t in turns
     ]

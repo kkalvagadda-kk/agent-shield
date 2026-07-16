@@ -495,9 +495,17 @@ async def _save_memory_turn(
         if author_agent_name:
             body["author_agent_name"] = author_agent_name
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
+            resp = await client.post(
                 f"{cfg.REGISTRY_API_URL}/api/v1/agents/{agent_name}/memory",
                 json=body,
+            )
+        # httpx does NOT raise on 4xx/5xx. A silent non-2xx here is exactly how a
+        # persisted-memory failure (e.g. a missing column) hid as a "successful" turn:
+        # the write never landed and nothing surfaced. Fail loud instead.
+        if resp.status_code >= 400:
+            logger.error(
+                "Memory save rejected for %s/%s: HTTP %s — %s",
+                agent_name, conversation_id, resp.status_code, resp.text[:500],
             )
     except Exception as exc:
         logger.warning("Memory save failed for %s/%s: %s", agent_name, conversation_id, exc)

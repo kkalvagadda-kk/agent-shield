@@ -589,7 +589,11 @@ registry-api:
     # eval_mode threaded run-create → durable dispatch body → runner
     # Context Storage POC-0/1: migration 0064 (agent_memory scope/workflow_run_id/
     # message_kind); ConversationStore; session_id threading; shared workflow thread.
-    tag: "0.2.186"
+    # 0.2.187: fix GET /memory read regression — POC-0 routed the transcript API
+    # through the lean LLM-context path (load_context), which dropped message_index
+    # and forced deployment_id IS NULL (excluded deployment-tagged rows). Restore
+    # row metadata through the Turn port + reconcile the deployment filter.
+    tag: "0.2.188"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -665,7 +669,7 @@ deploy-controller:
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
   # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
   # load/save + shared workflow transcript are all baked into this image.
-  declarativeRunnerTag: "0.1.51"
+  declarativeRunnerTag: "0.1.52"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

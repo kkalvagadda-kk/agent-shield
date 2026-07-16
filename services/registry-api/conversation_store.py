@@ -37,6 +37,10 @@ class Turn(TypedDict):
     content: str
     agent_name: NotRequired[str | None]  # author (returned by workflow_run reads)
     message_kind: NotRequired[str]  # user | agent_output | rationale
+    # Row-level metadata carried through for the transcript read API
+    # (AgentMemoryResponse). The runner's LLM-context read ignores these.
+    message_index: NotRequired[int | None]
+    created_at: NotRequired[str | None]  # ISO-8601
 
 
 class ConversationStore(Protocol):
@@ -73,6 +77,21 @@ class ConversationStore(Protocol):
           scope='agent'        → filter (agent_name, conversation_id) + user_id when given.
           scope='workflow_run' → filter conversation_id + scope; DROP agent_name filter
                                  (cross-agent read); each Turn carries its author agent_name."""
+        ...
+
+    async def list_recent(
+        self,
+        db: AsyncSession,
+        *,
+        agent_name: str,
+        deployment_id: str | None = None,
+        user_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentMemory]:
+        """Cross-thread recent rows for an agent (newest-first) — the "which
+        conversations exist" read that backs the Memory tab's thread list. Returns
+        full ORM rows (row metadata intact), unlike the conversation-keyed `load`."""
         ...
 
     async def erase(
@@ -157,8 +176,31 @@ class PostgresConversationStore:
                 turn["agent_name"] = r["agent_name"]
             if "message_kind" in r:
                 turn["message_kind"] = r["message_kind"]
+            if "message_index" in r:
+                turn["message_index"] = r["message_index"]
+            if "created_at" in r:
+                turn["created_at"] = r["created_at"]
             turns.append(turn)
         return turns
+
+    async def list_recent(
+        self,
+        db: AsyncSession,
+        *,
+        agent_name: str,
+        deployment_id: str | None = None,
+        user_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[AgentMemory]:
+        return await memory.list_recent(
+            db,
+            agent_name=agent_name,
+            deployment_id=deployment_id,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
 
     async def erase(
         self,

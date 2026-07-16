@@ -233,9 +233,14 @@ async def chat_turn(agent, message, session_id, auth):
                         ev = json.loads(line[6:].strip())
                     except Exception:
                         continue
-                    if ev.get("event") == "text_delta":
+                    # The registry-api chat endpoint emits data-only frames in the
+                    # frontend EventSource schema ({"type": "token"|"done"|"error"}),
+                    # NOT the runner's raw named-event schema (event: text_delta). Read
+                    # the same frames the real browser consumes — see
+                    # routers/chat.py::_proxy_agent_stream translation.
+                    if ev.get("type") == "token":
                         text += ev.get("content", "")
-                    if ev.get("event") in ("done", "error"):
+                    if ev.get("type") in ("done", "error"):
                         break
     except Exception as e:
         diag(f"stream error agent={agent}: {e!r}")
@@ -308,6 +313,30 @@ async def main():
                 else:
                     out("T-S75-001", "FAIL",
                         f"http={st2} rows={len(rows)} ordered={ordered}({reason})")
+
+        # ===================================================================
+        # T-S75-006 — cross-thread conversation LIST (Memory-tab regression guard)
+        # GET /memory with NO thread_id must return the agent's rows across
+        # conversations so the Memory tab can enumerate its threads. POC-0 wrongly
+        # made thread_id mandatory (returned []), blanking the tab even for
+        # memory-enabled agents. Same call the tab makes on load.
+        # ===================================================================
+        if not token:
+            out("T-S75-006", "SKIP", "no keycloak token")
+        elif not deployed:
+            out("T-S75-006", "SKIP", f"chat agent not running: {statuses.get(CHAT_AGENT)}")
+        else:
+            async with httpx.AsyncClient(timeout=30) as c:
+                lm = await c.get(f"{BASE}/agents/{CHAT_AGENT}/memory")  # NO thread_id
+            listed = lm.json() if lm.status_code == 200 else []
+            has_idx = all(m.get("message_index") is not None for m in listed)
+            threads = {m.get("thread_id") for m in listed}
+            if lm.status_code == 200 and len(listed) >= 2 and SESSION in threads and has_idx:
+                out("T-S75-006", "PASS",
+                    f"cross-thread list: {len(listed)} rows across {len(threads)} thread(s), metadata intact")
+            else:
+                out("T-S75-006", "FAIL",
+                    f"http={lm.status_code} rows={len(listed)} session_in_list={SESSION in threads} has_idx={has_idx}")
 
         # ===================================================================
         # T-S75-003 — foreign-thread rejection (fail-closed session ownership, S6)
@@ -484,9 +513,14 @@ async def chat_turn(agent, message, session_id, auth):
                         ev = json.loads(line[6:].strip())
                     except Exception:
                         continue
-                    if ev.get("event") == "text_delta":
+                    # The registry-api chat endpoint emits data-only frames in the
+                    # frontend EventSource schema ({"type": "token"|"done"|"error"}),
+                    # NOT the runner's raw named-event schema (event: text_delta). Read
+                    # the same frames the real browser consumes — see
+                    # routers/chat.py::_proxy_agent_stream translation.
+                    if ev.get("type") == "token":
                         text += ev.get("content", "")
-                    if ev.get("event") in ("done", "error"):
+                    if ev.get("type") in ("done", "error"):
                         break
     except Exception as e:
         print(f"DIAG stream error: {e!r}")

@@ -64,9 +64,9 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.186"
+REGISTRY_API_TAG="0.2.188"
 DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.51"
+DECLARATIVE_RUNNER_TAG="0.1.52"
 STUDIO_TAG="0.1.140"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
