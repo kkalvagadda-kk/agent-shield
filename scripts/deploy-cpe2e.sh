@@ -249,7 +249,7 @@ SAFETY_ORCHESTRATOR_TAG="0.1.3"
 DEPLOY_CONTROLLER_TAG="0.1.38"
 STUDIO_TAG="0.1.140"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.49"
+DECLARATIVE_RUNNER_TAG="0.1.50"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -344,9 +344,17 @@ kubectl create secret generic postgres-passwords \
   --from-literal=langfuse="${PG_PASS}" \
   --from-literal=langgraph="${PG_PASS}" \
   --from-literal=appsmith="${PG_PASS}" \
-  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
-  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
+  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NAMESPACE}:5432/agentshield" \
+  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NAMESPACE}:5432/agentshield" \
   --dry-run=client -o yaml | kubectl apply -f -
+# NOTE: the host is namespace-QUALIFIED on purpose. registry-api reads this from
+# the platform namespace, but the deploy-controller also propagates
+# registry-api-direct-url into AGENT pods, which run in agents-*. A bare service
+# name only resolves inside its own namespace, so agents died with
+# "failed to resolve host 'agentshield-postgresql'" -> the (fail-loud)
+# checkpointer refused to start -> CrashLoopBackOff. `<svc>.<ns>` resolves from
+# every namespace, so one value is correct in both contexts. Same reason
+# LANGFUSE_HOST is qualified in the deploy-controller chart.
 
 # Redis password (Bitnami existingSecret)
 kubectl create secret generic redis-password \

@@ -40,6 +40,11 @@
 #     ConfigMap + playground RBAC are applied separately (step 3b). Without the
 #     ConfigMap every agent pod hangs in ContainerCreating; the controller only
 #     self-creates it on the PRODUCTION path, never for sandbox deploys.
+#  9. Anything injected into AGENT pods must be namespace-QUALIFIED. Agents run
+#     in agents-*, so a bare `agentshield-postgresql` does not resolve there and
+#     the fail-loud checkpointer CrashLoopBackOffs the pod. postgres-passwords
+#     therefore stores `<release>-postgresql.<ns>` — correct from every namespace
+#     (registry-api included). Same reason LANGFUSE_HOST is qualified.
 #
 # RESTORING A BACKUP AFTERWARDS: see the note at the bottom — you MUST scale the
 # DB clients to 0 first or the restore SILENTLY half-applies.
@@ -61,7 +66,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
 REGISTRY_API_TAG="0.2.186"
 DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.49"
+DECLARATIVE_RUNNER_TAG="0.1.50"
 STUDIO_TAG="0.1.140"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -200,9 +205,10 @@ kubectl create secret generic postgres-passwords -n "$NS" \
   --from-literal=keycloak="${PG_PASS}" --from-literal=agentshield="${PG_PASS}" \
   --from-literal=langfuse="${PG_PASS}" --from-literal=langgraph="${PG_PASS}" \
   --from-literal=appsmith="${PG_PASS}" \
-  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
-  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
+  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NS}:5432/agentshield" \
+  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NS}:5432/agentshield" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+# The host is namespace-QUALIFIED deliberately — see note 9 in the header.
 kubectl create secret generic redis-password -n "$NS" \
   --from-literal=redis-password="${REDIS_PASS}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl create secret generic minio-credentials -n "$NS" \
