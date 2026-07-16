@@ -32,13 +32,21 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from db import AsyncSessionLocal
 from filter_engine import evaluate_filters
-from models import AgentRun, Approval
+from models import AgentRun, Approval, RunStep
+from pod_stream import stream_pod_chat_frames
 
 logger = logging.getLogger(__name__)
+
+# Internal per-member terminal sentinel. Yielded by _dispatch_stream / _run_step_stream
+# for the mode walkers to route on; the SSE serializer in the stream endpoint filters it
+# out so it NEVER reaches a client (contracts/sse-frames.md §D).
+_MEMBER_END = "__member_end__"
+
+from typing import AsyncGenerator, Optional  # noqa: E402
 
 # Hard cap on total member steps for graph walks — protects against cycles even
 # when a bespoke max_iterations isn't configured.
@@ -67,41 +75,87 @@ async def _resolve_agent_environment(agent_name: str) -> str:
         return "production"
 
 
-async def _dispatch(agent_name: str, team: str, message: str, thread_id: str | None = None,
-                    conversation_id: str | None = None, scope: str = "agent") -> tuple[str, str | None, str | None]:
-    """POST the message to the member agent's deployed pod. Returns (status, output, error).
+async def _persist_tool_call_step(child_id: str, tool: str, status: str) -> None:
+    """Persist one observed reactive tool_call frame as a RunStep marker row under the
+    child run (R2/R4). Reactive members write NO run_steps on their own, so this marker
+    (``output.kind='tool_call'``) is what the run-tree tool_calls projection reads — the
+    invariant that reload == stream for reactive members. Best-effort; a persistence
+    failure must never break the live stream."""
+    try:
+        now = datetime.now(timezone.utc)
+        async with AsyncSessionLocal() as s:
+            next_num = (await s.execute(
+                select(func.coalesce(func.max(RunStep.step_number), 0) + 1)
+                .where(RunStep.run_id == child_id)
+            )).scalar_one()
+            s.add(RunStep(
+                run_id=child_id,
+                step_number=int(next_num),
+                name=tool or "tool",
+                status="completed" if status == "ok" else "failed",
+                output={"kind": "tool_call", "tool": tool, "status": status},
+                started_at=now,
+                completed_at=now,
+            ))
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001 — never break the stream on a marker write
+        logger.warning("failed to persist tool_call RunStep under %s (%s): %s", child_id, tool, exc)
 
-    Passing `thread_id` lets a member that pauses for approval create its Approval
-    row under a thread_id the orchestrator can correlate (see `_run_step`).
 
-    `conversation_id`/`scope` carry the SHARED workflow transcript key (context-storage
-    design §5.2 — identity split): they travel ALONGSIDE `thread_id` in different body
-    fields and never alias it. `thread_id` stays the per-member checkpoint + approval key;
-    `conversation_id` is the orthogonal cross-member transcript key each member loads.
+async def _dispatch_stream(
+    agent_name: str, team: str, message: str, thread_id: str,
+    conversation_id: str, scope: str, child_id: str,
+) -> AsyncGenerator[dict, None]:
+    """Reactive member: stream the member pod's /chat/stream via the ONE shared reader,
+    re-yielding its content frames (token/tool_call/rationale/error/approval_requested)
+    to the caller, accumulating token text as the member's output, and persisting each
+    observed tool_call as a RunStep marker (so the tree projection has data — R2).
+
+    The reader's own ``agent_start`` is suppressed here — ``_run_step_stream`` owns the
+    member lifecycle framing (agent_start/agent_end) so durable and reactive members
+    frame identically. Ends by yielding the internal ``__member_end__`` sentinel with the
+    routing outcome (status/output/error); the sentinel is consumed by the mode walker,
+    never sent to the client.
+
+    ``conversation_id``/``scope`` carry the SHARED workflow transcript key (§5.2 identity
+    split); they ride ALONGSIDE ``thread_id`` (the per-member checkpoint + Approval key)
+    and never alias it.
     """
     environment = await _resolve_agent_environment(agent_name)
-    url = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080/chat"
-    body: dict = {"message": message}
-    if thread_id:
-        body["thread_id"] = thread_id
-    if conversation_id:
-        body["conversation_id"] = conversation_id
-        body["scope"] = scope
+    service_url = f"http://{agent_name}-{environment}.{_team_namespace(team)}.svc.cluster.local:8080"
+    accumulated: list[str] = []
+    error_msg: Optional[str] = None
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json=body)
-        if resp.status_code == 200:
-            data = resp.json()
-            return "completed", (data.get("output") or data.get("response") or json.dumps(data)), None
-        return "failed", None, f"agent returned {resp.status_code}: {resp.text[:300]}"
-    except httpx.ConnectError:
-        # No pod at the expected Service — almost always an undeployed agent.
-        return "failed", None, (
-            f"agent '{agent_name}' appears undeployed (no pod at {url}). "
-            f"Deploy the agent before running the workflow."
-        )
-    except Exception as exc:  # network / timeout / bad JSON
-        return "failed", None, f"dispatch failed: {exc}"
+        async for frame in stream_pod_chat_frames(
+            service_url,
+            message=message,
+            thread_id=thread_id,
+            conversation_id=conversation_id,
+            scope=scope,
+            author=agent_name,
+        ):
+            ftype = frame.get("type")
+            if ftype == "agent_start":
+                # Lifecycle is owned by _run_step_stream — do not double-open the bubble.
+                continue
+            if ftype == "token":
+                accumulated.append(frame.get("content", ""))
+            elif ftype == "tool_call":
+                await _persist_tool_call_step(child_id, frame.get("tool", ""), frame.get("status", "ok"))
+            elif ftype == "error":
+                error_msg = frame.get("message") or "member stream error"
+            yield frame
+    except Exception as exc:  # noqa: BLE001 — surface as a failed member, never crash the walk
+        logger.exception("reactive member '%s' stream failed", agent_name)
+        error_msg = f"dispatch failed: {exc}"
+
+    output = "".join(accumulated) or None
+    if error_msg is not None:
+        yield {"type": _MEMBER_END, "author": agent_name, "status": "failed",
+               "output": output, "error": error_msg}
+    else:
+        yield {"type": _MEMBER_END, "author": agent_name, "status": "completed",
+               "output": output, "error": None}
 
 
 async def _resolve_agent_shape(agent_name: str) -> str:
@@ -435,14 +489,23 @@ async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: s
     await _halt_for_approval(parent_run_id, mode, team, workflow_id, cursor)
 
 
-async def _run_step(parent_run_id: str, team: str, agent_name: str, current_input: str) -> tuple[str, str | None, str | None]:
-    """Create a child run, dispatch to the member, record the outcome. Returns (status, output, err).
+async def _run_step_stream(
+    parent_run_id: str, team: str, agent_name: str, current_input: str, conversation_id: str,
+) -> AsyncGenerator[dict, None]:
+    """The ONE member-step leaf, as a generator. Creates the child run, dispatches to the
+    member (durable via /run poll, reactive via the streaming /chat/stream reader), records
+    the outcome, detects a HITL pause, and authors the parent-trace span — exactly as the
+    former non-streaming ``_run_step`` did — while yielding client-facing frames:
 
-    If the member pauses for HITL approval (a pending Approval row appears for the
-    child's thread_id after dispatch), returns status 'awaiting_approval' and leaves
-    the child in 'awaiting_approval' (no completed_at) so the caller can checkpoint
-    and halt. The pending-approval row — not an empty response — is the authoritative
-    pause signal (a member's sync /chat returns 200 with empty output on interrupt).
+        agent_start{author} → [reactive member content frames] → agent_end{author}
+        → __member_end__{status,output,error}   (internal sentinel, consumed by the walker)
+
+    Durable members emit only ``agent_start`` → (poll) → ``agent_end`` (no token/tool/
+    rationale frames — accepted asymmetry). The ``__member_end__`` sentinel carries the
+    routing outcome; the mode walker consumes it and never forwards it to the client.
+
+    ``_run_step`` (below) is a thin non-streaming DRAIN of this generator, so there is ONE
+    leaf implementation (No-Bandaid: no forked member-dispatch path).
     """
     start = time.perf_counter()
     member_shape = await _resolve_agent_shape(agent_name)
@@ -486,16 +549,19 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
         child_id = str(child.id)
 
     # Context-storage design §5.2 (identity split): every member of THIS workflow run
-    # shares ONE conversation_id (= parent_run_id) so each loads the same cross-member
-    # transcript (loaded runner-side in T012), while its per-member `thread_id`
+    # shares ONE `conversation_id` (passed in — parent.session_id or the run id) so each
+    # loads the same cross-member transcript, while its per-member `thread_id`
     # (checkpoint + Approval correlation, WS-1) stays exactly as assigned above. The two
     # keys travel in DIFFERENT body fields and never alias — this is what keeps durable
     # resume keyed off thread_id=child_id from regressing. String-passing (`current_input`
     # as `message`) is retained as a fallback; cross-member context now flows via the
     # shared transcript.
-    conversation_id = parent_run_id
     conversation_scope = "workflow_run"
     workflow_run_id = parent_run_id
+
+    # Open this member's attributed bubble before any content (single lifecycle owner —
+    # _dispatch_stream suppresses the reader's own agent_start).
+    yield {"type": "agent_start", "author": agent_name}
 
     if member_shape == "durable":
         # D4 "+ Visibility": a durable member runs via `/run` so its per-node run_steps
@@ -521,10 +587,18 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
             workflow_run_id=workflow_run_id,
         )
     else:
-        status_val, output, err = await _dispatch(
+        # Reactive member: stream /chat/stream through the shared reader, re-yielding the
+        # member's content frames to the client and collecting the routing outcome from the
+        # __member_end__ sentinel.
+        status_val, output, err = "completed", None, None
+        async for frame in _dispatch_stream(
             agent_name, team, current_input, thread_id,
-            conversation_id=conversation_id, scope=conversation_scope,
-        )
+            conversation_id, conversation_scope, child_id,
+        ):
+            if frame.get("type") == _MEMBER_END:
+                status_val, output, err = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
     elapsed_ms = int((time.perf_counter() - start) * 1000)
 
     # Authoritative pause detection (reactive /chat members only — a durable member's
@@ -576,6 +650,30 @@ async def _run_step(parent_run_id: str, team: str, agent_name: str, current_inpu
             )
         except Exception:  # tracing must never break orchestration
             pass
+
+    # Close the member's bubble, then hand the routing outcome to the walker. agent_end
+    # is emitted even for awaiting_approval/failed so the client always sees a clean
+    # per-member envelope; the sentinel carries the status the walker routes on.
+    yield {"type": "agent_end", "author": agent_name}
+    yield {"type": _MEMBER_END, "author": agent_name,
+           "status": status_val, "output": output, "error": err}
+
+
+async def _run_step(
+    parent_run_id: str, team: str, agent_name: str, current_input: str,
+    conversation_id: str | None = None,
+) -> tuple[str, str | None, str | None]:
+    """Non-streaming DRAIN of ``_run_step_stream`` — the single leaf both the streamed and
+    the non-streamed paths share (No-Bandaid: one member-dispatch implementation). Consumes
+    the generator, ignores the client-facing frames, and returns the routing outcome from
+    the ``__member_end__`` sentinel: ``(status, output, error)``. ``conversation_id``
+    defaults to ``parent_run_id`` for legacy callers (scheduler/webhook/resume) that don't
+    thread a session key."""
+    conversation_id = conversation_id or parent_run_id
+    status_val, output, err = "failed", None, "member produced no terminal sentinel"
+    async for frame in _run_step_stream(parent_run_id, team, agent_name, current_input, conversation_id):
+        if frame.get("type") == _MEMBER_END:
+            status_val, output, err = frame["status"], frame["output"], frame["error"]
     return status_val, output, err
 
 
@@ -663,8 +761,10 @@ def _compute_sequential_order(member_names: list[str], graph: dict[str, list[tup
 
 async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
                                order: list[str], start_index: int, current_input: str,
-                               shape: str = "durable") -> None:
-    """Run members order[start_index:] in sequence. Pausable + resumable.
+                               conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Run members order[start_index:] in sequence. Pausable + resumable. Async GENERATOR:
+    re-yields each member's client-facing frames and routes on the __member_end__ sentinel;
+    all DB writes / routing / fail-fast are byte-identical to the pre-stream walker.
 
     On a member pausing for approval, checkpoints {next_index=i+1} and halts the
     parent at 'awaiting_approval'; `resume_orchestration` re-enters here with the
@@ -672,7 +772,12 @@ async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
     """
     for i in range(start_index, len(order)):
         agent_name = order[i]
-        status_val, output, _err = await _run_step(parent_run_id, team, agent_name, current_input)
+        status_val, output, _err = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, agent_name, current_input, conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                status_val, output, _err = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if status_val == "awaiting_approval":
             if shape == "reactive":
                 await _fail_parent(
@@ -703,14 +808,18 @@ async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
 
 
 async def orchestrate_graph_sequential(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                                       shape: str = "durable") -> None:
-    """Walk the edge chain (default/first outgoing edge) or member order if no edges. Fail-fast."""
+                                       conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Walk the edge chain (default/first outgoing edge) or member order if no edges. Fail-fast.
+    Async GENERATOR — re-yields the sequential walker's member frames."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
     order = _compute_sequential_order(member_names, graph)
-    await _run_sequential_from(parent_run_id, team, workflow_id, order, 0, input_message or "", shape)
+    async for frame in _run_sequential_from(
+        parent_run_id, team, workflow_id, order, 0, input_message or "", conversation_id, shape
+    ):
+        yield frame
 
 
 async def resume_orchestration(parent_run_id: str, member_output: str, member_status: str) -> None:
@@ -723,6 +832,9 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(select(AgentRun).where(AgentRun.id == parent_run_id))).scalar_one_or_none()
         state = parent.orchestrator_state if parent else None
+        # Shared transcript key (§5.2): the same conversation_id the forward walk used —
+        # parent.session_id when a session was supplied, else the run id.
+        conversation_id = (parent.session_id if parent else None) or parent_run_id
     if not state:
         logger.warning("resume_orchestration: no checkpoint for parent %s — nothing to advance", parent_run_id)
         return
@@ -788,11 +900,15 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
     await _clear_checkpoint(parent_run_id)
     await _mark_parent(parent_run_id, "running")
 
+    # The mode walkers are now async generators; resume is console-driven (no client
+    # stream is listening) so we DRAIN them locally, discarding the frames while every
+    # DB write inside still lands (No-Bandaid: same walkers as the streamed path).
     if mode == "sequential":
-        await _run_sequential_from(
+        async for _ in _run_sequential_from(
             parent_run_id, team, workflow_id,
-            state["order"], int(state["next_index"]), out,
-        )
+            state["order"], int(state["next_index"]), out, conversation_id,
+        ):
+            pass
     elif mode in ("conditional", "handoff"):
         # Markovian re-entry: the parked node completed with `out`; compute its next hop
         # and resume the walk from there (re-resolve the graph from workflow_id — the
@@ -808,16 +924,19 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
                         mode, parent_run_id)
             return
         runner = _run_conditional_from if mode == "conditional" else _run_handoff_from
-        await runner(parent_run_id, team, workflow_id, graph, nxt, visited_count, out)
+        async for _ in runner(parent_run_id, team, workflow_id, graph, nxt, visited_count, out, conversation_id):
+            pass
     elif mode == "supervisor":
-        await _run_supervisor_from(
+        async for _ in _run_supervisor_from(
             parent_run_id, team, workflow_id,
             state["supervisor"], list(state.get("workers") or []), int(state["max_iters"]),
+            conversation_id=conversation_id,
             iteration=int(state.get("iteration", 0)),
             current_input=state.get("current_input", ""),
             worker_outputs=list(state.get("worker_outputs") or []),
             resumed_phase=state.get("phase"), resumed_output=out,
-        )
+        ):
+            pass
     else:
         # Unknown mode — safe fallback: complete with the member's output rather than hang.
         await _mark_parent(parent_run_id, "completed", out)
@@ -828,8 +947,9 @@ async def resume_orchestration(parent_run_id: str, member_output: str, member_st
 async def _run_conditional_from(parent_run_id: str, team: str, workflow_id: str,
                                 graph: dict[str, list[tuple[str, str | None]]],
                                 node: str | None, visited_count: int, current_input: str,
-                                shape: str = "durable") -> None:
-    """Run the conditional graph from `node`. Pausable + resumable (D3).
+                                conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Run the conditional graph from `node`. Pausable + resumable (D3). Async GENERATOR:
+    re-yields member frames; routing is byte-identical to the pre-stream walker.
 
     On a member pausing for approval, checkpoints the current node + visited_count and
     halts; `resume_orchestration` computes the next node from the resumed member's output
@@ -838,7 +958,12 @@ async def _run_conditional_from(parent_run_id: str, team: str, workflow_id: str,
     failed = False
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
-        status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
+        status_val, output, _err = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, node, current_input, conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                status_val, output, _err = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if status_val == "awaiting_approval":
             await _park_or_fail(parent_run_id, "conditional", team, workflow_id, shape,
                                 cursor={"node": node, "visited_count": visited_count})
@@ -861,21 +986,26 @@ async def _run_conditional_from(parent_run_id: str, team: str, workflow_id: str,
 
 
 async def orchestrate_conditional(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                                  shape: str = "durable") -> None:
-    """At each node, take the first outgoing edge whose condition matches the output."""
+                                  conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """At each node, take the first outgoing edge whose condition matches the output.
+    Async GENERATOR — re-yields the conditional walker's member frames."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
     node = find_start_node(graph, member_names)
-    await _run_conditional_from(parent_run_id, team, workflow_id, graph, node, 0, input_message or "", shape)
+    async for frame in _run_conditional_from(
+        parent_run_id, team, workflow_id, graph, node, 0, input_message or "", conversation_id, shape
+    ):
+        yield frame
 
 
 async def _run_handoff_from(parent_run_id: str, team: str, workflow_id: str,
                             graph: dict[str, list[tuple[str, str | None]]],
                             node: str | None, visited_count: int, current_input: str,
-                            shape: str = "durable") -> None:
-    """Run the handoff graph from `node`. Pausable + resumable (D3).
+                            conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Run the handoff graph from `node`. Pausable + resumable (D3). Async GENERATOR:
+    re-yields member frames; routing is byte-identical to the pre-stream walker.
 
     On a member pausing for approval, checkpoints the current node + visited_count and
     halts; `resume_orchestration` computes the next hop from the resumed member's output
@@ -884,7 +1014,12 @@ async def _run_handoff_from(parent_run_id: str, team: str, workflow_id: str,
     failed = False
     while node and visited_count < _MAX_STEPS:
         visited_count += 1
-        status_val, output, _err = await _run_step(parent_run_id, team, node, current_input)
+        status_val, output, _err = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, node, current_input, conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                status_val, output, _err = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if status_val == "awaiting_approval":
             await _park_or_fail(parent_run_id, "handoff", team, workflow_id, shape,
                                 cursor={"node": node, "visited_count": visited_count})
@@ -911,22 +1046,30 @@ async def _run_handoff_from(parent_run_id: str, team: str, workflow_id: str,
 
 
 async def orchestrate_handoff(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                              shape: str = "durable") -> None:
-    """Follow the handoff signal in each agent's output; else its sole outgoing edge."""
+                              conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Follow the handoff signal in each agent's output; else its sole outgoing edge.
+    Async GENERATOR — re-yields the handoff walker's member frames."""
     async with AsyncSessionLocal() as s:
         member_names = await resolve_member_names(s, workflow_id)
         graph = await resolve_edge_graph(s, workflow_id)
     await _mark_parent(parent_run_id, "running")
     node = find_start_node(graph, member_names)
-    await _run_handoff_from(parent_run_id, team, workflow_id, graph, node, 0, input_message or "", shape)
+    async for frame in _run_handoff_from(
+        parent_run_id, team, workflow_id, graph, node, 0, input_message or "", conversation_id, shape
+    ):
+        yield frame
 
 
 async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
                                supervisor: str, workers: list[str], max_iters: int,
-                               *, iteration: int, current_input: str, worker_outputs: list[str],
+                               *, conversation_id: str, iteration: int, current_input: str,
+                               worker_outputs: list[str],
                                resumed_phase: str | None = None, resumed_output: str | None = None,
-                               shape: str = "durable") -> None:
-    """Re-entrant supervisor loop. Pausable + resumable (D3).
+                               shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """Re-entrant supervisor loop. Pausable + resumable (D3). Async GENERATOR: each member
+    dispatch drains ``_run_step_stream`` and re-yields the member's client-facing frames;
+    the accumulator + routing + pause/fail semantics are byte-identical to the pre-stream
+    walker.
 
     The accumulator (`worker_outputs` + `iteration` + `current_input`) is what survives a
     pause: it is checkpointed on park and reconstructed on resume. A pause can land at two
@@ -951,7 +1094,12 @@ async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
             await _mark_parent(parent_run_id, "completed", s_out or current_input)
             logger.info("workflow run %s (supervisor) finished: completed (resumed at supervisor)", parent_run_id)
             return
-        w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
+        w_status, w_out, _we = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, decision, s_out or "", conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                w_status, w_out, _we = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if w_status == "awaiting_approval":
             await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
                                 cursor=_cursor("worker", iteration, current_input))
@@ -973,7 +1121,12 @@ async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
     hit_cap = True
     while iteration < max_iters:
         # 1. supervisor decides
-        s_status, s_out, _e = await _run_step(parent_run_id, team, supervisor, current_input)
+        s_status, s_out, _e = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, supervisor, current_input, conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                s_status, s_out, _e = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if s_status == "awaiting_approval":
             await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
                                 cursor=_cursor("supervisor", iteration, current_input))
@@ -987,7 +1140,12 @@ async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
             current_input = s_out or current_input
             break
         # 2. dispatch to the chosen worker; thread its output back to the supervisor
-        w_status, w_out, _we = await _run_step(parent_run_id, team, decision, s_out or "")
+        w_status, w_out, _we = "failed", None, None
+        async for frame in _run_step_stream(parent_run_id, team, decision, s_out or "", conversation_id):
+            if frame.get("type") == _MEMBER_END:
+                w_status, w_out, _we = frame["status"], frame["output"], frame["error"]
+            else:
+                yield frame
         if w_status == "awaiting_approval":
             await _park_or_fail(parent_run_id, "supervisor", team, workflow_id, shape,
                                 cursor=_cursor("worker", iteration, current_input))
@@ -1013,8 +1171,9 @@ async def _run_supervisor_from(parent_run_id: str, team: str, workflow_id: str,
 
 
 async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str, input_message: str,
-                                 shape: str = "durable") -> None:
-    """A coordinator (role='supervisor') routes to workers each turn until DONE / max_iterations."""
+                                 conversation_id: str, shape: str = "durable") -> AsyncGenerator[dict, None]:
+    """A coordinator (role='supervisor') routes to workers each turn until DONE / max_iterations.
+    Async GENERATOR — re-yields the supervisor walker's member frames."""
     async with AsyncSessionLocal() as s:
         members = await resolve_members(s, workflow_id)
 
@@ -1027,31 +1186,57 @@ async def orchestrate_supervisor(parent_run_id: str, team: str, workflow_id: str
     workers = [m["name"] for m in members if m["name"] != supervisor["name"]]
     max_iters = int(supervisor["routing"].get("max_iterations", 10) or 10)
     await _mark_parent(parent_run_id, "running")
-    await _run_supervisor_from(
+    async for frame in _run_supervisor_from(
         parent_run_id, team, workflow_id, supervisor["name"], workers, max_iters,
+        conversation_id=conversation_id,
         iteration=0, current_input=input_message or "", worker_outputs=[], shape=shape,
-    )
+    ):
+        yield frame
 
 
 # ---------------------------------------------------------------------------
 # Dispatcher + backward-compat entry point
 # ---------------------------------------------------------------------------
+async def orchestrate_stream(
+    parent_run_id: str, team: str, workflow_id: str, input_message: str, mode: str,
+    conversation_id: str, shape: str = "durable",
+) -> AsyncGenerator[dict, None]:
+    """The ONE graph walk, as an async generator (No-Bandaid: both the streamed endpoint
+    and the non-streamed drain consume THIS). Routes `mode` → the matching generator
+    mode-walker, re-yielding every member frame, and ends with a run-level
+    ``{"type":"done","run_id":parent_run_id}``. ALL DB writes (_mark_parent / _save_checkpoint /
+    _park_or_fail / _fail_parent / child rows / tool-call markers) happen INSIDE the walkers,
+    so draining this reproduces the pre-stream terminal state exactly.
+
+    Does NOT swallow exceptions — the drain wrapper (`orchestrate`) and the SSE endpoint each
+    own their own failure handling."""
+    if mode == "conditional":
+        walker = orchestrate_conditional(parent_run_id, team, workflow_id, input_message, conversation_id, shape)
+    elif mode == "supervisor":
+        walker = orchestrate_supervisor(parent_run_id, team, workflow_id, input_message, conversation_id, shape)
+    elif mode == "handoff":
+        walker = orchestrate_handoff(parent_run_id, team, workflow_id, input_message, conversation_id, shape)
+    else:  # sequential (default)
+        walker = orchestrate_graph_sequential(parent_run_id, team, workflow_id, input_message, conversation_id, shape)
+    async for frame in walker:
+        yield frame
+    yield {"type": "done", "run_id": parent_run_id}
+
+
 async def orchestrate(parent_run_id: str, team: str, workflow_id: str, input_message: str, mode: str,
-                      shape: str = "durable") -> None:
-    """Route to the orchestration implementation for `mode`. Fail-safe (never raises).
+                      shape: str = "durable", conversation_id: str | None = None) -> None:
+    """Non-streaming DRAIN of ``orchestrate_stream`` (No-Bandaid: one graph walk). Fail-safe
+    (never raises). `conversation_id` defaults to `parent_run_id`.
 
     `shape` ('durable' default | 'reactive') controls approval-gate handling: durable
     parks + resumes; reactive fails-closed (D2/S2). Existing callers keep the durable
     default, so their behavior is byte-for-byte unchanged."""
+    conversation_id = conversation_id or parent_run_id
     try:
-        if mode == "conditional":
-            await orchestrate_conditional(parent_run_id, team, workflow_id, input_message, shape)
-        elif mode == "supervisor":
-            await orchestrate_supervisor(parent_run_id, team, workflow_id, input_message, shape)
-        elif mode == "handoff":
-            await orchestrate_handoff(parent_run_id, team, workflow_id, input_message, shape)
-        else:  # sequential (default)
-            await orchestrate_graph_sequential(parent_run_id, team, workflow_id, input_message, shape)
+        async for _ in orchestrate_stream(
+            parent_run_id, team, workflow_id, input_message, mode, conversation_id, shape
+        ):
+            pass
     except Exception as exc:  # never leave a run stuck in 'running'
         logger.exception("workflow run %s (%s) crashed: %s", parent_run_id, mode, exc)
         await _mark_parent(parent_run_id, "failed")

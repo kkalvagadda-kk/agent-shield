@@ -17,23 +17,25 @@ EXISTING member agents, orchestrated as a run tree.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import asyncio
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
 from db import get_db
 from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
-from models import Agent, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, Tool, WorkflowEdge, WorkflowMember
+from models import Agent, AgentMemory, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, RunStep, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
     AgentRunResponse,
     AgentTriggerCreate,
@@ -43,17 +45,19 @@ from schemas import (
     CompositeWorkflowUpdate,
     CompositeWorkflowWithMembersResponse,
     RotateTokenResponse,
+    ToolCallProjection,
     WorkflowEdgeCreate,
     WorkflowEdgeResponse,
     WorkflowMemberCreate,
     WorkflowMemberResponse,
     WorkflowRunCreate,
     WorkflowRunStartResponse,
+    WorkflowRunStreamRequest,
     WorkflowRunTreeResponse,
     WorkflowTriggerResponse,
 )
 from trigger_utils import _new_token, workflow_webhook_url
-from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
+from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, orchestrate_stream, resolve_member_names
 
 logger = logging.getLogger(__name__)
 
@@ -504,6 +508,84 @@ async def start_workflow_run(
     return WorkflowRunStartResponse(workflow_id=wf.id, run_id=parent.id, status="queued", warning=warning)
 
 
+@router.post("/{workflow_id}/runs/stream")
+async def stream_workflow_run(
+    workflow_id: uuid.UUID,
+    body: WorkflowRunStreamRequest,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """POC-2b 2b-0 headline: stream a workflow run as multiplexed SSE.
+
+    Creates the parent run exactly like ``start_workflow_run`` (playground context) but
+    keyed to ``body.session_id`` for the shared transcript, then streams the ONE
+    ``orchestrate_stream`` graph walk as ``data: {json}\\n\\n`` frames. The internal
+    ``__member_end__`` sentinel is filtered out (never leaks to the client). Frame vocab:
+    ``agent_start`` / ``token`` / ``tool_call`` / ``rationale`` / ``agent_end`` / ``done`` /
+    ``error`` — see contracts/sse-frames.md §A.
+
+    In-process only — this endpoint never dispatches to a production orchestrator pod
+    (gap-ledgered)."""
+    wf = await _get_workflow(workflow_id, db)
+    if wf.status == "archived":
+        raise HTTPException(status_code=422, detail="Cannot run an archived workflow.")
+    member_names = await resolve_member_names(db, workflow_id)
+    if not member_names:
+        raise HTTPException(status_code=422, detail="Workflow has no members to run.")
+
+    caller_sub = caller.get("sub")
+    message = body.message or ""
+
+    parent = AgentRun(
+        agent_name=wf.name,
+        input=message[:4000] if message else None,
+        context="playground",
+        status="queued",
+        trigger_type="api",
+        run_by=caller_sub,
+        team=wf.team,
+        workflow_id=wf.id,
+        session_id=body.session_id,
+    )
+    db.add(parent)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=str(parent.id),
+        agent_name=wf.name,
+        user_id=caller_sub or "system",
+        context="playground",
+        input_message=message[:4000] if message else "",
+    )
+    if trace_id:
+        parent.langfuse_trace_id = trace_id
+
+    await db.commit()
+    await db.refresh(parent)
+
+    parent_id = str(parent.id)
+    conversation_id = body.session_id or parent_id
+    team = wf.team
+    mode = wf.orchestration
+    shape = wf.execution_shape
+
+    async def _sse():
+        async for frame in orchestrate_stream(
+            parent_id, team, str(workflow_id), message, mode, conversation_id, shape
+        ):
+            # The internal per-member sentinel must never reach the client.
+            if frame.get("type") == "__member_end__":
+                continue
+            yield f"data: {json.dumps(frame)}\n\n"
+
+    return StreamingResponse(
+        _sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/{workflow_id}/runs", response_model=list[AgentRunResponse])
 async def list_workflow_runs(
     workflow_id: uuid.UUID,
@@ -540,15 +622,53 @@ async def get_workflow_run_tree(
     )).scalars().all())
 
     obs = get_observability_backend()
+    # Shared transcript key for this run (§5.2): session_id when a session was supplied to
+    # the stream/start endpoint, else the run id. Rationale rows are keyed on it.
+    conversation_id = parent.session_id or str(run_id)
 
     def _with_trace_url(run: AgentRun) -> AgentRunResponse:
         resp = AgentRunResponse.model_validate(run)
         resp.trace_url = obs.build_trace_url(run.langfuse_trace_id)
         return resp
 
+    async def _project_child(run: AgentRun) -> AgentRunResponse:
+        resp = _with_trace_url(run)
+        # tool_calls (2b-i): reactive tool-call marker rows persisted by the streaming
+        # orchestrator (output.kind='tool_call'), ordered as observed.
+        steps = list((await db.execute(
+            select(RunStep)
+            .where(
+                RunStep.run_id == run.id,
+                RunStep.output["kind"].astext == "tool_call",
+            )
+            .order_by(RunStep.step_number)
+        )).scalars().all())
+        resp.tool_calls = [
+            ToolCallProjection(
+                tool_name=s.name,
+                status=(s.output or {}).get("status", "ok"),
+            )
+            for s in steps
+        ]
+        # rationale (2b-ii): the latest message_kind='rationale' row this member authored
+        # on the shared workflow thread. Null for tool-less/durable members.
+        rationale = (await db.execute(
+            select(AgentMemory.content)
+            .where(
+                AgentMemory.thread_id == conversation_id,
+                AgentMemory.scope == "workflow_run",
+                AgentMemory.message_kind == "rationale",
+                AgentMemory.agent_name == run.agent_name,
+            )
+            .order_by(AgentMemory.message_index.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        resp.rationale = rationale or None
+        return resp
+
     return WorkflowRunTreeResponse(
         parent=_with_trace_url(parent),
-        children=[_with_trace_url(c) for c in children],
+        children=[await _project_child(c) for c in children],
     )
 
 

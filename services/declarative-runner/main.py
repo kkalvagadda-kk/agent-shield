@@ -470,23 +470,34 @@ async def _save_memory_turn(
     deployment_id: str = "",
     author_agent_name: str | None = None,
     message_kind: str = "agent_output",
+    rationale: str | None = None,
 ) -> None:
     """Persist the user+assistant messages to the transcript via registry-api.
 
     For a workflow member (``scope='workflow_run'``) the row is tagged with
     ``author_agent_name`` + ``workflow_run_id`` so the shared transcript records
-    which member produced it."""
+    which member produced it.
+
+    When ``rationale`` is truthy AND ``scope=='workflow_run'`` (2b-ii), a third
+    ``message_kind='rationale'`` assistant message is appended so the run-tree
+    projection can join the member's tool-call reasoning. Single-agent chat
+    (``scope=='agent'``) never persists a rationale row."""
     if not conversation_id or not cfg.REGISTRY_API_URL:
         return
     try:
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": user_msg, "message_kind": "user"},
+            {"role": "assistant", "content": assistant_msg, "message_kind": message_kind},
+        ]
+        if rationale and scope == "workflow_run":
+            messages.append(
+                {"role": "assistant", "content": rationale, "message_kind": "rationale"}
+            )
         body: dict[str, Any] = {
             "thread_id": conversation_id,
             "user_id": user_id or None,
             "scope": scope,
-            "messages": [
-                {"role": "user", "content": user_msg, "message_kind": "user"},
-                {"role": "assistant", "content": assistant_msg, "message_kind": message_kind},
-            ],
+            "messages": messages,
         }
         if deployment_id:
             body["deployment_id"] = deployment_id
@@ -539,6 +550,8 @@ async def chat(req: ChatRequest, request: Request):
         )
         elapsed = int(time.perf_counter() * 1000) - start_ms
         output_text = result.get("output", str(result)) if isinstance(result, dict) else str(result)
+        # 2b-ii: the model's own tool-call reasoning (empty for tool-less turns).
+        rationale = result.get("rationale") if isinstance(result, dict) else None
         if agent_run_id:
             import asyncio
             asyncio.create_task(_complete_agent_run(agent_run_id, "completed", output_text, elapsed))
@@ -550,6 +563,7 @@ async def chat(req: ChatRequest, request: Request):
             scope=req.scope, workflow_run_id=req.workflow_run_id,
             deployment_id=deployment_id,
             author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+            rationale=rationale,
         ))
 
         return result
@@ -602,6 +616,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             "auto_approve": auto_approve,
         })
         accumulated: list[str] = []
+        rationale = ""
         try:
             # 1. Load prior transcript BEFORE streaming (symmetry with /chat).
             memory_context = await _load_memory_context(
@@ -627,6 +642,18 @@ async def chat_stream(req: ChatRequest, request: Request):
                     except Exception:
                         pass
                 yield chunk
+            # 2b-ii: after the graph stream closes, read the turn-boundary rationale
+            #   (last tool-calling AIMessage) from the checkpoint. Emit it as a trailing
+            #   `rationale` SSE frame for workflow members only (the shared pod-SSE reader
+            #   reads to EOF to capture it); single-agent chat (scope='agent') gets none.
+            rationale = await workflow_executor.extract_tool_rationale(
+                req.thread_id or conversation_id or ""
+            )
+            if req.scope == "workflow_run" and rationale:
+                yield (
+                    f"event: rationale\n"
+                    f"data: {_json.dumps({'content': rationale})}\n\n"
+                )
         except SafetyBlockedError as exc:
             SAFETY_BLOCKS.inc()
             yield (
@@ -648,6 +675,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             scope=req.scope, workflow_run_id=req.workflow_run_id,
             deployment_id=deployment_id,
             author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+            rationale=rationale,
         ))
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")

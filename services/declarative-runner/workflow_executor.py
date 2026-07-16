@@ -774,8 +774,28 @@ class WorkflowExecutor:
             response_text, agent_name=agent_name, session_id=thread_id
         )
 
+        # Rationale (2b-ii): the last tool-calling AIMessage's text — the model's own
+        # one-sentence 'why' before a tool ran. Empty for tool-less turns (no amber box).
+        from agentshield_sdk.graph_builder import _extract_tool_rationale  # type: ignore[import]
+        rationale = _extract_tool_rationale(result)
+
         tracer.end_trace(trace_ctx, output={"response_len": len(out_scan.clean_text)})
-        return {"response": out_scan.clean_text, "thread_id": thread_id}
+        return {"response": out_scan.clean_text, "thread_id": thread_id, "rationale": rationale}
+
+    async def extract_tool_rationale(self, thread_id: str) -> str:
+        """Read the final checkpoint state for *thread_id* and return the turn-boundary
+        rationale (last tool-calling AIMessage's text). Best-effort — returns '' on any
+        error so a rationale-read failure never breaks the stream (2b-ii, non-blocking).
+
+        Used by the /chat/stream path, whose run_streamed() does not return state.
+        """
+        from agentshield_sdk.graph_builder import _extract_tool_rationale  # type: ignore[import]
+        try:
+            state = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+            return _extract_tool_rationale(getattr(state, "values", {}) or {})
+        except Exception as exc:  # noqa: BLE001 — never raise from a best-effort read
+            logger.warning("extract_tool_rationale failed for thread %s: %s", thread_id, exc)
+            return ""
 
     async def run_streamed(
         self, message: str, thread_id: str | None = None, trace_id: str | None = None,

@@ -1562,6 +1562,20 @@ class AgentRunUpdate(BaseModel):
     error_message: str | None = None
 
 
+class ToolCallProjection(BaseModel):
+    """One projected reactive tool-call chip for a run-tree child (POC-2b 2b-i).
+    Projected from ``run_steps`` marker rows (``output.kind='tool_call'``)."""
+    tool_name: str
+    status: str            # "ok" | "error"
+
+
+class WorkflowRunStreamRequest(BaseModel):
+    """Body for ``POST /workflows/{id}/runs/stream`` (POC-2b 2b-0). ``session_id``, when
+    present, becomes the shared workflow transcript key so the thread persists across turns."""
+    message: str
+    session_id: str | None = None
+
+
 class AgentRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1595,6 +1609,10 @@ class AgentRunResponse(BaseModel):
     sandbox_deployment_id: uuid.UUID | None = None
     workflow_deployment_id: uuid.UUID | None = None
     judge_score: float | None = None
+    # POC-2b rich console (non-ORM — from_attributes leaves them at default; the run-tree
+    # endpoint sets them explicitly per child, exactly like trace_url).
+    tool_calls: list[ToolCallProjection] = Field(default_factory=list)
+    rationale: str | None = None
 
 
 class AgentStatsResponse(BaseModel):

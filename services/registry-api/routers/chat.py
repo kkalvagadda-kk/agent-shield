@@ -40,6 +40,7 @@ from auth_middleware import require_user
 from db import get_db
 from identity import resolve_principal
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
+from pod_stream import stream_pod_chat_frames
 
 deployment_chat_router = APIRouter(prefix="/api/v1/agents", tags=["deployment-chat"])
 
@@ -393,96 +394,37 @@ async def _proxy_agent_stream(
       scope           = "agent".
     ``run_id`` stays the client-facing correlation id in the emitted SSE frames.
 
-    Translates named SSE events from the declarative-runner into unnamed
-    data-only frames that the EventSource frontend expects:
-      text_delta         → {"type": "token",              "content": "..."}
-      done               → {"type": "done",                "run_id": "..."}
-      error              → {"type": "error",               "message": "..."} + done
-      approval_requested → {"type": "approval_requested",  ...}
+    Delegates the per-pod SSE parsing to the ONE shared reader
+    ``stream_pod_chat_frames`` (No-Bandaid: the same reader the workflow stream uses).
+    Each normalized frame dict is serialized for the EventSource frontend; the reader
+    already tags every frame with ``author`` and no longer drops ``tool_call`` frames
+    (the L473 drop is gone — single-agent chat now surfaces tool chips). This function
+    owns the run-level ``done`` (the reader never emits it).
     """
-    target = f"{service_url}/chat/stream"
-    timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
-
     def _emit(payload: dict) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
     try:
-        req_headers: dict[str, str] = {"Content-Type": "application/json"}
-        if trace_id:
-            req_headers["X-AgentShield-Trace-ID"] = trace_id
-        # Identity + deployment propagation so the runner can load/save memory
-        # scoped to this user and deployment (thread-ownership.md, memory-api.md).
-        if user_id:
-            req_headers["x-user-sub"] = user_id
-        if user_team:
-            req_headers["x-agent-team"] = user_team
-        if deployment_id:
-            req_headers["x-deployment-id"] = deployment_id
-
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                target,
-                json={
-                    "message": message,
-                    "thread_id": conversation_id,
-                    "conversation_id": conversation_id,
-                    "scope": "agent",
-                },
-                headers=req_headers,
-                timeout=timeout,
-            ) as response:
-                if response.status_code != 200:
-                    logger.error(
-                        "Agent pod %s returned HTTP %d", target, response.status_code
-                    )
-                    yield _emit({"type": "error", "message": f"Agent returned HTTP {response.status_code}"})
-                    yield _emit({"type": "done", "run_id": run_id})
-                    return
-
-                # POC-2 attribution: open a fresh labeled assistant bubble for
-                # this speaker before the first token (single-agent = the
-                # degenerate one-speaker case). See contracts/sse-frames.md.
-                yield _emit({"type": "agent_start", "author": author})
-
-                current_event: Optional[str] = None
-                current_data: Optional[str] = None
-
-                async for line in response.aiter_lines():
-                    if line.startswith("event:"):
-                        current_event = line[len("event:"):].strip()
-                    elif line.startswith("data:"):
-                        current_data = line[len("data:"):].strip()
-                    elif line == "":
-                        # End of SSE frame — translate and emit
-                        if current_data is not None:
-                            try:
-                                payload = json.loads(current_data)
-                            except json.JSONDecodeError:
-                                payload = {}
-
-                            if current_event == "text_delta":
-                                yield _emit({"type": "token", "content": payload.get("content", ""), "author": author})
-                            elif current_event == "done":
-                                yield _emit({"type": "done", "run_id": run_id})
-                            elif current_event == "error":
-                                yield _emit({"type": "error", "message": payload.get("message", "Agent error")})
-                                yield _emit({"type": "done", "run_id": run_id})
-                            elif current_event == "approval_requested":
-                                yield _emit({"type": "approval_requested", **payload})
-                            # tool_call_start / tool_call_end are informational — skip for consumer chat
-
-                        current_event = None
-                        current_data = None
-
-    except httpx.ConnectError:
-        logger.error("Cannot reach agent pod at %s", target)
-        yield _emit({"type": "error", "message": "Agent pod is unreachable. It may still be starting."})
+        # thread_id == conversation_id == session_id for single-agent chat (they
+        # differ only for workflow members). scope="agent" → no rationale frames.
+        async for frame in stream_pod_chat_frames(
+            service_url,
+            message=message,
+            thread_id=conversation_id,
+            conversation_id=conversation_id,
+            scope="agent",
+            author=author,
+            trace_id=trace_id,
+            user_id=user_id,
+            user_team=user_team,
+            deployment_id=deployment_id,
+        ):
+            yield _emit(frame)
         yield _emit({"type": "done", "run_id": run_id})
     except asyncio.CancelledError:
         logger.info("Client disconnected during stream for run_id=%s", run_id)
     except Exception as exc:
-        logger.exception("Unexpected error proxying to agent pod %s", target)
+        logger.exception("Unexpected error proxying to agent pod %s", service_url)
         yield _emit({"type": "error", "message": str(exc)})
         yield _emit({"type": "done", "run_id": run_id})
 
