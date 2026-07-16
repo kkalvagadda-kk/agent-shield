@@ -46,8 +46,10 @@ _MAX_STEPS = 50
 _DONE_SENTINEL = "DONE"
 
 
-def _team_namespace(team: str) -> str:
-    return f"agents-{(team or 'platform').lower().replace(' ', '-')}"
+# Kept as a thin alias so the ~15 existing call sites in this module stay untouched;
+# the DEFINITION now lives in agent_endpoints (TODO-8 — this had already drifted from
+# routers/internal.py's copy).
+from agent_endpoints import team_namespace as _team_namespace
 
 
 async def _resolve_agent_environment(agent_name: str) -> str:

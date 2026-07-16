@@ -246,10 +246,23 @@ a doc. **Task deleted in WS-6; no code written.**
 
 ---
 
-### TODO-8: Agent pod-URL resolution — `environment="production"` default is never threaded — 🔴 OPEN (LIVE BUG)
+### TODO-8: Agent pod-URL resolution — `environment="production"` default is never threaded — ✅ RESOLVED 2026-07-15
 
-**Filed by WS-6 (2026-07-15). Not built — `services/registry-api/**` was owned by a concurrent lane
-at the time. This is a REAL, LIVE defect, not a cleanup.**
+**✅ RESOLVED 2026-07-15 — both halves.** The LIVE defect was fixed in `4f2abee` (found independently
+while debugging a demo: `_agent_pod_url`'s `environment` default REMOVED — not corrected — so a wrong
+default is a TypeError at import rather than invisible at the call site; both call sites now resolve the
+real environment). The ARCHITECTURAL half landed in the follow-up: `services/registry-api/agent_endpoints.py`
+is now the single home for `team_namespace` + `agent_pod_base`, and `workflow_orchestrator`,
+`routers/internal` and `approval_timeout_worker` all import it — proven by identity on the running pod
+(`w._team_namespace is team_namespace is i._team_namespace` → True), not by matching text.
+
+WS-6's filing was right on every point, including the one it could not have known mattered: the two
+`_team_namespace` copies **had already drifted** — `(team or 'platform')` vs a bare `team.lower()`, so an
+empty team resolved to `agents-platform` in one and the invalid `agents-` in the other, and `None` raised
+AttributeError in one. Latent only because `agents.team` is NOT NULL and no row is empty: one nullable
+column away from live, with nothing to flag it.
+
+*Original filing follows.*
 
 `_agent_pod_url(agent_name, team, environment: str = "production")` in
 `services/registry-api/approval_timeout_worker.py` is **parameterized but never threaded**: both

@@ -41,8 +41,11 @@ async def _get_db():
         yield session
 
 
-def _team_namespace(team: str) -> str:
-    return f"agents-{team.lower().replace(' ', '-')}"
+# DEFINITION moved to agent_endpoints (TODO-8). This copy had drifted: it lacked the
+# `team or 'platform'` guard, so an empty team built the invalid `agents-` namespace
+# and None raised AttributeError — while workflow_orchestrator's copy resolved
+# `agents-platform`. Same name, two behaviours.
+from agent_endpoints import team_namespace as _team_namespace
 
 
 async def _mark_agent_run_failed(

@@ -10,8 +10,11 @@ Race safety: uses a single UPDATE ... WHERE status='pending' AND expires_at < no
 RETURNING ... statement so only one worker wins even if deploy-controller's
 timeout_worker.py runs simultaneously.
 
-Agent pod URL is derived from the approval's agent_name + team fields:
-    http://{agent_name}-production.agents-{team}.svc.cluster.local:8080
+Agent pod URL comes from `agent_endpoints.agent_pod_base(agent_name, team, environment)`
+— the ONE definition. `environment` is resolved per agent, never assumed: this module
+used to hardcode `-production`, so every sandbox approval's resume POST went to a
+Service that does not exist, the RequestError was swallowed to a warning below, and the
+approval was still marked resolved (TODO-8).
 """
 
 from __future__ import annotations
@@ -33,26 +36,7 @@ _RESUME_TIMEOUT_SECONDS = 5
 _DURABLE_RUN_TTL_MINUTES = 10
 
 
-def _agent_pod_url(agent_name: str, team: str, environment: str) -> str:
-    """Derive the agent pod's K8s cluster-internal service URL.
-
-    `environment` is REQUIRED — it used to default to "production", and both callers
-    omitted it, so every sandbox/playground approval resume POSTed to a
-    `{agent}-production` Service that does not exist for a sandbox-only agent. httpx
-    raised, the caller swallowed it into a `logger.warning`, and the approval row was
-    still marked resolved — so the reviewer saw "approved" while the agent was never
-    resumed and its run hung until TTL. Fail-silent, exactly like the rest of this
-    class of bug.
-
-    The default is removed rather than corrected: a wrong default is invisible at the
-    call site, while a missing argument is a TypeError at import/CI. Callers must
-    resolve the real environment (`_resolve_agent_environment`) and say which one they
-    mean — the No-Bandaid rule ("when sandbox and production share infrastructure they
-    must pass explicit identifiers, never rely on a default").
-    """
-    svc_name = f"{agent_name}-{environment}"
-    namespace = f"agents-{team}"
-    return f"http://{svc_name}.{namespace}.svc.cluster.local:8080"
+from agent_endpoints import agent_pod_base as _agent_pod_url
 
 
 async def _notify_agent(agent_name: str, team: str, thread_id: str, approval_id: str) -> None:
