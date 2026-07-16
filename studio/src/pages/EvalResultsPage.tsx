@@ -45,10 +45,21 @@ const STATUS_CHIP: Record<string, string> = {
   failed: "bg-red-100 text-red-700",
 };
 
-function scoreColor(score: number | null): string {
+// The colour band is a VERDICT, so it uses the run's OWN threshold — never a literal.
+// Green = "this would publish", amber = "it would not". Hardcoded, a 0.85 run on a
+// 0.9-threshold dataset rendered GREEN while the gate refused it: the UI contradicted
+// the product it reports on.
+//
+// `threshold` is REQUIRED and has NO local default. The API always resolves it
+// (`eval_run_response` fills pre-E-6 rows from the single platform default), so a
+// default here would just re-declare the threshold — which is exactly how it came to
+// exist four times across three services. If it is ever absent at runtime the
+// comparison yields false and we render the NEUTRAL band: fail-closed, never a
+// confident wrong verdict.
+function scoreColor(score: number | null, threshold: number): string {
   if (score == null) return "";
-  if (score < 0.4) return "bg-red-50 text-red-700";
-  if (score <= 0.7) return "bg-amber-50 text-amber-700";
+  if (!(score >= threshold * 0.6)) return "bg-red-50 text-red-700";
+  if (!(score >= threshold)) return "bg-amber-50 text-amber-700";
   return "bg-green-50 text-green-700";
 }
 
@@ -63,7 +74,7 @@ function scoreColor(score: number | null): string {
 // and "—" for every action dimension, because nothing ran — which is the pass.
 const EVAL_DIMENSIONS = ["response", "trajectory", "tool_call", "side_effect", "filter", "injection", "member_path"] as const;
 
-function DimensionScores({ scores }: { scores: Record<string, number> | null }) {
+function DimensionScores({ scores, threshold }: { scores: Record<string, number> | null; threshold: number }) {
   return (
     <div className="flex flex-wrap gap-1">
       {EVAL_DIMENSIONS.map((dim) => {
@@ -75,7 +86,7 @@ function DimensionScores({ scores }: { scores: Record<string, number> | null }) 
             data-testid={`dim-${dim}`}
             title={dim}
             className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-              has ? scoreColor(v as number) : "text-slate-300"
+              has ? scoreColor(v as number, threshold) : "text-slate-300"
             }`}
           >
             {dim.replace("_", " ")}: {has ? (v as number).toFixed(2) : "—"}
@@ -188,10 +199,14 @@ export default function EvalResultsPage() {
 
   const scorePercent =
     run.overall_score != null ? Math.round(run.overall_score * 100) : null;
+  // Gate the "mark passed" action on the run's OWN threshold. This offered to mark a
+  // version eval-passed at >= 0.7 regardless of the run's actual gate, so on a
+  // 0.9-threshold dataset the button appeared for a 0.85 run and the backend then
+  // refused the publish — the UI promising something the platform would not honour.
   const canMarkPassed =
     run.status === "completed" &&
     run.overall_score != null &&
-    run.overall_score >= 0.7 &&
+    run.overall_score >= run.pass_threshold &&
     (isWorkflowEval ? run.workflow_version_id != null : run.agent_version_id != null);
 
   const filteredResults = showFailedOnly
@@ -359,6 +374,7 @@ export default function EvalResultsPage() {
                 <ResultRow
                   key={r.id}
                   result={r}
+                  threshold={run.pass_threshold}
                   mode={run.mode}
                   expanded={expandedRow === r.id}
                   onToggle={() =>
@@ -392,8 +408,12 @@ function ResultRow({
   expanded,
   onToggle,
   onViewTrace,
+  threshold,
 }: {
   result: EvalRunResult;
+  /** The parent run's resolved publish threshold — every verdict in this row is
+   *  rendered against it, never a local literal. */
+  threshold: number;
   // The eval run's EXPLICIT interpretation mode. It decides which evidence blocks
   // render — never sniffed from which keys the row carries, because a scheduled
   // `job_spec` and a webhook synthetic event ride the SAME `trigger_payload` column
@@ -441,13 +461,13 @@ function ResultRow({
         </td>
         <td className="px-3 py-3">
           <span
-            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${scoreColor(composite)}`}
+            className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${scoreColor(composite, threshold)}`}
           >
             {composite != null ? composite.toFixed(2) : "—"}
           </span>
         </td>
         <td className="px-3 py-3">
-          <DimensionScores scores={r.dimension_scores} />
+          <DimensionScores scores={r.dimension_scores} threshold={threshold} />
         </td>
         <td className="px-3 py-3">
           {r.trace_url ? (
@@ -534,7 +554,7 @@ function ResultRow({
                 <InjectionEvidence detail={r.eval_detail ?? null} />
               )}
               {r.eval_detail && isWorkflowDetail(r.eval_detail) ? (
-                <WorkflowEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
+                <WorkflowEvidence detail={r.eval_detail} threshold={threshold} runId={r.run_id ?? null} />
               ) : r.eval_detail ? (
                 <DurableEvidence detail={r.eval_detail} runId={r.run_id ?? null} />
               ) : null}
@@ -1038,9 +1058,11 @@ function SideEffectEvidence({
 // ---------------------------------------------------------------------------
 function WorkflowEvidence({
   detail,
+  threshold,
   runId,
 }: {
   detail: EvalDetail;
+  threshold: number;
   runId: string | null;
 }) {
   const expected = detail.expected_member_path ?? [];
@@ -1143,7 +1165,7 @@ function WorkflowEvidence({
                   <span className="font-mono text-slate-700">{pm.member}</span>
                   {typeof pm.score === "number" && (
                     <span
-                      className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scoreColor(pm.score)}`}
+                      className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${scoreColor(pm.score, threshold)}`}
                     >
                       {pm.score.toFixed(2)}
                     </span>

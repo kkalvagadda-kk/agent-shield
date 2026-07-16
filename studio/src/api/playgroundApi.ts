@@ -211,6 +211,15 @@ export function isDurableItem(item: AnyDatasetItem): item is DurableDatasetItem 
 export interface EvalRun {
   id: string;
   user_id: string;
+  /** THE publish threshold for this run — always resolved by the API (never null on
+   *  the wire; `eval_run_response` fills pre-E-6 rows from the platform default).
+   *  Render verdicts against THIS, never a local literal: the UI used to hardcode
+   *  0.7, so a 0.85 run with pass_threshold=0.9 showed "passed" while the gate
+   *  refused to publish. REQUIRED: the API always resolves it, and a `?` here would
+   *  invite a local `?? 0.7` fallback — the re-declaration that caused the bug. If it
+   *  is somehow absent at runtime, every `score >= threshold` yields false and the UI
+   *  fails CLOSED (no verdict, no mark-passed button) rather than guessing. */
+  pass_threshold: number;
   agent_name: string;
   agent_version_id: string | null;
   workflow_id: string | null;

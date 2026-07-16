@@ -66,6 +66,24 @@ def effective_pass_threshold(run: EvalRun) -> float:
     return EVAL_PASS_THRESHOLD
 
 
+def eval_run_response(run: EvalRun) -> EvalRunResponse:
+    """Serialize an EvalRun with its threshold ALREADY RESOLVED.
+
+    The wire always carries a real number, so no consumer ever has to guess — which
+    is the whole point: `eval_runs.pass_threshold` is nullable and 141 pre-E-6 rows
+    are NULL, so a client that read the column raw would have to re-declare the 0.7
+    default locally. That is exactly how the threshold came to exist four times
+    across three services. Resolving it HERE keeps `effective_pass_threshold` the
+    single answer and leaves the UI with nothing to decide.
+
+    Use this instead of `EvalRunResponse.model_validate(run)` — a raw validate leaks
+    the NULL back out and re-opens the guess.
+    """
+    resp = EvalRunResponse.model_validate(run)
+    resp.pass_threshold = effective_pass_threshold(run)
+    return resp
+
+
 async def _resolve_eval_run(
     eval_run_id: uuid.UUID, db: AsyncSession
 ) -> EvalRun:
@@ -432,7 +450,7 @@ async def create_eval_run(
 
     await db.commit()
     await db.refresh(eval_run)
-    return EvalRunResponse.model_validate(eval_run)
+    return eval_run_response(eval_run)
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +471,7 @@ async def list_eval_runs(
     if caller:
         q = q.where(EvalRun.user_id == caller)
     result = await db.execute(q)
-    return [EvalRunResponse.model_validate(r) for r in result.scalars().all()]
+    return [eval_run_response(r) for r in result.scalars().all()]
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +487,7 @@ async def get_eval_run(
     db: AsyncSession = Depends(get_db),
 ) -> EvalRunResponse:
     run = await _resolve_eval_run(eval_run_id, db)
-    return EvalRunResponse.model_validate(run)
+    return eval_run_response(run)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +618,7 @@ async def update_eval_run(
         "update_eval_run: id=%s status=%s score=%s",
         run.id, run.status, run.overall_score,
     )
-    return EvalRunResponse.model_validate(run)
+    return eval_run_response(run)
 
 
 # ---------------------------------------------------------------------------

@@ -153,7 +153,13 @@ fi
 
 # (b) The Studio half — REPORTED, never silently skipped. Owned by WS-6.
 if [ -f "studio/src/pages/EvalResultsPage.tsx" ]; then
-  n_ui=$(grep -c "0\.7" studio/src/pages/EvalResultsPage.tsx || true)
+  # Strip comments before grepping — the SAME false-positive class this suite's sibling
+  # `check-suite-guards.sh` already fixed (a fake suite passed on a `# T-S99-999` in a
+  # header comment). Here it points the other way: a COMMENT explaining the bug that was
+  # fixed ("used to hardcode >= 0.7") would fail the gate forever, which teaches the next
+  # dev to delete the explanation to get green. A gate must read CODE, not prose.
+  n_ui=$(sed -E 's://.*::; s:/\*.*\*/::' studio/src/pages/EvalResultsPage.tsx \
+         | grep -c "0\.7" || true)
   if [ "$n_ui" -eq 0 ]; then
     bpass "T-S80-000b the Studio no longer re-declares the publish threshold"
   else
