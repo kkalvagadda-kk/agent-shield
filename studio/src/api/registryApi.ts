@@ -1595,3 +1595,29 @@ export const deleteMemoryThread = async (
 export const clearAgentMemory = async (agentName: string): Promise<void> => {
   await http.delete(`/agents/${agentName}/memory/clear`);
 };
+
+// ---------------------------------------------------------------------------
+// User response preferences (POC-3)
+// Structured, enum-only presets keyed by the caller; compiled server-side into a
+// bounded advisory directive. Caller-scoped: user_id = caller.sub (no id in path).
+// The DB field is `response_length`; the UI historically called it `length`.
+// ---------------------------------------------------------------------------
+export interface UserPreferences {
+  response_length: string | null;
+  tone: string | null;
+  format: string | null;
+  language: string | null;
+  expertise: string | null;
+}
+
+export const getMyPreferences = async (): Promise<UserPreferences> => {
+  const { data } = await http.get<UserPreferences>("/me/preferences");
+  return data;
+};
+
+export const updateMyPreferences = async (
+  prefs: Partial<UserPreferences>
+): Promise<UserPreferences> => {
+  const { data } = await http.put<UserPreferences>("/me/preferences", prefs);
+  return data;
+};

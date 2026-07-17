@@ -122,6 +122,7 @@ run_suite "Suite 72: Eval v2 E-1 durable (no-fakes)" "suite-72-eval-v2-durable.s
 run_suite "Suite 73: Eval v2 E-5 workflow run-tree (no-fakes)" "suite-73-eval-v2-workflow.sh"
 run_suite "Suite 74: Eval v2 E-2 side-effect record/mock (no-fakes)" "suite-74-eval-v2-side-effects.sh"
 run_suite "Suite 75: Context Storage (POC-0/1)" "suite-75-context-storage.sh"
+run_suite "Suite 76: User Response Preferences (POC-3)" "suite-76-preferences.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

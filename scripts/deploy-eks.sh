@@ -64,10 +64,10 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.190"   # 0.2.190: POC-2b live workflow member streaming + tool-call chips + rationale projection
+REGISTRY_API_TAG="0.2.191"   # 0.2.191: POC-3 user response preferences → advisory directive
 DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.55"   # 0.1.55: POC-2b rationale capture (_extract_tool_rationale -> message_kind=rationale); still carries OPA bypass (task #16)
-STUDIO_TAG="0.1.143"   # 0.1.143: POC-2b rich workflow console (live streaming bubbles, avatars, tool chips, rationale toggle)
+DECLARATIVE_RUNNER_TAG="0.1.56"   # 0.1.56: POC-3 applies user_directive as leading SystemMessage; carries OPA bypass (task #16)
+STUDIO_TAG="0.1.144"   # 0.1.144: POC-3 Preferences page wired to real data
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
 PYTHON_EXECUTOR_TAG="0.1.0"

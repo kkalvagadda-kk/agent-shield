@@ -594,7 +594,7 @@ registry-api:
     # and forced deployment_id IS NULL (excluded deployment-tagged rows). Restore
     # row metadata through the Turn port + reconcile the deployment filter.
     # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
-    tag: "0.2.190"
+    tag: "0.2.191"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -670,7 +670,7 @@ deploy-controller:
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
   # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
   # load/save + shared workflow transcript are all baked into this image.
-  declarativeRunnerTag: "0.1.55"
+  declarativeRunnerTag: "0.1.56"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -914,7 +914,7 @@ studio:
     repository: registry.internal/agentshield/studio
     # E-2: rebuilt alongside the eval-v2 slice
     # POC-2: per-agent attributed bubbles + eval transcript + share-context toggle
-    tag: "0.1.143"
+    tag: "0.1.144"
     pullPolicy: IfNotPresent
 
   service:
