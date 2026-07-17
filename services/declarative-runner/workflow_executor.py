@@ -48,7 +48,7 @@ from collections import defaultdict
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage  # type: ignore[import]
+from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore[import]
 from langgraph.graph import END, START, StateGraph  # type: ignore[import]
 from langgraph.graph.message import MessagesState  # type: ignore[import]
 from langgraph.types import Command  # type: ignore[import]
@@ -703,7 +703,7 @@ class WorkflowExecutor:
 
     async def run(
         self, message: str, thread_id: str | None = None, trace_id: str | None = None,
-        memory_context: list[dict] | None = None,
+        memory_context: list[dict] | None = None, user_directive: str | None = None,
     ) -> dict:
         """Invoke the workflow synchronously and return a response dict.
 
@@ -753,7 +753,11 @@ class WorkflowExecutor:
         lf_handler = _make_langfuse_handler(trace_id, thread_id)
         if lf_handler:
             config["callbacks"] = [lf_handler]
-        state = {"messages": history + [HumanMessage(content=safe_message)]}
+        # Platform-composed advisory preference directive (POC-3): a leading SystemMessage
+        # that lands AFTER create_react_agent's author-instructions prompt at invoke time,
+        # so it is advisory (last = weakest). None ⇒ byte-identical to the pre-POC-3 state.
+        lead = [SystemMessage(content=user_directive)] if user_directive else []
+        state = {"messages": lead + history + [HumanMessage(content=safe_message)]}
         # Bind OpenInference/OTEL spans to a trace id derived from run_id (=trace_id)
         # so the LLM/tool spans land on the platform's trace, not a separate one.
         from agentshield_sdk.otel import otel_run_context
@@ -799,7 +803,7 @@ class WorkflowExecutor:
 
     async def run_streamed(
         self, message: str, thread_id: str | None = None, trace_id: str | None = None,
-        memory_context: list[dict] | None = None,
+        memory_context: list[dict] | None = None, user_directive: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream workflow output as SSE-formatted strings.
 
@@ -857,7 +861,9 @@ class WorkflowExecutor:
                 history.append(HumanMessage(content=content))
             elif m.get("role") == "assistant":
                 history.append(AIMessage(content=content))
-        state = {"messages": history + [HumanMessage(content=safe_message)]}
+        # Leading advisory preference directive (POC-3) — see run(). None ⇒ unchanged.
+        lead = [SystemMessage(content=user_directive)] if user_directive else []
+        state = {"messages": lead + history + [HumanMessage(content=safe_message)]}
 
         # Bind OTEL spans to the run_id-derived trace (see run()).
         from agentshield_sdk.otel import otel_run_context

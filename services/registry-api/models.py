@@ -1924,6 +1924,30 @@ class ProductionDeployment(Base):
 
 
 # ---------------------------------------------------------------------------
+# user_profiles (POC-3 response preferences)
+# ---------------------------------------------------------------------------
+class UserProfile(Base):
+    """Platform-level response presets, one row per user (Keycloak JWT `sub` = PK).
+
+    Five nullable enum columns (NULL = "no preference" for that dimension). Values are
+    guarded by CHECK constraints in migration 0065 and by Pydantic Literals in
+    preferences.py (see contracts/enums.md). Not per-team, not per-deployment.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    response_length: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    format: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expertise: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -1964,4 +1988,5 @@ __all__ = [
     "PublishedArtifact",
     "PublishedVersion",
     "ProductionDeployment",
+    "UserProfile",
 ]

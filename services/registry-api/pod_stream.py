@@ -45,6 +45,7 @@ async def stream_pod_chat_frames(
     user_team: str = "",
     deployment_id: str = "",
     auto_approve: bool = False,
+    user_directive: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """POST ``{service_url}/chat/stream`` and yield normalized frame dicts.
 
@@ -76,6 +77,11 @@ async def stream_pod_chat_frames(
         "conversation_id": conversation_id,
         "scope": scope,
     }
+    # POC-3: the platform-composed advisory response-preference directive (a bounded
+    # string, enums-only, composed registry-side). Omitted when None (daemon / no prefs)
+    # so the runner behaves exactly as before.
+    if user_directive:
+        body["user_directive"] = user_directive
 
     try:
         async with httpx.AsyncClient() as client:

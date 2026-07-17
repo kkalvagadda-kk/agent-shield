@@ -105,6 +105,7 @@ async def _persist_tool_call_step(child_id: str, tool: str, status: str) -> None
 async def _dispatch_stream(
     agent_name: str, team: str, message: str, thread_id: str,
     conversation_id: str, scope: str, child_id: str,
+    user_directive: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Reactive member: stream the member pod's /chat/stream via the ONE shared reader,
     re-yielding its content frames (token/tool_call/rationale/error/approval_requested)
@@ -133,6 +134,7 @@ async def _dispatch_stream(
             conversation_id=conversation_id,
             scope=scope,
             author=agent_name,
+            user_directive=user_directive,
         ):
             ftype = frame.get("type")
             if ftype == "agent_start":
@@ -512,7 +514,7 @@ async def _run_step_stream(
     thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(
-            select(AgentRun.run_by, AgentRun.context).where(AgentRun.id == parent_run_id)
+            select(AgentRun.run_by, AgentRun.context, AgentRun.user_id).where(AgentRun.id == parent_run_id)
         )).first()
         # D1 actor_chain (WS-2 T016): the child member run acts under the WORKFLOW's
         # authority, not the member's own. That authority is carried by inheriting the
@@ -532,6 +534,14 @@ async def _run_step_stream(
         # (triggered) run yields production children (→ reviewer console). Do NOT
         # hardcode — the two paths must not be conflated.
         parent_context = (parent[1] if parent else None) or "production"
+        # POC-3: apply the AUTHORIZING user's response preferences to this member.
+        # The parent workflow run carries the live user's sub in user_id (stamped at
+        # both creation sites); a daemon workflow's parent user_id is "" →
+        # compose_directive_for_user returns None (no directive). Compose here, inside
+        # the open session, then thread the bounded string into the member dispatch.
+        from preferences import compose_directive_for_user
+        parent_user_id = (parent[2] if parent else None) or ""
+        user_directive = await compose_directive_for_user(s, parent_user_id)
         child = AgentRun(
             agent_name=agent_name,
             input=current_input[:4000] if current_input else None,
@@ -594,6 +604,7 @@ async def _run_step_stream(
         async for frame in _dispatch_stream(
             agent_name, team, current_input, thread_id,
             conversation_id, conversation_scope, child_id,
+            user_directive=user_directive,
         ):
             if frame.get("type") == _MEMBER_END:
                 status_val, output, err = frame["status"], frame["output"], frame["error"]

@@ -256,6 +256,9 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         # Daemon workflow → the workflow's SERVICE identity subject; user_delegated → the
         # arming human. Members inherit this in _run_step (D1 actor_chain).
         run_by=principal.run_by,
+        # POC-3: the live human's sub (EMPTY for a daemon) — the preference discriminator
+        # a reactive member reads in _run_step_stream. Daemon (user_id=="") ⇒ no directive.
+        user_id=principal.user_id,
         team=wf.team,
         workflow_id=wf.id,
         # Link the parent workflow run to its trigger so a daemon workflow member's

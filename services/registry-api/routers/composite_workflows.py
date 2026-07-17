@@ -543,6 +543,9 @@ async def stream_workflow_run(
         status="queued",
         trigger_type="api",
         run_by=caller_sub,
+        # POC-3: stamp the interactive caller so reactive members can compose that
+        # user's advisory preference directive (_run_step_stream reads parent user_id).
+        user_id=caller_sub,
         team=wf.team,
         workflow_id=wf.id,
         session_id=body.session_id,

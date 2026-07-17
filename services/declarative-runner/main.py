@@ -193,6 +193,10 @@ class ChatRequest(BaseModel):
     scope: str = "agent"                   # agent | workflow_run
     workflow_run_id: str | None = None
     metadata: dict | None = None
+    # POC-3: platform-composed advisory response-preference directive. None = no change
+    # (daemon / no prefs). The runner appends it as a leading SystemMessage; it never
+    # reads user_profiles or composes from raw input — it applies this string only.
+    user_directive: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -546,7 +550,7 @@ async def chat(req: ChatRequest, request: Request):
     try:
         result = await workflow_executor.run(
             req.message, thread_id=req.thread_id, trace_id=trace_id,
-            memory_context=memory_context,
+            memory_context=memory_context, user_directive=req.user_directive,
         )
         elapsed = int(time.perf_counter() * 1000) - start_ms
         output_text = result.get("output", str(result)) if isinstance(result, dict) else str(result)
@@ -627,7 +631,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             #    accumulating assistant text_delta content to persist afterwards.
             async for chunk in workflow_executor.run_streamed(
                 req.message, thread_id=req.thread_id, trace_id=trace_id,
-                memory_context=memory_context,
+                memory_context=memory_context, user_directive=req.user_directive,
             ):
                 event_name = None
                 data_str = None

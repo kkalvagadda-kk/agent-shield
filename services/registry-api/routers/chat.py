@@ -41,6 +41,7 @@ from db import get_db
 from identity import resolve_principal
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
 from pod_stream import stream_pod_chat_frames
+from preferences import compose_directive_for_user
 
 deployment_chat_router = APIRouter(prefix="/api/v1/agents", tags=["deployment-chat"])
 
@@ -381,6 +382,7 @@ async def _proxy_agent_stream(
     user_team: str = "",
     deployment_id: str = "",
     author: str = "",
+    user_directive: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Proxy the live agent pod's /chat/stream SSE output.
 
@@ -418,6 +420,7 @@ async def _proxy_agent_stream(
             user_id=user_id,
             user_team=user_team,
             deployment_id=deployment_id,
+            user_directive=user_directive,
         ):
             yield _emit(frame)
         yield _emit({"type": "done", "run_id": run_id})
@@ -712,6 +715,10 @@ async def stream_chat(
     conversation_id = run.session_id or run_id
     owner_team = await _caller_team(db, run.user_id or "") or ""
     deployment_id = str(deployment.id)
+    # POC-3: compose the caller's advisory preference directive now, while the session
+    # is open (it closes before the stream generator runs). run.user_id is always the
+    # interactive caller here, so a profile — if any — always applies (daemon ⇒ None).
+    user_directive = await compose_directive_for_user(db, run.user_id or "")
 
     # Find the corresponding AgentRun for production tracking
     ar_result = await db.execute(
@@ -736,6 +743,7 @@ async def stream_chat(
             conversation_id=conversation_id, trace_id=trace_id,
             user_id=run.user_id or "", user_team=owner_team,
             deployment_id=deployment_id, author=name,
+            user_directive=user_directive,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -918,6 +926,9 @@ async def stream_deployment_chat(
     conversation_id = run.session_id or run_id
     owner_team = await _caller_team(db, run.user_id or "") or ""
     deployment_id = str(deployment.id)
+    # POC-3: compose the caller's advisory directive while the session is open (it
+    # closes before the stream generator). run.user_id = interactive caller (daemon ⇒ None).
+    user_directive = await compose_directive_for_user(db, run.user_id or "")
 
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
@@ -926,6 +937,7 @@ async def stream_deployment_chat(
             conversation_id=conversation_id, trace_id=trace_id,
             user_id=run.user_id or "", user_team=owner_team,
             deployment_id=deployment_id, author=name,
+            user_directive=user_directive,
         ):
             if chunk.startswith("data: "):
                 try:
