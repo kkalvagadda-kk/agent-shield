@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import require_user
 from db import get_db
 from models import UserProfile
+from schemas import ConversationSummary
+from store_factory import get_conversation_store
 from preferences import (
     UserPreferences,
     UserPreferencesUpdate,
@@ -88,3 +90,22 @@ async def put_my_preferences(
     await db.execute(stmt)
     await db.commit()
     return await load_user_preferences(db, user_id)
+
+
+@router.get("/conversations", response_model=list[ConversationSummary])
+async def list_my_conversations(
+    limit: int = 100,
+    offset: int = 0,
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSummary]:
+    """The caller's conversations across ALL agents (newest-first) — backs the
+    standalone Conversations page. Caller-scoped (user_id = caller.sub); each row
+    carries a derived `environment` so the page's All/Sandbox/Production filter is a
+    pure client predicate. Continue is free: reusing a thread's session_id reloads
+    its prior turns as context."""
+    store = get_conversation_store()
+    rows = await store.list_conversations(
+        db, user_id=claims["sub"], limit=limit, offset=offset,
+    )
+    return [ConversationSummary.model_validate(r) for r in rows]

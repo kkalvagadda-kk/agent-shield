@@ -354,3 +354,62 @@ async def clear_agent_memory(
         q = q.where(AgentMemory.deployment_id == _uuid.UUID(deployment_id))
     result = await db.execute(q)
     return result.rowcount
+
+
+# ---------------------------------------------------------------------------
+# POC-5 — conversation list (read-only aggregate; no new storage / migration)
+# ---------------------------------------------------------------------------
+_LIST_CONVERSATIONS_SQL = text("""
+SELECT
+  am.thread_id                                              AS thread_id,
+  min(am.session_id)                                        AS session_id,
+  min(am.agent_name)                                        AS agent_name,
+  (array_agg(am.content ORDER BY am.message_index)
+     FILTER (WHERE am.role = 'user'))[1]                    AS title,
+  count(*)                                                  AS message_count,
+  max(am.created_at)                                        AS last_activity,
+  min(am.deployment_id)::text                               AS deployment_id,
+  CASE WHEN bool_or(pd.id IS NOT NULL)
+       THEN 'production' ELSE 'sandbox' END                 AS environment
+FROM agent_memory am
+LEFT JOIN production_deployments pd ON am.deployment_id = pd.id
+WHERE am.user_id = :user_id
+  AND (CAST(:agent_name AS text)    IS NULL OR am.agent_name    = :agent_name)
+  AND (CAST(:deployment_id AS uuid) IS NULL OR am.deployment_id = CAST(:deployment_id AS uuid))
+GROUP BY am.thread_id
+ORDER BY max(am.created_at) DESC
+LIMIT :limit OFFSET :offset
+""")
+
+
+async def list_conversations(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    agent_name: str | None = None,
+    deployment_id: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Per-thread conversation summaries for the caller, newest-first.
+
+    Aggregates ``agent_memory`` grouped by ``thread_id``: title = first user
+    message, message_count, last_activity, session_id, agent_name, and a DERIVED
+    ``environment`` (production iff the thread's deployment_id is in
+    production_deployments, else sandbox — there is NO environment column).
+    Ownership-scoped: only the caller's own rows (``user_id = :user_id``); rows
+    with a NULL user_id (daemon/legacy) are never listed. Optional agent_name /
+    deployment_id narrow the scope (the deployment_id filter backs the docked
+    History panel + the deployment Overview conversations tab).
+    """
+    result = await db.execute(
+        _LIST_CONVERSATIONS_SQL,
+        {
+            "user_id": user_id,
+            "agent_name": agent_name,
+            "deployment_id": deployment_id,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+    return [dict(row) for row in result.mappings().all()]

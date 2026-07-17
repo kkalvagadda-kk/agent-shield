@@ -1862,6 +1862,22 @@ class AgentMemoryResponse(BaseModel):
     workflow_run_id: uuid.UUID | None = None
 
 
+class ConversationSummary(BaseModel):
+    """POC-5 — one row per conversation thread for the Conversations list / docked
+    History / deployment conversations tab. Title = first user message (NULL when a
+    thread has no user turn — the client renders a fallback label). `environment` is
+    DERIVED (production iff the thread's deployment is a production_deployment)."""
+
+    thread_id: str
+    session_id: str | None = None
+    agent_name: str | None = None
+    title: str | None = None
+    message_count: int
+    last_activity: datetime | None = None
+    deployment_id: str | None = None
+    environment: str
+
+
 class MemorySearchResult(BaseModel):
     content: str
     similarity_score: float

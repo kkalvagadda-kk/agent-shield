@@ -18,10 +18,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from db import get_db
 from models import Agent
 from schemas import (
     AgentMemoryResponse,
+    ConversationSummary,
     MemorySaveTurnRequest,
     MemorySearchRequest,
     MemorySearchResult,
@@ -87,6 +89,32 @@ async def save_turn(
     )
     await db.commit()
     return [AgentMemoryResponse.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/{name}/memory/conversations",
+    response_model=list[ConversationSummary],
+    summary="List the caller's conversations with this agent (POC-5)",
+)
+async def list_agent_conversations(
+    name: str,
+    deployment_id: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSummary]:
+    """Per-thread conversation summaries for the CALLER with this agent — the resume
+    lens that backs the docked History panel and the deployment Overview
+    conversations tab. Caller-scoped (user_id = caller.sub); optional deployment_id
+    narrows to one deployment. Distinct from the admin Memory tab (list_recent)."""
+    await _get_agent_or_404(name, db)
+    store = get_conversation_store()
+    rows = await store.list_conversations(
+        db, user_id=claims["sub"], agent_name=name,
+        deployment_id=deployment_id, limit=limit, offset=offset,
+    )
+    return [ConversationSummary.model_validate(r) for r in rows]
 
 
 @router.get(

@@ -94,6 +94,24 @@ class ConversationStore(Protocol):
         full ORM rows (row metadata intact), unlike the conversation-keyed `load`."""
         ...
 
+    async def list_conversations(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: str,
+        agent_name: str | None = None,
+        deployment_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """POC-5 — per-thread conversation summaries for the caller (newest-first):
+        title (first user message), message_count, last_activity, session_id,
+        agent_name, and a DERIVED environment (production iff the thread's
+        deployment_id ∈ production_deployments). Ownership-scoped to user_id. This
+        backs the Conversations page / docked History / deployment conversations tab
+        (the RESUME lens), as opposed to `list_recent` (the admin Memory lens)."""
+        ...
+
     async def erase(
         self,
         db: AsyncSession,
@@ -198,6 +216,25 @@ class PostgresConversationStore:
             agent_name=agent_name,
             deployment_id=deployment_id,
             user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_conversations(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: str,
+        agent_name: str | None = None,
+        deployment_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        return await memory.list_conversations(
+            db,
+            user_id=user_id,
+            agent_name=agent_name,
+            deployment_id=deployment_id,
             limit=limit,
             offset=offset,
         )
