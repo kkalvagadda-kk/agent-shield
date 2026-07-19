@@ -115,11 +115,15 @@ SERVICES=(
   "safety-orchestrator|SAFETY_ORCHESTRATOR_TAG|services/safety-orchestrator|yaml:safety-orchestrator.image.tag"
   "python-executor|PYTHON_EXECUTOR_TAG|services/python-executor|subchart:python-executor"
   "scheduler|SCHEDULER_TAG|services/scheduler|subchart:scheduler"
+  "embedding-sidecar|EMBEDDING_SIDECAR_TAG|services/embedding-sidecar|yaml:embeddingSidecar.image.tag"
 )
 
 # Dirs under services/ that intentionally have NO image tag. EXPLICIT, never a silent
 # lookup miss: a service that quietly falls out of the table is how coverage rots.
-NO_TAG_DIRS=("echo-agent" "minio-cp1" "nemo-guardrails")
+# postgresql-pgvector: portable pgvector build for x86 EKS nodes w/o AVX-512 — built
+# only by the EKS path (values-eks.yaml), never by deploy-cpe2e.sh. Local/docker-desktop
+# uses the stock postgres sub-chart, so this dir is tag-free for the cpe2e coupling gate.
+NO_TAG_DIRS=("echo-agent" "minio-cp1" "nemo-guardrails" "postgresql-pgvector")
 
 # Paths inside a service dir that do not change image behaviour. Kept deliberately tiny:
 # the Dockerfile is `COPY . .`, so almost everything in the dir IS image content.
