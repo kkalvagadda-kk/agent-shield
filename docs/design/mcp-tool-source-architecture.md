@@ -93,8 +93,25 @@ Full detail on each point is in the requirements doc's "Corrections found during
 1. Operator → Studio → `POST /api/v1/mcp-servers` (name, url, transport, auth_config_id, owner_team, identity_mode).
 2. registry-api persists `MCPServer`, calls MCP Proxy `POST /internal/discover {server_id}`.
 3. Proxy resolves credentials (own K8s Secret read), opens a `streamable_http` session, runs `initialize` + `tools/list`, returns tool list + JSON schemas.
-4. registry-api upserts one `Tool` row per discovered tool (`type='mcp_tool'`, `mcp_server_id`, `mcp_tool_name`, `input_schema`); updates `discovered_tool_count`/`last_synced_at`/`status`.
+4. registry-api upserts one `Tool` row per discovered tool (`type='mcp_tool'`, `mcp_server_id`, `mcp_tool_name`, `input_schema`, `owner_team` set from `MCPServer.owner_team`); updates `discovered_tool_count`/`last_synced_at`/`status`.
 5. Studio shows discovery results inline before the operator leaves the screen (FR-MCP-41).
+
+### 3a. Studio UX Walkthrough (fleshes out FR-MCP-40..43)
+
+**Where servers are listed.** A new **"MCP Servers"** screen under the Settings sidebar section, alongside the existing "Models" and "Credentials" entries (`Sidebar.tsx:85-88`'s `SETTINGS_ITEMS` pattern) — route `/mcp-servers`, new `McpServersPage.tsx`. Plain list: Name, Transport, Status (`connected`/`disconnected`/`error` badge), Discovered Tool Count, Owner Team, Last Synced, row actions (Sync, Delete). This screen only ever does registration + discovery + lifecycle management — it never touches agent binding, same separation of concerns as today's Tools page.
+
+**Registering a server (FR-MCP-41's proof point).**
+- "Register Server" → a form: name, description, `server_url`, transport (`streamable_http` selectable; `stdio` shown but disabled/grayed — not built until Phase 3), and an **Internal/External toggle** that changes the rest of the form: External shows the auth-config picker (reusing the credential dropdown pattern `ToolsPage.tsx`/`CredentialsPage.tsx` already use); Internal shows the identity-mode dropdown (on-behalf-of / service-identity — on-behalf-of stays effectively inert until the Decision 29 dependency chain lands, §7a).
+- Submitting **synchronously attempts the real connect + `initialize` + `tools/list`** (FR-MCP-02) as part of that one request — no async job/polling for Phase 1. Either way (success or connection failure) the `MCPServer` row is created, and the response navigates to a new **Server Detail page** (`/mcp-servers/{id}`, mirroring `KnowledgeBaseDetailPage.tsx`'s list→detail-with-tabs shape). On success, that page shows the actual discovered-tools table (name, namespaced as `{server_name}__{mcp_tool_name}`, input schema summary, risk badge) — this table **is** the proof required by FR-MCP-41. On failure (bad URL, bad creds, timeout), the detail page instead shows a red status banner with the failure reason (`health_detail`) and a Sync/Retry button — registration is not an all-or-nothing gate; a broken connection just leaves the server in `error` status until fixed.
+- The detail page is also where Sync (re-run discovery), Delete, and editing the auth config live.
+
+**Wiring a discovered tool to an agent — no new binding path.** Binding happens only in the agent builder's existing `ToolsPicker.tsx`, never on the MCP Servers or Tools screens. Since MCP-discovered tools are plain `Tool` rows (`type='mcp_tool'`, D4), they show up in `listTools()` — and therefore in `ToolsPicker` — automatically. Two small additions make it legible rather than confusing:
+- `ToolsPicker` tags each MCP-sourced tool with a small badge naming its source server (FR-MCP-42) — requires `RegistryTool` (`registryApi.ts`) to carry the server name, which it doesn't today.
+- `ToolsPage.tsx` shows `mcp_tool` rows **read-only** (view schema/risk/"discovered from {server}" link back to the detail page) — not creatable there; MCP tools only ever originate from a server registration.
+
+Checking the box and saving the agent hits the same `POST /agents/{name}/tools` bind call as any http/native/python tool (FR-MCP-10). Team-scoping (`publish_status` for visibility, `AssetGrant` for deploy-time gating, resolved above) applies automatically — zero new code, keyed on `Tool.id`/`Tool.owner_team` regardless of type.
+
+**Runtime — nothing MCP-specific visible to the end user.** Same tool-call rendering, same HITL approval surface (`HitlPanel`/`HITLDashboardPage`) if the tool's risk requires approval, same trace panel. The only visual difference anywhere in the chat/run experience is the source-server badge in the builder's tool picker.
 
 ### Data Flow — Governed Tool Call (Decision 27's new gate, applied to all types)
 1. LLM emits a tool call → `governed_tool` (same code path for all 4 types).
