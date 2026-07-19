@@ -18,16 +18,32 @@ import {
   type RegistryTool,
 } from '../api/registryApi';
 
-const schema = z
-  .object({
-    name: z.string().min(1, 'Name is required'),
-    type: z.enum(['api_key', 'oauth2', 'bearer', 'mtls']),
-    credential_key: z.string().optional(),
-    credential_value: z.string().optional(),
-    owner_team: z.string().optional(),
-  })
-  .superRefine((v, ctx) => {
+const baseObject = z.object({
+  name: z.string().min(1, 'Name is required'),
+  type: z.enum(['api_key', 'oauth2', 'bearer', 'mtls']),
+  credential_key: z.string().optional(),
+  credential_value: z.string().optional(),
+  owner_team: z.string().optional(),
+});
+
+type FormValues = z.infer<typeof baseObject>;
+
+// The schema depends on whether the credential already has a stored value.
+// A credential with no value is a useless empty shell (a named row whose key
+// was never persisted) — the exact state that made a "saved" credential fail
+// with 403 at tool-call time. When no value is stored yet, one is required.
+function makeSchema(valueRequired: boolean) {
+  return baseObject.superRefine((v, ctx) => {
     const key = v.credential_key?.trim() ?? '';
+    const val = v.credential_value?.trim() ?? '';
+    // Block saving an empty credential (create, or editing one with no key yet).
+    if (valueRequired && !val) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['credential_value'],
+        message: 'A secret value is required — this credential has no key stored yet.',
+      });
+    }
     // A secret value with no key would be silently dropped on save.
     if (v.credential_value && !key) {
       ctx.addIssue({
@@ -47,8 +63,7 @@ const schema = z
       });
     }
   });
-
-type FormValues = z.infer<typeof schema>;
+}
 
 // Fingerprints of HTTP/httpx error strings that must never be saved as a secret
 // value (e.g. a pasted "Client error '403 Forbidden' for url '...'"). Guards the
@@ -172,7 +187,19 @@ export default function CredentialsPage() {
               <tbody>
                 {configs.map((c) => (
                   <tr key={c.id} className="border-b last:border-0 hover:bg-slate-50">
-                    <td className="px-4 py-3 font-medium text-slate-800">{c.name}</td>
+                    <td className="px-4 py-3 font-medium text-slate-800">
+                      <span className="inline-flex items-center gap-2">
+                        {c.name}
+                        {!c.has_credentials && (
+                          <span
+                            className="badge text-xs bg-amber-100 text-amber-700"
+                            title="No secret value stored — tools using this credential will fail to authenticate. Edit to add a key."
+                          >
+                            no key set
+                          </span>
+                        )}
+                      </span>
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`badge text-xs ${TYPE_BADGE[c.type] ?? 'bg-slate-100 text-slate-600'}`}>
                         {TYPE_LABELS[c.type] ?? c.type}
@@ -217,9 +244,13 @@ function CredentialForm({
   onSaved: () => void;
 }) {
   const isEdit = config !== null;
+  // A value must be entered whenever none is stored yet: every create, and any
+  // edit of an empty-shell credential (has_credentials === false). Editing a
+  // credential that already has a value may leave it blank to keep it.
+  const valueRequired = !isEdit || !config.has_credentials;
 
   const { register, handleSubmit, setValue, formState: { errors } } = useForm<FormValues>({
-    resolver: zodResolver(schema),
+    resolver: zodResolver(makeSchema(valueRequired)),
     defaultValues: {
       name: config?.name ?? '',
       type: (config?.type as FormValues['type']) ?? 'api_key',
@@ -387,8 +418,16 @@ function CredentialForm({
                 {...register('credential_value')}
                 type="password"
                 className="input"
-                placeholder={isEdit ? '(unchanged if blank)' : 'Paste secret value'}
+                placeholder={valueRequired ? 'Paste secret value' : '(unchanged if blank)'}
               />
+              {isEdit && !config.has_credentials && (
+                <p className="text-xs text-amber-600 mt-1">
+                  No key is stored for this credential yet — enter one to make it usable.
+                </p>
+              )}
+              {errors.credential_value && (
+                <p className="text-xs text-red-500 mt-1">{errors.credential_value.message}</p>
+              )}
             </div>
           </div>
         </div>

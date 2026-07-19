@@ -18,6 +18,7 @@ import {
   listProviders,
   listTeams,
   type LLMProvider,
+  type LLMProviderCredentials,
 } from "../api/registryApi";
 import { cn } from "../lib/utils";
 
@@ -39,12 +40,23 @@ const AWS_REGIONS = [
   "eu-west-1", "eu-central-1", "ap-southeast-1", "ap-northeast-1",
 ];
 
+// Ollama models are user-pulled, so the field stays freeform — this is just an
+// autocomplete/suggestion list. The live list comes from /config.json
+// (studio.providerModels.ollama in the Helm values → nginx ConfigMap), so ops can
+// extend it with `helm upgrade` and NO image rebuild. This default matches the
+// chart's baked-in list and is used only when /config.json omits it (older deploys).
+const DEFAULT_OLLAMA_MODELS = ["gemma4:12b-mlx", "qwen2.5-coder:32b", "mistral-small:24b"];
+
+interface StudioConfig {
+  providerModels?: { ollama?: string[] };
+}
+
 // ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
 const baseSchema = z.object({
   name: z.string().min(1, "Name is required").max(128),
-  provider: z.enum(["anthropic", "bedrock"]),
+  provider: z.enum(["anthropic", "bedrock", "ollama"]),
   default_model: z.string().min(1, "Model is required"),
   team: z.string().min(1, "Team is required"),
 });
@@ -61,7 +73,16 @@ const bedrockSchema = baseSchema.extend({
   AWS_DEFAULT_REGION: z.string().min(1, "Region is required"),
 });
 
-const schema = z.discriminatedUnion("provider", [anthropicSchema, bedrockSchema]);
+const ollamaSchema = baseSchema.extend({
+  provider: z.literal("ollama"),
+  OLLAMA_BASE_URL: z.string().min(1, "Base URL is required"),
+});
+
+const schema = z.discriminatedUnion("provider", [
+  anthropicSchema,
+  bedrockSchema,
+  ollamaSchema,
+]);
 type FormValues = z.infer<typeof schema>;
 
 // ---------------------------------------------------------------------------
@@ -70,6 +91,7 @@ type FormValues = z.infer<typeof schema>;
 const PROVIDER_BADGE: Record<string, string> = {
   anthropic: "bg-purple-100 text-purple-700",
   bedrock: "bg-orange-100 text-orange-700",
+  ollama: "bg-emerald-100 text-emerald-700",
 };
 
 // ---------------------------------------------------------------------------
@@ -260,17 +282,32 @@ function AddProviderForm({
   const provider = watch("provider");
   const models = MODELS[provider] ?? [];
 
+  // Suggested Ollama models, served dynamically at runtime via /config.json (the
+  // same file keycloak config is read from). Falls back to a hardcoded default when
+  // the key is absent (older deploys) or the fetch fails.
+  const { data: studioConfig } = useQuery({
+    queryKey: ["studio-config"],
+    queryFn: async (): Promise<StudioConfig> => {
+      const r = await fetch("/config.json");
+      return r.json();
+    },
+    staleTime: Infinity,
+  });
+  const ollamaModels = studioConfig?.providerModels?.ollama ?? DEFAULT_OLLAMA_MODELS;
+
   const mutation = useMutation({
     mutationFn: (values: FormValues) => {
-      let credentials: Record<string, string>;
+      let credentials: LLMProviderCredentials;
       if (values.provider === "anthropic") {
         credentials = { api_key: values.ANTHROPIC_API_KEY };
-      } else {
+      } else if (values.provider === "bedrock") {
         credentials = {
           aws_access_key_id: values.AWS_ACCESS_KEY_ID,
           aws_secret_access_key: values.AWS_SECRET_ACCESS_KEY,
           aws_region: values.AWS_DEFAULT_REGION,
         };
+      } else {
+        credentials = { base_url: values.OLLAMA_BASE_URL };
       }
       return createProvider({
         name: values.name,
@@ -308,6 +345,7 @@ function AddProviderForm({
             <select {...register("provider")} className="input">
               <option value="anthropic">Anthropic</option>
               <option value="bedrock">Amazon Bedrock</option>
+              <option value="ollama">Ollama</option>
             </select>
           </Field>
 
@@ -326,11 +364,27 @@ function AddProviderForm({
             </select>
           </Field>
 
-          {/* Default model */}
+          {/* Default model — freeform for Ollama (user-pulled models), dropdown otherwise */}
           <Field label="Default model" required error={(errors as Record<string, {message?: string}>).default_model?.message}>
-            <select {...register("default_model")} className="input">
-              {models.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
+            {provider === "ollama" ? (
+              <>
+                <input
+                  {...register("default_model")}
+                  list="ollama-model-suggestions"
+                  className={cn("input font-mono", (errors as Record<string, {message?: string}>).default_model && "border-red-400")}
+                  placeholder="gemma4:12b-mlx"
+                />
+                <datalist id="ollama-model-suggestions">
+                  {ollamaModels.map((m) => (
+                    <option value={m} key={m} />
+                  ))}
+                </datalist>
+              </>
+            ) : (
+              <select {...register("default_model")} className="input">
+                {models.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            )}
           </Field>
         </div>
 
@@ -382,6 +436,21 @@ function AddProviderForm({
               </p>
             </Field>
           </>
+        )}
+
+        {provider === "ollama" && (
+          <Field label="Base URL" required error={(errors as Record<string, {message?: string}>).OLLAMA_BASE_URL?.message}>
+            <input
+              {...register("OLLAMA_BASE_URL" as keyof FormValues)}
+              type="text"
+              autoComplete="off"
+              className={cn("input font-mono", (errors as Record<string, {message?: string}>).OLLAMA_BASE_URL && "border-red-400")}
+              placeholder="http://host.docker.internal:11434"
+            />
+            <p className="text-xs text-slate-400 mt-0.5">
+              URL of the Ollama server reachable from agent pods.
+            </p>
+          </Field>
         )}
 
         <div className="flex justify-end gap-3 pt-2 border-t border-slate-100">

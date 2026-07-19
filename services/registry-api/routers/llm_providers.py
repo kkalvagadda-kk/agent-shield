@@ -78,7 +78,7 @@ async def create_provider(
         name=body.name,
         provider=body.provider,
         default_model=body.default_model,
-        credentials_encrypted=encrypt_json(body.credentials.model_dump()),
+        credentials_encrypted=encrypt_json(body.credentials.model_dump(exclude_none=True)),
         team=body.team,
     )
     db.add(provider)
@@ -140,7 +140,7 @@ async def update_provider(
     if body.default_model is not None:
         provider.default_model = body.default_model
     if body.credentials is not None:
-        provider.credentials_encrypted = encrypt_json(body.credentials.model_dump())
+        provider.credentials_encrypted = encrypt_json(body.credentials.model_dump(exclude_none=True))
     provider.updated_at = datetime.now(tz=timezone.utc)
 
     await db.flush()
