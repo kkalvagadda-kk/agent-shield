@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, GitBranch, Loader2, Pause, Play, Trash2 } from "lucide-react";
+import { ArrowLeft, ExternalLink, GitBranch, Loader2, MessageCircle, Pause, Play, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
@@ -15,6 +15,8 @@ import {
   type WorkflowDeployment,
 } from "../api/registryApi";
 import WorkflowMiniGraph from "../components/WorkflowMiniGraph";
+import WorkflowConversationsTab from "../components/agent-detail/WorkflowConversationsTab";
+import WorkflowMemoryTab from "../components/agent-detail/WorkflowMemoryTab";
 import { toast } from "sonner";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
@@ -28,7 +30,7 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   terminating: { label: "Terminating…", cls: "bg-slate-50 text-slate-500" },
 };
 
-type Tab = "overview" | "runs";
+type Tab = "overview" | "runs" | "memory" | "conversations";
 
 export default function WorkflowDeploymentOverviewPage() {
   const { id, depId } = useParams<{ id: string; depId: string }>();
@@ -135,6 +137,17 @@ export default function WorkflowDeploymentOverviewPage() {
         </div>
         {/* Actions */}
         <div className="flex items-center gap-1.5">
+          {/* Reactive workflows get an "Open Chat" entry point — parity with a
+              reactive agent's deployment (its chat streams POST /workflows/{id}/runs/stream). */}
+          {workflow?.execution_shape === "reactive" && deployment.status === "running" && (
+            <Link
+              to={`/workflows/${id}/d/${depId}/chat`}
+              className="btn-primary text-xs py-1.5 mr-1 inline-flex items-center gap-1.5"
+              data-testid="workflow-open-chat"
+            >
+              <MessageCircle size={12} /> Open Chat
+            </Link>
+          )}
           {!isTransitional && deployment.status === "running" && (
             <button onClick={() => handleAction("suspend")} className="p-1.5 rounded-md hover:bg-slate-100 text-amber-600" title="Suspend">
               <Pause size={16} />
@@ -156,7 +169,7 @@ export default function WorkflowDeploymentOverviewPage() {
       {/* Tabs */}
       <div className="border-b border-slate-200 mb-6">
         <nav className="flex gap-6">
-          {(["overview", "runs"] as Tab[]).map((tab) => (
+          {(["overview", "runs", "memory", "conversations"] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -177,6 +190,15 @@ export default function WorkflowDeploymentOverviewPage() {
         <OverviewStats stats={stats} deployment={deployment} version={version} workflowId={id!} workflow={workflow} />
       )}
       {activeTab === "runs" && <RunsList runs={runs} />}
+      {/* Conversations + Memory parity with an agent's deployment overview. A
+          workflow's transcript is authored by its MEMBERS (member agent_name,
+          NULL user_id), so the Conversations tab must resolve the list through
+          the workflow's parent runs (workflow id), NOT the workflow name — see
+          WorkflowConversationsTab / GET /workflows/{id}/conversations. */}
+      {activeTab === "memory" && <WorkflowMemoryTab workflowId={id!} deploymentId={depId!} />}
+      {activeTab === "conversations" && (
+        <WorkflowConversationsTab workflowId={id!} deploymentId={depId!} />
+      )}
     </div>
   );
 }
@@ -192,7 +214,11 @@ function OverviewStats({
   deployment: WorkflowDeployment;
   version?: { version_number: number; orchestration: string; members: unknown[]; edges?: unknown[] };
   workflowId: string;
-  workflow?: { members?: { agent_id: string; agent_name: string | null }[]; edges?: { source_agent_id: string; target_agent_id: string }[] };
+  workflow?: {
+    execution_shape?: string;
+    members?: { agent_id: string; agent_name: string | null }[];
+    edges?: { source_agent_id: string; target_agent_id: string }[];
+  };
 }) {
   const members = (version?.members ?? workflow?.members ?? []) as { agent_id: string; agent_name: string | null }[];
   const edges = (version?.edges ?? workflow?.edges ?? []) as { source_agent_id: string; target_agent_id: string }[];
@@ -241,6 +267,14 @@ function OverviewStats({
           <span className="text-slate-500">Members</span>
           <span className="font-medium">{members.length}</span>
         </div>
+        {workflow?.execution_shape === "reactive" && (
+          <div className="flex justify-between items-center gap-3">
+            <span className="text-slate-500 shrink-0">Chat Endpoint</span>
+            <code className="font-mono text-xs text-slate-700 truncate" title={`POST /api/v1/workflows/${workflowId}/runs/stream`}>
+              POST /api/v1/workflows/{workflowId}/runs/stream
+            </code>
+          </div>
+        )}
         {deployment.ttl_hours && (
           <div className="flex justify-between">
             <span className="text-slate-500">TTL</span>

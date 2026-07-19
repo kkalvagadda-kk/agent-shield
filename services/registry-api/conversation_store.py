@@ -112,6 +112,39 @@ class ConversationStore(Protocol):
         (the RESUME lens), as opposed to `list_recent` (the admin Memory lens)."""
         ...
 
+    async def list_workflow_conversations(
+        self,
+        db: AsyncSession,
+        *,
+        workflow_id: str,
+        workflow_name: str,
+        user_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        """POC-5 — per-thread conversation summaries for a WORKFLOW (same shape as
+        `list_conversations`). A workflow's transcript is authored by its members
+        (member agent_name, NULL user_id), so the thread set is scoped through the
+        workflow's parent runs (workflow_id + owner) and the display name comes from
+        the workflow. Backs the workflow deployment Conversations tab."""
+        ...
+
+    async def list_workflow_memory(
+        self,
+        db: AsyncSession,
+        *,
+        workflow_id: str,
+        user_id: str,
+        thread_id: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[AgentMemory]:
+        """POC-5 ledger — workflow memory ENTRIES (not summaries) scoped through the
+        workflow's parent runs (workflow_id + owner). `thread_id` given → one thread's
+        transcript oldest-first (chat replay); absent → recent entries newest-first
+        (Memory tab). Backs `GET /workflows/{id}/memory`."""
+        ...
+
     async def erase(
         self,
         db: AsyncSession,
@@ -235,6 +268,44 @@ class PostgresConversationStore:
             user_id=user_id,
             agent_name=agent_name,
             deployment_id=deployment_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_workflow_conversations(
+        self,
+        db: AsyncSession,
+        *,
+        workflow_id: str,
+        workflow_name: str,
+        user_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict]:
+        return await memory.list_workflow_conversations(
+            db,
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_workflow_memory(
+        self,
+        db: AsyncSession,
+        *,
+        workflow_id: str,
+        user_id: str,
+        thread_id: str | None = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[AgentMemory]:
+        return await memory.list_workflow_memory(
+            db,
+            workflow_id=workflow_id,
+            user_id=user_id,
+            thread_id=thread_id,
             limit=limit,
             offset=offset,
         )

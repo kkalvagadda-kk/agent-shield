@@ -37,6 +37,7 @@ from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
 from models import Agent, AgentMemory, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, RunStep, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
+    AgentMemoryResponse,
     AgentRunResponse,
     AgentTriggerCreate,
     AgentTriggerUpdate,
@@ -44,6 +45,7 @@ from schemas import (
     CompositeWorkflowResponse,
     CompositeWorkflowUpdate,
     CompositeWorkflowWithMembersResponse,
+    ConversationSummary,
     RotateTokenResponse,
     ToolCallProjection,
     WorkflowEdgeCreate,
@@ -56,6 +58,7 @@ from schemas import (
     WorkflowRunTreeResponse,
     WorkflowTriggerResponse,
 )
+from store_factory import get_conversation_store
 from trigger_utils import _new_token, workflow_webhook_url
 from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, orchestrate_stream, resolve_member_names
 
@@ -97,10 +100,11 @@ async def compute_reactive_approval_warnings(
     db: AsyncSession, workflow_id: uuid.UUID, execution_shape: str
 ) -> list[str]:
     """Non-blocking author warning (best-effort half of S2): a reactive workflow with a
-    statically high-risk-tool member will FAIL at runtime if that tool trips an approval
-    gate (a reactive workflow can't durably park — the authoritative S2 seam is the runtime
-    fail-closed in workflow_orchestrator). Returns [] for durable workflows or when no
-    member carries a high-/critical-risk tool."""
+    statically high-risk-tool member STOPS EARLY at runtime if that tool trips an approval
+    gate. A reactive workflow can't resume through approvals, so the run emits the member's
+    ``approval_requested`` frame and then ``done`` WITHOUT executing the gated tool or any
+    downstream members (verified against the runtime — not a hard failure/error). Returns []
+    for durable workflows or when no member carries a high-/critical-risk tool."""
     if execution_shape != "reactive":
         return []
     rows = (await db.execute(
@@ -119,8 +123,10 @@ async def compute_reactive_approval_warnings(
     members = sorted({name for (name,) in rows})
     return [
         f"Reactive workflow has high-risk-tool member(s): {', '.join(members)}. "
-        f"If a tool trips an approval gate this run will FAIL (reactive can't park). "
-        f"Set shape=durable to allow approvals."
+        f"If a tool trips an approval gate this run STOPS EARLY — it surfaces the approval "
+        f"request then ends without running the gated tool or any downstream members "
+        f"(reactive workflows can't resume through approvals). Set shape=durable to run "
+        f"approval-gated tools."
     ]
 
 
@@ -259,6 +265,68 @@ async def get_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db
     warnings = await _workflow_warnings(db, wf)
     base = _to_response(wf, len(members), warnings)
     return CompositeWorkflowWithMembersResponse(**base.model_dump(), members=members, edges=edges)
+
+
+@router.get(
+    "/{workflow_id}/conversations",
+    response_model=list[ConversationSummary],
+    summary="List the caller's conversations with this workflow (POC-5)",
+)
+async def list_workflow_conversations(
+    workflow_id: uuid.UUID,
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSummary]:
+    """Per-thread conversation summaries for the CALLER with this workflow — the
+    resume lens behind the workflow deployment Conversations tab. A workflow's
+    transcript is authored by its members (member agent_name, NULL user_id), so
+    ownership + identity come from the workflow's PARENT runs (workflow_id + owner),
+    not the member rows. Same ConversationSummary shape as the per-agent endpoint."""
+    wf = await _get_workflow(workflow_id, db)
+    store = get_conversation_store()
+    rows = await store.list_workflow_conversations(
+        db,
+        workflow_id=str(workflow_id),
+        workflow_name=wf.name,
+        user_id=claims["sub"],
+        limit=limit,
+        offset=offset,
+    )
+    return [ConversationSummary.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/{workflow_id}/memory",
+    response_model=list[AgentMemoryResponse],
+    summary="List this workflow's memory entries for the caller (workflow ledger)",
+)
+async def list_workflow_memory(
+    workflow_id: uuid.UUID,
+    thread_id: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentMemoryResponse]:
+    """Workflow memory ENTRIES for the CALLER — the same parent-run-scoped read the
+    Conversations tab uses, but returning individual entries. Backs BOTH the workflow
+    Memory tab (no thread_id → recent entries, newest-first) and the WorkflowChat
+    replay (thread_id → that thread's transcript, oldest-first). Ownership + identity
+    come from the workflow's PARENT runs (workflow_id + owner), not the member rows
+    (member agent_name, NULL user_id)."""
+    await _get_workflow(workflow_id, db)  # 404 if the workflow is unknown
+    store = get_conversation_store()
+    rows = await store.list_workflow_memory(
+        db,
+        workflow_id=str(workflow_id),
+        user_id=claims["sub"],
+        thread_id=thread_id,
+        limit=limit,
+        offset=offset,
+    )
+    return [AgentMemoryResponse.model_validate(r) for r in rows]
 
 
 @router.patch("/{workflow_id}", response_model=CompositeWorkflowResponse)

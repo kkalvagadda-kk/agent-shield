@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import AgentMemory
+from models import AgentMemory, AgentRun
 
 logger = logging.getLogger(__name__)
 
@@ -368,7 +368,10 @@ SELECT
      FILTER (WHERE am.role = 'user'))[1]                    AS title,
   count(*)                                                  AS message_count,
   max(am.created_at)                                        AS last_activity,
-  min(am.deployment_id)::text                               AS deployment_id,
+  -- deployment_id is a UUID; Postgres has no min(uuid) aggregate, so pick the
+  -- thread's first-seen non-null deployment_id deterministically by message order.
+  (array_agg(am.deployment_id ORDER BY am.message_index)
+     FILTER (WHERE am.deployment_id IS NOT NULL))[1]::text  AS deployment_id,
   CASE WHEN bool_or(pd.id IS NOT NULL)
        THEN 'production' ELSE 'sandbox' END                 AS environment
 FROM agent_memory am
@@ -380,6 +383,121 @@ GROUP BY am.thread_id
 ORDER BY max(am.created_at) DESC
 LIMIT :limit OFFSET :offset
 """)
+
+
+# A WORKFLOW's transcript rows are authored by its MEMBERS (agent_name = the
+# member, user_id = NULL), so the per-agent list above never matches a workflow.
+# The workflow's identity + ownership live on its PARENT run instead
+# (agent_runs.workflow_id / .user_id / .session_id == the transcript thread_id).
+# So we scope the transcript threads via a semi-join to the workflow's parent runs
+# (DISTINCT session_id — avoids fan-out when a session recurs across runs) and take
+# the display name from the workflow, not the member rows. Ownership comes from the
+# parent run's user_id (the member rows' user_id is NULL by construction).
+_LIST_WORKFLOW_CONVERSATIONS_SQL = text("""
+SELECT
+  am.thread_id                                              AS thread_id,
+  min(am.session_id)                                        AS session_id,
+  CAST(:workflow_name AS text)                              AS agent_name,
+  (array_agg(am.content ORDER BY am.message_index)
+     FILTER (WHERE am.role = 'user'))[1]                    AS title,
+  count(*)                                                  AS message_count,
+  max(am.created_at)                                        AS last_activity,
+  (array_agg(am.deployment_id ORDER BY am.message_index)
+     FILTER (WHERE am.deployment_id IS NOT NULL))[1]::text  AS deployment_id,
+  CASE WHEN bool_or(pd.id IS NOT NULL)
+       THEN 'production' ELSE 'sandbox' END                 AS environment
+FROM agent_memory am
+LEFT JOIN production_deployments pd ON am.deployment_id = pd.id
+WHERE am.scope = 'workflow_run'
+  AND am.thread_id IN (
+    SELECT DISTINCT run.session_id
+    FROM agent_runs run
+    WHERE run.workflow_id = CAST(:workflow_id AS uuid)
+      AND run.parent_run_id IS NULL
+      AND run.user_id = :user_id
+      AND run.session_id IS NOT NULL
+  )
+GROUP BY am.thread_id
+ORDER BY max(am.created_at) DESC
+LIMIT :limit OFFSET :offset
+""")
+
+
+async def list_workflow_conversations(
+    db: AsyncSession,
+    *,
+    workflow_id: str,
+    workflow_name: str,
+    user_id: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Per-thread conversation summaries for a WORKFLOW, newest-first.
+
+    Same shape as :func:`list_conversations` (ConversationSummary), but the thread
+    set is scoped through the workflow's parent runs (workflow_id + owner) instead
+    of a member agent_name, and ownership comes from the parent run's user_id (the
+    workflow_run transcript rows carry a NULL user_id). Returns [] for a workflow
+    the caller has never run.
+    """
+    result = await db.execute(
+        _LIST_WORKFLOW_CONVERSATIONS_SQL,
+        {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow_name,
+            "user_id": user_id,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+    return [dict(row) for row in result.mappings().all()]
+
+
+async def list_workflow_memory(
+    db: AsyncSession,
+    *,
+    workflow_id: str,
+    user_id: str,
+    thread_id: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[AgentMemory]:
+    """Workflow memory ENTRIES scoped through the workflow's parent runs.
+
+    Mirrors :func:`list_workflow_conversations`' ownership semi-join (the thread set
+    is the workflow's parent runs' session_ids for this owner — the workflow_run
+    transcript rows carry ``user_id = NULL``), but returns individual ``AgentMemory``
+    rows (entries), not per-thread summaries. Two orderings, matching the per-agent
+    ``GET /agents/{name}/memory`` dual behavior:
+
+      thread_id given  → one thread's transcript, ORDER BY message_index ASC (replay → G1)
+      thread_id absent → recent entries across the workflow's threads, created_at DESC (tab → G2)
+
+    Returns ``[]`` for a workflow the caller has never run. No ``workflow_name`` needed —
+    entries keep their author ``agent_name`` (the member), which the tab/replay want to show.
+    """
+    import uuid as _uuid
+
+    q = select(AgentMemory).where(
+        AgentMemory.scope == "workflow_run",
+        AgentMemory.thread_id.in_(
+            select(AgentRun.session_id)
+            .where(
+                AgentRun.workflow_id == _uuid.UUID(workflow_id),
+                AgentRun.parent_run_id.is_(None),
+                AgentRun.user_id == user_id,
+                AgentRun.session_id.isnot(None),
+            )
+            .distinct()
+        ),
+    )
+    if thread_id:
+        q = q.where(AgentMemory.thread_id == thread_id).order_by(AgentMemory.message_index.asc())
+    else:
+        q = q.order_by(AgentMemory.created_at.desc())
+    q = q.limit(limit).offset(offset)
+    result = await db.execute(q)
+    return list(result.scalars().all())
 
 
 async def list_conversations(
