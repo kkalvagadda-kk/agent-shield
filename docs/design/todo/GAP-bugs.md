@@ -1,6 +1,6 @@
 # Consolidated Open Gaps & Bugs
 
-**Last updated:** 2026-07-09
+**Last updated:** 2026-07-19
 **Sources:** slice-implementation-assessment.md, execution-models-gap-analysis.md, future-improvements.md, cost-tracking.md, unified-artifact-deployment-navigation.md, gaps.md, testing-gaps-plan.md, execution-modes-production.md, production-workflow-deployment.md
 
 Items marked FIXED/DONE/RESOLVED in source docs are excluded. Duplicates across docs are merged (source noted in parentheses).
@@ -38,6 +38,7 @@ Items marked FIXED/DONE/RESOLVED in source docs are excluded. Duplicates across 
 | P2-09 | Prod WF | Small | Edge graph support in pod orchestrator — uses position ordering, not topological sort | prod-wf deferred #3 |
 | P2-10 | Prod WF | Medium | Graceful failover — if orchestrator pod crashes mid-run, runs stay `running` forever | prod-wf deferred #4 |
 | P2-11 | Prod WF | Small | Version drift detection — no warning when member agent's deployed version differs from workflow snapshot | prod-wf deferred #5 |
+| P2-12 | Eval/Test | Medium | 7 HITL/eval e2e suites red under fail-closed OPA: their fixture agents declare no tools (tools injected from the eval dataset at runtime), so nothing grants the `AssetGrant` those calls need → `tool_not_granted` deny, no run/park. Test-harness/eval-runner gap, NOT a product regression (real agents with declared tools work; deploy-time auto-grant shipped in `fe059b6`). Suites 72/45/60/65/70/71 (+ 37 is a separate asyncpg loop bug). Fix + options in `docs/design/todo/eval-fixture-tool-grants.md` | 2026-07-19 merge verification |
 
 ---
 
