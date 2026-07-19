@@ -10,13 +10,16 @@
 #   6. Audit trail: decision_at, reviewer_id on all records
 #   7. Production: authority-gated approval + resume-stream
 #
-# Requires: serper-agent-4 deployed with web_search (risk=high),
-#           Serper API key seeded, OPA bundle propagated.
+# Requires: a reactive HITL agent deployed with web_search (risk=high),
+#           Serper API key seeded on its credential, OPA bundle propagated.
+#           Defaults to the `hitl-agent` fixture; override with HITL_AGENT=<name>.
+#           (The former `serper-agent-4` fixture was retired; hitl-agent is the
+#           canonical reactive HITL fixture — web_search, high-risk, Ollama.)
 
 set -euo pipefail
 
 PASS=0; FAIL=0; SKIP=0
-AGENT="serper-agent-4"
+AGENT="${HITL_AGENT:-hitl-agent}"
 KALYAN="643b0e62-b437-40f8-8104-57c34203624b"
 ADMIN="75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
 
@@ -48,7 +51,7 @@ echo ""
 # ---------------------------------------------------------------------------
 # T-S45-001: Pre-flight — bundle has agent with high-risk tool
 # ---------------------------------------------------------------------------
-run_test "T-S45-001" "OPA bundle has serper-agent-4 with web_search risk=high"
+run_test "T-S45-001" "OPA bundle has $AGENT with web_search risk=high"
 BUNDLE_CHECK=$(api "
 import asyncio, json
 async def check():
@@ -57,7 +60,7 @@ async def check():
     async with AsyncSessionLocal() as db:
         data = await generate_bundle_data(db)
         for key, val in data.get('agents', {}).items():
-            if 'serper-agent-4' in key:
+            if '$AGENT' in key:
                 tools = val.get('tools', [])
                 ws = [t for t in tools if t.get('name') == 'web_search' and t.get('risk') == 'high']
                 if ws:
@@ -508,6 +511,115 @@ try: asyncio.run(test())
 except Exception as e: print(f'FAIL:exc={e!r}')
 ")
 if echo "$EVAL_CHECK" | grep -q "^OK:"; then pass; else fail "$EVAL_CHECK"; fi
+
+# ---------------------------------------------------------------------------
+# T-S45-011: REACTIVE chat HITL surfacing (regression for the AsyncPostgresSaver
+#   sync-get_state bug). Drives the SAME reactive path AgentChatPage uses —
+#   POST /agents/{name}/chat + GET the SSE stream — and asserts an
+#   `approval_requested` frame (non-null approval_id, tool=web_search) is
+#   received BEFORE any `done`. Under the bug the pod's stream_events reads the
+#   parked interrupt with a SYNC graph.get_state() that fails against the
+#   AsyncPostgresSaver checkpointer, so the client wrongly gets `done` and the
+#   run is orphaned. Agent is overridable (HITL_REACTIVE_AGENT) so this runs red
+#   on a dev cluster that only has ollama-smoke; defaults to $AGENT (hitl-agent).
+# ---------------------------------------------------------------------------
+REACTIVE_AGENT="${HITL_REACTIVE_AGENT:-$AGENT}"
+run_test "T-S45-011" "Reactive /agents/${REACTIVE_AGENT}/chat emits approval_requested before done"
+REACTIVE_CHECK=$(api "
+import asyncio, json, httpx
+async def test():
+    base='http://localhost:8000/api/v1'
+    tr=httpx.post('http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token',
+        data={'grant_type':'password','client_id':'agentshield-studio','username':'platform-admin','password':'PlatformAdmin2024'},timeout=10)
+    if tr.status_code!=200: print(f'SKIP:no-token={tr.status_code}'); return
+    auth={'Authorization':f\"Bearer {tr.json()['access_token']}\"}
+    root='http://localhost:8000'
+    # Start a reactive sandbox chat that should trigger the high-risk web_search.
+    async with httpx.AsyncClient(timeout=60) as c:
+        r=await c.post(f'{base}/agents/${REACTIVE_AGENT}/chat',
+            json={'message':'What is the current weather in Austin Texas right now?','session_id':'s45-011','context':'playground'},headers=auth)
+        if r.status_code!=200:
+            print(f'SKIP:chat-start={r.status_code} (agent pod not running?)'); return
+        b=r.json(); su=root+b['stream_url']
+    saw_approval=False; appr_id=None; appr_tool=None; saw_done_first=False
+    async with httpx.AsyncClient(timeout=120) as c:
+        async with c.stream('GET',su,headers=auth) as resp:
+            async for line in resp.aiter_lines():
+                if not line.startswith('data: '): continue
+                try: ev=json.loads(line[6:].strip())
+                except: continue
+                ty=ev.get('type')
+                if ty=='approval_requested':
+                    saw_approval=True; appr_id=ev.get('approval_id'); appr_tool=ev.get('tool'); break
+                if ty in ('done','error'):
+                    saw_done_first=True; break
+    # The bug: the stream ends on 'done' with no approval, even though the tool
+    # is high-risk and an approval row was created server-side.
+    if saw_approval and appr_id and appr_tool=='web_search':
+        print(f'OK:approval_id={str(appr_id)[:8]},tool={appr_tool}')
+    elif saw_done_first:
+        print('FAIL:got_done_no_approval (reactive HITL surfacing broken — parked interrupt not read from AsyncPostgresSaver)')
+    else:
+        print(f'FAIL:no_approval_no_done saw_approval={saw_approval} id={appr_id} tool={appr_tool}')
+try: asyncio.run(test())
+except Exception as e: print(f'FAIL:exc={e!r}')
+")
+if echo "$REACTIVE_CHECK" | grep -q "^OK:"; then pass
+elif echo "$REACTIVE_CHECK" | grep -q "^SKIP:"; then echo "SKIP ($REACTIVE_CHECK)"; SKIP=$((SKIP + 1))
+else fail "$REACTIVE_CHECK"; fi
+
+# ---------------------------------------------------------------------------
+# T-S45-012: REACTIVE approve -> RESUME completes (regression for the resume
+#   endpoint keying the approval/checkpoint by run_id instead of the POC-0
+#   conversation thread = session_id). Drives the SAME path AgentChatPage uses:
+#   chat -> approval_requested -> decide approved -> GET /agents/{name}/chat/
+#   {run_id}/resume-stream. Under the bug the resume-stream returns 404 ("No
+#   decided approval found for this run") and the chat hangs after approval.
+# ---------------------------------------------------------------------------
+run_test "T-S45-012" "Reactive approve → resume-stream connects (not 404) and completes"
+RESUME_CHECK=$(api "
+import asyncio, json, httpx
+async def test():
+    base='http://localhost:8000/api/v1'; root='http://localhost:8000'
+    tr=httpx.post('http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token',
+        data={'grant_type':'password','client_id':'agentshield-studio','username':'platform-admin','password':'PlatformAdmin2024'},timeout=10)
+    if tr.status_code!=200: print(f'SKIP:no-token={tr.status_code}'); return
+    auth={'Authorization':f\"Bearer {tr.json()['access_token']}\"}
+    async with httpx.AsyncClient(timeout=60) as c:
+        r=await c.post(f'{base}/agents/${REACTIVE_AGENT}/chat',
+            json={'message':'What is the current weather in Austin Texas right now?','session_id':'s45-012','context':'playground'},headers=auth)
+        if r.status_code!=200: print(f'SKIP:chat-start={r.status_code}'); return
+        b=r.json(); su=root+b['stream_url']; run_id=b['run_id']; appr=None
+    async with httpx.AsyncClient(timeout=90) as c:
+        async with c.stream('GET',su,headers=auth) as resp:
+            async for line in resp.aiter_lines():
+                if not line.startswith('data: '): continue
+                try: ev=json.loads(line[6:].strip())
+                except: continue
+                if ev.get('type')=='approval_requested': appr=ev.get('approval_id'); break
+                if ev.get('type') in ('done','error'): break
+    if not appr: print('SKIP:no-approval (risk not high / not parking)'); return
+    async with httpx.AsyncClient(timeout=30) as c:
+        d=await c.post(f'{base}/playground/approvals/{appr}/decide', json={'decision':'approved'}, headers=auth)
+        if d.status_code!=200: print(f'FAIL:decide={d.status_code}'); return
+    # The regression: resume-stream must NOT 404, and must yield a terminal frame.
+    async with httpx.AsyncClient(timeout=90) as c:
+        async with c.stream('GET',f'{base}/agents/${REACTIVE_AGENT}/chat/{run_id}/resume-stream',headers=auth) as resp:
+            if resp.status_code!=200:
+                print(f'FAIL:resume-stream={resp.status_code} (bug: approval keyed by run_id != session thread)'); return
+            got_terminal=False
+            async for line in resp.aiter_lines():
+                if not line.startswith('data: '): continue
+                try: ev=json.loads(line[6:].strip())
+                except: continue
+                if ev.get('type') in ('done','error','approval_requested'): got_terminal=True; break
+    print('OK:resume connected+completed' if got_terminal else 'FAIL:resume connected but never completed')
+try: asyncio.run(test())
+except Exception as e: print(f'FAIL:exc={e!r}')
+")
+if echo "$RESUME_CHECK" | grep -q "^OK:"; then pass
+elif echo "$RESUME_CHECK" | grep -q "^SKIP:"; then echo "SKIP ($RESUME_CHECK)"; SKIP=$((SKIP + 1))
+else fail "$RESUME_CHECK"; fi
 
 # ===========================================================================
 echo ""

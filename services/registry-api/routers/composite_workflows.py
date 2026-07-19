@@ -17,24 +17,27 @@ EXISTING member agents, orchestrated as a run tree.
 """
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import asyncio
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
 from db import get_db
 from observability_backend import get_observability_backend
 from rbac import grant_creator_admin
-from models import Agent, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, Tool, WorkflowEdge, WorkflowMember
+from models import Agent, AgentMemory, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, RunStep, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
+    AgentMemoryResponse,
     AgentRunResponse,
     AgentTriggerCreate,
     AgentTriggerUpdate,
@@ -42,18 +45,22 @@ from schemas import (
     CompositeWorkflowResponse,
     CompositeWorkflowUpdate,
     CompositeWorkflowWithMembersResponse,
+    ConversationSummary,
     RotateTokenResponse,
+    ToolCallProjection,
     WorkflowEdgeCreate,
     WorkflowEdgeResponse,
     WorkflowMemberCreate,
     WorkflowMemberResponse,
     WorkflowRunCreate,
     WorkflowRunStartResponse,
+    WorkflowRunStreamRequest,
     WorkflowRunTreeResponse,
     WorkflowTriggerResponse,
 )
+from store_factory import get_conversation_store
 from trigger_utils import _new_token, workflow_webhook_url
-from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
+from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, orchestrate_stream, resolve_member_names
 
 logger = logging.getLogger(__name__)
 
@@ -93,10 +100,11 @@ async def compute_reactive_approval_warnings(
     db: AsyncSession, workflow_id: uuid.UUID, execution_shape: str
 ) -> list[str]:
     """Non-blocking author warning (best-effort half of S2): a reactive workflow with a
-    statically high-risk-tool member will FAIL at runtime if that tool trips an approval
-    gate (a reactive workflow can't durably park — the authoritative S2 seam is the runtime
-    fail-closed in workflow_orchestrator). Returns [] for durable workflows or when no
-    member carries a high-/critical-risk tool."""
+    statically high-risk-tool member STOPS EARLY at runtime if that tool trips an approval
+    gate. A reactive workflow can't resume through approvals, so the run emits the member's
+    ``approval_requested`` frame and then ``done`` WITHOUT executing the gated tool or any
+    downstream members (verified against the runtime — not a hard failure/error). Returns []
+    for durable workflows or when no member carries a high-/critical-risk tool."""
     if execution_shape != "reactive":
         return []
     rows = (await db.execute(
@@ -115,8 +123,10 @@ async def compute_reactive_approval_warnings(
     members = sorted({name for (name,) in rows})
     return [
         f"Reactive workflow has high-risk-tool member(s): {', '.join(members)}. "
-        f"If a tool trips an approval gate this run will FAIL (reactive can't park). "
-        f"Set shape=durable to allow approvals."
+        f"If a tool trips an approval gate this run STOPS EARLY — it surfaces the approval "
+        f"request then ends without running the gated tool or any downstream members "
+        f"(reactive workflows can't resume through approvals). Set shape=durable to run "
+        f"approval-gated tools."
     ]
 
 
@@ -255,6 +265,68 @@ async def get_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db
     warnings = await _workflow_warnings(db, wf)
     base = _to_response(wf, len(members), warnings)
     return CompositeWorkflowWithMembersResponse(**base.model_dump(), members=members, edges=edges)
+
+
+@router.get(
+    "/{workflow_id}/conversations",
+    response_model=list[ConversationSummary],
+    summary="List the caller's conversations with this workflow (POC-5)",
+)
+async def list_workflow_conversations(
+    workflow_id: uuid.UUID,
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ConversationSummary]:
+    """Per-thread conversation summaries for the CALLER with this workflow — the
+    resume lens behind the workflow deployment Conversations tab. A workflow's
+    transcript is authored by its members (member agent_name, NULL user_id), so
+    ownership + identity come from the workflow's PARENT runs (workflow_id + owner),
+    not the member rows. Same ConversationSummary shape as the per-agent endpoint."""
+    wf = await _get_workflow(workflow_id, db)
+    store = get_conversation_store()
+    rows = await store.list_workflow_conversations(
+        db,
+        workflow_id=str(workflow_id),
+        workflow_name=wf.name,
+        user_id=claims["sub"],
+        limit=limit,
+        offset=offset,
+    )
+    return [ConversationSummary.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/{workflow_id}/memory",
+    response_model=list[AgentMemoryResponse],
+    summary="List this workflow's memory entries for the caller (workflow ledger)",
+)
+async def list_workflow_memory(
+    workflow_id: uuid.UUID,
+    thread_id: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentMemoryResponse]:
+    """Workflow memory ENTRIES for the CALLER — the same parent-run-scoped read the
+    Conversations tab uses, but returning individual entries. Backs BOTH the workflow
+    Memory tab (no thread_id → recent entries, newest-first) and the WorkflowChat
+    replay (thread_id → that thread's transcript, oldest-first). Ownership + identity
+    come from the workflow's PARENT runs (workflow_id + owner), not the member rows
+    (member agent_name, NULL user_id)."""
+    await _get_workflow(workflow_id, db)  # 404 if the workflow is unknown
+    store = get_conversation_store()
+    rows = await store.list_workflow_memory(
+        db,
+        workflow_id=str(workflow_id),
+        user_id=claims["sub"],
+        thread_id=thread_id,
+        limit=limit,
+        offset=offset,
+    )
+    return [AgentMemoryResponse.model_validate(r) for r in rows]
 
 
 @router.patch("/{workflow_id}", response_model=CompositeWorkflowResponse)
@@ -504,6 +576,87 @@ async def start_workflow_run(
     return WorkflowRunStartResponse(workflow_id=wf.id, run_id=parent.id, status="queued", warning=warning)
 
 
+@router.post("/{workflow_id}/runs/stream")
+async def stream_workflow_run(
+    workflow_id: uuid.UUID,
+    body: WorkflowRunStreamRequest,
+    caller: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
+    """POC-2b 2b-0 headline: stream a workflow run as multiplexed SSE.
+
+    Creates the parent run exactly like ``start_workflow_run`` (playground context) but
+    keyed to ``body.session_id`` for the shared transcript, then streams the ONE
+    ``orchestrate_stream`` graph walk as ``data: {json}\\n\\n`` frames. The internal
+    ``__member_end__`` sentinel is filtered out (never leaks to the client). Frame vocab:
+    ``agent_start`` / ``token`` / ``tool_call`` / ``rationale`` / ``agent_end`` / ``done`` /
+    ``error`` — see contracts/sse-frames.md §A.
+
+    In-process only — this endpoint never dispatches to a production orchestrator pod
+    (gap-ledgered)."""
+    wf = await _get_workflow(workflow_id, db)
+    if wf.status == "archived":
+        raise HTTPException(status_code=422, detail="Cannot run an archived workflow.")
+    member_names = await resolve_member_names(db, workflow_id)
+    if not member_names:
+        raise HTTPException(status_code=422, detail="Workflow has no members to run.")
+
+    caller_sub = caller.get("sub")
+    message = body.message or ""
+
+    parent = AgentRun(
+        agent_name=wf.name,
+        input=message[:4000] if message else None,
+        context="playground",
+        status="queued",
+        trigger_type="api",
+        run_by=caller_sub,
+        # POC-3: stamp the interactive caller so reactive members can compose that
+        # user's advisory preference directive (_run_step_stream reads parent user_id).
+        user_id=caller_sub,
+        team=wf.team,
+        workflow_id=wf.id,
+        session_id=body.session_id,
+    )
+    db.add(parent)
+    await db.flush()
+
+    from tracing import trace_create_run
+    trace_id = trace_create_run(
+        run_id=str(parent.id),
+        agent_name=wf.name,
+        user_id=caller_sub or "system",
+        context="playground",
+        input_message=message[:4000] if message else "",
+    )
+    if trace_id:
+        parent.langfuse_trace_id = trace_id
+
+    await db.commit()
+    await db.refresh(parent)
+
+    parent_id = str(parent.id)
+    conversation_id = body.session_id or parent_id
+    team = wf.team
+    mode = wf.orchestration
+    shape = wf.execution_shape
+
+    async def _sse():
+        async for frame in orchestrate_stream(
+            parent_id, team, str(workflow_id), message, mode, conversation_id, shape
+        ):
+            # The internal per-member sentinel must never reach the client.
+            if frame.get("type") == "__member_end__":
+                continue
+            yield f"data: {json.dumps(frame)}\n\n"
+
+    return StreamingResponse(
+        _sse(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/{workflow_id}/runs", response_model=list[AgentRunResponse])
 async def list_workflow_runs(
     workflow_id: uuid.UUID,
@@ -540,15 +693,53 @@ async def get_workflow_run_tree(
     )).scalars().all())
 
     obs = get_observability_backend()
+    # Shared transcript key for this run (§5.2): session_id when a session was supplied to
+    # the stream/start endpoint, else the run id. Rationale rows are keyed on it.
+    conversation_id = parent.session_id or str(run_id)
 
     def _with_trace_url(run: AgentRun) -> AgentRunResponse:
         resp = AgentRunResponse.model_validate(run)
         resp.trace_url = obs.build_trace_url(run.langfuse_trace_id)
         return resp
 
+    async def _project_child(run: AgentRun) -> AgentRunResponse:
+        resp = _with_trace_url(run)
+        # tool_calls (2b-i): reactive tool-call marker rows persisted by the streaming
+        # orchestrator (output.kind='tool_call'), ordered as observed.
+        steps = list((await db.execute(
+            select(RunStep)
+            .where(
+                RunStep.run_id == run.id,
+                RunStep.output["kind"].astext == "tool_call",
+            )
+            .order_by(RunStep.step_number)
+        )).scalars().all())
+        resp.tool_calls = [
+            ToolCallProjection(
+                tool_name=s.name,
+                status=(s.output or {}).get("status", "ok"),
+            )
+            for s in steps
+        ]
+        # rationale (2b-ii): the latest message_kind='rationale' row this member authored
+        # on the shared workflow thread. Null for tool-less/durable members.
+        rationale = (await db.execute(
+            select(AgentMemory.content)
+            .where(
+                AgentMemory.thread_id == conversation_id,
+                AgentMemory.scope == "workflow_run",
+                AgentMemory.message_kind == "rationale",
+                AgentMemory.agent_name == run.agent_name,
+            )
+            .order_by(AgentMemory.message_index.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        resp.rationale = rationale or None
+        return resp
+
     return WorkflowRunTreeResponse(
         parent=_with_trace_url(parent),
-        children=[_with_trace_url(c) for c in children],
+        children=[await _project_child(c) for c in children],
     )
 
 

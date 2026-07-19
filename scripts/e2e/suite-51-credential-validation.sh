@@ -131,5 +131,47 @@ assert not any(a["name"] == name for a in lst), "Rejected config must not persis
 print("PASS: T-S51-006")
 '
 
+# --------------------------------------------------------------------------
+# T-S51-007 — has_credentials distinguishes an empty shell from a real credential
+# This is the serper-dev root cause: a credential linked to a tool but with no
+# value stored (has_credentials=false, no K8s secret) → tool auth fails with 403.
+# --------------------------------------------------------------------------
+echo "T-S51-007 — has_credentials reflects whether a value is actually stored"
+run '
+import httpx, uuid
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+c = httpx.Client(base_url="http://localhost:8000/api/v1")
+config.load_incluster_config()
+v1 = client.CoreV1Api()
+
+# (a) Credential created WITHOUT a value = empty shell → has_credentials false, no secret.
+name = "s51-shell-" + uuid.uuid4().hex[:8]
+r = c.post("/auth-configs/", json={"name":name,"type":"api_key"})
+assert r.status_code == 201, f"create shell: {r.status_code}: {r.text}"
+cid = r.json()["id"]
+assert r.json()["has_credentials"] is False, f"empty shell must be has_credentials=false: {r.json()}"
+# GET/list must agree.
+got = next(a for a in c.get("/auth-configs/", params={"limit":200}).json()["items"] if a["id"]==cid)
+assert got["has_credentials"] is False, f"list shows shell as has_credentials: {got}"
+# No K8s secret should exist for an empty shell.
+try:
+    v1.read_namespaced_secret(f"auth-config-{cid}", "agentshield-platform")
+    raise AssertionError("empty shell must NOT have a K8s secret")
+except ApiException as e:
+    assert e.status == 404, f"unexpected secret lookup status: {e.status}"
+
+# (b) Updating the shell WITH a value flips has_credentials → true and creates the secret.
+real = "sk-real-" + uuid.uuid4().hex
+r2 = c.put(f"/auth-configs/{cid}", json={"credentials":{"serper_api_key":real}})
+assert r2.status_code == 200, f"update shell: {r2.status_code}: {r2.text}"
+assert r2.json()["has_credentials"] is True, f"after value, has_credentials must be true: {r2.json()}"
+sec = v1.read_namespaced_secret(f"auth-config-{cid}", "agentshield-platform")
+import base64
+assert base64.b64decode(sec.data["serper_api_key"]).decode() == real, "secret not materialized on update"
+c.delete(f"/auth-configs/{cid}")
+print("PASS: T-S51-007")
+'
+
 echo ""
-echo "=== Suite 51 COMPLETE: 6/6 ==="
+echo "=== Suite 51 COMPLETE: 7/7 ==="

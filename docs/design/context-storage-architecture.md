@@ -327,6 +327,8 @@ No surface has per-message agent attribution today; every bubble renderer assume
 
 **Approach: prove the end-to-end journey with proper UX as a POC, then harden.** The POC delivers working cross-agent context sharing a user can *see* in the browser; the §7 security/privacy items are applied in a **Tighten** track once functionality + UX are validated. Deliberate trade: we de-risk the product question before investing in hardening.
 
+> **Build order, per-phase build detail & rhythm:** the committed execution sequence for the user-facing phases (POC-2→POC-5), each phase's grounded build steps, and the `/plan`+`/tasks`-before-each-phase rhythm live in the companion [`context-storage-ux-roadmap.md`](./context-storage-ux-roadmap.md). This section defines *what* each phase delivers; the roadmap defines *the order and how it's built*. POC-0/1 are done + proven (suite-75 5/0/1) as of 2026-07-16.
+
 **One correction so the POC isn't built on sand:** two items that read like "hardening" are actually **functional prerequisites** — the feature is simply broken without them, so they stay *in* the POC: (a) chat using `session_id` as `thread_id` (today it's `run_id`, so nothing threads), and (b) a persistent Postgres checkpointer + `user_id`/`deployment_id` propagation (so state survives and is scoped at all). A **basic** thread-ownership check ships with the POC too — cheap, and without it the demo is trivially leaky. The *rest* of §7 (PII-scan-on-write, atomic index, injection defense, erasure, encryption, audit, budget) is deferred to Tighten.
 
 ### POC — functionality + proper UX

@@ -40,6 +40,8 @@ from auth_middleware import require_user
 from db import get_db
 from identity import resolve_principal
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
+from pod_stream import stream_pod_chat_frames
+from preferences import compose_directive_for_user
 
 deployment_chat_router = APIRouter(prefix="/api/v1/agents", tags=["deployment-chat"])
 
@@ -70,6 +72,36 @@ async def _caller_team(db: AsyncSession, user_sub: str) -> Optional[str]:
     )
     r = row.first()
     return r.team_name if r else None
+
+
+async def _resolve_session_id(
+    db: AsyncSession, supplied: Optional[str], user_sub: str
+) -> str:
+    """Resolve the session_id a chat turn binds to, fail-closed (thread-ownership.md, S6).
+
+    - Empty supplied session OR unauthenticated caller → mint a fresh session_id.
+      There is no binding to prove, and an ambiguous identity must never bind to a
+      shared session.
+    - Supplied session already owned by a DIFFERENT user → 403. A session first used
+      by user A cannot be replayed by user B to read A's conversation.
+    - Supplied session owned by the same user (or not yet used) → allowed; this POST
+      establishes/continues ownership by writing a run with user_id=user_sub.
+    """
+    if not supplied or not user_sub:
+        return str(uuid.uuid4())
+    owner = (
+        await db.execute(
+            select(PlaygroundRun.user_id)
+            .where(PlaygroundRun.session_id == supplied)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if owner is not None and owner != user_sub:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not your session.",
+        )
+    return supplied
 
 
 async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
@@ -344,96 +376,58 @@ async def _proxy_agent_stream(
     service_url: str,
     message: str,
     run_id: str,
+    conversation_id: str,
     trace_id: str | None = None,
     user_id: str = "",
     user_team: str = "",
+    deployment_id: str = "",
+    author: str = "",
+    user_directive: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Proxy the live agent pod's /chat/stream SSE output.
 
-    Translates named SSE events from the declarative-runner into unnamed
-    data-only frames that the EventSource frontend expects:
-      text_delta         → {"type": "token",              "content": "..."}
-      done               → {"type": "done",                "run_id": "..."}
-      error              → {"type": "error",               "message": "..."} + done
-      approval_requested → {"type": "approval_requested",  ...}
-    """
-    target = f"{service_url}/chat/stream"
-    timeout = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
+    The pod body carries BOTH keys (chat-stream-memory contract):
+      thread_id       = session_id  → the LangGraph checkpoint key. This is the
+                        POC-0 fix: it was ``run_id`` (a fresh id per turn), so
+                        nothing threaded across turns; keying on the session lets
+                        the checkpointer + transcript accumulate the conversation.
+      conversation_id = session_id  → the transcript key (equal to thread_id for
+                        chat; they differ only for workflow members).
+      scope           = "agent".
+    ``run_id`` stays the client-facing correlation id in the emitted SSE frames.
 
+    Delegates the per-pod SSE parsing to the ONE shared reader
+    ``stream_pod_chat_frames`` (No-Bandaid: the same reader the workflow stream uses).
+    Each normalized frame dict is serialized for the EventSource frontend; the reader
+    already tags every frame with ``author`` and no longer drops ``tool_call`` frames
+    (the L473 drop is gone — single-agent chat now surfaces tool chips). This function
+    owns the run-level ``done`` (the reader never emits it).
+    """
     def _emit(payload: dict) -> str:
         return f"data: {json.dumps(payload)}\n\n"
 
     try:
-        req_headers: dict[str, str] = {"Content-Type": "application/json"}
-        if trace_id:
-            req_headers["X-AgentShield-Trace-ID"] = trace_id
-        # The caller's identity MUST reach the pod: the SDK reads these headers to
-        # build the OPA input, and WS-2's `user_identity_ok` floor denies any
-        # `user_delegated` tool call whose `input.user_id` is empty. Omitting them
-        # (as this proxy did) made the agent report a "policy restriction on the
-        # search tool" for every tool call — the deny is correct given the input; the
-        # input was wrong. Fail-closed, so nothing errored and the agent degraded
-        # politely, which is why it survived: only the trace showed an 11ms tool span.
-        # A daemon agent legitimately sends "" here and OPA's daemon branch admits it.
-        if user_id:
-            req_headers["X-User-Sub"] = user_id
-        if user_team:
-            req_headers["X-Agent-Team"] = user_team
-
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
-                target,
-                json={"message": message, "thread_id": run_id},
-                headers=req_headers,
-                timeout=timeout,
-            ) as response:
-                if response.status_code != 200:
-                    logger.error(
-                        "Agent pod %s returned HTTP %d", target, response.status_code
-                    )
-                    yield _emit({"type": "error", "message": f"Agent returned HTTP {response.status_code}"})
-                    yield _emit({"type": "done", "run_id": run_id})
-                    return
-
-                current_event: Optional[str] = None
-                current_data: Optional[str] = None
-
-                async for line in response.aiter_lines():
-                    if line.startswith("event:"):
-                        current_event = line[len("event:"):].strip()
-                    elif line.startswith("data:"):
-                        current_data = line[len("data:"):].strip()
-                    elif line == "":
-                        # End of SSE frame — translate and emit
-                        if current_data is not None:
-                            try:
-                                payload = json.loads(current_data)
-                            except json.JSONDecodeError:
-                                payload = {}
-
-                            if current_event == "text_delta":
-                                yield _emit({"type": "token", "content": payload.get("content", "")})
-                            elif current_event == "done":
-                                yield _emit({"type": "done", "run_id": run_id})
-                            elif current_event == "error":
-                                yield _emit({"type": "error", "message": payload.get("message", "Agent error")})
-                                yield _emit({"type": "done", "run_id": run_id})
-                            elif current_event == "approval_requested":
-                                yield _emit({"type": "approval_requested", **payload})
-                            # tool_call_start / tool_call_end are informational — skip for consumer chat
-
-                        current_event = None
-                        current_data = None
-
-    except httpx.ConnectError:
-        logger.error("Cannot reach agent pod at %s", target)
-        yield _emit({"type": "error", "message": "Agent pod is unreachable. It may still be starting."})
+        # thread_id == conversation_id == session_id for single-agent chat (they
+        # differ only for workflow members). scope="agent" → no rationale frames.
+        async for frame in stream_pod_chat_frames(
+            service_url,
+            message=message,
+            thread_id=conversation_id,
+            conversation_id=conversation_id,
+            scope="agent",
+            author=author,
+            trace_id=trace_id,
+            user_id=user_id,
+            user_team=user_team,
+            deployment_id=deployment_id,
+            user_directive=user_directive,
+        ):
+            yield _emit(frame)
         yield _emit({"type": "done", "run_id": run_id})
     except asyncio.CancelledError:
         logger.info("Client disconnected during stream for run_id=%s", run_id)
     except Exception as exc:
-        logger.exception("Unexpected error proxying to agent pod %s", target)
+        logger.exception("Unexpected error proxying to agent pod %s", service_url)
         yield _emit({"type": "error", "message": str(exc)})
         yield _emit({"type": "done", "run_id": run_id})
 
@@ -604,7 +598,9 @@ async def start_chat(
                 detail=f"Agent '{name}' has no running {env_label} deployment.",
             )
 
-    session_id = body.session_id or str(uuid.uuid4())
+    # Fail-closed session binding: a supplied session owned by another user is
+    # rejected before we create any run under it (thread-ownership.md, S6).
+    session_id = await _resolve_session_id(db, body.session_id, user_sub)
 
     # -- Resolve the acting principal (WS-2 R3) -------------------------------
     # Interactive run → a JWT caller is present, so pass caller=<jwt user> (never
@@ -714,6 +710,15 @@ async def stream_chat(
         f"http://{deployment.k8s_deployment_name}.{deployment.k8s_namespace}:8080"
     )
     trace_id = run.langfuse_trace_id
+    # Resolve identity now (the DB session closes before the stream generator
+    # runs). conversation_id = run.session_id is the transcript/checkpoint key.
+    conversation_id = run.session_id or run_id
+    owner_team = await _caller_team(db, run.user_id or "") or ""
+    deployment_id = str(deployment.id)
+    # POC-3: compose the caller's advisory preference directive now, while the session
+    # is open (it closes before the stream generator runs). run.user_id is always the
+    # interactive caller here, so a profile — if any — always applies (daemon ⇒ None).
+    user_directive = await compose_directive_for_user(db, run.user_id or "")
 
     # Find the corresponding AgentRun for production tracking
     ar_result = await db.execute(
@@ -734,9 +739,11 @@ async def stream_chat(
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id,
-            user_id=caller.get("sub", ""),
-            user_team=await _caller_team(db, caller.get("sub", "")) or "",
+            service_url, run.input_message or "", run_id,
+            conversation_id=conversation_id, trace_id=trace_id,
+            user_id=run.user_id or "", user_team=owner_team,
+            deployment_id=deployment_id, author=name,
+            user_directive=user_directive,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -809,7 +816,8 @@ async def start_deployment_chat(
 
     user_sub = caller.get("sub", "")
     caller_team = await _caller_team(db, user_sub)
-    session_id = body.session_id or str(uuid.uuid4())
+    # Fail-closed session binding (thread-ownership.md, S6).
+    session_id = await _resolve_session_id(db, body.session_id, user_sub)
 
     # Same single identity decision as start_chat: caller-present → the caller is
     # the principal (any agent class). Keeps run_by attribution consistent across
@@ -914,13 +922,22 @@ async def stream_deployment_chat(
     # and into _complete_chat_run so the trace is closed out — both were missing
     # here, so deployment-pinned runs produced no trace at all.
     trace_id = run.langfuse_trace_id
+    # Resolve identity before the DB session closes (stream generator runs later).
+    conversation_id = run.session_id or run_id
+    owner_team = await _caller_team(db, run.user_id or "") or ""
+    deployment_id = str(deployment.id)
+    # POC-3: compose the caller's advisory directive while the session is open (it
+    # closes before the stream generator). run.user_id = interactive caller (daemon ⇒ None).
+    user_directive = await compose_directive_for_user(db, run.user_id or "")
 
     async def _stream_and_complete() -> AsyncGenerator[str, None]:
         output_parts: list[str] = []
         async for chunk in _proxy_agent_stream(
-            service_url, run.input_message or "", run_id, trace_id=trace_id,
-            user_id=caller.get("sub", ""),
-            user_team=await _caller_team(db, caller.get("sub", "")) or "",
+            service_url, run.input_message or "", run_id,
+            conversation_id=conversation_id, trace_id=trace_id,
+            user_id=run.user_id or "", user_team=owner_team,
+            deployment_id=deployment_id, author=name,
+            user_directive=user_directive,
         ):
             if chunk.startswith("data: "):
                 try:
@@ -978,7 +995,13 @@ async def resume_stream_chat(
     if run.user_id != user_sub:
         raise HTTPException(status_code=403, detail="Not your run")
 
-    thread_id = run_id
+    # The HITL approval + LangGraph checkpoint are keyed by the CONVERSATION id
+    # (session_id since POC-0), NOT the per-turn run_id. Deriving thread_id the
+    # same way the chat dispatch does (chat.py:715/926 `run.session_id or run_id`)
+    # is what lets the approval lookup below match AND the pod /resume/{thread_id}
+    # target the parked checkpoint. Using run_id here (pre-POC-0 assumption) made
+    # the approval lookup 404 and the chat hang after approval.
+    thread_id = run.session_id or run_id
 
     approval_result = await db.execute(
         select(Approval)
@@ -1062,7 +1085,9 @@ async def resume_stream_chat(
 
                                 if current_event == "text_delta":
                                     output_parts.append(payload.get("content", ""))
-                                    yield _emit({"type": "token", "content": payload.get("content", "")})
+                                    # POC-2: resume is a one-speaker continuation of
+                                    # the same agent — attribute to {name}.
+                                    yield _emit({"type": "token", "content": payload.get("content", ""), "author": name})
                                 elif current_event == "done":
                                     yield _emit({"type": "done", "run_id": run_id})
                                 elif current_event == "error":

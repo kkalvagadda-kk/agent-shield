@@ -138,9 +138,17 @@ if ! diff -q "$RA_FE" "$GW_FE" >/dev/null 2>&1; then
   PARITY_OK=0
   PARITY_DETAIL="filter_engine.py DIVERGED between registry-api and event-gateway; "
 fi
-if ! grep -q "check-filter-engine-parity.sh" scripts/deploy-cpe2e.sh; then
+# The parity gate must be wired into the deploy so a filter-engine divergence is
+# UNDEPLOYABLE. main's b9fb2bb moved it one tier up: deploy-cpe2e.sh runs the pre-build
+# source-gate wrapper run-fast-gates.sh, which invokes check-filter-engine-parity.sh.
+# Verify the WHOLE chain (grepping deploy-cpe2e.sh alone went stale after that refactor).
+if ! grep -q "run-fast-gates.sh" scripts/deploy-cpe2e.sh; then
   PARITY_OK=0
-  PARITY_DETAIL="${PARITY_DETAIL}check-filter-engine-parity.sh is NOT invoked from deploy-cpe2e.sh (divergence would become deployable); "
+  PARITY_DETAIL="${PARITY_DETAIL}run-fast-gates.sh (pre-build source-gate wrapper) is NOT invoked from deploy-cpe2e.sh; "
+fi
+if ! grep -q "check-filter-engine-parity.sh" scripts/e2e/run-fast-gates.sh; then
+  PARITY_OK=0
+  PARITY_DETAIL="${PARITY_DETAIL}check-filter-engine-parity.sh is NOT invoked from run-fast-gates.sh (divergence would become deployable); "
 fi
 
 # (b) no new filter code: the engine is the only decider.

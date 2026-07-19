@@ -121,12 +121,21 @@ run_suite "Suite 71: Scheduled e2e (WS-3)"           "suite-71-scheduled-e2e.sh"
 run_suite "Suite 72: Eval v2 E-1 durable (no-fakes)" "suite-72-eval-v2-durable.sh"
 run_suite "Suite 73: Eval v2 E-5 workflow run-tree (no-fakes)" "suite-73-eval-v2-workflow.sh"
 run_suite "Suite 74: Eval v2 E-2 side-effect record/mock (no-fakes)" "suite-74-eval-v2-side-effects.sh"
+# NOTE (merge): my POC suites and main's eval/webhook suites both claimed numbers 75-80
+# with DISTINCT filenames, so all are registered here. Labels duplicate a few numbers
+# (cosmetic) — a follow-up can renumber my POC suites to 81+; the files themselves run fine.
+run_suite "Suite 75: Context Storage (POC-0/1)" "suite-75-context-storage.sh"
 run_suite "Suite 75: Eval v2 E-3 scheduled job_spec eval (no-fakes)" "suite-75-eval-v2-scheduled.sh"
+run_suite "Suite 76: User Response Preferences (POC-3)" "suite-76-preferences.sh"
 run_suite "Suite 76: WS-4 webhook client-id + allowlist + HMAC signing (no-fakes)" "suite-76-webhook-client-signing.sh"
+run_suite "Suite 77: Team Knowledge Base / RAG (POC-4)" "suite-77-knowledge-rag.sh"
 run_suite "Suite 77: Eval v2 E-4 webhook filter+action+injection (no-fakes)" "suite-77-eval-v2-webhook.sh"
-# 78 is WS-5's slot (claimed concurrently) — left deliberately unused rather than renumbered.
+run_suite "Suite 78: Conversations (POC-5 list)" "suite-78-conversations.sh"
+run_suite "Suite 79: Reactive-Workflow inline HITL" "suite-79-workflow-hitl.sh"
 run_suite "Suite 79: WS-6 operate parity — one Overview dispatcher + served-bundle proof" "suite-79-operate-parity.sh"
+run_suite "Suite 80: Multi-KB agent bindings + derived knowledge_search" "suite-80-agent-knowledge-binding.sh"
 run_suite "Suite 80: Eval v2 E-6 regression gate + per-run threshold (no-fakes)" "suite-80-eval-v2-regression.sh"
+run_suite "Suite 81: Deploy-time tool-access auto-grant" "suite-81-deploy-tool-autograt.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

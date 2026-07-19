@@ -92,18 +92,20 @@ print('OK')
 " && pass "T-S25-001 — save turn" || fail "T-S25-001"
 
 # ---------------------------------------------------------------------------
-# T-S25-002 — List memory (all)
+# T-S25-002 — List memory for a thread
+# The transcript store is conversation-keyed (POC-0), so a read is scoped to a
+# thread_id rather than an agent-wide "list all".
 # ---------------------------------------------------------------------------
-echo "--- T-S25-002: List memory (all) ---"
+echo "--- T-S25-002: List memory for a thread ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory')
+r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory', params={'thread_id': '${THREAD_ID}'})
 if r.status_code != 200:
     print(f'FAIL: expected 200, got {r.status_code}: {r.text}'); sys.exit(1)
 if len(r.json()) < 2:
     print(f'FAIL: expected >=2 messages, got {len(r.json())}'); sys.exit(1)
 print('OK')
-" && pass "T-S25-002 — list all" || fail "T-S25-002"
+" && pass "T-S25-002 — list thread" || fail "T-S25-002"
 
 # ---------------------------------------------------------------------------
 # T-S25-003 — List memory filtered by thread

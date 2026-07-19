@@ -41,9 +41,13 @@ spec:
         app.kubernetes.io/name: minio
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
+      {{- with (.Values.global).imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: minio
-          image: registry.internal/agentshield/minio-cp1:0.1.0
+          image: {{ .Values.minioImage | default "registry.internal/agentshield/minio-cp1:0.1.0" }}
           imagePullPolicy: IfNotPresent
           ports:
             - name: api

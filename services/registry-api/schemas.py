@@ -824,6 +824,10 @@ class AuthConfigResponse(BaseModel):
     owner_team: str | None
     created_at: datetime
     updated_at: datetime
+    # True once an actual secret value has been stored. The value itself is never
+    # returned, so this lets the UI distinguish a configured credential from an
+    # empty shell (a named row whose key was never persisted).
+    has_credentials: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -943,14 +947,23 @@ class LLMCredentials(BaseModel):
     aws_access_key_id: str | None = None
     aws_secret_access_key: str | None = None
     aws_region: str | None = None
+    base_url: str | None = None            # ollama (no auth) — reverse-proxied endpoint URL
 
 
 class LLMProviderCreate(BaseModel):
     name: str = Field(..., max_length=128)
-    provider: Literal["anthropic", "bedrock"]
+    provider: str = Field(..., max_length=32)   # validated against LLM_PROVIDER_SPECS (replaces the dropped DB CHECK)
     default_model: str = Field(..., max_length=256)
     credentials: LLMCredentials
     team: str = Field(..., max_length=128)
+
+    @model_validator(mode="after")
+    def _validate_provider(self) -> "LLMProviderCreate":
+        from llm_provider_specs import validate_provider_credentials
+        validate_provider_credentials(
+            self.provider, self.credentials.model_dump(exclude_none=True)
+        )
+        return self
 
 
 class LLMProviderUpdate(BaseModel):
@@ -1660,6 +1673,20 @@ class AgentRunUpdate(BaseModel):
     error_message: str | None = None
 
 
+class ToolCallProjection(BaseModel):
+    """One projected reactive tool-call chip for a run-tree child (POC-2b 2b-i).
+    Projected from ``run_steps`` marker rows (``output.kind='tool_call'``)."""
+    tool_name: str
+    status: str            # "ok" | "error"
+
+
+class WorkflowRunStreamRequest(BaseModel):
+    """Body for ``POST /workflows/{id}/runs/stream`` (POC-2b 2b-0). ``session_id``, when
+    present, becomes the shared workflow transcript key so the thread persists across turns."""
+    message: str
+    session_id: str | None = None
+
+
 class AgentRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -1693,6 +1720,10 @@ class AgentRunResponse(BaseModel):
     sandbox_deployment_id: uuid.UUID | None = None
     workflow_deployment_id: uuid.UUID | None = None
     judge_score: float | None = None
+    # POC-2b rich console (non-ORM — from_attributes leaves them at default; the run-tree
+    # endpoint sets them explicitly per child, exactly like trace_url).
+    tool_calls: list[ToolCallProjection] = Field(default_factory=list)
+    rationale: str | None = None
 
 
 class AgentStatsResponse(BaseModel):
@@ -1950,14 +1981,21 @@ class ErrorResponse(BaseModel):
 class MemoryMessage(BaseModel):
     role: str = Field(..., pattern="^(user|assistant|system|tool)$")
     content: str
+    # None → derived on save: role=='user' → 'user', else 'agent_output'.
+    message_kind: str | None = Field(None, pattern="^(user|agent_output|rationale)$")
 
 
 class MemorySaveTurnRequest(BaseModel):
-    thread_id: str
+    thread_id: str  # == conversation_id (transcript key)
     messages: list[MemoryMessage]
     session_id: str | None = None
     user_id: str | None = None
     deployment_id: str | None = None
+    scope: str = Field("agent", pattern="^(agent|workflow_run)$")
+    workflow_run_id: str | None = None
+    # Overrides the path {name} as the row author — a workflow member writes
+    # under its own name into the shared transcript.
+    author_agent_name: str | None = None
 
 
 class MemorySearchRequest(BaseModel):
@@ -1969,15 +2007,38 @@ class MemorySearchRequest(BaseModel):
 class AgentMemoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    id: uuid.UUID
+    agent_name: str
     thread_id: str
     role: str
     content: str
-    message_index: int
-    created_at: datetime
+    message_kind: str
+    scope: str
+    # Row-level metadata: populated on the write path (save returns full rows) but
+    # absent on a conversation-keyed transcript read, which returns message-level
+    # Turns via the ConversationStore. Optional so both paths validate.
+    id: uuid.UUID | None = None
+    message_index: int | None = None
+    created_at: datetime | None = None
     user_id: str | None = None
     session_id: str | None = None
     deployment_id: uuid.UUID | None = None
+    workflow_run_id: uuid.UUID | None = None
+
+
+class ConversationSummary(BaseModel):
+    """POC-5 — one row per conversation thread for the Conversations list / docked
+    History / deployment conversations tab. Title = first user message (NULL when a
+    thread has no user turn — the client renders a fallback label). `environment` is
+    DERIVED (production iff the thread's deployment is a production_deployment)."""
+
+    thread_id: str
+    session_id: str | None = None
+    agent_name: str | None = None
+    title: str | None = None
+    message_count: int
+    last_activity: datetime | None = None
+    deployment_id: str | None = None
+    environment: str
 
 
 class MemorySearchResult(BaseModel):
@@ -2061,6 +2122,116 @@ class CatalogDeployRequest(BaseModel):
 class CatalogDeploymentUpdateRequest(BaseModel):
     action: str  # "upgrade" | "suspend" | "resume"
     version_id: uuid.UUID | None = None  # required for upgrade
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Base / RAG (POC-4) — see contracts/endpoints.md
+# ---------------------------------------------------------------------------
+class KnowledgeBaseCreate(BaseModel):
+    """POST /api/v1/knowledge-bases body. `team`/`created_by` are server-side."""
+
+    name: str
+    description: str | None = None
+
+
+class KnowledgeBaseResponse(BaseModel):
+    id: uuid.UUID
+    team: str
+    name: str
+    description: str | None = None
+    created_by: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    # Computed in the router (not ORM columns).
+    source_count: int = 0
+    ready_count: int = 0
+    attached_agents: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SourceResponse(BaseModel):
+    id: uuid.UUID
+    kb_id: uuid.UUID
+    filename: str
+    content_type: str | None = None
+    size_bytes: int | None = None
+    status: Literal["pending", "indexing", "ready", "failed"]
+    error: str | None = None
+    chunk_count: int = 0
+    created_by: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ChunkResponse(BaseModel):
+    """Chunk-viewer drawer payload — no embedding on the wire."""
+
+    id: uuid.UUID
+    chunk_index: int
+    content: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SearchRequest(BaseModel):
+    """Body for the team-scoped test-retrieval box."""
+
+    query: str
+    k: int = 5
+
+
+class KBHit(BaseModel):
+    chunk_id: uuid.UUID
+    source_id: uuid.UUID
+    source_filename: str
+    content: str
+    score: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SearchResponse(BaseModel):
+    hits: list[KBHit] = Field(default_factory=list)
+
+
+class BindingResponse(BaseModel):
+    agent_id: uuid.UUID
+    agent_name: str
+    kb_id: uuid.UUID
+    team: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ---------------------------------------------------------------------------
+# Internal knowledge/search result (POC-4 T-012) — the JSON the knowledge_search
+# HTTP tool returns to the model AND the frontend parses for citation chips.
+# `kb_id`/`team` never appear here — only the model-facing content + provenance.
+# ---------------------------------------------------------------------------
+class KnowledgeSearchChunk(BaseModel):
+    """One retrieved passage the model reads to ground its answer."""
+
+    content: str
+    source: str          # knowledge_sources.filename
+    kb: str              # knowledge_bases.name
+    score: float
+
+
+class KnowledgeCitation(BaseModel):
+    """De-duplicated {source, kb} — the exact shape AttributedBubble.citations wants."""
+
+    source: str
+    kb: str
+
+
+class KnowledgeSearchResult(BaseModel):
+    chunks: list[KnowledgeSearchChunk] = Field(default_factory=list)
+    citations: list[KnowledgeCitation] = Field(default_factory=list)
+    # Optional advisory note (e.g. "no knowledge base attached") — never an error;
+    # an unbound/mismatched agent gets empty chunks+citations (fail-closed).
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -2206,6 +2377,18 @@ __all__ = [
     "MemberTopologyEntry",
     "CatalogDeployRequest",
     "CatalogDeploymentUpdateRequest",
+    # Knowledge Base / RAG (POC-4)
+    "KnowledgeBaseCreate",
+    "KnowledgeBaseResponse",
+    "SourceResponse",
+    "ChunkResponse",
+    "SearchRequest",
+    "KBHit",
+    "SearchResponse",
+    "BindingResponse",
+    "KnowledgeSearchChunk",
+    "KnowledgeCitation",
+    "KnowledgeSearchResult",
     # Error
     "ErrorResponse",
 ]

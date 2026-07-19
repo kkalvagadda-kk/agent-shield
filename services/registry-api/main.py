@@ -88,6 +88,7 @@ from routers.memory import router as memory_router
 from routers.internal import router as internal_router
 from routers.events import router as events_router
 from routers.observability import router as observability_router
+from routers.knowledge import router as knowledge_router
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +239,9 @@ def create_app() -> FastAPI:
 
     # --- Observability (traces list + dashboard) ---
     app.include_router(observability_router)
+
+    # --- Knowledge Base / RAG (POC-4) ---
+    app.include_router(knowledge_router)
 
     # --- Current user router ---
     app.include_router(me_router)

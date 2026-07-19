@@ -2,7 +2,7 @@
 
 **Status:** Proposed.
 **Scope:** registry-api, declarative-runner, SDK, scheduler, event-gateway, eval-runner, Studio, Helm chart, Keycloak realm.
-**Related:** [`authorization-model-spec.md`](todo/authorization-model-spec.md) (machine identity + OPA), [`hitl-approval-system.md`](hitl-approval-system.md), [`opa-authorization-contract.md`](opa-authorization-contract.md), [`event-gateway-threat-model.md`](event-gateway-threat-model.md) (T-8 internal-auth). Addresses `spec.md` §"Internal-auth on `/api/v1/internal/*`".
+**Related:** [`authorization-model-spec.md`](todo/authorization-model-spec.md) (machine identity + OPA), [`hitl-approval-system.md`](hitl-approval-system.md), [`opa-authorization-contract.md`](opa-authorization-contract.md), [`event-gateway-threat-model.md`](event-gateway-threat-model.md) (T-8 internal-auth), [`mcp-tool-source-architecture.md`](mcp-tool-source-architecture.md) §7a (a downstream consumer of `RunContext.user_sub` — MCP's on-behalf-of identity mode for internal MCP servers is blocked on this doc's Phase 0–2), [`sdk-agent-gaps.md`](sdk-agent-gaps.md) Gap 1 (independently confirms Drop point 2 below from the SDK-runtime-parity angle). Addresses `spec.md` §"Internal-auth on `/api/v1/internal/*`".
 
 ---
 
@@ -24,7 +24,7 @@ The consequence is that tool governance — OPA policy + human-in-the-loop (HITL
 - The HITL approval record and Studio surface the real requesting/authorizing human.
 
 **Non-goals**
-- Full RFC 8693 token exchange / per-tool scoped-down tokens. Deferred; the actor-chain model here is the minimal real chain-of-custody.
+- Full RFC 8693 token exchange / per-tool scoped-down tokens **as a general internal delegation model**. Deferred; the actor-chain model here is the minimal real chain-of-custody. **Narrower exception (2026-07-19):** MCP's on-behalf-of identity mode for internal MCP servers (`mcp-tool-source-architecture.md` §7a) is a concrete, specific consumer of `RunContext.user_sub` that does need token exchange — confirmed as **impersonation-based** exchange (a confidential client with an impersonation grant, minting a token for a `user_sub` string), not classic subject_token exchange, precisely because this doc never propagates a re-presentable access token internally (see Decision 29, `docs/decisions.md`). This doesn't change `RunContext`'s design — it's an additive downstream use of the `user_sub` field once it exists, not a new propagation requirement on this doc.
 - Replacing Keycloak or the OPA/HITL governance model. This threads identity *into* them.
 - Reworking the agent runtime or LangGraph checkpointer beyond reading/writing identity.
 
@@ -207,4 +207,4 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 ## 10. Open questions
 
 - Should scheduled/event runs whose trigger `created_by` is NULL be *denied* HITL-gated tools outright (no one can approve), or allowed to autonomously proceed on `sa_subject` scopes? Current design: allow on scopes; revisit if audit requires a named human for every high-risk action.
-- Long-term: is per-tool scoped-down delegation (RFC 8693 token exchange) worth it over the `actor_chain` model? Out of scope now; the anchor + actor_chain give full traceability without it.
+- Long-term: is per-tool scoped-down delegation (RFC 8693 token exchange) worth it over the `actor_chain` model as a *general* pattern? Narrower now than when this was written — MCP's on-behalf-of mode (`mcp-tool-source-architecture.md` §7a) already needed a concrete answer and got one (impersonation-based exchange, layered on top of `RunContext.user_sub`, not a change to this doc's model). Remaining question is only whether other future integrations need the same treatment, or whether the anchor + actor_chain model stays sufficient everywhere else.

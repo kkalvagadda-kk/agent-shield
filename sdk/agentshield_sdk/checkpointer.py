@@ -18,35 +18,67 @@ import os
 
 logger = logging.getLogger(__name__)
 
+# Module-global: keep the connection pool open for the pod's lifetime so the
+# AsyncPostgresSaver stays live (from_conn_string is an @asynccontextmanager and
+# would close the saver on exit — see research.md §5).
+_pool = None
+
 
 async def get_checkpointer():
     """Return the appropriate LangGraph checkpointer based on environment.
 
-    Returns:
-        AsyncPostgresSaver if DIRECT_DATABASE_URL is set, MemorySaver otherwise.
+    Returns a process-lifetime `AsyncPostgresSaver` over an explicitly-opened
+    module-global pool when DIRECT_DATABASE_URL is set.
+
+    Fail-loud: MemorySaver is returned ONLY when DIRECT_DATABASE_URL is unset
+    (local dev). When the URL IS set but construction fails, we log the error and
+    raise RuntimeError — never a silent MemorySaver fallback, which would pin
+    tenant state in pod RAM and break cross-replica HITL resume.
     """
     url = os.getenv("DIRECT_DATABASE_URL", "")
 
     if not url:
-        logger.info("DIRECT_DATABASE_URL not set — using in-memory checkpointer")
+        logger.info(
+            "DIRECT_DATABASE_URL not set — using in-memory checkpointer (local dev)"
+        )
         from langgraph.checkpoint.memory import MemorySaver  # type: ignore[import]
 
         return MemorySaver()
 
-    logger.info("Initialising AsyncPostgresSaver for LangGraph checkpointing")
+    global _pool
     try:
+        from psycopg_pool import AsyncConnectionPool  # type: ignore[import]
         from langgraph.checkpoint.postgres.aio import (  # type: ignore[import]
             AsyncPostgresSaver,
         )
 
-        checkpointer = AsyncPostgresSaver.from_conn_string(url)
-        await checkpointer.setup()
-        return checkpointer
+        # psycopg wants a plain URL (no SQLAlchemy +asyncpg driver suffix); the
+        # readiness probe in the runner strips it the same way.
+        conninfo = url.replace("+asyncpg", "")
+        _pool = AsyncConnectionPool(
+            conninfo=conninfo,
+            max_size=10,
+            open=False,  # avoid opening the async pool in the constructor
+            # Liveness-check every connection before handing it out, and recycle
+            # idle ones, so a connection that Postgres (or the mesh) closed while
+            # the pod sat idle is transparently replaced. Without this the pool
+            # returns a dead [BAD] connection and the next checkpointer op fails
+            # with "server closed the connection unexpectedly" — e.g. a workflow
+            # member run 500s after an idle period even though Postgres is healthy.
+            check=AsyncConnectionPool.check_connection,
+            max_idle=120.0,
+            max_lifetime=1800.0,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+        await _pool.open()
+        saver = AsyncPostgresSaver(_pool)
+        await saver.setup()
+        logger.info("AsyncPostgresSaver ready (pool-backed, pod-lifetime)")
+        return saver
     except Exception as exc:
         logger.error(
-            "Failed to initialise AsyncPostgresSaver (%s) — falling back to MemorySaver",
-            exc,
+            "AsyncPostgresSaver init FAILED with DIRECT_DATABASE_URL set: %s", exc
         )
-        from langgraph.checkpoint.memory import MemorySaver  # type: ignore[import]
-
-        return MemorySaver()
+        raise RuntimeError(
+            f"checkpointer init failed (fail-loud, no MemorySaver fallback): {exc}"
+        ) from exc

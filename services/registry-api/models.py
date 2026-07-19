@@ -928,6 +928,18 @@ class AuthConfig(Base):
         _TSTZ, nullable=False, server_default=_NOW
     )
 
+    @property
+    def has_credentials(self) -> bool:
+        """Whether a secret value has actually been stored for this credential.
+
+        The credential *value* is never echoed in API responses, so callers
+        otherwise cannot tell a fully-configured credential apart from an empty
+        shell (a row with a name/type but no key). ``credentials_encrypted`` is
+        the durable source of truth (create/update sets it whenever a value is
+        provided), so its presence is the reliable "is this usable" signal.
+        """
+        return self.credentials_encrypted is not None
+
     # Relationships
     tools: Mapped[list[Tool]] = relationship(
         "Tool",
@@ -1129,10 +1141,10 @@ class LLMProvider(Base):
     __tablename__ = "llm_providers"
     __table_args__ = (
         UniqueConstraint("name", "team", name="uq_llm_providers_name_team"),
-        CheckConstraint(
-            "provider IN ('anthropic','bedrock')",
-            name="ck_llm_providers_provider",
-        ),
+        # Provider validity is enforced at the Pydantic layer against
+        # LLM_PROVIDER_SPECS (llm_provider_specs.py), not a DB CHECK — so adding a
+        # provider (e.g. ollama) is one registry entry, not a migration. The old
+        # ck_llm_providers_provider CHECK is dropped in migration 0066.
         Index("idx_llm_providers_team", "team"),
     )
 
@@ -1848,8 +1860,22 @@ class AgentMemory(Base):
             "role IN ('user','assistant','system','tool')",
             name="ck_agent_memory_role",
         ),
+        CheckConstraint(
+            "scope IN ('agent','workflow_run')",
+            name="ck_agent_memory_scope",
+        ),
+        CheckConstraint(
+            "message_kind IN ('user','agent_output','rationale')",
+            name="ck_agent_memory_message_kind",
+        ),
         Index("ix_agent_memory_thread_msg", "thread_id", "message_index"),
         Index("ix_agent_memory_agent_team", "agent_name", "team"),
+        Index(
+            "idx_agent_memory_thread_scope", "thread_id", "scope", "message_index"
+        ),
+        UniqueConstraint(
+            "thread_id", "message_index", name="uq_agent_memory_thread_msg"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1864,6 +1890,14 @@ class AgentMemory(Base):
     message_index: Mapped[int] = mapped_column(Integer, nullable=False)
     session_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     deployment_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    # POC-1 (context storage): shared workflow-thread transcript columns.
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="agent"
+    )
+    message_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="agent_output"
+    )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1967,6 +2001,170 @@ class ProductionDeployment(Base):
 
 
 # ---------------------------------------------------------------------------
+# user_profiles (POC-3 response preferences)
+# ---------------------------------------------------------------------------
+class UserProfile(Base):
+    """Platform-level response presets, one row per user (Keycloak JWT `sub` = PK).
+
+    Five nullable enum columns (NULL = "no preference" for that dimension). Values are
+    guarded by CHECK constraints in migration 0065 and by Pydantic Literals in
+    preferences.py (see contracts/enums.md). Not per-team, not per-deployment.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    response_length: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    format: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expertise: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
+# knowledge_bases / knowledge_sources / knowledge_chunks / agent_knowledge_bindings
+# (POC-4 Team Knowledge Base / RAG — migration 0067)
+# ---------------------------------------------------------------------------
+class KnowledgeBase(Base):
+    """A team-scoped collection of uploaded Sources."""
+
+    __tablename__ = "knowledge_bases"
+    __table_args__ = (
+        Index("ix_knowledge_bases_team", "team"),
+        UniqueConstraint("team", "name", name="uq_knowledge_bases_team_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    sources: Mapped[list["KnowledgeSource"]] = relationship(
+        "KnowledgeSource", back_populates="knowledge_base", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeSource(Base):
+    """One uploaded file + its ingestion lifecycle (pending→indexing→ready|failed)."""
+
+    __tablename__ = "knowledge_sources"
+    __table_args__ = (
+        Index("ix_knowledge_sources_kb", "kb_id"),
+        Index("ix_knowledge_sources_team_kb", "team", "kb_id"),
+        CheckConstraint(
+            "status IN ('pending','indexing','ready','failed')",
+            name="ck_knowledge_sources_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    # Denormalized tenant key (copied from the parent KB at write time — never a request field).
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    blob_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    content_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'pending'")
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chunk_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    knowledge_base: Mapped["KnowledgeBase"] = relationship(
+        "KnowledgeBase", back_populates="sources"
+    )
+    chunks: Mapped[list["KnowledgeChunk"]] = relationship(
+        "KnowledgeChunk", back_populates="source", cascade="all, delete-orphan"
+    )
+
+
+class KnowledgeChunk(Base):
+    """A retrievable text segment of a Source.
+
+    NOTE: the `embedding vector(384)` column is intentionally NOT mapped here.
+    pgvector's `vector` type isn't a native SQLAlchemy type in this codebase; the
+    column is read/written only via raw `text()` SQL in PgVectorStore (mirrors
+    memory.search_memory). Keeping it off the mapper lets configure_mappers()
+    stay clean on a stock DB where the column may be absent (migration 0067 guards
+    it behind pgvector availability).
+    """
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        # Composite tenant index — the S5 predicate; also backs the keyword fallback.
+        Index("ix_knowledge_chunks_team_kb", "team", "kb_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    # Denormalized tenant key — the S5 predicate column.
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("knowledge_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    source: Mapped["KnowledgeSource"] = relationship(
+        "KnowledgeSource", back_populates="chunks"
+    )
+
+
+class AgentKnowledgeBinding(Base):
+    """Which KB an agent's knowledge_search tool is bound to (POC: one per agent).
+
+    No relationship onto Agent — the binding is queried directly (by the internal
+    knowledge/search endpoint) to avoid touching the large Agent mapper.
+    """
+
+    __tablename__ = "agent_knowledge_bindings"
+    __table_args__ = (Index("ix_agent_knowledge_bindings_agent", "agent_id"),)
+
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, ForeignKey("knowledge_bases.id", ondelete="CASCADE"), primary_key=True
+    )
+    # The agent's team (denormalized) — the join key the internal endpoint filters on.
+    team: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
+# ---------------------------------------------------------------------------
 # Explicit __all__ so Alembic env.py can do `from models import Base`
 # and pick up all mapped tables via Base.metadata.
 # ---------------------------------------------------------------------------
@@ -2007,4 +2205,9 @@ __all__ = [
     "PublishedArtifact",
     "PublishedVersion",
     "ProductionDeployment",
+    "UserProfile",
+    "KnowledgeBase",
+    "KnowledgeSource",
+    "KnowledgeChunk",
+    "AgentKnowledgeBinding",
 ]

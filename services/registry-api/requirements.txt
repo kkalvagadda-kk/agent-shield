@@ -14,3 +14,6 @@ redis==5.*
 kubernetes==31.*
 croniter==3.*
 boto3>=1.35.0
+# POC-4 knowledge ingest: PDF text extraction + multipart file upload (UploadFile).
+pypdf>=4.0
+python-multipart>=0.0.9

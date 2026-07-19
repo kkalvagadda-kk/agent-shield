@@ -1,4 +1,4 @@
-# MCP as a Tool Source — Requirements
+  # MCP as a Tool Source — Requirements
 
 **Status:** Requirements (not started)
 **Author:** Karthik + Claude
@@ -84,21 +84,42 @@ The user requirement calls out two topologies explicitly. They differ in trust a
 
 ## 5. Current state — what exists vs. what's missing
 
+**Verified against actual code on 2026-07-18 (not spec.md, which is stale — see below).**
+
 | Layer | Status |
 |---|---|
-| `MCPServer` model + `mcp_servers` table (migration 0001) | **Built** (schema only) |
-| `Tool.type='mcp_tool'` + `mcp_server_id` + `mcp_tool_name` | **Built** (schema only) |
-| `MCPServerCreate` / `MCPServerResponse` schemas | **Built** |
-| `auth_configs` delete-guard checks `MCPServer` refs | **Built** |
-| spec.md "MCP Proxy" component + `/api/v1/mcp-servers` endpoints | **Documented, not implemented** |
+| `MCPServer` model + `mcp_servers` table | **Built since migration `0001`** (not a future addition) — `models.py:957-1005` |
+| `Tool.type='mcp_tool'` + `mcp_server_id` + `mcp_tool_name` | **Built since migration `0001`** — `models.py:1011-1134` |
+| `MCPServerCreate` / `MCPServerResponse` schemas | **Built, but dead** — `schemas.py:838-861`, zero references from any router |
+| `auth_configs` delete-guard checks `MCPServer` refs | **Built** — `routers/auth_configs.py:246-265` |
+| spec.md "MCP Proxy" component + `/api/v1/mcp-servers` endpoints | **Documented, not implemented.** spec.md is stale platform-wide — do not use it as a design reference for this feature. |
 | Decision 15 (Option B, three tool types incl. MCP) | **Decided** |
-| `services/mcp-proxy` service (client, discovery, call proxy) | **Missing** |
-| `/api/v1/mcp-servers` router (CRUD + sync) | **Missing** |
-| Runner/SDK `mcp_tool` execution path | **Missing** |
-| Studio: register server, browse discovered tools, tool-picker | **Missing** |
+| `services/mcp-proxy` service (client, discovery, call proxy) | **Missing** — confirmed 100% absent (no dir, no chart stub, no script ref) |
+| `/api/v1/mcp-servers` router (CRUD + sync) | **Missing** — confirmed absent from `main.py` router mounts |
+| Runner/SDK `mcp_tool` execution path | **Missing** — `tool_resolver._build_executor` (`sdk/agentshield_sdk/tool_resolver.py:76-111`) has no `mcp_tool`/`native` branch; anything not `"python"` falls into the HTTP executor today |
+| Declarative-runner `mcp_tool` execution path | **Missing** — and **not just a mirror of the SDK path**. See "Declarative-runner has its own dispatch" below — a second place to wire, not one. |
+| Studio: register server, browse discovered tools, tool-picker | **Missing** — confirmed 100% absent, zero grep hits for "mcp" anywhere in `studio/src` |
 | Health / re-sync loop, `notifications/tools/list_changed` | **Missing** |
+| Per-tool-call output scan (any tool type) | **Missing** — see "Output-scan/de-anonymize gate doesn't exist" below. FR-MCP-30/31 assumed reuse of an existing hook; there isn't one. |
+| OPA `allow_deanonymize` decision field | **Missing** — `opa_client.Decision` (`sdk/agentshield_sdk/opa_client.py:61-62`) only carries `allow`/`require_approval`. Rego generation (`policy_generator.py:27-67`) only emits `action` from a flat risk→action map — no de-anonymize concept exists in policy today. |
 
-Note the existing `mcp_servers` table lacks a couple of fields these requirements need (identity mode, default transport args, health detail). Schema deltas in §7.
+Note the existing `mcp_servers` table lacks a few fields these requirements need (identity mode, transport config, health detail). Schema deltas in §7 are **additive** (chain after the current latest migration, `0068`, not `0028` as previously stated here).
+
+### Corrections found during architecture grounding (2026-07-18/19)
+
+1. **OPA policy generation happens at *deployment* time, not tool-bind time.** `policy_generator.generate_and_store` (`policy_generator.py:78-123`) is called from `routers/deployments.py` when a deployment is created, reading the `AgentVersion.tools` JSON snapshot — not from `POST /agents/{name}/tools` (`routers/agent_tools.py:60-88`), which has no immediate OPA side effect. Doesn't change the "no MCP special-casing" intent (D4) — MCP tools get Rego generated at the same trigger point as every other type — just corrects *when*.
+
+2. **`governed_tool` has no per-tool-call output scan and no PII de-anonymize gate — for any tool type, today.** (`sdk/agentshield_sdk/graph_builder.py:256-396`, the OPA→HITL→execute wrapper, stops at execute.) The only output scan that exists runs once per conversation *turn* on the final LLM text (`runner.py:141-145`), not per tool call. **Locked decision (2026-07-19): build this generically**, not as an MCP-only bolt-on — see Decision in `docs/decisions.md`. This means Phase 1 for this feature includes adding a per-tool-call output-scan + de-anonymize step to `governed_tool` itself, applied to native/http/python/mcp_tool alike. Concretely:
+   - **Output-scan side** can reuse the existing Safety Orchestrator `scan_output` primitive (`sdk/agentshield_sdk/safety_client.py:89-134`, `POST /api/v1/scan/output`) by calling it per tool result instead of only once per turn — **but note the SDK client has a live field-name bug**: the server's `ScanOutputResponse` (`services/safety-orchestrator/schemas.py:27-32`) returns `deanonymized_message`, but the SDK client reads `data.get("clean_text", text)` (`safety_client.py:128-130`) — a key that the server never sends — so today `clean_text` is silently always the original unscanned text on any real deployment. This must be fixed as part of wiring the generic gate, not carried forward.
+   - **De-anonymize side is a different shape than what exists.** The Safety Orchestrator's current de-anonymize step (`orchestrator.py:296-308`, inside `_scan_output_inner`) operates on free-text (final agent message to the human) and runs **unconditionally** whenever PII mappings exist for the session — there is no OPA gate on it today, and (per the bug above) its result is currently discarded by every caller. FR-MCP-30's actual requirement — swap PII placeholders for real values in **structured tool-call arguments**, gated per-tool by OPA, before dispatch — is a genuinely new capability, not a reuse of the existing free-text de-anonymize path. Needs its own request shape (args dict + session_id → args dict with real values) and a new OPA decision field (`allow_deanonymize: bool`, alongside `allow`/`require_approval`) threaded through `Decision` (`opa_client.py:61-62`) and Rego generation (`policy_generator.py`).
+
+3. **Declarative-runner has its own dispatch, duplicated from the SDK, not a wrapper around it.** `workflow_executor._tool_dict_to_executor` (`workflow_executor.py:258-312`) and `node_executors.py` independently re-implement `"python"` vs. HTTP-executor dispatch — a second copy of `tool_resolver._build_executor`. Agent-owned tool calls (new canvas schema) do eventually route through the real `governed_tool` via `AgentNodeExecutor.build_subgraph()` (`node_executors.py:322-350` → `graph_builder.build_graph()`), so governance is intact there — but there's also a **legacy "old-schema standalone tool node" path** (`workflow_executor._build_old_schema_graph`, `workflow_executor.py:601-669`) that calls `HttpToolNodeExecutor.execute()` directly with **zero OPA/HITL** (pre-existing gap, not introduced by MCP). **Design stance: MCP tools are only wired into the governed agent-owned-tool path in both runtimes (SDK + declarative-runner's new-schema agent subgraph). They are explicitly NOT exposed on the legacy ungoverned standalone-tool-node path** — this doesn't fix that pre-existing gap, but it also doesn't extend it to a new tool source. Net: an MCP executor needs adding in **four** places — `sdk/agentshield_sdk/tool_resolver.py`, `sdk/agentshield_sdk/tool_executor.py` (new `McpToolExecutor`), `services/declarative-runner/workflow_executor.py` (`_tool_dict_to_executor`), `services/declarative-runner/node_executors.py` (new `McpToolNodeExecutor`) — not one.
+
+4. **MCP Proxy needs its own credential-resolution path — the existing one doesn't reach it.** Today's `AuthConfig` credential flow is two-phase and **agent-pod-scoped**: create-time encryption + K8s Secret write (`routers/auth_configs.py:56-79`), then *deploy-time* resolution by `deploy-controller`'s `resolve_and_copy_tool_secrets` (`services/deploy-controller/tool_secrets.py:22-65`), which walks `GET /agents/{name}/tools` → `Tool.auth_config_id` → copies the secret into that **agent's own namespace**. It never looks at `MCPServer.auth_config_id`, and — since MCP Proxy (D1) is a standalone centralized service, not a per-agent pod — this namespace-copy mechanism doesn't apply to it anyway. The proxy needs a direct resolution path (e.g. calling `GET /api/v1/auth-configs/{id}/secret-ref` itself and mounting/reading from its own namespace) — new plumbing, not a reuse of `tool-credential-management.md`'s existing flow as-is.
+
+5. **`python-executor` (closest existing sidecar template) is stateless-per-call; MCP Proxy is fundamentally stateful.** `services/python-executor/main.py` spawns a subprocess per `/execute` call with no session state carried between requests. MCP Proxy (D1) needs to hold live `streamable_http` sessions and `stdio` subprocess connections in memory across calls (that's the point of centralizing — one connection pool, not one per call). This means the Helm chart/deployment shape is a genuinely different exercise, not a clone of `python-executor`'s chart: multi-replica session affinity (or accept that a session lives on exactly one replica and route accordingly) and a reconnect-on-restart strategy both need explicit design — see Round 1 architecture below.
+
+6. **Studio is confirmed 100% greenfield** (matches the original doc's claim) — zero grep hits for "mcp" anywhere in `studio/src`. Good templates exist to build from: `studio/src/pages/KnowledgeBasesPage.tsx` + `KnowledgeBaseDetailPage.tsx` (list → detail-with-tabs shape) and `studio/e2e/knowledge.spec.ts` (register → reload → assert-persisted journey) map closely to FR-MCP-40/41/43. `ToolsPage.tsx`'s tool-type selector is a hardcoded 2-way enum (`http`/`python`, `ToolsPage.tsx:29`) with no native/mcp option — recommend MCP-sourced tools appear **read-only** in the Tools list (discovered, not manually creatable there); creation only happens via the new MCP Servers screen's register+sync flow.
 
 ---
 
@@ -108,7 +129,8 @@ Numbered `FR-MCP-##`. Each is written to be testable (a bash e2e suite and/or Pl
 
 ### Server registration & lifecycle
 - **FR-MCP-01** — An operator can register an MCP server with: name, description, `server_url`, `transport` (`streamable_http`|`stdio`), optional `auth_config_id`, `owner_team`, and identity mode (§4a; N/A for external). `POST /api/v1/mcp-servers`.
-- **FR-MCP-02** — On registration the platform connects, runs the MCP `initialize` handshake, and calls `tools/list`. Each returned tool is persisted as a `Tool` row (`type='mcp_tool'`, `mcp_server_id`, `mcp_tool_name`, `input_schema` from the server's JSON Schema).
+- **FR-MCP-02** — On registration the platform connects, runs the MCP `initialize` handshake, and calls `tools/list`. Each returned tool is persisted as a `Tool` row (`type='mcp_tool'`, `mcp_server_id`, `mcp_tool_name`, `input_schema` from the server's JSON Schema, **`owner_team` set from `MCPServer.owner_team`**).
+  - **Team-scoping (confirmed 2026-07-19): reuse the existing tool grant model as-is, no new mechanism.** `Tool.publish_status` (`routers/tools.py:158-160`) gates cross-team visibility; `AssetGrant` (`asset_type='tool'`, `models.py:1242-1263`, checked at deploy time in `routers/deployments.py:390-536`) gates cross-team deployment. Neither branches on `Tool.type` — as long as `owner_team` is populated correctly at discovery, MCP tools inherit both automatically.
 - **FR-MCP-03** — `discovered_tool_count` and `last_synced_at` are updated after every discovery. Server `status` is one of `connected` / `disconnected` / `error`, reflecting the last connection attempt.
 - **FR-MCP-04** — `POST /api/v1/mcp-servers/{id}/sync` re-runs discovery. New tools are inserted; tools that vanished from the server are marked `status='deprecated'` (never hard-deleted while bound to an agent — impact analysis, same as native tools).
 - **FR-MCP-05** — `GET /api/v1/mcp-servers` lists servers with discovered-tool counts; `GET /api/v1/mcp-servers/{id}` returns server detail + its discovered tools.
@@ -124,7 +146,10 @@ Numbered `FR-MCP-##`. Each is written to be testable (a bash e2e suite and/or Pl
 
 ### Auth & identity
 - **FR-MCP-20** — For an **external** server, the proxy injects static credentials from the linked `AuthConfig` (api_key / bearer / custom header) on connect. Credentials come from the K8s Secret; they are never stored in Postgres or returned by the API (reuses `tool-credential-management.md`).
-- **FR-MCP-21** — For an **internal** server with identity mode = on-behalf-of, the proxy presents the calling user's Keycloak identity (JWT forward or token exchange) so the server can enforce per-user authz. With mode = service-identity, the proxy uses a platform Keycloak service-account token.
+- **FR-MCP-21** — For an **internal** server with identity mode = on-behalf-of, the proxy presents the calling user's Keycloak identity so the server can enforce per-user authz. With mode = service-identity, the proxy uses a platform Keycloak service-account token.
+  - **Mechanism (confirmed 2026-07-19, see Decision 29 in `docs/decisions.md`): impersonation-based Keycloak token exchange, not JWT forward, not classic RFC 8693 subject_token exchange.** Verified in code that no raw Keycloak JWT survives past `services/registry-api/auth_middleware.py` today — every internal hop only ever carries a derived `user_id`/`user_team` string (`x-user-sub`/`x-agent-team` headers). `docs/design/identity-propagation-architecture.md` (Proposed, unimplemented) will replace that ad-hoc header pattern with a durable `RunContext.user_sub` string, propagated via an HMAC-signed internal token — but by design it **still never carries a re-presentable access token**, only the verified subject string. So on-behalf-of cannot use Classic Token Exchange (which requires an actual `subject_token`); it must be impersonation-based exchange: MCP Proxy holds a confidential Keycloak client with an impersonation grant, and mints a token *for* `RunContext.user_sub` without ever possessing that user's original token.
+  - **Hard dependency:** FR-MCP-21 is blocked on `docs/design/identity-propagation-architecture.md` Phase 0–2 landing (shared `RunContext` infra + SDK pod runtime reading it) — without it, `RunContext.user_sub` never reaches `governed_tool` for `sdk`-type agents at all (see `docs/design/sdk-agent-gaps.md` Gap 1, same root cause). This is an external dependency, not something MCP Phase 2 builds standalone.
+  - **MCP-specific incremental work, once that dependency lands:** (1) new Keycloak confidential client for MCP Proxy with an impersonation grant scoped appropriately; (2) `governed_tool`'s `mcp_tool` dispatch branch reads `RunContext.user_sub` and includes it in the `/tools-call` request to MCP Proxy, only when `MCPServer.identity_mode == on_behalf_of`; (3) MCP Proxy performs the impersonation exchange (client credentials + impersonation permission + `requested_subject=user_sub`) to mint a token scoped/audienced for that internal server, then uses it for `tools/call`; (4) fail-closed if `user_sub` is empty for an on-behalf-of-configured server (deny, do not silently fall back to service-identity); (5) no token caching in the first cut — mint fresh per call, revisit only if latency becomes a real issue.
 
 ### Health & observability
 - **FR-MCP-22** — The proxy periodically health-checks each `connected` server (lightweight `ping`/`tools/list`); repeated failures flip `status` to `error` and surface in Studio.
@@ -132,8 +157,13 @@ Numbered `FR-MCP-##`. Each is written to be testable (a bash e2e suite and/or Pl
 - **FR-MCP-24** — Every MCP tool call writes an OPA decision record (allow/deny/require_approval) to the immutable audit log, same as native tools.
 
 ### Safety
-- **FR-MCP-30** — MCP tool arguments containing PII placeholders follow the existing de-anonymization path (OPA `allow_deanonymize` gate → Safety Orchestrator `POST /scan/deanonymize`) before leaving the platform — real PII only ever goes to a tool that policy allows, never back into the LLM context.
-- **FR-MCP-31** — Results from an **external** MCP server pass the Safety Orchestrator output scan before re-entering the agent's LLM context (untrusted-input boundary, §4b). Internal-server results are scanned too (defense in depth) but may be exempted per-server by an admin.
+
+**Generic governance gate (Decision 27, `docs/decisions.md`) — applies to ALL tool types, not MCP-specific. Built once, in `governed_tool`, consumed by every tool type including MCP.**
+- **FR-MCP-50** — `governed_tool` (`sdk/agentshield_sdk/graph_builder.py:256-396`) gains a per-tool-call output-scan step, applied after execute and before the result re-enters the LLM context, for native/http/python/mcp_tool alike. Reuses the Safety Orchestrator's `scan_output` primitive, called per tool call instead of only once per turn. Includes fixing the live field-name bug where the SDK client reads `clean_text` (`safety_client.py:128-130`) but the server only ever sends `deanonymized_message` (`services/safety-orchestrator/schemas.py:27-32`) — today `clean_text` is silently always the original unscanned text on any real deployment.
+- **FR-MCP-51** — New OPA decision field `allow_deanonymize: bool`, added to `Decision` (`opa_client.py:61-62`) and Rego generation (`policy_generator.py`), alongside the existing `allow`/`require_approval`. Per-tool, same risk-driven generation path as everything else — no MCP-specific policy branch.
+- **FR-MCP-52** — New structured de-anonymize primitive: tool-call args (dict) + session_id → args dict with real PII values substituted, gated by FR-MCP-51's `allow_deanonymize`. Distinct from the existing free-text de-anonymize path inside the Safety Orchestrator (`orchestrator.py:296-308`), which stays untouched for its original purpose (final-message de-anonymization for human review) — this is a new, separate capability, not a reuse.
+- **FR-MCP-30** — MCP tool arguments containing PII placeholders consume FR-MCP-52 (structured de-anonymize, gated by FR-MCP-51's `allow_deanonymize`) before leaving the platform — real PII only ever goes to a tool that policy allows, never back into the LLM context. No MCP-specific implementation; MCP is one consumer of the generic gate.
+- **FR-MCP-31** — Results from an **external** MCP server consume FR-MCP-50 (generic output scan) before re-entering the agent's LLM context (untrusted-input boundary, §4b) and cannot have this step skipped. Internal-server results are scanned too (defense in depth) but may be exempted per-server via `scan_results` (an admin-configurable override).
 
 ### Studio (UX)
 - **FR-MCP-40** — A "MCP Servers" screen under Settings: list, register (form: name, URL, transport, auth config, identity mode), see status + discovered-tool count, sync, delete.
@@ -231,5 +261,7 @@ Per CLAUDE.md, "backend works" ≠ done. For this feature, done means:
 2. **Save → reload → assert** — register a server, reload from the backend, discovered tools still there (FR-MCP-43).
 3. **No orphan code** — every new symbol (proxy client methods, `/mcp-servers` router, SSE/health signals) has a live caller in the same change; grep before claiming done.
 4. **Governance proven end-to-end** — a bash e2e suite (`scripts/e2e/suite-NN-mcp-tools.sh`) registers a stub MCP server, binds a tool, runs it through OPA + HITL, and asserts the audit record + Langfuse span (FR-MCP-12, 23, 24).
-5. **Untrusted-input boundary proven** — a test shows an external-server result passing the Safety Orchestrator output scan before re-entering context (FR-MCP-31).
-6. **Gap ledger** — anything deferred (stdio, OAuth, resources/prompts) is logged in the known-gaps list, tagged deferred-intentional vs debt.
+5. **Untrusted-input boundary proven** — a test shows an external-server result passing the generic output scan (FR-MCP-50) before re-entering context (FR-MCP-31).
+6. **Generic gate proven for every tool type, not just MCP** — since FR-MCP-50/51/52 change `governed_tool` itself, the impacted-blast-radius regression sweep (CLAUDE.md's mandatory rule) must re-run existing native/http/python tool-call e2e coverage, not only the new MCP suite — a green MCP suite with a broken native-tool output scan is a shipped regression.
+7. **Team-scoping proven** — a test confirms a foreign-team's agent cannot deploy with an unpublished/ungranted MCP tool bound (`AssetGrant`/`publish_status`, same mechanism as any other tool, no new code path).
+8. **Gap ledger** — see the consolidated Known Gaps list in `docs/design/mcp-tool-source-architecture.md` §8; anything deferred (stdio, OAuth, resources/prompts, latency budget, pagination, backpressure) is tagged deferred-intentional vs debt.

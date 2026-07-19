@@ -22,11 +22,13 @@ import {
   Workflow,
   Wrench,
 } from "lucide-react";
+import { SlidersHorizontal, History } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
 import { listAgents, listPendingApprovals } from "../api/registryApi";
+import { DEMO } from "../demo/demo";
 import { STUDIO_BUILD } from "../lib/build";
 import type { LucideIcon } from "lucide-react";
 
@@ -55,7 +57,8 @@ interface NavItem {
 }
 
 const BUILD_ITEMS: NavItem[] = [
-  { label: "Agents",    to: "/",          end: true,  icon: Bot },
+  { label: "Agents",    to: DEMO ? "/agents" : "/", end: !DEMO, icon: Bot },
+  { label: "Knowledge", to: "/knowledge", end: false, icon: Database },
   { label: "Skills",    to: "/skills",    end: false, icon: Sparkles },
   { label: "Tools",     to: "/tools",     end: false, icon: Wrench },
   { label: "Workflows", to: "/workflows", end: false, icon: Workflow },
@@ -278,6 +281,11 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-2 py-2 overflow-y-auto">
+        {/* Conversations */}
+        <div className="space-y-0.5 pt-2">
+          <SideLink to="/conversations" label="Conversations" end={false} icon={History} />
+        </div>
+
         {/* Build */}
         <SectionHeader label="Build" />
         <div className="space-y-0.5">
@@ -360,27 +368,43 @@ export default function Sidebar() {
         )}
       </nav>
 
-      {/* User footer */}
+      {/* User footer — the account menu. Response Preferences live here: they are
+          user-global (not per-agent, not per-console), so this is their real home. */}
       {user && (
-        <div className="border-t border-slate-800 px-3 py-3 flex items-center gap-2">
-          <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-semibold shrink-0">
-            {(user.given_name?.[0] ?? user.preferred_username?.[0] ?? "?").toUpperCase()}
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-slate-200 truncate">
-              {user.given_name
-                ? `${user.given_name} ${user.family_name ?? ""}`.trim()
-                : user.preferred_username}
-            </p>
-            <p className="text-xs text-slate-500 truncate">{user.email ?? user.preferred_username}</p>
-          </div>
-          <button
-            onClick={logout}
-            title="Sign out"
-            className="text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+        <div className="border-t border-slate-800">
+          <NavLink
+            to="/preferences"
+            className={({ isActive }) =>
+              `flex items-center gap-3 mx-2 mt-2 px-3 py-2 rounded-md text-[14px] transition-colors ${
+                isActive
+                  ? "bg-blue-500/10 text-blue-400 font-medium"
+                  : "text-slate-300 hover:text-white hover:bg-slate-800/60"
+              }`
+            }
           >
-            <LogOut size={14} />
-          </button>
+            <SlidersHorizontal size={18} strokeWidth={1.8} className="shrink-0" />
+            Response Preferences
+          </NavLink>
+          <div className="px-3 py-3 flex items-center gap-2">
+            <div className="w-7 h-7 rounded-full bg-blue-600 flex items-center justify-center text-white text-xs font-semibold shrink-0">
+              {(user.given_name?.[0] ?? user.preferred_username?.[0] ?? "?").toUpperCase()}
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-slate-200 truncate">
+                {user.given_name
+                  ? `${user.given_name} ${user.family_name ?? ""}`.trim()
+                  : user.preferred_username}
+              </p>
+              <p className="text-xs text-slate-500 truncate">{user.email ?? user.preferred_username}</p>
+            </div>
+            <button
+              onClick={logout}
+              title="Sign out"
+              className="text-slate-500 hover:text-slate-300 transition-colors shrink-0"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
         </div>
       )}
     </aside>

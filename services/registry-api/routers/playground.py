@@ -543,9 +543,11 @@ async def _real_agent_stream(
     agent_svc_url: str,
     input_message: str,
     thread_id: str,
+    conversation_id: str,
     trace_id: str | None = None,
     user_id: str = "",
     user_team: str = "",
+    deployment_id: str = "",
     requested_by: str | None = None,
     requested_by_team: str | None = None,
 ) -> AsyncIterator[str]:
@@ -565,7 +567,14 @@ async def _real_agent_stream(
         tool  -> tool_name
         risk  -> risk_level
     """
-    body = {"message": input_message, "thread_id": thread_id}
+    # thread_id = LangGraph checkpoint key; conversation_id = transcript key. For a
+    # reactive chat they are equal (session_id); durable/non-chat keeps run_id.
+    body = {
+        "message": input_message,
+        "thread_id": thread_id,
+        "conversation_id": conversation_id,
+        "scope": "agent",
+    }
 
     try:
         async with httpx.AsyncClient(timeout=_AGENT_STREAM_TIMEOUT) as aclient:
@@ -576,6 +585,8 @@ async def _real_agent_stream(
                 req_headers["x-user-sub"] = user_id
             if user_team:
                 req_headers["x-agent-team"] = user_team
+            if deployment_id:
+                req_headers["x-deployment-id"] = deployment_id
             # Batch/dataset eval runs non-interactively — no human to approve HITL.
             # Only the internal eval-runner service identity may auto-approve; the
             # SDK re-checks this identity as defense-in-depth. Interactive chats
@@ -759,7 +770,14 @@ async def stream_playground_run(
     agent_name = run.agent_name
     execution_shape = run.execution_shape or "reactive"
     input_message = run.input_message or ""
-    thread_id = run_id  # use run_id as thread_id for traceability
+    deployment_id = str(deployment.id) if deployment else ""
+    # Reactive/chat runs thread across turns via the session (POC-0): key the
+    # checkpoint + transcript on session_id, not the per-turn run_id. Durable and
+    # other non-chat entrypoints keep run_id as the thread key (traceability).
+    if execution_shape == "durable":
+        thread_id = run_id
+    else:
+        thread_id = run.session_id or run_id
 
     # Resolve user team for OPA identity propagation
     caller_id = run.user_id or ""
@@ -791,9 +809,11 @@ async def stream_playground_run(
             agent_svc_url=agent_svc_url,
             input_message=input_message,
             thread_id=thread_id,
+            conversation_id=thread_id,
             trace_id=run_id,
             user_id=caller_id,
             user_team=caller_team,
+            deployment_id=deployment_id,
             requested_by=requested_by,
             requested_by_team=requested_by_team,
         ):
@@ -1876,6 +1896,30 @@ async def decide_playground_approval(
         "decide_playground_approval: id=%s decision=%s thread_id=%s",
         approval_id, body.decision, approval.thread_id,
     )
+
+    # WORKFLOW-MEMBER inline resume: a single-agent playground approval is resumed by the
+    # client opening /runs/{run_id}/resume-stream, but a WORKFLOW member has no such client
+    # resume — the paused member pod must be resumed AND the orchestration advanced, or the
+    # run sits at 'awaiting_approval' forever (this was "approved but the chat/eval didn't
+    # continue"). The console decide does this via _resume_and_advance; mirror it here, but
+    # ONLY for workflow members (thread_id → a child AgentRun with a parent) so single-agent
+    # playground resumes stay client-driven and never double-resume.
+    from models import AgentRun
+    member_child = (await db.execute(
+        select(AgentRun.id)
+        .where(AgentRun.thread_id == approval.thread_id, AgentRun.parent_run_id.isnot(None))
+        .limit(1)
+    )).first()
+    if member_child is not None:
+        from routers.approvals import _resume_and_advance
+        asyncio.create_task(_resume_and_advance(
+            approval.agent_name, approval.team, approval.thread_id,
+            db_status, approval.reviewer_id, getattr(body, "reason", None),
+        ))
+        logger.info(
+            "decide_playground_approval: workflow member (thread_id=%s) — scheduled resume+advance",
+            approval.thread_id,
+        )
 
     return {
         "approval_id": approval_id,

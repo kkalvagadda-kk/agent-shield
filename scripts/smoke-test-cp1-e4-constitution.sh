@@ -195,12 +195,15 @@ else
       "they have DIVERGED — E-4 would grade a filter production never runs (it already happened once, silently, for months)"
 fi
 
-if grep -q "check-filter-engine-parity.sh" "$DEPLOY_SH"; then
+# b9fb2bb moved the parity gate one tier up: deploy-cpe2e.sh runs the source-gate wrapper
+# run-fast-gates.sh, which invokes check-filter-engine-parity.sh. Verify the whole chain
+# (grepping DEPLOY_SH alone for the leaf script went stale after that refactor).
+if grep -q "run-fast-gates.sh" "$DEPLOY_SH" && grep -q "check-filter-engine-parity.sh" scripts/e2e/run-fast-gates.sh; then
   ok "CP1e the filter-engine parity gate is still wired into deploy-cpe2e.sh" \
-     "divergent engines stay UNDEPLOYABLE — enforcement, not discipline"
+     "deploy-cpe2e.sh → run-fast-gates.sh → check-filter-engine-parity.sh; divergent engines stay UNDEPLOYABLE"
 else
   bad "CP1e the filter-engine parity gate is still wired into deploy-cpe2e.sh" \
-      "the gate is not invoked before the builds — divergence would become deployable"
+      "the gate is not invoked before the builds (via run-fast-gates.sh) — divergence would become deployable"
 fi
 
 # `|| true`, never `|| echo 0`: grep -c PRINTS "0" and THEN exits 1 on no match, so

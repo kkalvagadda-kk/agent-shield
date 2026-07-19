@@ -17,18 +17,36 @@ import uuid
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import AsyncSessionLocal
+from embedding_client import embed
 from identity import (
     PrincipalResolutionError,
     resolve_principal,
     resolve_workflow_principal,
 )
-from models import Agent, AgentRun, AgentTrigger, CompositeWorkflow, Deployment
-from schemas import AgentRunResponse, InternalRunStartRequest
+from models import (
+    Agent,
+    AgentKnowledgeBinding,
+    AgentRun,
+    AgentTrigger,
+    CompositeWorkflow,
+    Deployment,
+    KnowledgeBase,
+    KnowledgeSource,
+)
+from schemas import (
+    AgentRunResponse,
+    InternalRunStartRequest,
+    KnowledgeCitation,
+    KnowledgeSearchChunk,
+    KnowledgeSearchResult,
+    SearchRequest,
+)
+from store_factory import get_vector_store
 from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, resolve_member_names
 
 logger = logging.getLogger(__name__)
@@ -259,6 +277,9 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         # Daemon workflow → the workflow's SERVICE identity subject; user_delegated → the
         # arming human. Members inherit this in _run_step (D1 actor_chain).
         run_by=principal.run_by,
+        # POC-3: the live human's sub (EMPTY for a daemon) — the preference discriminator
+        # a reactive member reads in _run_step_stream. Daemon (user_id=="") ⇒ no directive.
+        user_id=principal.user_id,
         team=wf.team,
         workflow_id=wf.id,
         # Link the parent workflow run to its trigger so a daemon workflow member's
@@ -610,3 +631,118 @@ async def internal_step_update(
 
     await db.commit()
     return {"status": "ok"}
+
+
+@router.post(
+    "/knowledge/search",
+    response_model=KnowledgeSearchResult,
+    summary="Knowledge search backend (cluster-internal; the knowledge_search HTTP tool)",
+)
+async def internal_knowledge_search(
+    body: SearchRequest,
+    x_agent_team: str | None = Header(None, alias="X-Agent-Team"),
+    x_agent_name: str | None = Header(None, alias="X-Agent-Name"),
+    db: AsyncSession = Depends(_get_db),
+) -> KnowledgeSearchResult:
+    """The backend of the `knowledge_search` HTTP tool (contracts/endpoints.md).
+
+    Identity is read ONLY from the headers the tool sets server-side from the pod's
+    env (`X-Agent-Team` = AGENTSHIELD_AGENT_TEAM, `X-Agent-Name` = AGENT_NAME) — the
+    model cannot set them. Tenancy is structural, not a guard bolted on:
+
+      * Either header missing → 422 (never default the team).
+      * `kb_id` is resolved SERVER-SIDE from `agent_knowledge_bindings` by
+        (agent_name, team) — never from the request body/model.
+      * An unbound agent, OR a header team that doesn't match the binding's team,
+        finds no binding row → `{chunks:[], citations:[]}` (fail-closed, no widening).
+      * `VectorStore.search` then RE-enforces (team, kb_id) as required predicates.
+    """
+    # Fail-closed: never default the team. A missing identity header is a 422, not
+    # a broad search.
+    if not x_agent_team or not x_agent_name:
+        raise HTTPException(
+            status_code=422,
+            detail="X-Agent-Team and X-Agent-Name headers are required",
+        )
+
+    team = x_agent_team
+    agent_name = x_agent_name
+
+    # Resolve ALL the agent's bound KBs server-side (an agent may be bound to one OR
+    # MORE). The JOIN filters on b.team = :team, so a mismatched team header (or an
+    # unbound agent) yields no bindings → empty. Isolation stays structural: each KB is
+    # searched via a SEPARATE VectorStore.search(team, kb_id) call — the S5 atom — and
+    # results are merged here. The store never sees a multi-KB query, so any adapter
+    # behind the VectorStore port works unchanged.
+    kb_ids = (
+        await db.execute(
+            select(AgentKnowledgeBinding.kb_id)
+            .join(Agent, Agent.id == AgentKnowledgeBinding.agent_id)
+            .where(Agent.name == agent_name, AgentKnowledgeBinding.team == team)
+        )
+    ).scalars().all()
+    if not kb_ids:
+        logger.info(
+            "internal_knowledge_search: no binding for agent=%s team=%s — fail-closed empty",
+            agent_name, team,
+        )
+        return KnowledgeSearchResult(chunks=[], citations=[], note="no knowledge base attached")
+
+    query = (body.query or "").strip()
+    if not query:
+        return KnowledgeSearchResult(chunks=[], citations=[])
+
+    q_vec = (await embed([query]))[0]
+    store = get_vector_store()
+    # Fan out across the agent's KBs (each call single-KB, isolation-scoped), then merge
+    # by score and keep the global top-k. Each hit is tagged with its kb_id for citations.
+    scored: list = []  # list[tuple[uuid.UUID, SearchHit]]
+    for kid in kb_ids:
+        for h in await store.search(
+            db, team=team, kb_id=str(kid), query_embedding=q_vec, k=body.k, query_text=query
+        ):
+            scored.append((kid, h))
+    if not scored:
+        return KnowledgeSearchResult(chunks=[], citations=[])
+    scored.sort(key=lambda pair: pair[1]["score"], reverse=True)
+    scored = scored[: body.k]
+
+    # KB names (only the KBs that produced hits) + source filenames — for citation chips.
+    hit_kb_ids = list({kid for (kid, _h) in scored})
+    kb_name_by_id = {
+        str(rid): name
+        for (rid, name) in (
+            await db.execute(select(KnowledgeBase.id, KnowledgeBase.name).where(KnowledgeBase.id.in_(hit_kb_ids)))
+        ).all()
+    }
+    source_ids = list({h["source_id"] for (_kid, h) in scored})
+    fname_rows = (
+        await db.execute(
+            select(KnowledgeSource.id, KnowledgeSource.filename).where(
+                KnowledgeSource.id.in_([uuid.UUID(s) for s in source_ids])
+            )
+        )
+    ).all()
+    filenames = {str(rid): fname for (rid, fname) in fname_rows}
+
+    chunks: list[KnowledgeSearchChunk] = []
+    citations: list[KnowledgeCitation] = []
+    seen: set[tuple[str, str]] = set()
+    for (kid, h) in scored:
+        source = filenames.get(h["source_id"], "unknown")
+        kb_name = kb_name_by_id.get(str(kid), "knowledge base")
+        chunks.append(
+            KnowledgeSearchChunk(
+                content=h["content"], source=source, kb=kb_name, score=h["score"]
+            )
+        )
+        key = (source, kb_name)
+        if key not in seen:
+            seen.add(key)
+            citations.append(KnowledgeCitation(source=source, kb=kb_name))
+
+    logger.info(
+        "internal_knowledge_search: agent=%s team=%s kbs=%d hits=%d",
+        agent_name, team, len(kb_ids), len(chunks),
+    )
+    return KnowledgeSearchResult(chunks=chunks, citations=citations)

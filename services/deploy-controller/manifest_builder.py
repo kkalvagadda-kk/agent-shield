@@ -7,6 +7,23 @@ _OPA_CONFIG_CM = "opa-sidecar-config"
 _OPA_CONFIG_NS = "agentshield-platform"
 
 
+def _image_pull_secrets() -> list:
+    """Pull secrets for agent pods, from AGENT_IMAGE_PULL_SECRETS (comma-separated).
+
+    Agent pods run under a per-agent ServiceAccount (machine identity), not the
+    namespace default, so a pull secret attached to the default SA does NOT
+    apply to them — it has to be on the pod spec. Empty (the default) yields no
+    imagePullSecrets, which is correct for clusters that side-load images
+    locally (kind) or use a public/anonymous registry.
+    """
+    raw = os.environ.get("AGENT_IMAGE_PULL_SECRETS", "")
+    return [
+        k8s_client.V1LocalObjectReference(name=n)
+        for n in (s.strip() for s in raw.split(","))
+        if n
+    ]
+
+
 def build_service(
     agent_name: str,
     environment: str,
@@ -176,17 +193,24 @@ def build_deployment(
     if llm_provider_model:
         env_vars.append(k8s_client.V1EnvVar(name="LLM_MODEL", value=llm_provider_model))
 
-    # Map secret keys to the canonical env var names expected by provider SDKs.
-    _ENV_NAME_MAP = {
-        "aws_access_key_id": "AWS_ACCESS_KEY_ID",
-        "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
-        "aws_region": "AWS_DEFAULT_REGION",
-        "api_key": "ANTHROPIC_API_KEY",
+    # Map secret keys to the canonical env var names expected by each provider's
+    # SDK. Per-provider so `api_key` maps to ANTHROPIC_API_KEY only for anthropic
+    # (not blindly for every provider) and `base_url` maps to OLLAMA_BASE_URL for
+    # ollama. Unmapped keys fall back to key.upper().
+    _PROVIDER_ENV_MAPS = {
+        "anthropic": {"api_key": "ANTHROPIC_API_KEY"},
+        "bedrock": {
+            "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+            "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "aws_region": "AWS_DEFAULT_REGION",
+        },
+        "ollama": {"base_url": "OLLAMA_BASE_URL"},
     }
+    _env_map = _PROVIDER_ENV_MAPS.get(llm_provider_type or "", {})
 
     if llm_secret_name and llm_env_keys:
         for key in llm_env_keys:
-            env_name = _ENV_NAME_MAP.get(key, key.upper())
+            env_name = _env_map.get(key, key.upper())
             env_vars.append(
                 k8s_client.V1EnvVar(
                     name=env_name,
@@ -243,6 +267,23 @@ def build_deployment(
         env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_PUBLIC_KEY", value=langfuse_pk))
     if langfuse_sk:
         env_vars.append(k8s_client.V1EnvVar(name="LANGFUSE_SECRET_KEY", value=langfuse_sk))
+
+    # --- Context storage (persistent LangGraph checkpointer + memory scoping) ---
+    # Pass the direct (PgBouncer-bypassing) Postgres URL through to the agent pod so
+    # its AsyncPostgresSaver can persist checkpoints (agent pods live in agents-{team}
+    # namespaces where the postgres-passwords secret does not exist, so the controller
+    # forwards its own resolved value — same two-hop pattern as LANGFUSE_HOST above).
+    direct_database_url = os.environ.get("DIRECT_DATABASE_URL", "")
+    if direct_database_url:
+        env_vars.append(
+            k8s_client.V1EnvVar(name="DIRECT_DATABASE_URL", value=direct_database_url)
+        )
+    # Deployment id lets the runner scope memory reads/writes by deployment.
+    env_vars.append(
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_DEPLOYMENT_ID", value=str(deployment.get("id", ""))
+        )
+    )
 
     # --- Tool credential secrets (envFrom) ---
     env_from_sources = []
@@ -355,6 +396,7 @@ def build_deployment(
         spec=k8s_client.V1PodSpec(
             # Phase 9.1: run pod under the per-agent SA (provisions projected token)
             service_account_name=sa_name,
+            image_pull_secrets=_image_pull_secrets() or None,
             containers=[agent_container, opa_container],
             volumes=volumes,
         ),

@@ -30,6 +30,7 @@ import ToolsPage from "./pages/ToolsPage";
 import ApprovalsInboxPage from "./pages/ApprovalsInboxPage";
 import WorkflowDeploymentOverviewPage from "./pages/WorkflowDeploymentOverviewPage";
 import WorkflowDetailPage from "./pages/WorkflowDetailPage";
+import WorkflowChatPage from "./pages/WorkflowChatPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import CatalogChatPage from "./pages/CatalogChatPage";
 import WorkflowBuilderPage from "./pages/WorkflowBuilderPage";
@@ -38,6 +39,14 @@ import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
 import ObservabilityComparePage from "./pages/ObservabilityComparePage";
 import CostConsolePage from "./pages/CostConsolePage";
 import CredentialsPage from "./pages/CredentialsPage";
+import { DEMO } from "./demo/demo";
+import DemoHomePage from "./pages/preview/DemoHomePage";
+import KnowledgeBasesPage from "./pages/KnowledgeBasesPage";
+import KnowledgeBaseDetailPage from "./pages/KnowledgeBaseDetailPage";
+import PreferencesPage from "./pages/preview/PreferencesPage";
+import MultiAgentChatPage from "./pages/preview/MultiAgentChatPage";
+import PreviewConversationsPage from "./pages/preview/ConversationsPage";
+import ConversationsPage from "./pages/ConversationsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -54,7 +63,14 @@ export default function App() {
           <main className="flex-1 overflow-auto">
             <ErrorBoundary>
             <Routes>
-              <Route path="/" element={<AgentListPage />} />
+              <Route path="/" element={DEMO ? <DemoHomePage /> : <AgentListPage />} />
+              {/* UX-preview routes (context storage / Knowledge Base) */}
+              <Route path="/knowledge" element={<KnowledgeBasesPage />} />
+              <Route path="/knowledge/:id" element={<KnowledgeBaseDetailPage />} />
+              <Route path="/preferences" element={<PreferencesPage />} />
+              <Route path="/preview/chat" element={<MultiAgentChatPage />} />
+              <Route path="/preview/conversations" element={<PreviewConversationsPage />} />
+              <Route path="/conversations" element={<ConversationsPage />} />
               <Route path="/agents" element={<AgentListPage />} />
               <Route path="/agents/new" element={<CreateAgentPage />} />
               <Route path="/agents/:name/chat" element={<AgentChatPage />} />
@@ -69,7 +85,9 @@ export default function App() {
               <Route path="/agent-graphs/:id" element={<CanvasPage />} />
               <Route path="/workflows" element={<WorkflowsPage />} />
               <Route path="/workflows/new" element={<WorkflowBuilderPage />} />
+              <Route path="/workflows/:id/d/:depId/chat" element={<WorkflowChatPage />} />
               <Route path="/workflows/:id/d/:depId" element={<WorkflowDeploymentOverviewPage />} />
+              <Route path="/workflows/:id/chat" element={<WorkflowChatPage />} />
               <Route path="/workflows/:id/builder" element={<WorkflowBuilderPage />} />
               <Route path="/workflows/:id" element={<WorkflowDetailPage />} />
               <Route path="/tools" element={<ToolsPage />} />

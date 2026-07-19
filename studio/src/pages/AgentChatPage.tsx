@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Loader2, Send, ShieldAlert, ExternalLink } from "lucide-react";
+import { ArrowLeft, Bot, Loader2, Send, ShieldAlert, ExternalLink, History } from "lucide-react";
 import {
   getAgent,
   getDeployments,
@@ -9,15 +9,41 @@ import {
   startDeploymentChat,
   getChatApprovalStatus,
   getSessionApprovals,
+  listMemory,
   SessionApproval,
 } from "../api/registryApi";
 import { getKeycloak } from "../lib/keycloak";
 import ConversationApprovalPanel from "../components/chat/ConversationApprovalPanel";
+import ConversationSidebar from "../components/conversations/ConversationSidebar";
+import AttributedBubble from "../components/chat/AttributedBubble";
+import {
+  routeToken,
+  openAuthorBubble,
+  attachToolCall,
+  attachRationale,
+  attachCitations,
+  parseKnowledgeCitations,
+  type Citation,
+  type ToolCall,
+} from "../lib/chatStream";
 
 interface Message {
   role: "user" | "assistant";
   content: string;
+  author?: string;
+  // POC-2b: tool-call chips + the model's one-line rationale, streamed from the
+  // pod via chat.py::_proxy_agent_stream (tool_call / rationale frames). Single
+  // agent = one speaker, so these render even without multi-agent attribution.
+  toolCalls?: ToolCall[];
+  rationale?: string | null;
+  // POC-4: {source, kb}[] from a knowledge_search tool result.
+  citations?: Citation[];
 }
+
+// Factory for a fresh assistant bubble, optionally attributed to `author`. Used
+// both to seed the pending bubble and by the stream reducers (routeToken /
+// openAuthorBubble) to open new bubbles as authored frames arrive.
+const mk = (author?: string): Message => ({ role: "assistant", content: "", author });
 
 interface PendingApproval {
   approvalId: string | null;
@@ -65,7 +91,14 @@ export default function AgentChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [sessionId] = useState(() => crypto.randomUUID());
+  // POC-5: sessionId is resettable and seedable from a `?session=<threadId>` query
+  // param so History (dock/standalone/tab) can resume a past conversation. New
+  // conversation re-keys it; selecting a row swaps it to the thread's id.
+  const [searchParams] = useSearchParams();
+  const [sessionId, setSessionId] = useState(() => searchParams.get("session") ?? crypto.randomUUID());
+  const [historyOpen, setHistoryOpen] = useState(true);
+  // POC-2b: gate the amber rationale box (default on, mirrors the mock's toggle).
+  const [showRationale, setShowRationale] = useState(true);
   // Production path: single waiting banner. Sandbox path: self-approve panel list.
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [sandboxApprovals, setSandboxApprovals] = useState<SessionApproval[]>([]);
@@ -82,6 +115,43 @@ export default function AgentChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // POC-5: rehydrate a past thread's transcript into the chat. Maps /memory rows
+  // to the local Message shape as PLAIN user/assistant bubbles — rich slots
+  // (citations / tool chips / rationale) are intentionally NOT reconstructed on a
+  // seed; only the live stream renders them (matches the non-live reload branch).
+  // The POC-4 citation wiring on the live path is untouched by this.
+  const seedFromThread = useCallback(
+    async (agentName: string, threadId: string, deploymentId?: string) => {
+      const rows = await listMemory(agentName, {
+        thread_id: threadId,
+        deployment_id: deploymentId,
+        limit: 200,
+      });
+      setSessionId(threadId);
+      setMessages(
+        rows
+          .filter((r) => r.role === "user" || r.role === "assistant")
+          .map((r) => ({
+            role: r.role as "user" | "assistant",
+            content: r.content,
+            author: r.agent_name,
+          }))
+      );
+    },
+    []
+  );
+
+  // On direct entry with `?session=<threadId>`, seed the transcript once on mount.
+  // (History row clicks call seedFromThread directly — this covers the deep-link.)
+  useEffect(() => {
+    const seed = searchParams.get("session");
+    if (seed && name) {
+      seedFromThread(name, seed, depId);
+    }
+    // Mount-only: deep-link seed. Later resumes go through onSelect/onNew.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const clearPoll = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
@@ -95,6 +165,24 @@ export default function AgentChatPage() {
       clearPoll();
     };
   }, [clearPoll]);
+
+  // POC-4: attach a knowledge_search result's {source, kb}[] to the current
+  // assistant bubble as a citation row (F-4 — frontend-only, no runner change).
+  // Fires on a `tool_call_end` frame carrying `result`. NOTE: the deployed-agent
+  // pod→registry stream (pod_stream.py) does not currently forward tool results,
+  // so on this surface the branch is dormant until that forwarding lands (gap
+  // ledger); the proven live citation path is the playground ChatPane.
+  const maybeAttachCitations = useCallback(
+    (d: { author?: string; tool?: string; tool_name?: string; result?: unknown }) => {
+      const tool = d.tool || d.tool_name;
+      if (tool !== "knowledge_search") return;
+      const cites = parseKnowledgeCitations(d.result);
+      if (cites.length > 0) {
+        setMessages((prev) => attachCitations(prev, d.author, cites, mk));
+      }
+    },
+    []
+  );
 
   // Reconnect the resume stream after an approval decision (sandbox or console).
   const connectResumeStream = useCallback((runId: string) => {
@@ -112,18 +200,23 @@ export default function AgentChatPage() {
     const source = new EventSource(resumeUrl);
     esRef.current = source;
 
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    setMessages((prev) => [...prev, mk(name)]);
 
     source.onmessage = (event) => {
       try {
         const d = JSON.parse(event.data);
-        if (d.type === "token") {
-          setMessages((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            copy[copy.length - 1] = { ...last, content: last.content + d.content };
-            return copy;
-          });
+        if (d.type === "agent_start") {
+          setMessages((prev) => openAuthorBubble(prev, d.author, mk));
+        } else if (d.type === "token") {
+          setMessages((prev) => routeToken(prev, d.author, d.content, mk));
+        } else if (d.type === "tool_call") {
+          setMessages((prev) =>
+            attachToolCall(prev, d.author, { tool_name: d.tool || d.tool_name || "", status: d.status || "ok" }, mk),
+          );
+        } else if (d.type === "rationale") {
+          setMessages((prev) => attachRationale(prev, d.author, d.content || "", mk));
+        } else if (d.type === "tool_call_end") {
+          maybeAttachCitations(d);
         } else if (d.type === "done") {
           source.close();
           esRef.current = null;
@@ -156,7 +249,7 @@ export default function AgentChatPage() {
       esRef.current = null;
       setIsStreaming(false);
     };
-  }, [name]);
+  }, [name, maybeAttachCitations]);
 
   // Production path: poll the console for a decision, then auto-resume.
   const startApprovalPolling = useCallback((runId: string) => {
@@ -297,7 +390,7 @@ export default function AgentChatPage() {
         ? await startDeploymentChat(name, depId, { message: userMsg, session_id: sessionId })
         : await startAgentChat(name, { message: userMsg, session_id: sessionId, context: "playground" });
 
-      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+      setMessages((prev) => [...prev, mk(name)]);
 
       const kc = getKeycloak();
       if (kc?.authenticated) {
@@ -315,13 +408,18 @@ export default function AgentChatPage() {
       source.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "token") {
-            setMessages((prev) => {
-              const copy = [...prev];
-              const last = copy[copy.length - 1];
-              copy[copy.length - 1] = { ...last, content: last.content + data.content };
-              return copy;
-            });
+          if (data.type === "agent_start") {
+            setMessages((prev) => openAuthorBubble(prev, data.author, mk));
+          } else if (data.type === "token") {
+            setMessages((prev) => routeToken(prev, data.author, data.content, mk));
+          } else if (data.type === "tool_call") {
+            setMessages((prev) =>
+              attachToolCall(prev, data.author, { tool_name: data.tool || data.tool_name || "", status: data.status || "ok" }, mk),
+            );
+          } else if (data.type === "rationale") {
+            setMessages((prev) => attachRationale(prev, data.author, data.content || "", mk));
+          } else if (data.type === "tool_call_end") {
+            maybeAttachCitations(data);
           } else if (data.type === "approval_requested") {
             source.close();
             esRef.current = null;
@@ -365,6 +463,27 @@ export default function AgentChatPage() {
 
   return (
     <div className="flex h-screen bg-white">
+      {/* POC-5: docked History (left). Reuses the shared ConversationSidebar with
+          an explicit agent scope; select/new are blocked while a turn is in flight
+          or an approval is pending (would corrupt the streaming state). */}
+      {historyOpen && (
+        <div
+          className="w-72 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto p-3"
+          data-testid="history-dock"
+        >
+          <ConversationSidebar
+            scope={{ kind: "agent", agentName: name!, deploymentId: depId }}
+            activeThreadId={sessionId}
+            onSelect={(s) => seedFromThread(name!, s.thread_id, depId)}
+            onNew={() => {
+              setSessionId(crypto.randomUUID());
+              setMessages([]);
+            }}
+            disabled={isStreaming || awaitingApproval}
+          />
+        </div>
+      )}
+
       {/* Chat column */}
       <div className="flex flex-col flex-1 min-w-0">
         {/* Header */}
@@ -381,6 +500,33 @@ export default function AgentChatPage() {
               <p className="text-xs text-slate-400 truncate">{agent.description}</p>
             )}
           </div>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((v) => !v)}
+            aria-pressed={historyOpen}
+            data-testid="history-toggle"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+              historyOpen
+                ? "bg-slate-800 text-white"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+          >
+            <History size={14} /> History
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowRationale((v) => !v)}
+            aria-pressed={showRationale}
+            data-testid="rationale-toggle"
+            title="Show the agent's one-line reasoning before each tool call"
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+              showRationale
+                ? "bg-amber-100 text-amber-800"
+                : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+          >
+            Rationale
+          </button>
           <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-700">
             Live
           </span>
@@ -443,20 +589,18 @@ export default function AgentChatPage() {
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
-              <div
-                className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap ${
-                  m.role === "user"
-                    ? "bg-blue-600 text-white rounded-br-sm"
-                    : "bg-slate-100 text-slate-800 rounded-bl-sm"
-                }`}
-              >
-                {m.content}
-                {m.role === "assistant" && isStreaming && i === messages.length - 1 && (
-                  <span className="inline-block w-1 h-3 bg-slate-400 ml-0.5 animate-pulse" />
-                )}
-              </div>
-            </div>
+            <AttributedBubble
+              key={i}
+              role={m.role}
+              content={m.content}
+              author={m.author}
+              showLabel={false}
+              streaming={m.role === "assistant" && isStreaming && i === messages.length - 1}
+              toolCalls={m.toolCalls}
+              rationale={m.rationale}
+              showRationale={showRationale}
+              citations={m.citations}
+            />
           ))}
           <div ref={bottomRef} />
         </div>
@@ -485,6 +629,7 @@ export default function AgentChatPage() {
             />
             <button
               type="submit"
+              aria-label="Send message"
               disabled={isStreaming || !input.trim() || awaitingApproval}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
             >

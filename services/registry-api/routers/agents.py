@@ -31,6 +31,7 @@ from rbac import grant_creator_admin
 from models import (
     Agent,
     AgentIdentity,
+    AgentKnowledgeBinding,
     AgentRun,
     AgentTool,
     AgentTrigger,
@@ -306,6 +307,30 @@ async def update_agent(
                 )).scalar_one_or_none()
                 if tool_row:
                     db.add(AgentTool(agent_id=agent.id, tool_id=tool_row.id, added_by="system"))
+
+            # `knowledge_search` is NOT a hand-picked tool — it is DERIVED from KB
+            # bindings (attaching a KB wires it; detaching the last one removes it).
+            # The rebuild above projects agent_tools purely from metadata.tools, which
+            # would drop the binding-attached row. Re-assert the invariant centrally so
+            # ANY caller of updateAgent is protected, not just the agent-config UI:
+            #   knowledge_search ∈ agent_tools  ⟺  the agent has ≥1 KB binding.
+            ks_tool_id = (await db.execute(
+                select(Tool.id).where(Tool.name == "knowledge_search")
+            )).scalar_one_or_none()
+            if ks_tool_id is not None:
+                await db.execute(
+                    delete(AgentTool).where(
+                        AgentTool.agent_id == agent.id,
+                        AgentTool.tool_id == ks_tool_id,
+                    )
+                )
+                has_kb = (await db.execute(
+                    select(AgentKnowledgeBinding.kb_id)
+                    .where(AgentKnowledgeBinding.agent_id == agent.id)
+                    .limit(1)
+                )).first() is not None
+                if has_kb:
+                    db.add(AgentTool(agent_id=agent.id, tool_id=ks_tool_id, added_by="system"))
     if body.execution_shape is not None:
         agent.execution_shape = body.execution_shape
         changed = True

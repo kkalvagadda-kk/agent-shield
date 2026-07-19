@@ -1,8 +1,8 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import ChatPane from "../components/playground/ChatPane";
+import ChatPane, { type Message as ChatMessage } from "../components/playground/ChatPane";
 import InteractionSurface from "../components/playground/InteractionSurface";
 import HitlPanel, { type HitlRequest } from "../components/playground/HitlPanel";
 import TracePanel, { type TraceEvent } from "../components/playground/TracePanel";
@@ -10,9 +10,11 @@ import VersionSelector from "../components/playground/VersionSelector";
 import type { AgentDeploymentSelection } from "../components/playground/VersionSelector";
 import WorkflowSelector from "../components/playground/WorkflowSelector";
 import type { WorkflowDeploymentSelection } from "../components/playground/WorkflowSelector";
-import { CheckCircle, Database, Loader2, Send, ShieldCheck } from "lucide-react";
+import ConversationSidebar from "../components/conversations/ConversationSidebar";
+import { CheckCircle, Database, History, Loader2, Send, ShieldCheck } from "lucide-react";
 import {
   getAgent,
+  listMemory,
   listTriggers,
   patchVersion,
   patchWorkflowVersion,
@@ -50,6 +52,20 @@ export default function PlaygroundPage() {
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   const [tracePanelCollapsed, setTracePanelCollapsed] = useState(false);
 
+  // POC-5 History: a docked ConversationSidebar scoped to the selected sandbox
+  // deployment. Selecting a row seeds ChatPane (remounted via `chatKey`) with that
+  // thread's transcript read back from the backend (listMemory); New mints a fresh
+  // chat. `chatRunning` (reported by ChatPane) plus the parent-owned HITL/resume
+  // state gate select/New so a remount never drops a live stream.
+  // NOTE: the playground POST is single-turn (PlaygroundRunCreate has no session_id),
+  // so this resumes the VIEW of a past thread; continuing it as ONE backend thread
+  // needs a backend session_id (see the manual-e2e gap ledger).
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [seedMessages, setSeedMessages] = useState<ChatMessage[]>([]);
+  const [chatKey, setChatKey] = useState<string>(() => crypto.randomUUID());
+  const [chatRunning, setChatRunning] = useState(false);
+
   const { data: agentData } = useQuery({
     queryKey: ["agent", selectedAgent],
     queryFn: () => getAgent(selectedAgent!),
@@ -70,6 +86,46 @@ export default function PlaygroundPage() {
     if (triggers.some((t) => t.trigger_type === "schedule")) return "schedule";
     return "none";
   })();
+
+  // The reactive ChatPane surface is the only one History seeds — a durable or
+  // triggered agent renders InteractionSurface instead, which owns its own runs.
+  const chatSurfaceActive =
+    targetType === "agent" && !!selectedAgent && executionShape !== "durable" && triggerMode === "none";
+  // Block History select/New while anything is mid-flight (streaming a run, awaiting
+  // an approval, or resuming after a decision) — a remount would drop that state.
+  const chatBusy = chatRunning || !!hitlRequest || !!resumeStreamUrl;
+
+  // Rehydrate a past thread into the chat pane. Reads the transcript from the
+  // backend (listMemory) — not client state — and remounts ChatPane seeded on it.
+  // Plain user/assistant bubbles only; rich slots (chips/citations) are not
+  // reconstructed on a seed, mirroring AgentChatPage/CatalogChatPage.
+  const seedFromThread = useCallback(
+    async (agentName: string, threadId: string, deploymentId?: string) => {
+      const rows = await listMemory(agentName, {
+        thread_id: threadId,
+        deployment_id: deploymentId,
+        limit: 200,
+      });
+      setActiveThreadId(threadId);
+      setSeedMessages(
+        rows
+          .filter((r) => r.role === "user" || r.role === "assistant")
+          .map((r) => ({
+            role: r.role as "user" | "assistant",
+            content: r.content,
+            author: r.agent_name,
+          }))
+      );
+      setChatKey(threadId);
+    },
+    []
+  );
+
+  const startNewConversation = () => {
+    setActiveThreadId(null);
+    setSeedMessages([]);
+    setChatKey(crypto.randomUUID());
+  };
 
   const handleApprovalRequested = (
     approvalId: string,
@@ -221,6 +277,10 @@ export default function PlaygroundPage() {
                 setSelectedAgent(name || null);
                 setAgentSelection(selection ?? null);
                 setTraceEvents([]);
+                // Clear the History highlight/seed when the target agent changes so a
+                // stale thread from a different agent never lingers.
+                setActiveThreadId(null);
+                setSeedMessages([]);
               }}
             />
           ) : (
@@ -319,49 +379,88 @@ export default function PlaygroundPage() {
         )}
       </div>
 
-      {/* Center panel — chat / workflow run */}
-      <div className="flex-1 flex flex-col min-w-0 bg-white">
-        {selectedAgent && targetType === "agent" && (
-          <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
-            <span className="text-sm font-medium text-slate-700">{selectedAgent}</span>
-            <span className="badge bg-purple-100 text-purple-700 text-xs">sandbox</span>
-            <span className={`badge text-xs ${executionShape === "durable" ? "bg-purple-100 text-purple-700" : "bg-sky-100 text-sky-700"}`}>
-              {executionShape}
-            </span>
-          </div>
-        )}
-        {selectedWorkflow && targetType === "workflow" && (
-          <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
-            <span className="text-sm font-medium text-slate-700">{selectedWorkflow.name}</span>
-            <span className="badge bg-indigo-100 text-indigo-700 text-xs">workflow</span>
-          </div>
-        )}
-        {targetType === "agent" ? (
-          executionShape === "durable" || triggerMode !== "none" ? (
-            <div className="flex-1 overflow-y-auto p-4">
-              <InteractionSurface
-                agentName={selectedAgent!}
-                executionShape={executionShape as "reactive" | "durable"}
-                triggerMode={triggerMode}
-              />
-            </div>
-          ) : (
-            <ChatPane
-              agentName={selectedAgent}
-              resumeStreamUrl={resumeStreamUrl}
-              onApprovalRequested={handleApprovalRequested}
-              onResumeComplete={handleResumeComplete}
-              onTraceEvent={handleTraceEvent}
+      {/* Center panel — docked History + chat / workflow run */}
+      <div className="flex-1 flex min-w-0 bg-white">
+        {/* POC-5 docked History — one shared ConversationSidebar scoped to the
+            selected sandbox deployment. Only mounted for the reactive ChatPane
+            surface; select/New are blocked while a run is in flight. */}
+        {chatSurfaceActive && historyOpen && (
+          <div
+            className="w-72 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto p-3"
+            data-testid="playground-history-dock"
+          >
+            <ConversationSidebar
+              scope={{ kind: "agent", agentName: selectedAgent!, deploymentId: agentSelection?.deploymentId }}
+              activeThreadId={activeThreadId}
+              onSelect={(s) => seedFromThread(selectedAgent!, s.thread_id, agentSelection?.deploymentId)}
+              onNew={startNewConversation}
+              disabled={chatBusy}
             />
-          )
-        ) : (
-          <InteractionSurface
-            agentName={selectedWorkflow?.name ?? null}
-            executionShape="durable"
-            triggerMode="none"
-            workflowId={selectedWorkflow?.id}
-          />
+          </div>
         )}
+
+        <div className="flex-1 flex flex-col min-w-0">
+          {selectedAgent && targetType === "agent" && (
+            <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">{selectedAgent}</span>
+              <span className="badge bg-purple-100 text-purple-700 text-xs">sandbox</span>
+              <span className={`badge text-xs ${executionShape === "durable" ? "bg-purple-100 text-purple-700" : "bg-sky-100 text-sky-700"}`}>
+                {executionShape}
+              </span>
+              {chatSurfaceActive && (
+                <button
+                  type="button"
+                  onClick={() => setHistoryOpen((v) => !v)}
+                  aria-pressed={historyOpen}
+                  data-testid="playground-history-toggle"
+                  title="Conversation history for this sandbox deployment"
+                  className={`ml-auto inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+                    historyOpen
+                      ? "bg-slate-800 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  }`}
+                >
+                  <History size={14} /> History
+                </button>
+              )}
+            </div>
+          )}
+          {selectedWorkflow && targetType === "workflow" && (
+            <div className="px-4 py-2 border-b border-slate-100 flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">{selectedWorkflow.name}</span>
+              <span className="badge bg-indigo-100 text-indigo-700 text-xs">workflow</span>
+            </div>
+          )}
+          {targetType === "agent" ? (
+            executionShape === "durable" || triggerMode !== "none" ? (
+              <div className="flex-1 overflow-y-auto p-4">
+                <InteractionSurface
+                  agentName={selectedAgent!}
+                  executionShape={executionShape as "reactive" | "durable"}
+                  triggerMode={triggerMode}
+                />
+              </div>
+            ) : (
+              <ChatPane
+                key={chatKey}
+                agentName={selectedAgent}
+                initialMessages={seedMessages}
+                onRunningChange={setChatRunning}
+                resumeStreamUrl={resumeStreamUrl}
+                onApprovalRequested={handleApprovalRequested}
+                onResumeComplete={handleResumeComplete}
+                onTraceEvent={handleTraceEvent}
+              />
+            )
+          ) : (
+            <InteractionSurface
+              agentName={selectedWorkflow?.name ?? null}
+              executionShape="durable"
+              triggerMode="none"
+              workflowId={selectedWorkflow?.id}
+            />
+          )}
+        </div>
       </div>
 
       {/* Right panel — trace */}

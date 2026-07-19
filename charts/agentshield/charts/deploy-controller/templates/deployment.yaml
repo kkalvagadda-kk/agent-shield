@@ -40,7 +40,7 @@ spec:
       {{- end }}
       containers:
         - name: deploy-controller
-          image: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/deploy-controller:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: IfNotPresent
           env:
             - name: REGISTRY_API_URL
@@ -53,12 +53,28 @@ spec:
                 secretKeyRef:
                   name: agentshield-secrets
                   key: database-url
+            # Direct (PgBouncer-bypassing) Postgres URL. The controller carries it
+            # in its own env and forwards it as a plain-value env var into agent
+            # pods (agents-* namespaces, where this secret does not exist) so their
+            # AsyncPostgresSaver can persist LangGraph checkpoints. Same source
+            # registry-api uses for its own DIRECT_DATABASE_URL.
+            - name: DIRECT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-passwords
+                  key: registry-api-direct-url
             - name: POLL_INTERVAL_SECONDS
               value: "5"
             - name: LOG_LEVEL
               value: "INFO"
             - name: DECLARATIVE_RUNNER_IMAGE
-              value: "{{ .Values.global.imageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+              value: "{{ .Values.global.appImageRegistry | default "registry.internal/agentshield" }}/declarative-runner:{{ .Values.declarativeRunnerTag | default "latest" }}"
+            # Pull secrets for the AGENT pods the controller creates in agents-*.
+            # Those pods run under a per-agent SA (machine identity), so a secret
+            # on the namespace default SA does not reach them — the controller
+            # must put it on the pod spec. Empty on kind (images side-loaded).
+            - name: AGENT_IMAGE_PULL_SECRETS
+              value: "{{ range $i, $s := ((.Values.global).imagePullSecrets | default list) }}{{ if $i }},{{ end }}{{ $s.name }}{{ end }}"
             # Namespace-qualified: the controller injects this host into agent
             # pods that run in OTHER namespaces (agents-*), where a bare service
             # name does not resolve. The langchain callback handler + SDK tracer

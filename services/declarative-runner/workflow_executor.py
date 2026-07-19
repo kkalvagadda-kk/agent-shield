@@ -48,7 +48,7 @@ from collections import defaultdict
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
-from langchain_core.messages import HumanMessage  # type: ignore[import]
+from langchain_core.messages import HumanMessage, SystemMessage  # type: ignore[import]
 from langgraph.graph import END, START, StateGraph  # type: ignore[import]
 from langgraph.graph.message import MessagesState  # type: ignore[import]
 from langgraph.types import Command  # type: ignore[import]
@@ -703,7 +703,7 @@ class WorkflowExecutor:
 
     async def run(
         self, message: str, thread_id: str | None = None, trace_id: str | None = None,
-        memory_context: list[dict] | None = None,
+        memory_context: list[dict] | None = None, user_directive: str | None = None,
     ) -> dict:
         """Invoke the workflow synchronously and return a response dict.
 
@@ -753,7 +753,11 @@ class WorkflowExecutor:
         lf_handler = _make_langfuse_handler(trace_id, thread_id)
         if lf_handler:
             config["callbacks"] = [lf_handler]
-        state = {"messages": history + [HumanMessage(content=safe_message)]}
+        # Platform-composed advisory preference directive (POC-3): a leading SystemMessage
+        # that lands AFTER create_react_agent's author-instructions prompt at invoke time,
+        # so it is advisory (last = weakest). None ⇒ byte-identical to the pre-POC-3 state.
+        lead = [SystemMessage(content=user_directive)] if user_directive else []
+        state = {"messages": lead + history + [HumanMessage(content=safe_message)]}
         # Bind OpenInference/OTEL spans to a trace id derived from run_id (=trace_id)
         # so the LLM/tool spans land on the platform's trace, not a separate one.
         from agentshield_sdk.otel import otel_run_context
@@ -774,13 +778,40 @@ class WorkflowExecutor:
             response_text, agent_name=agent_name, session_id=thread_id
         )
 
+        # Rationale (2b-ii): the last tool-calling AIMessage's text — the model's own
+        # one-sentence 'why' before a tool ran. Empty for tool-less turns (no amber box).
+        from agentshield_sdk.graph_builder import _extract_tool_rationale  # type: ignore[import]
+        rationale = _extract_tool_rationale(result)
+
         tracer.end_trace(trace_ctx, output={"response_len": len(out_scan.clean_text)})
-        return {"response": out_scan.clean_text, "thread_id": thread_id}
+        return {"response": out_scan.clean_text, "thread_id": thread_id, "rationale": rationale}
+
+    async def extract_tool_rationale(self, thread_id: str) -> str:
+        """Read the final checkpoint state for *thread_id* and return the turn-boundary
+        rationale (last tool-calling AIMessage's text). Best-effort — returns '' on any
+        error so a rationale-read failure never breaks the stream (2b-ii, non-blocking).
+
+        Used by the /chat/stream path, whose run_streamed() does not return state.
+        """
+        from agentshield_sdk.graph_builder import _extract_tool_rationale  # type: ignore[import]
+        try:
+            state = await self.graph.aget_state({"configurable": {"thread_id": thread_id}})
+            return _extract_tool_rationale(getattr(state, "values", {}) or {})
+        except Exception as exc:  # noqa: BLE001 — never raise from a best-effort read
+            logger.warning("extract_tool_rationale failed for thread %s: %s", thread_id, exc)
+            return ""
 
     async def run_streamed(
-        self, message: str, thread_id: str | None = None, trace_id: str | None = None
+        self, message: str, thread_id: str | None = None, trace_id: str | None = None,
+        memory_context: list[dict] | None = None, user_directive: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream workflow output as SSE-formatted strings.
+
+        Args:
+            memory_context: prior transcript turns (role/content, + author agent_name
+                for a shared workflow transcript) injected as leading Human/AI
+                messages so the streamed turn has conversational context — mirrors
+                run(). The LangGraph checkpoint key stays ``thread_id``.
 
         Yields:
             SSE-formatted strings (``event: …\\ndata: …\\n\\n`` frames).
@@ -815,7 +846,24 @@ class WorkflowExecutor:
         lf_handler = _make_langfuse_handler(trace_id, thread_id)
         if lf_handler:
             config["callbacks"] = [lf_handler]
-        state = {"messages": [HumanMessage(content=safe_message)]}
+
+        # Inject prior transcript as leading messages (mirrors run()). For a shared
+        # workflow transcript a turn may carry an author agent_name != this agent;
+        # prefix that content with "[<author>]: " so the model attributes peers.
+        from langchain_core.messages import AIMessage
+        history = []
+        for m in (memory_context or []):
+            content = m["content"]
+            author = m.get("agent_name")
+            if author and author != agent_name and m.get("role") == "assistant":
+                content = f"[{author}]: {content}"
+            if m.get("role") == "user":
+                history.append(HumanMessage(content=content))
+            elif m.get("role") == "assistant":
+                history.append(AIMessage(content=content))
+        # Leading advisory preference directive (POC-3) — see run(). None ⇒ unchanged.
+        lead = [SystemMessage(content=user_directive)] if user_directive else []
+        state = {"messages": lead + history + [HumanMessage(content=safe_message)]}
 
         # Bind OTEL spans to the run_id-derived trace (see run()).
         from agentshield_sdk.otel import otel_run_context

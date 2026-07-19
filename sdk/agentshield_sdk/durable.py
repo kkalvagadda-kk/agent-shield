@@ -125,14 +125,20 @@ def _exc_reason(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
-def _pending_interrupt(graph: Any, config: dict) -> dict | None:
+async def _pending_interrupt(graph: Any, config: dict) -> dict | None:
     """The pending interrupt value (a dict with `approval_id`) if the graph is parked
     at an interrupt(), else None. LangGraph v2 does not emit on_interrupt in
-    astream_events — the interrupt lives in get_state().tasks[].interrupts[].value."""
+    astream_events — the interrupt lives in get_state().tasks[].interrupts[].value.
+
+    MUST use the ASYNC ``aget_state``: with an ``AsyncPostgresSaver`` checkpointer
+    (cluster deployments — ``DIRECT_DATABASE_URL`` injected) the synchronous
+    ``get_state`` raises from inside the event loop and this returned None,
+    silently masking a real park (the run then looked "completed" instead of
+    "awaiting_approval"). Same fix as streaming._extract_interrupts."""
     try:
-        snapshot = graph.get_state(config)
+        snapshot = await graph.aget_state(config)
     except Exception as exc:  # a broken checkpointer must not look like "completed"
-        logger.warning("durable: get_state failed (thread parked-detection): %s", exc)
+        logger.warning("durable: aget_state failed (thread parked-detection): %s", exc)
         return None
     for task in getattr(snapshot, "tasks", None) or []:
         for intr in getattr(task, "interrupts", None) or []:
@@ -252,7 +258,7 @@ async def _drive(
         ))
         return RunResult("failed", thread_id, step)
 
-    intr = _pending_interrupt(graph, config)
+    intr = await _pending_interrupt(graph, config)
     if intr is not None:
         step += 1
         approval_id = intr.get("approval_id")

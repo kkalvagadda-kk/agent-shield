@@ -22,7 +22,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
@@ -35,6 +35,9 @@ import {
   type Agent,
 } from "../api/registryApi";
 import DeployModal from "../components/DeployModal";
+import { listKBs, getAgentKnowledgeBases, bindAgent, unbindAgent } from "../api/knowledgeApi";
+import ToolsPicker, { KNOWLEDGE_SEARCH_TOOL } from "../components/agent/ToolsPicker";
+import KnowledgeBasePicker from "../components/agent/KnowledgeBasePicker";
 
 const STATUS: Record<string, { label: string; cls: string }> = {
   active:      { label: "Active",      cls: "bg-green-100 text-green-700" },
@@ -372,6 +375,7 @@ function AgentEditForm({
   const [instructions, setInstructions] = useState((meta.instructions as string) ?? "");
   const [selectedProvider, setSelectedProvider] = useState((meta.llm_provider_id as string) ?? "");
   const [selectedTools, setSelectedTools] = useState<string[]>((meta.tools as string[]) ?? []);
+  const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
 
   const { data: providers } = useQuery({
     queryKey: ["providers"],
@@ -381,6 +385,19 @@ function AgentEditForm({
     queryKey: ["tools"],
     queryFn: () => listTools(200),
   });
+  const { data: allKbs } = useQuery({
+    queryKey: ["kbs", agent.team],
+    queryFn: () => listKBs(),
+  });
+  // The agent's CURRENT KB bindings — pre-select the picker; save reconciles them.
+  const { data: boundKbs } = useQuery({
+    queryKey: ["agent-kbs", agent.id],
+    queryFn: () => getAgentKnowledgeBases(agent.id),
+  });
+  const originalKbIds = (boundKbs ?? []).map((k) => k.kb_id);
+  useEffect(() => {
+    if (boundKbs) setSelectedKbIds(boundKbs.map((k) => k.kb_id));
+  }, [boundKbs]);
 
   const toggleTool = (toolName: string) => {
     setSelectedTools((prev) =>
@@ -388,9 +405,27 @@ function AgentEditForm({
     );
   };
 
+  const toggleKb = (kbId: string) => {
+    setSelectedKbIds((prev) =>
+      prev.includes(kbId) ? prev.filter((k) => k !== kbId) : [...prev, kbId]
+    );
+  };
+
   const mutation = useMutation({
-    mutationFn: () => {
-      const newMeta = { ...meta, instructions, tools: selectedTools, llm_provider_id: selectedProvider || undefined };
+    mutationFn: async () => {
+      // Never persist knowledge_search here — it is derived from KB bindings.
+      const newMeta = {
+        ...meta,
+        instructions,
+        tools: selectedTools.filter((t) => t !== KNOWLEDGE_SEARCH_TOOL),
+        llm_provider_id: selectedProvider || undefined,
+      };
+      // Reconcile KB bindings FIRST, then updateAgent re-asserts the invariant
+      // (knowledge_search ∈ agent_tools ⟺ ≥1 KB binding) against the final state.
+      const toUnbind = originalKbIds.filter((id) => !selectedKbIds.includes(id));
+      for (const kbId of toUnbind) await unbindAgent(kbId, agent.id);
+      const toBind = selectedKbIds.filter((id) => !originalKbIds.includes(id));
+      for (const kbId of toBind) await bindAgent(kbId, agent.id);
       return updateAgent(agent.name, {
         description: description || undefined,
         status: agentStatus,
@@ -489,26 +524,24 @@ function AgentEditForm({
           </select>
         </div>
 
+        {/* Knowledge Bases (special config → attaches knowledge_search server-side) */}
+        <div className="space-y-1">
+          <label className="label">Knowledge Bases</label>
+          <KnowledgeBasePicker kbs={allKbs ?? []} selected={selectedKbIds} onToggle={toggleKb} />
+          <p className="text-xs text-slate-400">
+            Attaching a KB gives the agent a <code>knowledge_search</code> tool scoped to it — no need to add it under Tools.
+          </p>
+        </div>
+
         {/* Tools */}
         <div className="space-y-1">
           <label className="label">Tools</label>
-          <div className="border border-slate-200 rounded p-3 max-h-40 overflow-y-auto space-y-1">
-            {tools?.items.length === 0 && (
-              <p className="text-xs text-slate-400">No tools registered.</p>
-            )}
-            {tools?.items.map((t) => (
-              <label key={t.name} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-slate-50 px-1 py-0.5 rounded">
-                <input
-                  type="checkbox"
-                  checked={selectedTools.includes(t.name)}
-                  onChange={() => toggleTool(t.name)}
-                  className="rounded"
-                />
-                <span className="font-mono text-xs">{t.name}</span>
-                {t.description && <span className="text-xs text-slate-400 truncate">— {t.description}</span>}
-              </label>
-            ))}
-          </div>
+          <ToolsPicker
+            tools={tools?.items ?? []}
+            selected={selectedTools}
+            onToggle={toggleTool}
+            emptyText="No tools registered."
+          />
         </div>
 
         {/* Status */}

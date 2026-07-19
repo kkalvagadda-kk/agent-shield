@@ -290,18 +290,31 @@ async def deploy_version(
     # Production HITL Queue is actionable without manual admin setup (until RBAC
     # lands). Production goes through this separate path, so the sandbox call in
     # deployments.py doesn't cover it. config_snapshot tools are {name, risk} dicts.
-    from routers.deployments import _auto_grant_approval_authority
+    from routers.deployments import _auto_grant_approval_authority, _auto_grant_tool_access
     snapshot_tools = (version.config_snapshot or {}).get("tools", []) or []
+    _tool_pairs = [
+        (t.get("name"), t.get("risk", "low"))
+        for t in snapshot_tools if isinstance(t, dict) and t.get("name")
+    ]
     try:
         granted = await _auto_grant_approval_authority(
-            db,
-            [(t.get("name"), t.get("risk", "low")) for t in snapshot_tools if isinstance(t, dict) and t.get("name")],
-            art.team,
-            granted_by=f"auto:production-deploy:{dep_id}",
+            db, _tool_pairs, art.team, granted_by=f"auto:production-deploy:{dep_id}",
         )
         logger.info("catalog_deploy: auto-granted %d approval-authority records", granted)
     except Exception as exc:  # non-fatal — deploy proceeds even if grant fails
         logger.warning("catalog_deploy: auto-grant ApprovalAuthority failed (non-fatal): %s", exc)
+
+    # Companion tool-access grant (AssetGrant) so the production agent can use its OWN declared
+    # tools under fail-closed OPA governance — the sandbox deploy path in deployments.py doesn't
+    # cover this separate production path (same reason the ApprovalAuthority grant is duplicated
+    # here). High-risk tools still require_approval / HITL-park; this only lifts tool_not_granted.
+    try:
+        tgranted = await _auto_grant_tool_access(
+            db, _tool_pairs, art.team, granted_by=f"auto:production-deploy:{dep_id}",
+        )
+        logger.info("catalog_deploy: auto-granted %d tool-access records", tgranted)
+    except Exception as exc:  # non-fatal — deploy proceeds even if grant fails
+        logger.warning("catalog_deploy: auto-grant tool access failed (non-fatal): %s", exc)
 
     await db.commit()
     await db.refresh(deployment)

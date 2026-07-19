@@ -9,6 +9,16 @@ service:
   type: ClusterIP
   port: 80
 
+# Suggested models per provider, surfaced to the SPA at runtime via /config.json.
+# Overridden by the umbrella chart's studio.providerModels. Dynamic — no rebuild
+# needed to extend. Ollama models are user-pulled, so the form still accepts any
+# freeform string; this is an autocomplete/suggestion list.
+providerModels:
+  ollama:
+    - gemma4:12b-mlx
+    - qwen2.5-coder:32b
+    - mistral-small:24b
+
 resources:
   requests:
     cpu: 50m

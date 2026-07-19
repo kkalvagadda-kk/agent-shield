@@ -212,6 +212,47 @@ def _extract_reasoning(state: Any) -> str:
     return text.strip()
 
 
+def _join_message_text(content: Any) -> str:
+    """Join an AIMessage's ``content`` into plain text (list-of-blocks → text blocks,
+    else ``str(content)``), matching ``_extract_reasoning``'s text-join logic."""
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        text = "".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    else:
+        text = str(content)
+    return text.strip()
+
+
+def _extract_tool_rationale(state: Any) -> str:
+    """Turn-boundary rationale: the text content of the LAST AIMessage that HAS
+    tool_calls — the one-sentence 'why' the model produced right before invoking a
+    tool.
+
+    Differs from ``_extract_reasoning`` ONLY in message selection: ``_extract_reasoning``
+    reads ``messages[-1]`` (correct at the HITL *interrupt*, where the tool-calling
+    AIMessage is last), whereas at the member *turn boundary* the last message is the
+    final answer AIMessage — so we scan backwards for the last message whose
+    ``tool_calls`` attribute is a non-empty list and return its joined text.
+
+    Returns ``""`` when no message had tool_calls (tool-less members) or the state is
+    malformed / the text block is empty. Non-blocking — callers treat it as optional.
+    """
+    try:
+        messages = (state or {}).get("messages") or []
+    except AttributeError:
+        return ""
+    for msg in reversed(messages):
+        tool_calls = getattr(msg, "tool_calls", None)
+        if isinstance(tool_calls, list) and tool_calls:
+            return _join_message_text(getattr(msg, "content", None))
+    return ""
+
+
 def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
     """Return an async wrapper that injects OPA check + HITL before the tool runs.
 
@@ -235,6 +276,11 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
         ) if uc else None
         decision = await opa_client.check_tool(agent_name, fn.tool_name, kwargs, user_context=user_ctx)
 
+        # OPA fail-closed: a denied tool call never executes. (A temporary POC
+        # fail-open bypass previously lived here to demo autonomous context-storage
+        # workflows whose user_delegated members hit OPA default_deny; it has been
+        # reverted — the underlying issue is fixed properly on main via a real grant/
+        # principal path, and governance must never fail open.)
         if not decision.allow:
             logger.info(
                 "OPA denied tool=%s agent=%s reason=%s",

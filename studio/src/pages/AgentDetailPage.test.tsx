@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { renderWithProviders } from "../test/utils";
@@ -20,8 +20,15 @@ vi.mock("../api/registryApi", () => ({
   deleteTrigger: vi.fn(),
   updateAgentMemory: vi.fn(),
 }));
+vi.mock("../api/knowledgeApi", () => ({
+  listKBs: vi.fn().mockResolvedValue([]),
+  getAgentKnowledgeBases: vi.fn().mockResolvedValue([]),
+  bindAgent: vi.fn().mockResolvedValue({}),
+  unbindAgent: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { getAgent, getDeployments, listVersions, deleteAgentVersion, updateAgent, listTriggers } from "../api/registryApi";
+import { listKBs, getAgentKnowledgeBases, bindAgent } from "../api/knowledgeApi";
 
 const NOW = new Date().toISOString();
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -166,6 +173,7 @@ describe("AgentDetailPage — Versions tab", () => {
 describe("AgentDetailPage — Settings tab (agent_class)", () => {
   beforeEach(() => {
     mock(getAgent).mockResolvedValue({
+      id: "agent-uuid-1",
       name: "my-agent",
       team: "default",
       agent_type: "declarative",
@@ -183,6 +191,8 @@ describe("AgentDetailPage — Settings tab (agent_class)", () => {
     mock(listVersions).mockResolvedValue([]);
     mock(listTriggers).mockResolvedValue([]);
     mock(updateAgent).mockResolvedValue({ name: "my-agent" });
+    mock(listKBs).mockResolvedValue([]);
+    mock(getAgentKnowledgeBases).mockResolvedValue([]);
   });
 
   it("changing the Authority class to daemon and saving PATCHes agent_class", async () => {
@@ -195,5 +205,67 @@ describe("AgentDetailPage — Settings tab (agent_class)", () => {
     expect(mock(updateAgent).mock.calls[0][1]).toEqual(
       expect.objectContaining({ agent_class: "daemon" })
     );
+  });
+});
+
+describe("AgentDetailPage — Settings tab (Knowledge Bases)", () => {
+  beforeEach(() => {
+    mock(getAgent).mockResolvedValue({
+      id: "agent-uuid-1",
+      name: "my-agent",
+      team: "default",
+      agent_type: "declarative",
+      status: "active",
+      publish_status: "private",
+      execution_shape: "reactive",
+      agent_class: "user_delegated",
+      created_at: NOW,
+      updated_at: NOW,
+      created_by: "dev",
+      memory_enabled: false,
+      metadata: {},
+    });
+    mock(getDeployments).mockResolvedValue([]);
+    mock(listVersions).mockResolvedValue([]);
+    mock(listTriggers).mockResolvedValue([]);
+    mock(updateAgent).mockResolvedValue({ name: "my-agent" });
+    // The team's tool list INCLUDES knowledge_search; the picker must hide it.
+    mock(getAgent).mockResolvedValue({
+      id: "agent-uuid-1", name: "my-agent", team: "default", agent_type: "declarative",
+      status: "active", publish_status: "private", execution_shape: "reactive",
+      agent_class: "user_delegated", created_at: NOW, updated_at: NOW, created_by: "dev",
+      memory_enabled: false, metadata: {},
+    });
+    mock(listKBs).mockResolvedValue([
+      { id: "kb-1", team: "default", name: "Product Docs", description: "", created_by: "u", created_at: NOW, updated_at: NOW, source_count: 2, ready_count: 2, attached_agents: [] },
+    ]);
+  });
+
+  it("pre-selects the agent's currently-bound KB and reconciles bind/unbind on save", async () => {
+    // Agent starts bound to kb-1 → the checkbox is checked on load.
+    mock(getAgentKnowledgeBases).mockResolvedValue([{ kb_id: "kb-1", name: "Product Docs" }]);
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "settings" }));
+    const picker = await screen.findByTestId("kb-picker");
+    const cb = within(picker).getByRole("checkbox") as HTMLInputElement;
+    await waitFor(() => expect(cb.checked).toBe(true));
+    // Unbind it → save must call updateAgent AND unbindAgent for the removed KB.
+    await userEvent.click(cb);
+    await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    await waitFor(() => expect(updateAgent).toHaveBeenCalled());
+    const { unbindAgent } = await import("../api/knowledgeApi");
+    await waitFor(() => expect(unbindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
+    // knowledge_search is never written into metadata.tools.
+    expect(mock(updateAgent).mock.calls[0][1].metadata.tools).not.toContain("knowledge_search");
+  });
+
+  it("binding a new KB on save calls bindAgent (auto-attaches knowledge_search)", async () => {
+    mock(getAgentKnowledgeBases).mockResolvedValue([]); // starts unbound
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: "settings" }));
+    const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
   });
 });

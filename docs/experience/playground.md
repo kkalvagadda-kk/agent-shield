@@ -89,7 +89,7 @@ The user sees an error entry in the trace panel and the spinner stops. Nothing h
 
 **6. HITL overlay**
 
-When `approval_requested` fires, `HitlPanel` renders over everything with the tool name, risk level, and (redacted) args. `HitlPanel` mounts the shared `components/approvals/ApprovalCard.tsx` for the approval body (WS-1 M1) — the same presentational card the sandbox chat panel (`ConversationApprovalPanel`) and the global Approvals Inbox (`ApprovalsInboxPage`) use, so a new approval field is added in one place. The user clicks Approve or Deny. The frontend POSTs to `POST /api/v1/playground/approvals/{id}/decide` — no authority check in playground context (sandbox self-approval). The overlay closes and streaming resumes.
+When `approval_requested` fires, `HitlPanel` renders over everything with the tool name, risk level, and (redacted) args. `HitlPanel` mounts the shared `components/approvals/ApprovalCard.tsx` for the approval body (WS-1 M1) — the same presentational card the sandbox chat panel (`ConversationApprovalPanel`) and the global Approvals Inbox (`ApprovalsInboxPage`) use, so a new approval field is added in one place. The user clicks Approve or Deny. The frontend POSTs to `POST /api/v1/playground/approvals/{id}/decide` — no authority check in playground context (sandbox self-approval). The overlay closes and streaming resumes. If the resumed turn trips a **second** high-risk tool, the run parks again and the overlay re-appears for the next gate — a single turn can require more than one approval, and each is surfaced in turn. (Workflow chat behaves the same way: after a member resumes, `WorkflowChatPage` re-surfaces the inline `ConversationApprovalPanel` for a re-parked 2nd gate via its resume poll, rather than completing with an orphaned approval.)
 
 **7. After the run**
 
@@ -578,3 +578,294 @@ Browser
 - Only `sequential` orchestration is executed at runtime. Supervisor and handoff can be selected but will return 422 from `POST /workflows/:id/runs`.
 - The run panel polls up to 15 times (30 seconds) then stops; long-running workflows may appear stuck.
 - T027 (manual browser verification) is pending — the browser flow should be verified before marking W4 fully complete.
+
+## Conversation memory & the shared workflow transcript (context-storage POC)
+
+Two related things thread context through a run. They use **different keys** and never mix.
+
+### Chat memory (single agent, across turns)
+
+Every chat turn carries a `session_id`. The registry uses it as the agent's `thread_id`
+(the LangGraph checkpoint key) **and** as the transcript `conversation_id`, so a follow-up
+turn on the same `session_id` recalls what was said before — the agent literally reloads the
+prior turns from the `agent_memory` transcript and injects them as leading messages before it
+runs. This is per-`(deployment, user, session)`: a second user replaying someone else's
+`session_id` is rejected (not-your-session), so one user never reads another's conversation.
+Because the transcript lives in Postgres (not pod RAM), the memory survives a pod restart.
+
+### Shared workflow transcript (multiple agents, one run)
+
+In a composite/multi-agent workflow, all members of a single run share **one**
+`conversation_id` (= the parent workflow run id). Before each member runs, it loads the whole
+shared transcript for that run — every member's turns, in order — not just the previous
+member's truncated output string. So member B can reference something that appeared only in
+member A's turn, and a supervisor sees a worker's reasoning, not just its final answer.
+
+- **Attribution.** Each transcript row records which agent authored it. When a member reads a
+  turn written by a *different* member, that turn's content is prefixed with `[<agent_name>]: `
+  so it reads it as a peer's contribution rather than its own words. Its own turns stay
+  verbatim.
+- **Write-back.** After a member runs, it appends its turn tagged with its own `agent_name`
+  and the `workflow_run_id`, so the next member sees the now-longer transcript. A fresh backend
+  fetch (`GET /agents/{name}/memory?scope=workflow_run&thread_id=<parent_run_id>`) returns every
+  member's tagged rows in order.
+- **Identity split (why durable resume still works).** The shared `conversation_id` is
+  orthogonal to each member's per-member `thread_id`. `thread_id` stays the checkpoint +
+  approval-correlation key (a durable member that pauses for HITL resumes on *its own*
+  `thread_id`); `conversation_id` is only the transcript key. They travel in separate request
+  fields and never alias, so sharing the transcript does not disturb per-member durable resume.
+- **String-passing is now a fallback.** The old behavior — passing only the previous member's
+  final output string as the next member's `message` — is retained as a fallback; the real
+  cross-member context now flows through the shared transcript.
+
+## Per-agent attribution — who said what (context-storage POC-2)
+
+POC-1 made members *share* a transcript; POC-2 makes it **visible**. Every chat and eval
+surface now shows which agent said what, so a multi-agent workflow reads as a real
+multi-speaker conversation instead of one anonymous blob. One presentational component backs
+all of it: `AttributedBubble` (`studio/src/components/chat/AttributedBubble.tsx`) renders a
+role-styled bubble with an optional agent-name label + a deterministic color dot from
+`agentColor` (`studio/src/lib/agentColor.ts`, same name → same color across reloads). Pass no
+`author` (or `showLabel={false}`) and it's the plain unlabeled bubble it always was — single
+agent is the degenerate one-speaker case, not a separate code path.
+
+### The streaming author frames (single-agent chat only)
+
+The single-agent chat proxy (`_proxy_agent_stream` in `services/registry-api/routers/chat.py`)
+now names the speaker on the wire. Right after the upstream agent returns `200`, before the
+first token, it emits **one** frame:
+
+```json
+{"type": "agent_start", "author": "refund-agent"}
+```
+
+and every token frame carries the same `author`:
+
+```json
+{"type": "token", "content": "Hello", "author": "refund-agent"}
+```
+
+`author` is the agent name (the `{name}` path param). `done` / `error` / `approval_requested`
+are unchanged, and a client that ignores `author` behaves exactly as before. The resume stream
+(`resume_stream_chat`, after a HITL approval) tags its tokens the same way. This rides
+`stream_chat` and `stream_deployment_chat` — the AgentChatPage and CatalogChatPage single-agent
+surfaces.
+
+**Why only single-agent.** Workflow members are **not** streamed to the client — the
+orchestrator dispatches each member server-side (`POST /chat` or `POST /run`) and collects the
+output; the browser learns member results only by polling the run tree. So streaming attribution
+is meaningful only for the one-speaker case; workflow attribution rides the run tree + the
+shared transcript instead (below). We did not invent a workflow streaming path that doesn't
+exist.
+
+### Attributed bubbles across the three surfaces
+
+- **AgentChatPage** (`/agents/{name}/chat`) and the **single-agent path of CatalogChatPage**
+  (`/catalog/{id}/chat`) consume the `agent_start` / `author` frames through the shared stream
+  reducer (`routeToken` / `openAuthorBubble` in `studio/src/lib/chatStream.ts`): a token appends
+  to the matching-author assistant bubble, a new author opens a new bubble. Single-agent chat
+  passes `showLabel={false}`, so it stays unlabeled — the plumbing is uniform, the label is a
+  caller decision.
+- **ChatPane** (playground) reads a *different* contract — the raw named runner events
+  (`text_delta`) off `/playground/runs/{id}/stream`, which carry no author — so it derives the
+  author client-side from the selected-agent prop and renders through `AttributedBubble`
+  (chips + safety block kept in the `children` slot). Also single-speaker, also unlabeled.
+- **CatalogChatPage workflow path** is the priority fix. A completed workflow turn now keeps the
+  **full `WorkflowRunTree`** (not just the parent's final output) and renders each
+  `tree.children[i]` as its own labeled `AttributedBubble` — `author = child.agent_name`, colored
+  dot, plus a compact step view (status badge · latency · View-Trace) — in run order, followed by
+  the parent's final-output summary bubble. A two-member run shows two labeled member bubbles in
+  distinct colors, not one collapsed answer.
+
+### Eval shared-thread transcript (EvalResultsPage)
+
+An expanded eval result row now has a collapsible **Conversation transcript**
+(`ConversationTranscript` in `studio/src/pages/EvalResultsPage.tsx`). Opening it lazily fetches
+`listMemory(memberName, {thread_id: run_id, scope: 'workflow_run', limit: 200})` — the
+`scope=workflow_run` read drops the per-agent filter so **every** member's turns come back on the
+one shared thread — and renders them as `AttributedBubble` rows in `message_index` order. So a
+workflow eval item replays as the real multi-speaker conversation that produced the score.
+`{memberName}` must be a real Agent (the `/agents/{name}/memory` endpoint 404s on a workflow
+name), so the page resolves a member from the eval detail's member path and only mounts the
+transcript when both a member and a `run_id` resolve — a single-agent/reactive item with no
+member renders nothing extra (no error).
+
+### "Share context between agents" toggle (WorkflowBuilder)
+
+The WorkflowBuilder first-save modal now has a **Share context between agents** checkbox
+(helper text: "Members see each other's turns in a shared conversation thread.") bound to the
+composite's `memory_enabled` field. It defaults on, loads from `workflow.memory_enabled` when an
+existing workflow opens, and is sent in **both** save calls — `createCompositeWorkflow` (first
+save) and `updateCompositeWorkflowApi` (resave). This is the on/off switch for the whole shared
+transcript. Per-session vs per-run scope is **not** a control — scope is derived from the
+entrypoint (chat → per-session, run → per-run) — and the "share rationale" toggle waits on the
+rationale summarizer (both recorded in the gap ledger).
+
+## Team Knowledge Base / RAG & citation chips (context-storage POC-4)
+
+POC-4 adds team Knowledge Bases that agents query via the platform-managed `knowledge_search`
+tool, and closes the citation loop into the POC-2b `AttributedBubble.citations` slot. The
+retrieval path is real end to end — a Source is chunked, embedded (`bge-small-en-v1.5`, 384-dim)
+and indexed into pgvector; search is cosine similarity over that index; MinIO holds the raw
+blobs. Tenancy is structural: every KB read/write is scoped to the caller's team, and the
+`knowledge_search` backend resolves `kb_id` **server-side** from the agent's binding, never from
+the model.
+
+### The Knowledge pages
+
+`Sidebar → Knowledge` (routes `/knowledge` and `/knowledge/:id`).
+
+**List — `KnowledgeBasesPage` (`/knowledge`).** `GET /api/v1/knowledge-bases` fills a table
+(name, team, source count, ready/total status, updated). **New Knowledge Base** opens a modal
+(`name` + optional `description`) → `POST /api/v1/knowledge-bases`; `team`/`created_by` are set
+server-side from the caller's identity (the body can't set them). On success the list query
+invalidates so the new KB appears after the refetch (save → reload).
+
+**Detail — `KnowledgeBaseDetailPage` (`/knowledge/:id`)** has three tabs:
+
+- **Sources** — a real `<input type=file>` upload zone (`.pdf/.txt/.md`) → `POST
+  /{kb}/sources` (multipart). Upload returns `201` immediately with a `pending` Source; ingest
+  runs fire-and-forget in the background (`BackgroundTasks → ingest.ingest_source`). The table
+  polls `GET /{kb}/sources` on a `refetchInterval` (2.5s) **while any Source is still ingesting**
+  and stops once every Source settles. The status badge maps the wire status to a friendly label
+  (F-6): `pending → Queued`, `indexing → Processing`, `ready → Ready`, `failed → Failed` (with the
+  ingest error inline). A ready Source's **View** opens the chunk drawer (`GET
+  /{kb}/sources/{id}/chunks` — content only, no embeddings on the wire); **Reprocess** (`POST
+  .../reprocess`) recovers a stuck `indexing` or a `failed` Source; **Delete** removes it (chunks +
+  vectors cascade).
+- **Test retrieval** — a query box → `POST /{kb}/search` returns the top-k chunks by cosine
+  similarity with their `source_filename` and `score`. This is the team-scoped proof that
+  retrieval works **before** attaching the KB to an agent; the `team` is always the caller's, so
+  the box can only ever search the caller's team's KB.
+- **Settings** — PATCH name/description, delete the KB, and the **Attach-agent picker**. Attaching
+  an agent (`PUT /{kb}/agents/{agent_id}`) records the `agent_knowledge_bindings` row **and**
+  idempotently ensures the `knowledge_search` tool is on the agent — one action wires both. The
+  "Attached to …" line reads `GET /{kb}/agents`; **Detach** (`DELETE /{kb}/agents/{agent_id}`)
+  removes the KB scope (the tool stays attached, but the internal search then fail-closes to empty
+  until a KB is bound again). POC = **one KB per agent** (a new bind replaces the prior one).
+
+### The citation chip — proven on the playground (ChatPane)
+
+Once a KB is attached, chatting with the agent in the **playground** (`ChatPane`) renders a
+citation chip under the answer whenever the agent calls `knowledge_search`. The mechanism is
+frontend-only (no SDK/runner change, F-4):
+
+1. The agent pod calls the `knowledge_search` HTTP tool, whose backend is `POST
+   /api/v1/internal/knowledge/search` (cluster-internal). It reads `X-Agent-Team` /
+   `X-Agent-Name` from the pod env (unspoofable by the model), resolves the bound `kb_id`, embeds
+   the query, searches `(team, kb_id)`, and returns `KnowledgeSearchResult { chunks, citations }`
+   where `citations` is the de-duplicated `{ source, kb }[]`.
+2. The playground SSE (`playground.py`) forwards the `tool_call_end` frame **with its result**.
+3. `ChatPane` sees `tool_call_end` for `tool_name === "knowledge_search"`, runs
+   `parseKnowledgeCitations(result)` (`lib/chatStream.ts`) to pull the `{ source, kb }[]`, and
+   attaches it to the current assistant message.
+4. `AttributedBubble` renders a chip row below the content — a `Database` icon + `{source} · {kb}`
+   per citation. Empty chunks ⇒ empty citations ⇒ no chip row (the bubble's `hasCitations` guard).
+
+The structured chip does **not** depend on the model quoting the source in prose — it is extracted
+from the tool result, so a citation renders even if the answer forgets to name the file.
+
+### Known gap — deployed-agent chat (AgentChatPage) citations are dormant
+
+`AgentChatPage` carries the same citation wiring (`parseKnowledgeCitations` on `tool_call_end`,
+`citations` passed to `AttributedBubble`), but it renders **no** chip today. Its stream is the
+production pod proxy `pod_stream.py`, whose `_translate` **drops the successful `tool_call_end`
+frame** (it emits one chip per call on `tool_call_start` and only re-emits on an *error* end), so
+no `knowledge_search` result reaches the page to parse. The playground path is the proven live
+citation surface; the deployed-agent surface is a not-yet-fed slot (gap ledger, deferred). Feeding
+it means having `_translate` forward the tool result on a successful `tool_call_end` — no
+frontend change needed.
+
+## Conversations & History (context-storage POC-5)
+
+POC-0/1 already persist every turn to `agent_memory`, and continue-with-context already works —
+re-POSTing a chat with the same `session_id` reloads the thread's earlier turns as context
+(`declarative-runner/main.py::_load_memory_context`). POC-5 is the surface layer that finally
+*shows* those stored conversations and lets you reopen one and keep chatting — everywhere a chat
+is exposed, sandbox and production. No new storage: the list is a read-side aggregate over
+`agent_memory` grouped by `thread_id`, with `environment` **derived** by a LEFT JOIN onto
+`production_deployments` (production iff the thread's `deployment_id` is a production deployment).
+Title = the thread's **first user message** (Haiku-generated titles stay deferred — gap ledger).
+
+### The two list endpoints
+
+Both are ownership-scoped server-side (`require_user`; `user_id = caller.sub`) and return a
+`ConversationSummary[]` — one row per `thread_id` carrying `title`, `agent_name`, `message_count`,
+`last_activity`, `session_id`, `deployment_id`, and the derived `environment`:
+
+- `GET /api/v1/me/conversations` — **cross-agent**: every thread the caller owns, each carrying its
+  `environment`. Backs the standalone page.
+- `GET /api/v1/agents/{name}/memory/conversations?deployment_id=` — **scoped** to one agent, and to
+  one deployment when `deployment_id` is present (sandbox and production threads stay disjoint).
+  Backs the docked History panel and the deployment Conversations tab.
+
+Because `environment` is derived, not stored, the All / Sandbox / Production filter is a pure
+client predicate (`filterConversationsByEnv`) over what `/me/conversations` already returned — not
+a second endpoint.
+
+### One shared sidebar, four surfaces
+
+All three reuse the same `ConversationSidebar` (`components/conversations/ConversationSidebar.tsx`)
+— a pure list + filter fed by React Query, taking an **explicit** `scope`
+(`{kind:"agent", agentName, deploymentId?}` or `{kind:"me"}`, never an implicit env sniff). It
+renders one row per thread (title | "Untitled conversation", agent name, an `sbx`/`prod` badge,
+turn count, relative time), a **New conversation** button, and — on the standalone page only — the
+env-filter pills. It does **not** fetch transcripts; each consumer seeds or navigates on
+`onSelect`.
+
+1. **Standalone Conversations page** (`ConversationsPage` → `/conversations`). Promoted to a real
+   top-level nav item (`History` icon); the old demo-gated *Context Preview* section is retired
+   (the `/preview/conversations` mock stays reachable while the `DEMO` flag lives). Two panes: the
+   cross-agent sidebar (`scope:{kind:"me"}`, env filter on) on the left; a **read-only transcript
+   preview** of the selected thread (via `listMemory`) on the right, with a **Continue** button →
+   `/agents/{name}/chat?session={thread_id}` (the sandbox resume path — continuing a *production*
+   row from here is a known gap; the docked History in the production console covers production
+   resume).
+2. **Docked History** in each chat console — `AgentChatPage` (sandbox, `/agents/:name/chat`) and
+   `CatalogChatPage` (the production consumer chat). A **History** toggle in the header opens a
+   docked `ConversationSidebar` scoped to that agent (and deployment). Selecting a row rehydrates
+   the thread (see below); **New conversation** re-keys a fresh `sessionId` and clears the pane.
+   Select/New are blocked while a turn is streaming or an approval is pending (resuming mid-stream
+   would corrupt the console state).
+3. **Conversations tab** on `DeploymentOverviewPage` (`/agents/:name/d/:depId`), sitting **beside**
+   Overview / Runs / Memory. Deployment-scoped (`deployment_id = depId`). It owns no chat logic:
+   selecting a row navigates to the deployment chat route
+   (`/agents/:name/d/:depId/chat?session=…`), reusing the full `AgentChatPage` machinery. It sits
+   next to — and does not replace — the admin **Memory** tab: Memory is the operator
+   inspect/manage lens (`MemoryTab` — view / delete), Conversations is the user resume lens over
+   the same store.
+4. **Docked History in the Playground** (`PlaygroundPage` → `ChatPane`, the reactive sandbox chat).
+   A **History** toggle in the agent header opens a docked `ConversationSidebar` scoped to the
+   selected sandbox deployment (`scope:{kind:"agent", agentName, deploymentId}`). Selecting a row
+   seeds the pane with that thread's transcript; **New conversation** starts a fresh chat.
+   `ChatPane` owns its own state, so the parent remounts it (`key={chatKey}`) with an
+   `initialMessages` seed instead of an in-place reset — every existing streaming / HITL / trace
+   path is untouched. Select/New are blocked while a run is streaming, an approval is pending, or a
+   resume is in flight (`ChatPane` reports its run state up via `onRunningChange`; a remount
+   mid-stream would drop the SSE connection). **Caveat:** the playground run POST
+   (`startPlaygroundRun` → `PlaygroundRunCreate`) carries **no** `session_id`, so this resumes the
+   **view** of a past sandbox thread — the next message starts a fresh backend thread rather than
+   continuing the seeded one. Making it a true multi-turn resume needs a backend `session_id` on the
+   playground run (gap ledger).
+
+### Continue with context — how resume works
+
+`sessionId` on both chat pages is resettable and seedable from a `?session=<threadId>` query
+param. Two entry paths converge on the same behaviour:
+
+- **Deep link** (`?session=…`, from the standalone Continue button or the deployment tab nav) — on
+  mount the page calls `seedFromThread(name, threadId, depId)`.
+- **In-console select** — clicking a docked History row calls the same helper directly.
+
+`seedFromThread` reads the transcript via `GET /agents/{name}/memory?thread_id=…` (`listMemory`),
+sets `sessionId = threadId`, and maps the rows into the message list. The next message you send
+POSTs with that `session_id`, so the runner reloads the thread's earlier turns as context and the
+conversation genuinely continues — no new backend work, the same continue-with-context POC-0/1
+shipped. (The **Playground** docked History is the one exception — its run POST has no `session_id`,
+so it resumes the *view* of a past thread but does not continue it as one backend thread; see
+surface 4 above and the gap ledger.)
+
+**Rehydrated turns are plain bubbles.** `seedFromThread` reconstructs only user/assistant text;
+rich slots (POC-4 citation chips, POC-2b tool chips / rationale / run-tree) are **not** rebuilt on
+a seed — only the live stream renders them. This matches each page's existing non-live reload
+branch, and the POC-4 citation wiring on the live path is untouched.

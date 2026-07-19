@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor, fireEvent } from "@testing-library/react";
+import { screen, waitFor, fireEvent, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../test/utils";
 import CreateAgentPage from "./CreateAgentPage";
@@ -10,9 +10,14 @@ vi.mock("../api/registryApi", () => ({
   listProviders: vi.fn(),
   listTools: vi.fn(),
 }));
+vi.mock("../api/knowledgeApi", () => ({
+  listKBs: vi.fn(),
+  bindAgent: vi.fn(),
+}));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 import { createAgent, createTrigger, listProviders, listTools } from "../api/registryApi";
+import { listKBs, bindAgent } from "../api/knowledgeApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -27,7 +32,9 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
   beforeEach(() => {
     mock(listProviders).mockResolvedValue({ items: [], total: 0 });
     mock(listTools).mockResolvedValue({ items: [], total: 0 });
-    mock(createAgent).mockResolvedValue({ name: "wiz-agent", team: "default" });
+    mock(listKBs).mockResolvedValue([]);
+    mock(bindAgent).mockResolvedValue({});
+    mock(createAgent).mockResolvedValue({ id: "agent-uuid-1", name: "wiz-agent", team: "default" });
     mock(createTrigger).mockResolvedValue({ token: "t", webhook_url: "https://x/hooks/wiz-agent/t" });
   });
 
@@ -162,5 +169,54 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
         expect.objectContaining({ trigger_type: "schedule", input_payload: { task: "q3-report" } })
       )
     );
+  });
+});
+
+// Knowledge Search is a SPECIAL config (the Knowledge Bases picker), never a
+// hand-pickable tool. Selecting a KB must bind it (which server-side attaches
+// knowledge_search) after the agent is created.
+describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
+  beforeEach(() => {
+    mock(listProviders).mockResolvedValue({ items: [], total: 0 });
+    // The tool list INCLUDES knowledge_search — the page must hide it.
+    mock(listTools).mockResolvedValue({
+      items: [
+        { id: "t1", name: "web_search", description: "search", risk_level: "high" },
+        { id: "t2", name: "knowledge_search", description: "kb", risk_level: "low" },
+      ],
+      total: 2,
+    });
+    mock(listKBs).mockResolvedValue([
+      { id: "kb-1", team: "default", name: "Product Docs", description: "", created_by: "u", created_at: "", updated_at: "", source_count: 3, ready_count: 3, attached_agents: [] },
+    ]);
+    mock(bindAgent).mockResolvedValue({});
+    mock(createAgent).mockResolvedValue({ id: "agent-uuid-1", name: "kb-agent", team: "default" });
+  });
+
+  it("hides knowledge_search from the Tools list but shows real tools", async () => {
+    await openNoCode();
+    const toolsPicker = await screen.findByTestId("tools-picker");
+    expect(within(toolsPicker).getByText("web_search")).toBeInTheDocument();
+    // knowledge_search must NOT be a pickable tool (it appears only in the KB
+    // picker's hint text, which is outside tools-picker).
+    expect(within(toolsPicker).queryByText("knowledge_search")).not.toBeInTheDocument();
+  });
+
+  it("lists team KBs in a dedicated picker", async () => {
+    await openNoCode();
+    const picker = await screen.findByTestId("kb-picker");
+    expect(picker).toHaveTextContent("Product Docs");
+  });
+
+  it("selecting a KB binds it to the created agent (auto-attaches knowledge_search)", async () => {
+    await openNoCode();
+    await userEvent.type(screen.getByPlaceholderText("my-agent"), "kb-agent");
+    const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
+    await waitFor(() => expect(createAgent).toHaveBeenCalled());
+    await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
+    // knowledge_search is never written into the hand-picked tools metadata.
+    expect(mock(createAgent).mock.calls[0][0].metadata.tools).not.toContain("knowledge_search");
   });
 });

@@ -3,24 +3,27 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.192 / eval-runner:0.1.13 (Eval v2 E-6 — REGRESSION GATE + PER-RUN PASS POLICY.
-#     (1) THE E-0 ORPHANS GET BOTH ENDS. `eval_runs.pass_threshold` / `dimension_weights` shipped in E-0
-#         (migration 0059) with NO writer and NO reader — the column was NULL in EVERY row ever written, so
-#         every downstream `if run.pass_threshold is not None` was a branch that could not execute.
-#         `EvalRunCreate` now accepts both (422 on a threshold outside 0..1 or a NEGATIVE weight, which would
-#         silently INVERT a composite); `create_eval_run` defaults the threshold from EVAL_PASS_THRESHOLD at
-#         the SINGLE write site, so the column is never NULL again and no consumer needs a fallback of its own.
-#     (2) ONE THRESHOLD, NOT FOUR. The publish threshold existed FOUR times across THREE services (the gate;
-#         the eval-runner's per-item verdict; the Studio's verdict AND its colour band), each defaulting to
-#         0.7 — so they agreed and nothing ever errored. Wiring a per-run threshold to the gate alone would
-#         have made the product LIE: a 0.85 run at threshold 0.9 renders "passed" and marks every item passed
-#         while the gate silently refuses to publish. Now: the gate reads effective_pass_threshold(run), and
-#         the runner resolves the run's policy ONCE (_RUN_PASS_THRESHOLD) for all five per-item verdicts and
-#         threads dimension_weights into the score body — so the DOOR keeps ONE weights source (no run_id→
-#         column second path + precedence chain, which is the priority-fallthrough that let MODE=webhook fall
-#         through to the reactive tail and deliver real side effects under a plausible PASS).
-#     (3) THE PRE-BUILD SOURCE TIER (below) now makes an unbumped tag, a drifted filter engine, and an
-#         unguarded/missing suite UNDEPLOYABLE. suite-80 is the live regression gate.)
+#   - registry-api:0.2.188 (Context Storage — fix Memory-tab regression: restore cross-thread
+#     conversation LIST. POC-0 made GET /agents/{name}/memory return [] whenever thread_id was
+#     omitted ("the legacy cross-thread list isn't a store operation") — but the Studio Memory tab
+#     loads with NO thread selected and derives its thread list FROM those rows, so the tab blanked
+#     for every agent, even memory-enabled ones. Fix: thread_id is an OPTIONAL filter again — no
+#     thread_id → ConversationStore.list_recent (new port method + memory.list_recent) returns the
+#     agent's recent rows across conversations as full ORM rows (row metadata intact). deployment_id/
+#     user_id filter only when provided (no forced NULL). suite-75 T-S75-006 guards it. No migration.)
+#   - registry-api:0.2.187 (Context Storage — fix GET /agents/{name}/memory READ regression. POC-0 wiring
+#     re-routed the transcript API through ConversationStore.load → memory.load_context, a path built to
+#     inject a bounded LLM-context window (lean Turn={role,content}; legacy deployment_id IS NULL default).
+#     Two symptoms, one cause: (1) message_index dropped by the lean Turn → serializer hardcoded None;
+#     (2) forced deployment_id IS NULL excluded every deployment-tagged row once POC-0 began tagging writes,
+#     so external reads (Studio MemoryTab, suite-75) got rows=0. The runner dodged both (it passes
+#     deployment_id + only reads role/content). Fix at the layer POC-0 broke: load_context carries
+#     message_index/created_at through both scope branches + cache (redis key bumped v2), Turn port copies
+#     them, serializer emits real values; deployment filter reconciled with the write (filter when provided,
+#     no forced NULL). No migration. Re-run suite-75 → T-S75-001/002/004 PASS.)
+#   - declarative-runner:0.1.53 (checkpointer pool liveness-check: AsyncConnectionPool gains check=check_connection + max_idle/max_lifetime so a stale pooled conn Postgres closed while the pod idled is replaced, not handed to LangGraph — fixes "server closed the connection unexpectedly" 500 on a workflow member run after idle. + 0.1.52 _save_memory_turn loud-log.)
+#     swallowing a fire-and-forget POST — the silent-500 that hid the missing-column write failure. Rides
+#     the next agent redeploy; not required for the read-path asserts above.)
 #   - eval-runner:0.1.7 (Eval v2 E-1 FIX — durable trajectory projection now COLLAPSES one logical
 #     tool call's consecutive same-tool run_steps into a single entry (_collapse_tool_calls in
 #     eval-runner/main.py). A gated call parks as TWO rows — running(no appr) then
@@ -284,12 +287,109 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # tool is recorded + answered with a mock sentinel and NOT invoked; OPA + HITL run
 # unchanged. **declarative-runner MUST be rebuilt** — the seam lives in
 # sdk/agentshield_sdk/ which is pip-bundled into the runner image.
-REGISTRY_API_TAG="0.2.200"
+# ── Context Storage POC-0 + POC-1 (this slice) ───────────────────────────────
+#   CONTEXT STORAGE — cross-agent conversation context a user can rely on.
+#   POC-0 (T001-T009): agent_memory columns + migration 0064 (scope, workflow_run_id,
+#     message_kind, atomic per-thread message_index); ConversationStore port+factory;
+#     fail-loud persistent AsyncPostgresSaver (never a silent MemorySaver when
+#     DIRECT_DATABASE_URL is set); DIRECT_DATABASE_URL + AGENTSHIELD_DEPLOYMENT_ID
+#     injected into agent pods; chat/playground thread on session_id (not per-turn
+#     run_id) with fail-closed session ownership (foreign session → 403); runner
+#     /chat/stream now LOADS + SAVES memory.
+#   POC-1 (T010-T012): ONE shared conversation_id=parent_run_id across workflow
+#     members (WS-1-safe: per-member thread_id=child_id checkpoint UNTOUCHED); the
+#     workflow-scoped read drops agent_name (member B sees member A) and write-back is
+#     tagged with author agent_name.
+#   Tag split (two deploy rounds, one committed final state):
+#     - CP1 (POC-0) deploy consumed registry-api 0.2.185 / declarative-runner 0.1.48
+#       / deploy-controller 0.1.37.
+#     - CP2 (POC-1) re-touched registry-api (workflow_orchestrator.py) +
+#       declarative-runner (orchestrator.py, main.py) AFTER CP1, so both advanced one
+#       more patch → registry-api 0.2.186 / declarative-runner 0.1.49. deploy-controller
+#       was NOT re-touched in POC-1 → stays 0.1.37.
+#   The repo is committed at the FINAL (CP2) tags below; scripts/checkpoints/*-deploy.sh
+#   deploy the current committed tags and assert their rollout.
+# 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
+# 0.2.192: POC-5 backend — list_conversations aggregate + GET /me/conversations +
+#          GET /agents/{name}/memory/conversations (the POC-5 commit landed the code
+#          but never bumped the tag; this makes it deployable/verifiable).
+# 0.2.193: POC-5 fix — list_conversations used min(deployment_id) but deployment_id
+#          is a UUID and Postgres has no min(uuid) → /me/conversations 500'd on every
+#          call. Pick the thread's first-seen deployment_id via array_agg[1] instead.
+# 0.2.194: Ollama LLM provider — LLM_PROVIDER_SPECS registry + base_url credential +
+#          drop provider CHECK (migration 0066). Pairs with runner 0.1.57 (ChatOllama),
+#          deploy-controller 0.1.39 (OLLAMA_BASE_URL env map), studio 0.1.145 (form).
+# 0.2.195: POC-4 Knowledge Base / RAG — migration 0067 (kb tables + guarded vector(384)),
+#          BlobStore/VectorStore/embedding_client ports, ingest pipeline, knowledge router,
+#          internal /knowledge/search (server-side kb_id, fail-closed S5), knowledge_search tool.
+# 0.2.198: Credentials — AuthConfigResponse.has_credentials (empty-shell detection). A credential
+#   linked to a tool but with no value stored (credentials_encrypted NULL, no K8s secret) fails tool
+#   auth with 403; the value is write-only so the UI couldn't tell it apart from a configured one.
+# 0.2.199: workflows — correct reactive-workflow approval warning (STOPS EARLY, not FAIL — verified vs runtime)
+# 0.2.200: reactive-workflow HITL — _derive_context matches child run by thread_id column (was id-only),
+#   so a playground workflow member approval is playground/inline, not production console
+# 0.2.201: restore inline HITL for REACTIVE workflows — park+resume (revert execution-models-v2 fail-closed)
+# 0.2.202: reactive member/eval HITL resume — post /resume to the agent's ACTUAL env pod, not -production (DNS-failed)
+# 0.2.203: workflow inline HITL — playground decide resumes+advances workflow member (was console-only)
+# 0.2.204: Knowledge Search as special config — multi-KB per agent: bind_agent upsert (was drop-then-insert),
+#   reverse-lookup GET /knowledge-bases/agent-bindings/{id}, internal search fans out across all bound KBs,
+#   updateAgent enforces invariant (knowledge_search ∈ agent_tools ⟺ agent has ≥1 KB binding)
+# 0.2.205: workflow conversations — GET /workflows/{id}/conversations + memory.list_workflow_conversations
+#   (join agent_memory→parent runs by session_id; ownership/name from the parent run, not the member rows)
+# 0.2.206: HITL multi-approval fix — reactive workflow-member resume RE-PARKS when a pending
+#   approval still exists on the thread (mirror the forward path's authoritative pause detection),
+#   instead of completing on the pod's HTTP 200 and orphaning the 2nd gate. approvals.py _resume_and_advance.
+# 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
+#   (parent-run semi-join, dual thread_id ordering: absent→recent DESC / given→message_index ASC).
+#   Backs the empty workflow Memory tab + WorkflowChat past-session replay. No migration.
+# 0.2.209: deploy-time tool-access auto-grant. Deploy already auto-granted ApprovalAuthority but
+#   never granted the TOOL itself (AssetGrant), so under fail-closed OPA every agent's own declared
+#   tools were denied (deny_reason tool_not_granted) unless manually granted — the HITL/eval suites
+#   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
+#   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
+#   tools still require_approval/HITL-park. No migration.
+REGISTRY_API_TAG="0.2.210"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
-DEPLOY_CONTROLLER_TAG="0.1.36"
-STUDIO_TAG="0.1.147"
+# NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
+EMBEDDING_SIDECAR_TAG="0.1.0"
+# minio-cp1 = official minio + mc client; deploy-cpe2e never built it before (agentshield-minio
+# ImagePullBackOff'd). POC-4 needs MinIO for Source blobs, so build it here.
+MINIO_CP1_TAG="0.1.0"
+# 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
+# they run under a per-agent SA, so a secret on the default SA never reached
+# them and any private-registry pull failed with "no basic auth credentials".
+DEPLOY_CONTROLLER_TAG="0.1.39"
+# 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
+# 0.1.146: POC-4 Knowledge Base pages (list/detail/upload/test-retrieval/attach) + runtime citation chips
+# 0.1.147: POC-5 Conversations — ConversationSidebar + standalone page + docked History (Agent/Catalog chat) + deployment Conversations tab + nav promotion (this image contains BOTH POC-4 + POC-5 frontends)
+# 0.1.149: Credentials page — surface empty-shell credentials ("no key set" badge), require a
+#   secret value on create + when editing a credential with none stored (uses has_credentials).
+# 0.1.150: Workflows — reactive-workflow chat (WorkflowChatPage + /workflows/:id/chat, Open Chat entry +
+#   endpoint listing) and editable workflow Settings (shape/class/orchestration/share-context via PATCH).
+# 0.1.151: workflow chat inline HITL panel + resume poll; Conversations + Memory tabs on workflow deployment
+# 0.1.152: Knowledge Bases picker in agent create + settings (special config) — knowledge_search hidden from the
+#   tool list, agent tied to one/more KBs (bind/unbind on save, pre-selected from bindings); WorkflowChat dedup
+# 0.1.153: add data-testid="tools-picker" to the agent create + settings Tools list (scopes the Playwright
+#   "knowledge_search is hidden from Tools" assertion in e2e/agent-knowledge-config.spec.ts)
+# 0.1.154: workflow deployment Conversations tab now lists via GET /workflows/{id}/conversations
+#   (WorkflowConversationsTab + ConversationSidebar kind:'workflow') — was empty (queried by workflow name)
+# 0.1.155: knowledge_search leak class-fix — the Edit Agent modal (AgentListPage, the 3rd agent-editing
+#   surface Task 13 missed) rendered the RAW tool list, so knowledge_search still showed as a checkable
+#   tool with no KB picker. Extracted shared ToolsPicker (filters knowledge_search) + KnowledgeBasePicker
+#   used by CreateAgentPage, AgentDetailPage AND the modal; the modal now reconciles KB bind/unbind + strips
+#   knowledge_search on save. AgentListPage.test regression + typecheck green.
+# 0.1.156: workflow ledger G1+G2 frontend + HITL 2nd-gate re-surface. G1: WorkflowChatPage.seedFromThread
+#   replays a past ?session (was empty composer). G2: new WorkflowMemoryTab reads GET /workflows/{id}/memory
+#   (member entries via parent-run semi-join) — the workflow Memory tab was empty. HITL: WorkflowChatPage
+#   re-surfaces the 2nd inline approval gate when the resumed member re-parks (listPendingApprovals
+#   correlation by parked child thread_id; poll bound 60→90). vitest green + typecheck.
+# 0.1.157: origin/main merge — WS-1..E-6 execution-models-v2 + eval-v2 frontends.
+# 0.1.158: sync the STUDIO_BUILD marker (studio/src/lib/build.ts) to the deployed tag. The merge
+#   left build.ts at 0.1.147 while STUDIO_TAG advanced to 0.1.157, so suite-79 T-S79-002 (served-tag
+#   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
+STUDIO_TAG="0.1.158"
 EVAL_RUNNER_TAG="0.1.14"
-DECLARATIVE_RUNNER_TAG="0.1.49"
+DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.3"
@@ -384,6 +484,12 @@ docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" servi
 echo "  → event-gateway:${EVENT_GATEWAY_TAG} (WS-4: ONE shared verify_webhook_auth wrapping BOTH hooks — per-application client-id + allowlist + HMAC signing; uniform-401 enumeration oracle CLOSED (stale-ts had its own body); +cryptography +AGENTSHIELD_ENCRYPTION_KEY so it can decrypt the client secret)"
 docker build -t "registry.internal/agentshield/event-gateway:${EVENT_GATEWAY_TAG}" services/event-gateway/
 
+echo "  → embedding-sidecar:${EMBEDDING_SIDECAR_TAG} (POC-4 — fastembed bge-small-en-v1.5, 384-dim; weights baked in)"
+docker build -t "registry.internal/agentshield/embedding-sidecar:${EMBEDDING_SIDECAR_TAG}" services/embedding-sidecar/
+
+echo "  → minio-cp1:${MINIO_CP1_TAG} (official minio + mc client; blob store for POC-4 Sources)"
+docker build -t "registry.internal/agentshield/minio-cp1:${MINIO_CP1_TAG}" services/minio-cp1/
+
 # ── Step 2: Namespaces ────────────────────────────────────────────────────────
 echo ""
 echo "[2/8] Applying namespaces..."
@@ -420,9 +526,17 @@ kubectl create secret generic postgres-passwords \
   --from-literal=langfuse="${PG_PASS}" \
   --from-literal=langgraph="${PG_PASS}" \
   --from-literal=appsmith="${PG_PASS}" \
-  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
-  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql:5432/agentshield" \
+  --from-literal=registry-api-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NAMESPACE}:5432/agentshield" \
+  --from-literal=registry-api-direct-url="postgresql+asyncpg://postgres:${PG_PASS}@${RELEASE}-postgresql.${NAMESPACE}:5432/agentshield" \
   --dry-run=client -o yaml | kubectl apply -f -
+# NOTE: the host is namespace-QUALIFIED on purpose. registry-api reads this from
+# the platform namespace, but the deploy-controller also propagates
+# registry-api-direct-url into AGENT pods, which run in agents-*. A bare service
+# name only resolves inside its own namespace, so agents died with
+# "failed to resolve host 'agentshield-postgresql'" -> the (fail-loud)
+# checkpointer refused to start -> CrashLoopBackOff. `<svc>.<ns>` resolves from
+# every namespace, so one value is correct in both contexts. Same reason
+# LANGFUSE_HOST is qualified in the deploy-controller chart.
 
 # Redis password (Bitnami existingSecret)
 kubectl create secret generic redis-password \

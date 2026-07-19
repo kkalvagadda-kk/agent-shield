@@ -9,6 +9,7 @@ import {
   listVersions,
   type DeploymentContext,
 } from "../api/registryApi";
+import ConversationsTab from "../components/agent-detail/ConversationsTab";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
 import MemoryTab from "../components/agent-detail/MemoryTab";
 import OverviewForShape, {
@@ -26,7 +27,7 @@ const STATUS: Record<string, { label: string; cls: string }> = {
   gate_failed: { label: "Gate failed", cls: "bg-red-100 text-red-700" },
 };
 
-type Tab = "overview" | "runs" | "memory";
+type Tab = "overview" | "runs" | "memory" | "conversations";
 
 /**
  * Level-3 Deployment Overview (playground context). Metrics, runs and memory
@@ -140,7 +141,7 @@ export default function DeploymentOverviewPage() {
       {/* Tabs */}
       <div className="border-b border-slate-200 mb-6">
         <nav className="flex gap-6">
-          {(["overview", "runs", "memory"] as Tab[]).map((tab) => (
+          {(["overview", "runs", "memory", "conversations"] as Tab[]).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -167,6 +168,7 @@ export default function DeploymentOverviewPage() {
       )}
       {activeTab === "runs" && <RunsTab deploymentId={deployment.id} context={context} />}
       {activeTab === "memory" && <MemoryTab agentName={name!} deploymentId={depId} />}
+      {activeTab === "conversations" && <ConversationsTab agentName={name!} deploymentId={depId!} />}
     </div>
   );
 }

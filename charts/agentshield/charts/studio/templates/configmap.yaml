@@ -18,7 +18,11 @@ data:
       location = /config.json {
         add_header Content-Type "application/json";
         add_header Cache-Control "no-store";
-        return 200 '{"keycloakUrl":"","keycloakRealm":"agentshield","keycloakClientId":"agentshield-studio"}';
+        # providerModels is injected from values (studio.providerModels), so the
+        # LLM Providers form's suggested-model lists are DYNAMIC — extend the list
+        # in values.yaml + `helm upgrade` (or edit this ConfigMap + restart the
+        # studio pod) with NO image rebuild.
+        return 200 '{{ dict "keycloakUrl" "" "keycloakRealm" "agentshield" "keycloakClientId" "agentshield-studio" "providerModels" (.Values.providerModels | default dict) | toJson }}';
       }
 
       # Proxy Keycloak OIDC endpoints through Studio so the browser only

@@ -1,0 +1,95 @@
+# values-eks.yaml — overrides to deploy AgentShield on the self-managed k8s-on-EC2
+# cluster (test-cluster). Applied via: helm upgrade --install ... -f values-eks.yaml
+#
+# What this handles vs the local (kind) values.yaml:
+#  - Images come from ECR (517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield),
+#    across the chart's THREE image-render mechanisms (see below).
+#  - EBS storage (block-storage), one ECR pull secret, internal-NLB gateway.
+#  - Langfuse OFF for first bring-up (hardcoded ClusterIP + SSO hostnames — follow-up).
+#  - HTTP-only edge first (TLS/Keycloak-hostname reconciliation is a follow-up).
+
+global:
+  # Dedicated agentshield app-image registry (chart templates edited to read
+  # global.appImageRegistry, NOT global.imageRegistry — the latter is a Bitnami
+  # global and setting it would repoint postgres/redis/etc. too). All app images
+  # resolve to <host>/agentshield/<svc>.
+  appImageRegistry: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield"
+  storageClass: "block-storage"
+  imagePullSecrets:
+    - name: agentshield-ecr
+  # Bitnami 2025 relocated free images to bitnamilegacy; allow the charts to run
+  # (images are repointed to bitnamilegacy per-subchart below).
+  security:
+    allowInsecureImages: true
+  # publicUrl/langfuseUrl reconciled AFTER the internal ELB DNS is known (Keycloak
+  # KC_HOSTNAME_STRICT=false lets install proceed with the placeholder).
+
+# minio-raw.yaml hardcoded image -> ECR (template now reads .Values.minioImage).
+minioImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/minio-cp1:0.1.0"
+
+# --- Group A: image.repository used verbatim (ignores global.imageRegistry) ---
+studio:
+  image:
+    repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/studio"
+python-executor:
+  image:
+    repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/python-executor"
+
+# embedding-sidecar (POC-4 RAG): parent-chart template image -> ECR. Tag is
+# carried from values.yaml (embeddingSidecar.image.tag) unless bumped there.
+embeddingSidecar:
+  image:
+    repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/embedding-sidecar"
+
+# --- eval-runner: full-string image (registry-api spawns eval Jobs) ---
+registry-api:
+  evalRunnerImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
+  env:
+    EVAL_RUNNER_IMAGE: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
+
+# --- Bitnami deps (postgres/redis): repoint to bitnamilegacy (2025 relocation) ---
+# Nodes have egress; images pull from docker.io/bitnamilegacy directly. Metrics
+# exporters disabled (not needed; removes two more legacy images).
+# postgres: custom image with pgvector rebuilt WITHOUT -march=native.
+# Bitnami's stock pgvector 0.8.0 emits AVX-512 and SIGILLs on nodes without it
+# (Broadwell t2 / AMD Zen1-3), crashing postgres mid-migration. See
+# services/postgresql-pgvector/Dockerfile. Portable => runs on any x86-64 node.
+postgresql:
+  image:
+    registry: 517602344783.dkr.ecr.us-west-2.amazonaws.com
+    repository: agentshield/postgresql-pgvector
+    tag: 17.6.0-portable
+  metrics:
+    enabled: false
+redis:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/redis
+    tag: latest
+  metrics:
+    enabled: false
+
+# --- Langfuse OFF for first bring-up (EKS-hostile hardcodes) ---
+langfuse:
+  enabled: false
+
+# --- fragile bitnami/kubectl:latest post-hook off ---
+pvRetainHook:
+  enabled: false
+
+# --- Edge: internal AWS NLB via the EnvoyProxy CRD (new template), HTTP-only first ---
+envoy-gateway:
+  gateway:
+    hostname: ""          # wildcard — match any Host (the ELB DNS)
+    langfuseHostname: ""  # no langfuse listener (langfuse disabled)
+    tls:
+      enabled: true       # REQUIRED for login: Keycloak PKCE needs a secure
+                          # context (Web Crypto), so plain http can't log in.
+      secretName: gateway-tls   # minted by scripts/deploy-eks.sh (self-signed,
+                                # wildcard SAN *.elb.us-west-2.amazonaws.com)
+  envoyProxy:
+    serviceType: LoadBalancer
+    serviceAnnotations:
+      service.beta.kubernetes.io/aws-load-balancer-type: external
+      service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: instance
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internal

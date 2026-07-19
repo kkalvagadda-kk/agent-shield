@@ -20,7 +20,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_timeout_worker import _agent_pod_url
@@ -140,13 +140,12 @@ async def _resume_and_advance(
         pass  # thread_id is not a durable run id → fall through to chat/workflow resume
 
     try:
-        # Hit the agent's ACTUAL deployed pod. This is env-aware for BOTH shapes: the
-        # durable branch was fixed here while the reactive branch kept calling
-        # `_agent_pod_url` with its `-production` default — so a sandbox/playground
-        # REACTIVE approval resolved to a Service that does not exist, httpx raised,
-        # the except below swallowed it into a warning, and the row was still marked
-        # resolved. Half a fix on one of two branches is how this whole class of bug
-        # survives; resolve once, use for both.
+        # Hit the agent's ACTUAL deployed pod — env-aware for BOTH shapes (durable +
+        # reactive). Resolve once via the canonical _agent_pod_url (main unified the two
+        # drifted _team_namespace copies in f5da324) instead of the old -production
+        # default that DNS-failed for a sandbox/playground agent. The durable specifics
+        # (run_id, callback_url, eval_mode) were already set on resume_body above; the
+        # resume POST path (/resume/{thread_id}) is identical for both shapes.
         from workflow_orchestrator import _resolve_agent_environment
 
         env = await _resolve_agent_environment(agent_name)
@@ -177,6 +176,31 @@ async def _resume_and_advance(
                 select(AgentRun).where(AgentRun.id == child.parent_run_id)
             )).scalar_one_or_none()
             if not parent or not parent.workflow_id or not parent.orchestrator_state:
+                return
+            # Authoritative RE-PARK detection — mirror the forward path's
+            # authoritative pause detection (workflow_orchestrator.py ~L616-624).
+            # The pod /resume returns HTTP 200 even when the resumed model made a
+            # SECOND approval-gated call and the pod re-parked (workflow_executor.
+            # resume() ignores result["__interrupt__"] and echoes messages[-1]).
+            # A 200 does NOT prove completion. If a pending Approval still exists on
+            # this thread, the member RE-PARKED: leave it awaiting_approval
+            # (non-terminal) and do NOT advance the parent. The next inline/console
+            # decide re-fires _resume_and_advance → loops until no pending remains,
+            # then closes the child completed and advances. `.first()` (not
+            # scalar_one) so a genuine double-interrupt with >1 pending never raises.
+            still_pending = (await s.execute(
+                select(Approval.id)
+                .where(Approval.thread_id == thread_id, Approval.status == "pending")
+                .limit(1)
+            )).first()
+            if still_pending is not None:
+                child.status = "awaiting_approval"
+                await s.commit()
+                logger.info(
+                    "workflow member re-parked after resume (thread_id=%s, "
+                    "approval=%s) — not advancing parent %s",
+                    thread_id, still_pending[0], parent.id,
+                )
                 return
             # Close out the paused child with the resumed member's result.
             child.status = member_status
@@ -605,11 +629,21 @@ async def _derive_context(thread_id: str, fallback: str, db: AsyncSession) -> st
             return "sandbox"
         return "playground"
 
-    # Not a PlaygroundRun — a workflow member's thread_id is its AgentRun id.
-    # Inherit that run's context so a playground/test workflow run yields a
-    # self-service (inline) approval, not a console (production) one.
+    # Not a PlaygroundRun — a workflow member's approval correlates to its child
+    # AgentRun. A DURABLE member sets thread_id == child AgentRun.id; a REACTIVE
+    # member dispatches with a separate uuid4().hex kept in the child's `thread_id`
+    # COLUMN (not its id, see workflow_orchestrator._run_step_stream). Match BOTH so a
+    # reactive member's approval inherits its (playground) member-run context instead
+    # of falling back to production — this was the reactive-workflow-HITL → production-
+    # console bug: the id-only lookup missed reactive members, so a playground workflow
+    # run's high-risk member parked as a console approval instead of a self-service one.
     agent_run_context = (
-        await db.execute(select(AgentRun.context).where(AgentRun.id == run_id))
+        await db.execute(
+            select(AgentRun.context)
+            .where(or_(AgentRun.id == run_id, AgentRun.thread_id == thread_id))
+            .order_by(AgentRun.started_at.desc())
+            .limit(1)
+        )
     ).scalar_one_or_none()
     if agent_run_context is not None:
         return agent_run_context

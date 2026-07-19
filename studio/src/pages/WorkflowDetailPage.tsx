@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle, ExternalLink, GitBranch, Loader2, Pause, Play, Rocket, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle, ExternalLink, GitBranch, Loader2, MessageCircle, Pause, Play, Rocket, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -10,9 +10,12 @@ import {
   getCompositeWorkflow,
   listWorkflowDeployments,
   listWorkflowVersions,
+  updateCompositeWorkflow,
   updateWorkflowDeployment,
+  type CompositeWorkflowWithMembers,
   type DeploymentAction,
   type WorkflowDeployment,
+  type WorkflowOrchestration,
   type WorkflowVersion,
 } from "../api/registryApi";
 import WorkflowMiniGraph from "../components/WorkflowMiniGraph";
@@ -124,13 +127,18 @@ export default function WorkflowDetailPage() {
       </div>
 
       {activeTab === "deployments" && (
-        <DeploymentsTab workflowId={id!} deployments={deployments} versions={versions} />
+        <DeploymentsTab
+          workflowId={id!}
+          deployments={deployments}
+          versions={versions}
+          isReactive={workflow?.execution_shape === "reactive"}
+        />
       )}
       {activeTab === "versions" && (
         <VersionsTab workflowId={id!} versions={versions} />
       )}
       {activeTab === "settings" && (
-        <SettingsTab workflow={workflow} />
+        <SettingsTab id={id!} workflow={workflow} />
       )}
     </div>
   );
@@ -140,10 +148,12 @@ function DeploymentsTab({
   workflowId,
   deployments,
   versions,
+  isReactive,
 }: {
   workflowId: string;
   deployments: WorkflowDeployment[];
   versions: WorkflowVersion[];
+  isReactive?: boolean;
 }) {
   const qc = useQueryClient();
   const verMap = new Map(versions.map((v) => [v.id, v.version_number]));
@@ -198,6 +208,16 @@ function DeploymentsTab({
                 <td className="px-4 py-2.5 text-slate-500 text-xs">{new Date(d.deployed_at).toLocaleDateString()}</td>
                 <td className="px-4 py-2.5 text-right">
                   <div className="inline-flex items-center gap-1">
+                    {isReactive && d.status === "running" && (
+                      <Link
+                        to={`/workflows/${workflowId}/d/${d.id}/chat`}
+                        className="p-1.5 rounded-md hover:bg-purple-50 text-purple-600"
+                        title="Open Chat"
+                        data-testid="workflow-row-open-chat"
+                      >
+                        <MessageCircle size={14} />
+                      </Link>
+                    )}
                     {d.status === "running" && (
                       <button onClick={() => handleAction(d.id, "suspend")} className="p-1.5 rounded-md hover:bg-slate-100 text-amber-600" title="Suspend">
                         <Pause size={14} />
@@ -385,43 +405,138 @@ function VersionsTab({ workflowId, versions }: { workflowId: string; versions: W
   );
 }
 
-function SettingsTab({ workflow }: { workflow: { orchestration: string; execution_shape: string; memory_enabled: boolean; team: string; created_at: string; created_by: string | null; description: string | null } }) {
+// Editable workflow configuration. The Save Workflow dialog sets these at
+// creation but they were read-only afterward — this closes that gap (backend
+// PATCH /workflows/{id} already accepts execution_shape / agent_class /
+// orchestration / memory_enabled / description). Option labels mirror the
+// create dialog (WorkflowBuilderPage) so the two surfaces stay consistent.
+function SettingsTab({ id, workflow }: { id: string; workflow: CompositeWorkflowWithMembers }) {
+  const qc = useQueryClient();
+  const [executionShape, setExecutionShape] = useState<"reactive" | "durable">(workflow.execution_shape);
+  const [agentClass, setAgentClass] = useState<"user_delegated" | "daemon">(workflow.agent_class);
+  const [orchestration, setOrchestration] = useState<WorkflowOrchestration>(workflow.orchestration);
+  const [memoryEnabled, setMemoryEnabled] = useState(workflow.memory_enabled);
+  const [description, setDescription] = useState(workflow.description ?? "");
+
+  const dirty =
+    executionShape !== workflow.execution_shape ||
+    agentClass !== workflow.agent_class ||
+    orchestration !== workflow.orchestration ||
+    memoryEnabled !== workflow.memory_enabled ||
+    description !== (workflow.description ?? "");
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateCompositeWorkflow(id, {
+        execution_shape: executionShape,
+        agent_class: agentClass,
+        orchestration,
+        memory_enabled: memoryEnabled,
+        description: description || undefined,
+      }),
+    onSuccess: () => {
+      toast.success("Workflow settings saved");
+      qc.invalidateQueries({ queryKey: ["workflow", id] });
+    },
+    onError: (e: unknown) => toast.error(e instanceof Error ? e.message : "Save failed"),
+  });
+
   return (
-    <div className="card p-5 space-y-4">
-      <h3 className="text-sm font-semibold text-slate-700 mb-3">Workflow Configuration</h3>
-      <div className="grid grid-cols-2 gap-4 text-sm">
+    <div className="card p-5 space-y-5" data-testid="workflow-settings">
+      <h3 className="text-sm font-semibold text-slate-700">Workflow Configuration</h3>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div>
-          <p className="text-xs text-slate-400 uppercase mb-0.5">Orchestration</p>
-          <p className="font-mono text-slate-700">{workflow.orchestration}</p>
+          <label className="label" htmlFor="wf-shape">Execution Shape</label>
+          <select
+            id="wf-shape"
+            className="input"
+            value={executionShape}
+            onChange={(e) => setExecutionShape(e.target.value as "reactive" | "durable")}
+          >
+            <option value="reactive">Ephemeral (fast, stateless request/response)</option>
+            <option value="durable">Durable (long-running, resumable, HITL)</option>
+          </select>
         </div>
+
         <div>
-          <p className="text-xs text-slate-400 uppercase mb-0.5">Execution Shape</p>
-          <p className="font-mono text-slate-700">{workflow.execution_shape}</p>
+          <label className="label" htmlFor="wf-class">Authority (class)</label>
+          <select
+            id="wf-class"
+            className="input"
+            value={agentClass}
+            onChange={(e) => setAgentClass(e.target.value as "user_delegated" | "daemon")}
+          >
+            <option value="user_delegated">User-delegated (runs under the invoking user)</option>
+            <option value="daemon">Daemon (service identity, no live user)</option>
+          </select>
         </div>
+
+        <div>
+          <label className="label" htmlFor="wf-orch">Orchestration Mode</label>
+          <select
+            id="wf-orch"
+            className="input"
+            value={orchestration}
+            onChange={(e) => setOrchestration(e.target.value as WorkflowOrchestration)}
+          >
+            <option value="sequential">Sequential</option>
+            <option value="conditional">Conditional (edge conditions route)</option>
+            <option value="supervisor">Supervisor (a coordinator routes)</option>
+            <option value="handoff">Handoff (agents pass control)</option>
+          </select>
+        </div>
+
+        <div className="flex items-end">
+          <label className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={memoryEnabled}
+              onChange={(e) => setMemoryEnabled(e.target.checked)}
+            />
+            <span>
+              <span className="label mb-0">Share context between agents</span>
+              <span className="block text-xs text-slate-400">Members see each other&apos;s turns in a shared thread.</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div>
+        <label className="label" htmlFor="wf-desc">Description <span className="text-slate-400 font-normal">(optional)</span></label>
+        <textarea
+          id="wf-desc"
+          className="input resize-none"
+          rows={2}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="What does this workflow do?"
+        />
+      </div>
+
+      {/* Read-only provenance */}
+      <div className="grid grid-cols-2 gap-4 text-sm border-t border-slate-100 pt-4">
         <div>
           <p className="text-xs text-slate-400 uppercase mb-0.5">Team</p>
           <p className="text-slate-700">{workflow.team}</p>
         </div>
         <div>
-          <p className="text-xs text-slate-400 uppercase mb-0.5">Memory</p>
-          <p className="text-slate-700">{workflow.memory_enabled ? "Enabled" : "Disabled"}</p>
-        </div>
-        <div>
           <p className="text-xs text-slate-400 uppercase mb-0.5">Created</p>
           <p className="text-slate-700">{new Date(workflow.created_at).toLocaleString()}</p>
         </div>
-        {workflow.created_by && (
-          <div>
-            <p className="text-xs text-slate-400 uppercase mb-0.5">Created By</p>
-            <p className="font-mono text-slate-700">{workflow.created_by}</p>
-          </div>
-        )}
-        {workflow.description && (
-          <div className="col-span-2">
-            <p className="text-xs text-slate-400 uppercase mb-0.5">Description</p>
-            <p className="text-slate-700">{workflow.description}</p>
-          </div>
-        )}
+      </div>
+
+      <div className="flex justify-end pt-1">
+        <button
+          onClick={() => save.mutate()}
+          disabled={!dirty || save.isPending}
+          className="btn-primary text-sm disabled:opacity-50"
+          data-testid="workflow-settings-save"
+        >
+          {save.isPending ? <Loader2 size={14} className="animate-spin" /> : null}
+          {save.isPending ? "Saving…" : "Save Changes"}
+        </button>
       </div>
     </div>
   );

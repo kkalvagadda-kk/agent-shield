@@ -227,6 +227,49 @@ describe("EvalResultsPage — durable trajectory evidence (Eval v2 E-1)", () => 
     // The control flips to "Hide run tree" once the read-only steps load.
     expect(await screen.findByText(/Hide run tree/i)).toBeInTheDocument();
   });
+
+  // T007 (eval surface) — an eval trajectory that re-parks on a SECOND gate renders
+  // BOTH approvals in the results detail (the re-park is visible, not collapsed to one).
+  it("renders BOTH gates in the HITL approvals panel when a durable run re-parks twice", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        id: "res-1", eval_run_id: "run-1", dataset_item_idx: 0,
+        input_message: "Review the ACME contract", expected_output: null,
+        response: "Parked twice for approval.", judge_score: 0.6, judge_reasoning: "x",
+        passed: false, langfuse_trace_id: null, trace_url: null,
+        dimension_scores: { response: 0.9, trajectory: 0.5, tool_call: 0.5 },
+        composite: 0.62, run_id: "pgrun-1234abcd",
+        eval_detail: {
+          expected_trajectory: {
+            match_mode: "ordered",
+            steps: [
+              { tool: "jira_create", expect_approval: true },
+              { tool: "wire_transfer", expect_approval: true },
+            ],
+          },
+          actual_trajectory: [
+            { step_number: 1, name: "jira_create", status: "awaiting_approval", tool: "jira_create", args: {}, approval_id: "appr-1" },
+            { step_number: 2, name: "wire_transfer", status: "awaiting_approval", tool: "wire_transfer", args: {}, approval_id: "appr-2" },
+          ],
+          tool_diffs: [],
+          approvals: [
+            { step: "jira_create", expected: true, parked: true, args_matched: true },
+            { step: "wire_transfer", expected: true, parked: true, args_matched: true },
+          ],
+        },
+        created_at: NOW,
+      },
+    ]);
+    renderPage();
+    fireEvent.click(await screen.findByText("Review the ACME contract"));
+
+    const panel = await screen.findByTestId("approvals-panel");
+    // Both gates (the re-parked 2nd included) render — the eval surface shows the
+    // re-park rather than dropping the 2nd gate.
+    expect(panel).toHaveTextContent("jira_create");
+    expect(panel).toHaveTextContent("wire_transfer");
+    expect(screen.getByTestId("actual-trajectory")).toHaveTextContent("wire_transfer");
+  });
 });
 
 // Eval v2 E-2 — the side effects a record-mode eval INTERCEPTED. The fixtures below

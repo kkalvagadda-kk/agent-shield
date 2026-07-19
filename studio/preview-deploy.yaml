@@ -1,0 +1,57 @@
+# Isolated UX-preview deployment. Namespace studio-ux-preview — no references to
+# any platform service.
+#
+# Image loading: this is a kind-backed cluster (nodes desktop-control-plane /
+# desktop-worker run their own containerd), so a host `docker build` is NOT
+# automatically visible. After each rebuild, bump the tag (never reuse one —
+# IfNotPresent will serve the stale cached layer) and load it into the nodes:
+#
+#   docker build -f Dockerfile.demo -t studio:ux-preview-N .
+#   docker save studio:ux-preview-N -o /tmp/s.tar
+#   for n in desktop-worker desktop-control-plane; do \
+#     docker exec -i $n ctr -n k8s.io images import - < /tmp/s.tar; done
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: studio-ux-preview
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studio-preview
+  namespace: studio-ux-preview
+  labels: { app: studio-preview }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: studio-preview }
+  template:
+    metadata:
+      labels: { app: studio-preview }
+    spec:
+      containers:
+        - name: studio
+          image: studio:ux-preview-2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 200m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: studio-preview
+  namespace: studio-ux-preview
+spec:
+  type: ClusterIP
+  selector: { app: studio-preview }
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http

@@ -12,6 +12,7 @@ Satisfies the agent-contract (docs/plan/contracts/agent-contract.yaml):
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any
@@ -224,8 +225,15 @@ class ChatRequest(BaseModel):
     # executor substitutes a kickoff (daemon_kickoff_if_empty) so an empty message is
     # valid rather than a 422 — user input is not required for triggered runs.
     message: str = ""
-    thread_id: str | None = None
+    thread_id: str | None = None          # LangGraph checkpoint key
+    conversation_id: str | None = None    # transcript key; defaults to thread_id
+    scope: str = "agent"                   # agent | workflow_run
+    workflow_run_id: str | None = None
     metadata: dict | None = None
+    # POC-3: platform-composed advisory response-preference directive. None = no change
+    # (daemon / no prefs). The runner appends it as a leading SystemMessage; it never
+    # reads user_profiles or composes from raw input — it applies this string only.
+    user_directive: str | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -342,15 +350,30 @@ async def ready():
     else:
         checks["langfuse"] = "disabled"
 
-    # Postgres (via checkpointer)
+    # Postgres — probe with psycopg, the SAME driver the checkpointer serves on.
+    #
+    # This used to import asyncpg, which the runner does not install. The
+    # ModuleNotFoundError was swallowed by `except Exception` and reported as
+    # "unreachable" — blaming the database for a packaging fault. It stayed
+    # dormant because this branch is gated on DIRECT_DATABASE_URL, which was
+    # empty until POC-0 (T005) began injecting it; from then on every agent pod
+    # failed readiness forever while /health cheerfully returned 200.
+    #
+    # Probing a driver the serving path does not use is the wrong test anyway: it
+    # can pass while the checkpointer's own driver is broken (exactly what a
+    # readiness probe exists to catch).
     if cfg.DIRECT_DATABASE_URL:
         try:
-            import asyncpg  # type: ignore[import]
-            conn = await asyncpg.connect(
-                cfg.DIRECT_DATABASE_URL.replace("+asyncpg", ""), timeout=2
+            import psycopg  # the checkpointer's driver — see sdk/checkpointer.py
+
+            conn = await psycopg.AsyncConnection.connect(
+                cfg.DIRECT_DATABASE_URL.replace("+asyncpg", ""), connect_timeout=2
             )
             await conn.close()
             checks["postgres"] = "ok"
+        except ModuleNotFoundError as e:
+            # A missing driver is a build defect, not an outage. Say so, loudly.
+            checks["postgres"] = f"driver-missing:{e.name}"
         except Exception:
             checks["postgres"] = "unreachable"
     else:
@@ -422,43 +445,122 @@ async def _complete_agent_run(run_id: str, status: str, output: str | None, late
         logger.warning("Failed to update agent_run %s: %s", run_id, exc)
 
 
-async def _load_memory_context(agent_name: str, thread_id: str | None) -> list[dict[str, str]]:
-    """Load conversation history from memory service for context injection."""
-    if not thread_id or not cfg.REGISTRY_API_URL:
+async def _load_memory_context(
+    agent_name: str,
+    conversation_id: str | None,
+    scope: str = "agent",
+    user_id: str = "",
+    deployment_id: str = "",
+) -> list[dict[str, str]]:
+    """Load prior transcript from the memory service for context injection.
+
+    Keyed by ``conversation_id`` (the transcript key). For ``scope='workflow_run'``
+    the memory API drops the agent_name filter, so returned rows carry their author
+    ``agent_name`` (a member sees peers' turns). Rows come back oldest-first
+    (message_index ascending), so we preserve order — no reverse."""
+    if not conversation_id or not cfg.REGISTRY_API_URL:
         return []
     try:
+        params: dict[str, str | int] = {
+            "thread_id": conversation_id,
+            "scope": scope,
+            "limit": 20,
+        }
+        if user_id:
+            params["user_id"] = user_id
+        if deployment_id:
+            params["deployment_id"] = deployment_id
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.get(
                 f"{cfg.REGISTRY_API_URL}/api/v1/agents/{agent_name}/memory",
-                params={"thread_id": thread_id, "limit": 20},
+                params=params,
             )
             if resp.status_code == 200:
                 rows = resp.json()
-                return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+                out: list[dict[str, str]] = []
+                for r in rows:
+                    content = r["content"]
+                    author = r.get("agent_name")
+                    # Peer attribution (context-storage §5.2): in a shared workflow
+                    # transcript (scope='workflow_run', which drops the agent_name filter
+                    # so this member sees peers' turns) a turn authored by a DIFFERENT
+                    # member is prefixed `[<agent_name>]: ` so it reads as a peer's
+                    # contribution, not this member's own words. Same-author turns (and
+                    # every scope='agent' row, which is always self-authored) stay verbatim.
+                    # No graph-state schema change — the prefix rides in `content`.
+                    if author and author != agent_name:
+                        content = f"[{author}]: {content}"
+                    turn: dict[str, str] = {"role": r["role"], "content": content}
+                    if author:
+                        turn["agent_name"] = author
+                    out.append(turn)
+                return out
     except Exception as exc:
-        logger.warning("Memory load failed for %s/%s: %s", agent_name, thread_id, exc)
+        logger.warning("Memory load failed for %s/%s: %s", agent_name, conversation_id, exc)
     return []
 
 
-async def _save_memory_turn(agent_name: str, thread_id: str | None, user_msg: str, assistant_msg: str, user_id: str) -> None:
-    """Persist the user+assistant messages to memory via registry-api."""
-    if not thread_id or not cfg.REGISTRY_API_URL:
+async def _save_memory_turn(
+    agent_name: str,
+    conversation_id: str | None,
+    user_msg: str,
+    assistant_msg: str,
+    user_id: str,
+    scope: str = "agent",
+    workflow_run_id: str | None = None,
+    deployment_id: str = "",
+    author_agent_name: str | None = None,
+    message_kind: str = "agent_output",
+    rationale: str | None = None,
+) -> None:
+    """Persist the user+assistant messages to the transcript via registry-api.
+
+    For a workflow member (``scope='workflow_run'``) the row is tagged with
+    ``author_agent_name`` + ``workflow_run_id`` so the shared transcript records
+    which member produced it.
+
+    When ``rationale`` is truthy AND ``scope=='workflow_run'`` (2b-ii), a third
+    ``message_kind='rationale'`` assistant message is appended so the run-tree
+    projection can join the member's tool-call reasoning. Single-agent chat
+    (``scope=='agent'``) never persists a rationale row."""
+    if not conversation_id or not cfg.REGISTRY_API_URL:
         return
     try:
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": user_msg, "message_kind": "user"},
+            {"role": "assistant", "content": assistant_msg, "message_kind": message_kind},
+        ]
+        if rationale and scope == "workflow_run":
+            messages.append(
+                {"role": "assistant", "content": rationale, "message_kind": "rationale"}
+            )
+        body: dict[str, Any] = {
+            "thread_id": conversation_id,
+            "user_id": user_id or None,
+            "scope": scope,
+            "messages": messages,
+        }
+        if deployment_id:
+            body["deployment_id"] = deployment_id
+        if workflow_run_id:
+            body["workflow_run_id"] = workflow_run_id
+        if author_agent_name:
+            body["author_agent_name"] = author_agent_name
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
+            resp = await client.post(
                 f"{cfg.REGISTRY_API_URL}/api/v1/agents/{agent_name}/memory",
-                json={
-                    "thread_id": thread_id,
-                    "user_id": user_id or None,
-                    "messages": [
-                        {"role": "user", "content": user_msg},
-                        {"role": "assistant", "content": assistant_msg},
-                    ],
-                },
+                json=body,
+            )
+        # httpx does NOT raise on 4xx/5xx. A silent non-2xx here is exactly how a
+        # persisted-memory failure (e.g. a missing column) hid as a "successful" turn:
+        # the write never landed and nothing surfaced. Fail loud instead.
+        if resp.status_code >= 400:
+            logger.error(
+                "Memory save rejected for %s/%s: HTTP %s — %s",
+                agent_name, conversation_id, resp.status_code, resp.text[:500],
             )
     except Exception as exc:
-        logger.warning("Memory save failed for %s/%s: %s", agent_name, thread_id, exc)
+        logger.warning("Memory save failed for %s/%s: %s", agent_name, conversation_id, exc)
 
 
 @app.post("/chat")
@@ -469,27 +571,41 @@ async def chat(req: ChatRequest, request: Request):
     trace_id = request.headers.get("x-agentshield-trace-id")
     user_id = request.headers.get("x-user-sub", "")
     team = request.headers.get("x-agent-team", "")
+    deployment_id = request.headers.get("x-deployment-id") or os.getenv("AGENTSHIELD_DEPLOYMENT_ID", "")
+    # conversation_id (transcript key) defaults to thread_id when the caller omits it.
+    conversation_id = req.conversation_id or req.thread_id
     start_ms = int(time.perf_counter() * 1000)
 
     agent_run_id = await _create_agent_run(cfg.AGENT_NAME, user_id, team, req.message, trace_id)
 
-    # Load conversation memory for context
-    memory_context = await _load_memory_context(cfg.AGENT_NAME, req.thread_id)
+    # Load conversation memory for context (scope-aware; workflow members see peers).
+    memory_context = await _load_memory_context(
+        cfg.AGENT_NAME, conversation_id, scope=req.scope,
+        user_id=user_id, deployment_id=deployment_id,
+    )
 
     try:
         result = await workflow_executor.run(
             req.message, thread_id=req.thread_id, trace_id=trace_id,
-            memory_context=memory_context,
+            memory_context=memory_context, user_directive=req.user_directive,
         )
         elapsed = int(time.perf_counter() * 1000) - start_ms
         output_text = result.get("output", str(result)) if isinstance(result, dict) else str(result)
+        # 2b-ii: the model's own tool-call reasoning (empty for tool-less turns).
+        rationale = result.get("rationale") if isinstance(result, dict) else None
         if agent_run_id:
             import asyncio
             asyncio.create_task(_complete_agent_run(agent_run_id, "completed", output_text, elapsed))
 
         # Save turn to memory (fire-and-forget)
         import asyncio
-        asyncio.create_task(_save_memory_turn(cfg.AGENT_NAME, req.thread_id, req.message, output_text[:4000], user_id))
+        asyncio.create_task(_save_memory_turn(
+            cfg.AGENT_NAME, conversation_id, req.message, output_text[:4000], user_id,
+            scope=req.scope, workflow_run_id=req.workflow_run_id,
+            deployment_id=deployment_id,
+            author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+            rationale=rationale,
+        ))
 
         return result
     except SafetyBlockedError as exc:
@@ -510,37 +626,106 @@ async def chat(req: ChatRequest, request: Request):
 
 @app.post("/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
-    """Streaming chat — return workflow output as Server-Sent Events."""
+    """Streaming chat — return workflow output as Server-Sent Events.
+
+    POC-0 core fix: this handler now loads the prior transcript before streaming
+    and persists the turn after it closes — symmetric with /chat, which it was
+    not before (it did neither, so streamed chats never remembered anything)."""
     if workflow_executor is None:
         raise HTTPException(status_code=503, detail="WorkflowExecutor not initialised")
     trace_id = request.headers.get("x-agentshield-trace-id")
     user_id = request.headers.get("x-user-sub", "")
     user_team = request.headers.get("x-agent-team", "")
-    # User context is bound app-wide by `_bind_user_context` (see the app-level
-    # dependency). It used to be set here, and ONLY here — which is precisely why
-    # every other entrypoint denied its tool calls. Do not re-add a local copy: two
-    # places to set the same thing is how the original bug happened.
+    deployment_id = request.headers.get("x-deployment-id") or os.getenv("AGENTSHIELD_DEPLOYMENT_ID", "")
+    # conversation_id (transcript key) defaults to thread_id when the caller omits it.
+    conversation_id = req.conversation_id or req.thread_id
+    # Batch/dataset eval sets this (registry-side, only for the eval-runner
+    # identity) so high-risk tools auto-approve instead of hanging on HITL. The
+    # SDK additionally gates it on a trusted batch identity (defense-in-depth).
+    auto_approve = request.headers.get("x-agentshield-auto-approve", "").lower() == "true"
+
+    # MERGE NOTE: the OPA user-context is now bound APP-WIDE by `_bind_user_context`
+    # (the app-level dependency from main) so every entrypoint gets identity — we do
+    # NOT re-set it in the handler body here (main's fix, honored). The import below is
+    # ONLY for the sse_generator's §6.3 leak-fix re-bind (a StreamingResponse generator
+    # runs in its own task, so it re-sets + captures a reset token so this request's
+    # identity never leaks into the next one). deployment_id/conversation_id/auto_approve
+    # above are POC-0/1 memory needs, not the OPA identity binding.
+    from agentshield_sdk.graph_builder import _current_user_context
+
 
     async def sse_generator():
+        import asyncio
+        import json as _json
+        # Capture the reset token so this request's identity never leaks into a
+        # later request served on the same worker (§6.3 leak fix).
+        token = _current_user_context.set({
+            "user_id": user_id,
+            "user_team": user_team,
+            "auto_approve": auto_approve,
+        })
+        accumulated: list[str] = []
+        rationale = ""
         try:
+            # 1. Load prior transcript BEFORE streaming (symmetry with /chat).
+            memory_context = await _load_memory_context(
+                cfg.AGENT_NAME, conversation_id, scope=req.scope,
+                user_id=user_id, deployment_id=deployment_id,
+            )
+            # 2. Stream, injecting the transcript as prior messages and
+            #    accumulating assistant text_delta content to persist afterwards.
             async for chunk in workflow_executor.run_streamed(
-                req.message, thread_id=req.thread_id, trace_id=trace_id
+                req.message, thread_id=req.thread_id, trace_id=trace_id,
+                memory_context=memory_context, user_directive=req.user_directive,
             ):
+                event_name = None
+                data_str = None
+                for line in chunk.splitlines():
+                    if line.startswith("event:"):
+                        event_name = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_str = line[len("data:"):].strip()
+                if event_name == "text_delta" and data_str:
+                    try:
+                        accumulated.append(_json.loads(data_str).get("content", ""))
+                    except Exception:
+                        pass
                 yield chunk
+            # 2b-ii: after the graph stream closes, read the turn-boundary rationale
+            #   (last tool-calling AIMessage) from the checkpoint. Emit it as a trailing
+            #   `rationale` SSE frame for workflow members only (the shared pod-SSE reader
+            #   reads to EOF to capture it); single-agent chat (scope='agent') gets none.
+            rationale = await workflow_executor.extract_tool_rationale(
+                req.thread_id or conversation_id or ""
+            )
+            if req.scope == "workflow_run" and rationale:
+                yield (
+                    f"event: rationale\n"
+                    f"data: {_json.dumps({'content': rationale})}\n\n"
+                )
         except SafetyBlockedError as exc:
             SAFETY_BLOCKS.inc()
-            import json as _json
             yield (
                 f"event: error\n"
                 f"data: {_json.dumps({'reason': exc.reason, 'type': 'safety_blocked'})}\n\n"
             )
         except Exception as exc:
-            import json as _json
             logger.exception("Streaming error in /chat/stream")
             yield (
                 f"event: error\n"
                 f"data: {_json.dumps({'reason': str(exc), 'type': 'internal_error'})}\n\n"
             )
+        finally:
+            _current_user_context.reset(token)
+        # 3. Persist the turn (fire-and-forget, after the stream closes — never
+        #    delays the client; failures are logged, not raised).
+        asyncio.create_task(_save_memory_turn(
+            cfg.AGENT_NAME, conversation_id, req.message, "".join(accumulated)[:4000], user_id,
+            scope=req.scope, workflow_run_id=req.workflow_run_id,
+            deployment_id=deployment_id,
+            author_agent_name=cfg.AGENT_NAME if req.scope == "workflow_run" else None,
+            rationale=rationale,
+        ))
 
     return StreamingResponse(sse_generator(), media_type="text/event-stream")
 

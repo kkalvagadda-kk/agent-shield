@@ -10,7 +10,10 @@
 #   * a triggered production run HONORS execution_shape: durable -> the shared
 #     durable-dispatch helper writes run_steps via the internal step-update
 #     callback; reactive -> the synchronous /chat path (output, no run_steps).
-#   * a reactive workflow can't durably park — an approval gate fails-closed (S2).
+#   * a reactive workflow approval gate PARKS inline (awaiting_approval), resumable via the
+#     inline HITL path — the exec-models-v2 fail-closed was reverted to restore inline workflow
+#     HITL (see _park_or_fail docstring + suite-79 park→approve→resume→complete). Governance is
+#     kept either way: the gated tool never runs unapproved; parking just makes it resumable.
 #   * PARITY: the /run POST lives in ONE shared helper both routers call (the
 #     2026-07-11 HITL retro root cause was a sandbox/production copy).
 #
@@ -22,7 +25,8 @@
 #   T-S54-006 — durable step-update callback -> RunStep written + run completed
 #   T-S54-007 — _dispatch_and_complete(shape=durable) -> shared helper + fail-closed on dispatch failure
 #   T-S54-008 — _dispatch_and_complete(shape=reactive) -> /chat output, NO run_steps
-#   T-S54-009 — _park_or_fail(shape=reactive) -> parent failed w/ "set shape=durable" (fail-closed)
+#   T-S54-009 — _park_or_fail(shape=reactive) -> parent PARKS (awaiting_approval), resumable inline
+#               (exec-models-v2 fail-closed reverted; end-to-end resume proven by suite-79)
 #   T-S54-010 — PARITY grep: dispatch_durable_run called from both routers; no raw /run POST in routers
 #
 # Usage:
@@ -161,7 +165,13 @@ async def main():
     async with AsyncSessionLocal() as db:
         pp=(await db.execute(select(AgentRun).where(AgentRun.id==uuid.UUID(pid)))).scalar_one()
         out['t9_park_status']=pp.status
-        out['t9_park_msg_ok']=bool(pp.error_message and 'set shape=durable' in pp.error_message)
+        # Reactive workflows now PARK inline for HITL (awaiting_approval) instead of failing
+        # closed. The exec-models-v2 reactive fail-closed was deliberately reverted on this
+        # branch to restore inline workflow HITL (see _park_or_fail docstring + suite-79, which
+        # proves park then inline-approve then resume then complete). Governance holds either
+        # way: the gated tool never runs unapproved; parking just makes the gate resumable.
+        # (comment uses single quotes only -- this whole block runs inside python3 -c bash dquotes)
+        out['t9_parked_not_failclosed']=bool(pp.status=='awaiting_approval' and not pp.error_message)
 
     # cleanup (best-effort — uniquely-suffixed rows; a cleanup FK snag must not fail the asserts)
     try:
@@ -211,8 +221,8 @@ check "T-S54-007 durable dispatch fail-closed"                "'t7_durable_statu
 check "T-S54-007 durable dispatch wrote no run_steps"         "'t7_durable_steps': 0"
 check "T-S54-008 reactive dispatch -> /chat output"           "'t8_reactive_output': 'reactive-out'"
 check "T-S54-008 reactive dispatch -> NO run_steps"           "'t8_reactive_steps': 0"
-check "T-S54-009 reactive workflow gate fail-closed"          "'t9_park_status': 'failed'"
-check "T-S54-009 fail message names set shape=durable"        "'t9_park_msg_ok': True"
+check "T-S54-009 reactive workflow gate parks inline (HITL)"  "'t9_park_status': 'awaiting_approval'"
+check "T-S54-009 parked not fail-closed (resumable inline)"   "'t9_parked_not_failclosed': True"
 
 # T-S54-010: PARITY grep (host filesystem) — the /run POST literal lives ONLY in the
 # shared helper; both routers call dispatch_durable_run; neither router POSTs /run raw.
