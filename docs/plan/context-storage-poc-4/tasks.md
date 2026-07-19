@@ -16,8 +16,8 @@
 - **Checkpoints** `CP-0…CP-3` are mandatory gates with executable scripts — do not proceed past a
   red checkpoint. Their heavy deploy steps (`scripts/deploy-eks.sh`) are **user-gated**.
 - Shared constant **`EMBEDDING_DIM = 384`** (`bge-small-en-v1.5`) appears in exactly three places
-  (embedding-sidecar, migration `0066` `vector(384)`, `PgVectorStore`) and must never drift.
-- Image bumps (T-BUMP-*): **registry-api `0.2.191→0.2.192`**, **studio `0.1.144→0.1.145`**,
+  (embedding-sidecar, migration `0067` `vector(384)`, `PgVectorStore`) and must never drift.
+- Image bumps (T-BUMP-*): **registry-api `0.2.194→0.2.195`**, **studio `0.1.145→0.1.146`**,
   **NEW embedding-sidecar `0.1.0`**. **declarative-runner is NOT bumped** (F-4 — HTTP tools + the
   existing `tool_call_end` SSE carry POC-4; no runner/SDK change).
 
@@ -80,16 +80,16 @@
 
 ## Phase 2 — Data model
 
-### T-004 — migration 0066 (4 tables + guarded vector col/index)  [P]
-- Files: `services/registry-api/alembic/versions/0066_knowledge_base_rag.py`
+### T-004 — migration 0067 (4 tables + guarded vector col/index)  [P]
+- Files: `services/registry-api/alembic/versions/0067_knowledge_base_rag.py`
 - Acceptance: creates `knowledge_bases`, `knowledge_sources` (status CHECK), `knowledge_chunks`
   (WITHOUT the embedding column in `create_table`), `agent_knowledge_bindings`;
   `ix_knowledge_chunks_team_kb (team, kb_id)` **always** created; `vector(384)` column + `hnsw
   (embedding vector_cosine_ops)` index added only when `_pgvector_available(conn)` (mirror 0022);
   idempotent (`IF [NOT] EXISTS`), `down_revision="0065"`, `downgrade()` drops in reverse.
 - Deps: none.
-- Verify: `python3 -c "import ast; ast.parse(open('services/registry-api/alembic/versions/0066_knowledge_base_rag.py').read())"`
-  and `grep -n 'down_revision' services/registry-api/alembic/versions/0066_knowledge_base_rag.py`
+- Verify: `python3 -c "import ast; ast.parse(open('services/registry-api/alembic/versions/0067_knowledge_base_rag.py').read())"`
+  and `grep -n 'down_revision' services/registry-api/alembic/versions/0067_knowledge_base_rag.py`
 
 ### T-005 — ORM models
 - Files: `services/registry-api/models.py`
@@ -172,7 +172,7 @@
   `grep -n "knowledge" services/registry-api/main.py`; `bash -n scripts/plan-poc4/smoke-knowledge.sh`
 
 ### [CP-2] Backend vertical slice + tenant isolation
-- Files: (deploy registry-api 0.2.192 + sidecar — user-gated; runs `smoke-knowledge.sh`)
+- Files: (deploy registry-api 0.2.195 + sidecar — user-gated; runs `smoke-knowledge.sh`)
 - Acceptance: `bash scripts/plan-poc4/smoke-knowledge.sh` green (upload→ready→chunks→test-retrieval),
   **AND** a two-team isolation probe: team A `search` on a KB seeded under team B returns `[]` at
   BOTH `POST /knowledge-bases/{kb}/search` (API) AND `VectorStore.search` (store), fail-closed. This
@@ -288,20 +288,20 @@
 
 ### T-BUMP-1 — deploy-script image bumps + sidecar build entry  [P]
 - Files: `scripts/deploy-cpe2e.sh`, `scripts/deploy-eks.sh`
-- Acceptance: `REGISTRY_API_TAG 0.2.191→0.2.192`, `STUDIO_TAG 0.1.144→0.1.145`, add
+- Acceptance: `REGISTRY_API_TAG 0.2.194→0.2.195`, `STUDIO_TAG 0.1.145→0.1.146`, add
   `EMBEDDING_SIDECAR_TAG=0.1.0` + a build entry that builds `services/embedding-sidecar/` (both
   scripts; deploy-eks pushes to ECR); **declarative-runner tag unchanged** — note the reason (F-4)
   in the header comment.
 - Deps: T-002 (image exists to build/tag).
-- Verify: `grep -n "0.2.192\|0.1.145\|EMBEDDING_SIDECAR_TAG" scripts/deploy-cpe2e.sh scripts/deploy-eks.sh`
+- Verify: `grep -n "0.2.195\|0.1.146\|EMBEDDING_SIDECAR_TAG" scripts/deploy-cpe2e.sh scripts/deploy-eks.sh`
 
 ### T-BUMP-2 — mirror tags in chart values  [P]
 - Files: `charts/agentshield/values.yaml`, `charts/agentshield/values-eks.yaml`
-- Acceptance: `values.yaml` registry-api `0.2.192` + studio `0.1.145` + `embeddingSidecar` tag
+- Acceptance: `values.yaml` registry-api `0.2.195` + studio `0.1.146` + `embeddingSidecar` tag
   `0.1.0`; `values-eks.yaml` mirrors the same tags + sidecar ECR repo. declarative-runner tag
   unchanged. (Bumping only deploy-cpe2e.sh leaves the chart on the old tag — mirror both.)
 - Deps: T-003.
-- Verify: `grep -n "0.2.192\|0.1.145\|embedding" charts/agentshield/values.yaml charts/agentshield/values-eks.yaml`
+- Verify: `grep -n "0.2.195\|0.1.146\|embedding" charts/agentshield/values.yaml charts/agentshield/values-eks.yaml`
 
 ### T-DOCS — experience doc + gap ledger  [P]
 - Files: `docs/experience/playground.md`, `docs/testing/manual-ui-e2e-test-plan.md`
@@ -335,8 +335,8 @@
 - Verify: run each grep above — every one returns ≥1 caller line (no orphan).
 
 ### [CP-3] Final gate — full deploy + suites
-- Files: (user-gated `bash scripts/deploy-eks.sh` — builds/deploys registry-api 0.2.192,
-  studio 0.1.145, embedding-sidecar 0.1.0)
+- Files: (user-gated `bash scripts/deploy-eks.sh` — builds/deploys registry-api 0.2.195,
+  studio 0.1.146, embedding-sidecar 0.1.0)
 - Acceptance: after deploy — `bash scripts/e2e/suite-77-knowledge-rag.sh` green (incl. T-S77-005
   tenant isolation), `bash scripts/studio-e2e.sh` green, `cd studio && npm run test && npm run
   typecheck` green, T-ORPHAN clean. Write the Definition-of-Done statement (which Playwright step

@@ -78,8 +78,8 @@ New registry-api deps (add to `services/registry-api/requirements.txt`): `pypdf>
 | 5. Honest gap ledger | Updated in T-021 (docs/testing manual plan header + spec §6): docx, durable ingest worker, multi-KB, orphan-blob GC, signed service token, S7 content-scan. |
 | 6. Reason from running product | Plan is built from verified code (research.md fact table), not the design doc's "(Python type)". |
 | No-Bandaid | HTTP-tool + server-side binding is the structural fix (illegal "model sets team" state unrepresentable), not an `if team==` guard. |
-| Migrations idempotent | 0066 guarded like 0022; `IF NOT EXISTS`; guarded vector col. |
-| Image bumps (both files + values) | T-021 bumps registry-api 0.2.192, studio 0.1.145, new embedding-sidecar 0.1.0 in deploy-cpe2e.sh + deploy-eks.sh + values.yaml + values-eks.yaml. |
+| Migrations idempotent | 0067 guarded like 0022; `IF NOT EXISTS`; guarded vector col. |
+| Image bumps (both files + values) | T-021 bumps registry-api 0.2.195, studio 0.1.146, new embedding-sidecar 0.1.0 in deploy-cpe2e.sh + deploy-eks.sh + values.yaml + values-eks.yaml. |
 | Experience docs | T-021 updates `docs/experience/playground.md` (new citation chip + knowledge page). |
 
 ## 5. File Structure
@@ -93,7 +93,7 @@ New registry-api deps (add to `services/registry-api/requirements.txt`): `pypdf>
 | `charts/agentshield/templates/embedding-sidecar.yaml` | New | T-003 | Deployment + Service |
 | `charts/agentshield/values.yaml` | Edit | T-003,T-021 | sidecar toggle + image tags |
 | `charts/agentshield/values-eks.yaml` | Edit | T-003,T-021 | sidecar ECR repo + tags |
-| `services/registry-api/alembic/versions/0066_knowledge_base_rag.py` | New | T-004 | 4 tables, guarded vector col+index |
+| `services/registry-api/alembic/versions/0067_knowledge_base_rag.py` | New | T-004 | 4 tables, guarded vector col+index |
 | `services/registry-api/models.py` | Edit | T-005 | 4 ORM models |
 | `services/registry-api/blob_store.py` | New | T-006 | `BlobStore` + `MinioBlobStore` |
 | `services/registry-api/vector_store.py` | New | T-007 | `VectorStore` + `PgVectorStore` (S5) |
@@ -237,8 +237,8 @@ symbol defined in a later task (no forward deps).
 
 ### Phase 2 — Data model
 
-**T-004 — migration 0066**
-- Files: `services/registry-api/alembic/versions/0066_knowledge_base_rag.py`
+**T-004 — migration 0067**
+- Files: `services/registry-api/alembic/versions/0067_knowledge_base_rag.py`
 - Interface: creates `knowledge_bases`, `knowledge_sources`, `knowledge_chunks`,
   `agent_knowledge_bindings` (data-model.md); guarded `vector(384)` column + `hnsw` index via
   `_pgvector_available` probe; `ix_knowledge_chunks_team_kb` always created; idempotent.
@@ -246,7 +246,7 @@ symbol defined in a later task (no forward deps).
   index; on a stock DB it skips them without error; re-running is a no-op.
 - Deps: none (independent of the sidecar).
 - Tests: covered by CP-2 (suite-77 upload path exercises the tables).
-- Verify: `python -c "import ast; ast.parse(open('.../0066_knowledge_base_rag.py').read())"`;
+- Verify: `python -c "import ast; ast.parse(open('.../0067_knowledge_base_rag.py').read())"`;
   `down_revision=="0065"`.
 
 **T-005 — ORM models**
@@ -330,7 +330,7 @@ symbol defined in a later task (no forward deps).
 - Verify: `python -c "import ast; ast.parse(open('.../routers/knowledge.py').read())"`;
   mapper-configure; `grep knowledge_router main.py`.
 
-> **CP-2 (checkpoint):** deploy registry-api (tag 0.2.192) + sidecar, then
+> **CP-2 (checkpoint):** deploy registry-api (tag 0.2.195) + sidecar, then
 > `bash scripts/plan-poc4/smoke-knowledge.sh`: upload→ready→chunks→test-retrieval all green,
 > **and** a two-team isolation probe (team A `search` on a KB seeded under team B returns `[]`
 > at BOTH the `/knowledge-bases/{kb}/search` API and `VectorStore.search`). Gate: retrieval
@@ -457,7 +457,7 @@ symbol defined in a later task (no forward deps).
 - Files: `scripts/deploy-cpe2e.sh`, `scripts/deploy-eks.sh`, `charts/agentshield/values.yaml`,
   `charts/agentshield/values-eks.yaml`, `docs/experience/playground.md`,
   `docs/testing/manual-ui-e2e-test-plan.md` (≤3 per commit — split as needed)
-- Interface: bump `REGISTRY_API_TAG 0.2.191→0.2.192`, `STUDIO_TAG 0.1.144→0.1.145`, add
+- Interface: bump `REGISTRY_API_TAG 0.2.194→0.2.195`, `STUDIO_TAG 0.1.145→0.1.146`, add
   `EMBEDDING_SIDECAR_TAG=0.1.0` + build entry (both deploy scripts); mirror tags in
   `values.yaml` and `values-eks.yaml`; **do NOT bump declarative-runner** (F-4 — note the
   reason in the header comment). Update `docs/experience/playground.md` with the citation chip +
@@ -469,10 +469,10 @@ symbol defined in a later task (no forward deps).
   gap ledger updated; every new symbol greps to a caller.
 - Deps: everything.
 - Tests: n/a (gate).
-- Verify: `grep -n "0.2.192\|0.1.145\|EMBEDDING_SIDECAR_TAG" scripts/deploy-cpe2e.sh scripts/deploy-eks.sh charts/agentshield/values.yaml charts/agentshield/values-eks.yaml`.
+- Verify: `grep -n "0.2.195\|0.1.146\|EMBEDDING_SIDECAR_TAG" scripts/deploy-cpe2e.sh scripts/deploy-eks.sh charts/agentshield/values.yaml charts/agentshield/values-eks.yaml`.
 
 > **CP-3 (final checkpoint):** `bash scripts/deploy-eks.sh` (user-gated) builds+deploys
-> registry-api 0.2.192, studio 0.1.145, embedding-sidecar 0.1.0; then
+> registry-api 0.2.195, studio 0.1.146, embedding-sidecar 0.1.0; then
 > `bash scripts/e2e/suite-77-knowledge-rag.sh` green (incl. tenant isolation) **and**
 > `bash scripts/studio-e2e.sh` green **and** `cd studio && npm run test && npm run typecheck`
 > green. Definition-of-Done statement written (which Playwright step proves the journey, what

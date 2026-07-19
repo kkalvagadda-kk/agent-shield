@@ -1,6 +1,6 @@
 # POC-4 Data Model
 
-New migration: **`0066_knowledge_base_rag.py`** (down_revision `0065`). Idempotent and
+New migration: **`0067_knowledge_base_rag.py`** (down_revision `0066`). Idempotent and
 guarded exactly like `0022` — probe `pg_available_extensions` before touching the `vector`
 type so the migration applies on a stock-Postgres dev box (there the embedding column + ANN
 index are skipped and retrieval degrades to keyword; surfaced, not silent).
@@ -80,10 +80,10 @@ one row per agent (the attach picker replaces any existing binding); multi-KB fa
 
 ---
 
-## Migration `0066` structure (mirror 0022's guard)
+## Migration `0067` structure (mirror 0022's guard)
 
 ```python
-revision = "0066"; down_revision = "0065"
+revision = "0067"; down_revision = "0066"
 
 def _pgvector_available(conn) -> bool:
     return bool(conn.execute(sa.text(

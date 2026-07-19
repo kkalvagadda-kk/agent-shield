@@ -24,7 +24,7 @@ Evidence:
 - Memory note "Migration 0022 taken (pgvector)" corroborates.
 
 **Disposition.** pgvector is **present on EKS**. POC-4's `knowledge_chunks.embedding
-vector(384)` column and its ANN index WILL be created by migration `0066`. We keep the
+vector(384)` column and its ANN index WILL be created by migration `0067`. We keep the
 **same defensive guard pattern as 0022** (probe before `CREATE EXTENSION`/adding the
 vector column) so the migration still applies cleanly on a stock-Postgres dev box —
 there it degrades to keyword search, surfaced not silent (gap ledger). **Task T-001 makes
@@ -210,7 +210,7 @@ stay consistent across tasks.
 
 | Fact | Value | Source |
 |---|---|---|
-| Latest migration | `0065_user_profiles.py` → **new = `0066`** | `alembic/versions/` |
+| Latest migration | `0066_drop_llm_provider_check.py` → **new = `0067`** | `alembic/versions/` |
 | pgvector on EKS | **present** (`postgresql-pgvector:17.6.0-portable`) | deploy-eks.sh:76, values-eks.yaml:54 |
 | MinIO on EKS | **deployed**, port 9000, secret `minio-credentials` | deploy-eks.sh:145,214 |
 | boto3 available | `boto3>=1.35.0` | registry-api/requirements.txt:16 |
@@ -222,8 +222,8 @@ stay consistent across tasks.
 | SSE tool result | `tool_call_end.result` carries full output | streaming.py:118-138 |
 | Citations slot | `AttributedBubble` `citations:{source,kb}[]` (renders) | AttributedBubble.tsx:42,106 |
 | Frontend SSE parser | `ChatPane.tsx` + `lib/chatStream.ts` | grep tool_call_end |
-| registry-api tag now | `0.2.191` → **0.2.192** | deploy-cpe2e.sh:266 |
-| studio tag now | `0.1.144` → **0.1.145** | deploy-cpe2e.sh:273 |
+| registry-api tag now | `0.2.194` → **0.2.195** | deploy-cpe2e.sh:266 |
+| studio tag now | `0.1.145` → **0.1.146** | deploy-cpe2e.sh:273 |
 | embedding-sidecar tag | **new = `0.1.0`** | this doc |
 | declarative-runner | **no bump** (F-4) | this doc |
 | Latest e2e suite | suite-76 → **new = suite-77** | scripts/e2e/ |

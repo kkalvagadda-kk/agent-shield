@@ -31,8 +31,8 @@ keyword-only on EKS.
 
 ## 3. Deploy (image bumps already in T-021)
 ```bash
-bash scripts/deploy-eks.sh     # user-gated; builds+deploys registry-api 0.2.192,
-                               # studio 0.1.145, embedding-sidecar 0.1.0 (NOT declarative-runner)
+bash scripts/deploy-eks.sh     # user-gated; builds+deploys registry-api 0.2.195,
+                               # studio 0.1.146, embedding-sidecar 0.1.0 (NOT declarative-runner)
 bash scripts/seed-defaults.sh  # seeds the knowledge_search HTTP tool (idempotent)
 ```
 
