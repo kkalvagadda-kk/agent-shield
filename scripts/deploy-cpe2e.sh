@@ -377,7 +377,11 @@ DEPLOY_CONTROLLER_TAG="0.1.39"
 #   (member entries via parent-run semi-join) — the workflow Memory tab was empty. HITL: WorkflowChatPage
 #   re-surfaces the 2nd inline approval gate when the resumed member re-parks (listPendingApprovals
 #   correlation by parked child thread_id; poll bound 60→90). vitest green + typecheck.
-STUDIO_TAG="0.1.157"
+# 0.1.157: origin/main merge — WS-1..E-6 execution-models-v2 + eval-v2 frontends.
+# 0.1.158: sync the STUDIO_BUILD marker (studio/src/lib/build.ts) to the deployed tag. The merge
+#   left build.ts at 0.1.147 while STUDIO_TAG advanced to 0.1.157, so suite-79 T-S79-002 (served-tag
+#   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
+STUDIO_TAG="0.1.158"
 EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"

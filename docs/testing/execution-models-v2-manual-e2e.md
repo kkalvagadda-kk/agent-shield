@@ -33,8 +33,41 @@ schedule, webhook} × `agent_class` {user_delegated, daemon} — plus Eval v2 (E
 win, not a *capability* unlock — the bring-your-own-image SDK path already works (see §WS-5).
 
 **Deployed stack (re-read from `scripts/deploy-cpe2e.sh` — this drifts):** registry-api
-`0.2.200` · studio `0.1.147` · deploy-controller `0.1.36` · declarative-runner `0.1.49` ·
-eval-runner `0.1.14` · scheduler `0.1.1` · event-gateway `0.1.3` · alembic head `0064`.
+`0.2.208` · studio `0.1.158` · deploy-controller `0.1.39` · declarative-runner `0.1.59` ·
+eval-runner `0.1.14` · scheduler `0.1.1` · event-gateway `0.1.3` · embedding-sidecar `0.1.0`
+· alembic head `0068`. (Updated 2026-07-19 after the `origin/main` merge + post-merge
+verification; embedding-sidecar + pgvector arrived with POC-4 KB/RAG.)
+
+### Post-merge verification notes (2026-07-19) — known gaps & fixes
+
+Fixes applied while verifying the `origin/main` merge (`f56c9f6`) on this branch:
+
+- **Migration-renumber drift (fixed).** The persistent dev DB skipped main's
+  `0064_webhook_clients`, so `agent_triggers.auth_mode` was absent → **500 on every
+  trigger/schedule create**. Reconciled with `alembic stamp 0063 → upgrade head` (forward-only,
+  idempotent). Postmortem: `docs/bugs/merge-migration-renumber-drift.md`. Correct for fresh DBs;
+  a fresh cluster deploy applies the linear chain and does not hit this.
+- **`build.ts` marker drift (fixed).** `STUDIO_BUILD` stayed `0.1.147` while `STUDIO_TAG` moved
+  to `0.1.157`; bumped both + the chart pin to `0.1.158` (suite-79 T-S79-002 5-way agreement).
+- **Stale tests reconciled (test bugs, not product bugs):** suite-54 T-S54-009 (reactive
+  workflow now PARKS inline vs the old exec-models-v2 fail-closed — deliberately reverted on
+  this branch, proven by suite-79); suite-76-preferences (was using `X-User-Sub` on a
+  `require_user` endpoint → 401; now fetches real JWTs); suite-77 T-S77-000 + smoke-test-cp1
+  (parity gate moved behind `run-fast-gates.sh` in main's `b9fb2bb`, but the grep still checked
+  `deploy-cpe2e.sh` directly — a defect present on main itself).
+
+**Known boundary (not a regression):** the local docker-desktop node is memory-saturated (~97%
+requests). New agent **fixture** pods stay `Pending` → "did not become available within 60s" →
+deployment `failed`. So suites whose cases require *live agent execution* (the `T-S*-00F`
+fixture-deploy steps in 71/75/77, plus HITL suites 45/60/65/70/72 and eval-exec 72/73) fail on
+**fixtures/resources, not code** — the same "few agent pods; runs may not complete" boundary the
+bash suites already accept. Their non-execution assertions (schema, trigger create, parity,
+scoping) pass. `suite-37-workflow-hitl-opa` fails on a pre-existing test-harness asyncpg
+"different event loop" error, unrelated to the merge.
+
+**Naming debt (deferred):** suite numbers `75/76/77/79/80` collide (this branch's context-storage
+work vs main's eval-v2/webhook/operate suites — distinct filenames, both registered in
+`run-all.sh`, nothing orphaned). Renumber one set in a follow-up.
 
 ---
 
