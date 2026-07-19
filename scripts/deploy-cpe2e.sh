@@ -342,7 +342,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
 #   (parent-run semi-join, dual thread_id ordering: absent→recent DESC / given→message_index ASC).
 #   Backs the empty workflow Memory tab + WorkflowChat past-session replay. No migration.
-REGISTRY_API_TAG="0.2.207"
+REGISTRY_API_TAG="0.2.208"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -377,9 +377,9 @@ DEPLOY_CONTROLLER_TAG="0.1.39"
 #   (member entries via parent-run semi-join) — the workflow Memory tab was empty. HITL: WorkflowChatPage
 #   re-surfaces the 2nd inline approval gate when the resumed member re-parks (listPendingApprovals
 #   correlation by parked child thread_id; poll bound 60→90). vitest green + typecheck.
-STUDIO_TAG="0.1.156"
+STUDIO_TAG="0.1.157"
 EVAL_RUNNER_TAG="0.1.14"
-DECLARATIVE_RUNNER_TAG="0.1.58"
+DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.3"
