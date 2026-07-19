@@ -135,6 +135,7 @@ run_suite "Suite 79: Reactive-Workflow inline HITL" "suite-79-workflow-hitl.sh"
 run_suite "Suite 79: WS-6 operate parity — one Overview dispatcher + served-bundle proof" "suite-79-operate-parity.sh"
 run_suite "Suite 80: Multi-KB agent bindings + derived knowledge_search" "suite-80-agent-knowledge-binding.sh"
 run_suite "Suite 80: Eval v2 E-6 regression gate + per-run threshold (no-fakes)" "suite-80-eval-v2-regression.sh"
+run_suite "Suite 81: Deploy-time tool-access auto-grant" "suite-81-deploy-tool-autograt.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

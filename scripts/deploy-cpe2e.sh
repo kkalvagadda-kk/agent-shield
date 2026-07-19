@@ -342,7 +342,13 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
 #   (parent-run semi-join, dual thread_id ordering: absent→recent DESC / given→message_index ASC).
 #   Backs the empty workflow Memory tab + WorkflowChat past-session replay. No migration.
-REGISTRY_API_TAG="0.2.208"
+# 0.2.209: deploy-time tool-access auto-grant. Deploy already auto-granted ApprovalAuthority but
+#   never granted the TOOL itself (AssetGrant), so under fail-closed OPA every agent's own declared
+#   tools were denied (deny_reason tool_not_granted) unless manually granted — the HITL/eval suites
+#   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
+#   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
+#   tools still require_approval/HITL-park. No migration.
+REGISTRY_API_TAG="0.2.210"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"

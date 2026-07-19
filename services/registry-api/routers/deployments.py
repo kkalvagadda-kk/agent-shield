@@ -126,6 +126,71 @@ async def _auto_grant_approval_authority(
     return created
 
 
+async def _auto_grant_tool_access(
+    db: AsyncSession,
+    tools: list[tuple[str, str]],
+    team: str,
+    granted_by: str,
+) -> int:
+    """Auto-grant AssetGrant(asset_type='tool') for an agent's OWN declared tools to its team.
+
+    Why this exists: under fail-closed OPA governance an ungranted tool is denied
+    (``deny_reason == 'tool_not_granted'``) REGARDLESS of risk, so a freshly deployed agent
+    cannot use ANY of its declared tools until the team holds a tool grant — not just the
+    high-risk ones. Deploy already auto-grants ApprovalAuthority (who may approve) but never
+    granted the tool itself, so every agent's tools were denied unless someone manually
+    granted them; the suites only passed under the (now-reverted) fail-open bypass. This is
+    the missing companion: an agent deploying with tool X authorizes its team for X. High-risk
+    tools are UNAFFECTED — they still resolve to ``require_approval`` and HITL-park; this only
+    turns "denied" into "allowed (park if high-risk)". It does NOT grant other teams' tools or
+    tools the agent didn't declare.
+
+    ``tools`` is a list of ``(tool_name, risk_level)`` pairs — the SAME source-agnostic shape
+    as ``_auto_grant_approval_authority`` so BOTH the sandbox (ORM Tool objects) and production
+    (config_snapshot dicts) deploy paths feed it identically (no path couples to the other's
+    data shape). Idempotent — skips a tool already granted (active, non-revoked) to the team.
+    Returns the number of new grants created.
+    """
+    tool_names = sorted({name for (name, _risk) in tools if name})
+    if not tool_names:
+        return 0
+
+    # Resolve declared tool NAMES -> registry tool IDs (AssetGrant.asset_id is a tools.id UUID).
+    rows = await db.execute(select(Tool.id, Tool.name).where(Tool.name.in_(tool_names)))
+    name_to_id = {r.name: r.id for r in rows.all()}
+
+    created = 0
+    for name in tool_names:
+        tid = name_to_id.get(name)
+        if tid is None:
+            continue  # agent references a tool the registry doesn't have — nothing to grant
+        existing = await db.execute(
+            select(AssetGrant.id).where(
+                AssetGrant.asset_id == tid,
+                AssetGrant.asset_type == "tool",
+                AssetGrant.grantee_team == team,
+                AssetGrant.revoked_at.is_(None),
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            continue
+        db.add(AssetGrant(
+            asset_id=tid,
+            asset_type="tool",
+            grantee_team=team,
+            granted_by=granted_by,
+        ))
+        created += 1
+
+    if created:
+        await db.flush()
+        logger.info(
+            "Auto-granted tool access: %d AssetGrants for team '%s' (%d declared tools)",
+            created, team, len(tool_names),
+        )
+    return created
+
+
 router = APIRouter(prefix="/api/v1/agents", tags=["deployments"])
 
 # ---------------------------------------------------------------------------
@@ -658,19 +723,45 @@ async def deploy_agent(
     except Exception as exc:
         logger.warning("Policy generation failed for agent '%s' (non-fatal): %s", name, exc)
 
+    # Tool set for the deploy-time auto-grants. An agent's tools may be BOUND via AgentTool
+    # OR only DECLARED in the version snapshot (eval / HITL fixtures do the latter), so a list
+    # built from agent_tools ALONE is empty for them — which is why both auto-grants below
+    # silently no-op'd and the fixtures' tools stayed denied under fail-closed OPA. Union both
+    # sources, exactly like the critical-risk gate above already does.
+    _deploy_tool_pairs = (
+        [(t.name, t.risk_level) for t in agent_tools]
+        + [
+            (t.get("name"), t.get("risk", "low"))
+            for t in (version.tools or [])
+            if isinstance(t, dict) and t.get("name")
+        ]
+    )
+
     # Auto-grant ApprovalAuthority to team members for high-risk tools
     # so the Approvals console works without manual admin setup (non-fatal).
     try:
         await _auto_grant_approval_authority(
-            db,
-            [(t.name, t.risk_level) for t in agent_tools],
-            agent.team,
+            db, _deploy_tool_pairs, agent.team,
             granted_by=f"auto:deploy:{deployment.id}",
         )
     except Exception as exc:
         logger.warning(
             "Auto-grant ApprovalAuthority failed for agent '%s' (non-fatal): %s",
             name, exc,
+        )
+
+    # Auto-grant tool access (AssetGrant) for this agent's OWN declared tools to its team,
+    # so the deployed agent can actually use them under fail-closed OPA governance (an
+    # ungranted tool is denied regardless of risk; high-risk still HITL-parks). Companion to
+    # the ApprovalAuthority grant above — same "functional without manual admin setup" intent.
+    try:
+        await _auto_grant_tool_access(
+            db, _deploy_tool_pairs, agent.team,
+            granted_by=f"auto:deploy:{deployment.id}",
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auto-grant tool access failed for agent '%s' (non-fatal): %s", name, exc,
         )
 
     # Emit Langfuse platform action trace

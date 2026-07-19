@@ -643,7 +643,9 @@ registry-api:
     # 0.2.205: GET /workflows/{id}/conversations (workflow transcript via parent runs)
     # 0.2.206: HITL multi-approval fix — reactive member resume re-parks on a still-pending approval
     # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
-    tag: "0.2.208"
+    # 0.2.209: deploy-time tool-access auto-grant (AssetGrant for the agent's own tools, both
+    #   deploy paths) — fixes fail-closed tool_not_granted denials; high-risk tools still HITL-park
+    tag: "0.2.210"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

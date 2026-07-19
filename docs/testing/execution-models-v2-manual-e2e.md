@@ -55,15 +55,33 @@ Fixes applied while verifying the `origin/main` merge (`f56c9f6`) on this branch
   `require_user` endpoint → 401; now fetches real JWTs); suite-77 T-S77-000 + smoke-test-cp1
   (parity gate moved behind `run-fast-gates.sh` in main's `b9fb2bb`, but the grep still checked
   `deploy-cpe2e.sh` directly — a defect present on main itself).
+- **Deploy-time tool-access auto-grant (fixed — `registry-api 0.2.210`).** After the fail-open OPA
+  bypass was reverted, deploy auto-granted `ApprovalAuthority` but **never the tool itself**
+  (`AssetGrant`), so under fail-closed OPA an agent's OWN declared tools were denied
+  (`deny_reason 'tool_not_granted'`) — HITL never reached the `require_approval`/park path.
+  New `_auto_grant_tool_access(db, tools, team)` is called from BOTH deploy paths
+  (`deployments.py` sandbox + `catalog.py` production), unions the tool sources
+  (`AgentTool` bindings **+** `version.tools`), is idempotent, and high-risk tools still
+  HITL-park. Proven: hitl-agent parks on `web_search`; regression **suite-81**. Also required a
+  one-time data repair — the pre-existing tool grants were **orphaned** (a past tool-table reset
+  left `asset_grants.asset_id` pointing at deleted tool IDs, so the OPA bundle resolved 0 grants);
+  the canonical tools were re-granted to `platform` and the bundle regenerated.
 
-**Known boundary (not a regression):** the local docker-desktop node is memory-saturated (~97%
-requests). New agent **fixture** pods stay `Pending` → "did not become available within 60s" →
-deployment `failed`. So suites whose cases require *live agent execution* (the `T-S*-00F`
-fixture-deploy steps in 71/75/77, plus HITL suites 45/60/65/70/72 and eval-exec 72/73) fail on
-**fixtures/resources, not code** — the same "few agent pods; runs may not complete" boundary the
-bash suites already accept. Their non-execution assertions (schema, trigger create, parity,
-scoping) pass. `suite-37-workflow-hitl-opa` fails on a pre-existing test-harness asyncpg
-"different event loop" error, unrelated to the merge.
+**Known boundary — eval-fixture tools (NOT a regression, NOT the merge):** the HITL/eval suites
+`72/45/60/65/70` (and the eval-exec parts of others) still fail under fail-closed OPA because
+their **fixture agents declare NO tools** (`version.tools == []`, 0 `AgentTool` bindings) — the
+tools (`get_weather`, `refund_action`, …) are **injected from the eval dataset at runtime**, not
+at deploy. So the deploy-time auto-grant above cannot help them (nothing to grant at deploy), and
+they only ever passed under the reverted fail-open bypass. Greening them needs the **eval-runner /
+test harness** to grant the dataset's tools — a separate effort, out of scope for the merge.
+
+**Resolved along the way — cluster resource pressure.** Early re-runs failed because the
+docker-desktop node was memory-saturated (~97% requests) so new fixture pods stayed `Pending`,
+and Postgres `max_connections` (100) was exhausted by leftover fixture pods. Both were relieved
+(worker node added; leftover ephemeral fixtures `s65-*/s71-*/s73-*/s75*/s77*/e2e-*` deleted).
+That un-blocked the eval/scheduled/webhook suites — **73/75/77 now pass**. It did NOT fix the
+HITL/eval-fixture suites, which are the eval-fixture-tool boundary above. `suite-37-workflow-hitl-opa`
+fails on a pre-existing test-harness asyncpg "different event loop" error, unrelated to the merge.
 
 **Naming debt (deferred):** suite numbers `75/76/77/79/80` collide (this branch's context-storage
 work vs main's eval-v2/webhook/operate suites — distinct filenames, both registered in
