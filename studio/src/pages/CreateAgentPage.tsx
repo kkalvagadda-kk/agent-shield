@@ -10,8 +10,11 @@ import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
 import { createAgent, createTrigger, listProviders, listTools } from "../api/registryApi";
+import { listKBs, bindAgent } from "../api/knowledgeApi";
 import { useAuth } from "../contexts/AuthContext";
 import { cn } from "../lib/utils";
+import ToolsPicker, { KNOWLEDGE_SEARCH_TOOL } from "../components/agent/ToolsPicker";
+import KnowledgeBasePicker from "../components/agent/KnowledgeBasePicker";
 
 // ---------------------------------------------------------------------------
 // Three independent authoring axes (R1): Shape · Trigger · Class.
@@ -306,9 +309,15 @@ async function createAgentOfType(opts: {
   hasSchedule: boolean; hasWebhook: boolean;
   cron: string; tz: string; alertEmail: string; filterRows: FilterRow[];
   inputPayload: string;
+  kbIds?: string[];
 }): Promise<{ name: string; webhookUrl: string | null }> {
-  const { base, shape, agentClass, hasSchedule, hasWebhook, cron, tz, alertEmail, filterRows, inputPayload } = opts;
+  const { base, shape, agentClass, hasSchedule, hasWebhook, cron, tz, alertEmail, filterRows, inputPayload, kbIds } = opts;
   const agent = await createAgent({ ...base, execution_shape: shape, agent_class: agentClass });
+  // Bind selected knowledge bases — each PUT also idempotently attaches the
+  // knowledge_search tool server-side (so the model can actually search).
+  for (const kbId of kbIds ?? []) {
+    await bindAgent(kbId, agent.id);
+  }
   let webhookUrl: string | null = null;
   if (hasSchedule) {
     const parsedPayload = inputPayload.trim() ? JSON.parse(inputPayload) : undefined;
@@ -732,6 +741,7 @@ function NoCodeForm({ team }: { team: string | null }) {
   // Three authoring axes (shape · trigger · class) + template/memory state.
   const axes = useAuthoringAxes();
   const [memoryEnabled, setMemoryEnabled] = useState(false);
+  const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
   const [createdName, setCreatedName] = useState<string | null>(null);
 
@@ -756,6 +766,11 @@ function NoCodeForm({ team }: { team: string | null }) {
     queryFn: () => listTools(100, 0),
   });
 
+  const { data: kbData } = useQuery({
+    queryKey: ["kbs", team],
+    queryFn: () => listKBs(),
+  });
+
   const mutation = useMutation({
     mutationFn: (values: NoCodeFormValues) =>
       createAgentOfType({
@@ -768,13 +783,16 @@ function NoCodeForm({ team }: { team: string | null }) {
           metadata: {
             instructions: values.instructions,
             llm_provider_id: values.llm_provider_id || undefined,
-            tools: values.tools,
+            // Never persist knowledge_search in the hand-picked tools — binding a
+            // KB attaches it server-side. Guards a stale value if the list changes.
+            tools: (values.tools ?? []).filter((t) => t !== KNOWLEDGE_SEARCH_TOOL),
           },
         },
         shape: axes.shape, agentClass: axes.agentClass,
         hasSchedule: axes.hasSchedule, hasWebhook: axes.hasWebhook,
         cron: axes.cron, tz: axes.tz, alertEmail: axes.alertEmail,
         filterRows: axes.filterRows, inputPayload: axes.inputPayload,
+        kbIds: selectedKbIds,
       }),
     onSuccess: ({ name, webhookUrl: url }) => {
       toast.success(`Agent "${name}" created.`);
@@ -797,6 +815,12 @@ function NoCodeForm({ team }: { team: string | null }) {
     } else {
       setValue("tools", [...current, toolName]);
     }
+  };
+
+  const toggleKb = (kbId: string) => {
+    setSelectedKbIds((prev) =>
+      prev.includes(kbId) ? prev.filter((k) => k !== kbId) : [...prev, kbId]
+    );
   };
 
   if (webhookUrl && createdName) {
@@ -866,42 +890,23 @@ function NoCodeForm({ team }: { team: string | null }) {
         )}
       </Field>
 
+      {/* Knowledge Bases (special config → auto-attaches knowledge_search) */}
+      <Field label="Knowledge Bases">
+        <KnowledgeBasePicker kbs={kbData ?? []} selected={selectedKbIds} onToggle={toggleKb} />
+        <FieldHint>
+          Attach one or more knowledge bases. The agent gets a <code>knowledge_search</code> tool
+          scoped to exactly these — no need to add it under Tools.
+        </FieldHint>
+      </Field>
+
       {/* Tools */}
       <Field label="Tools">
-        <div className="border border-slate-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-slate-100">
-          {toolsData?.items.length === 0 && (
-            <p className="p-3 text-sm text-slate-400 italic">No tools available for your team.</p>
-          )}
-          {toolsData?.items.map((tool) => (
-            <label
-              key={tool.id}
-              className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer"
-            >
-              <input
-                type="checkbox"
-                checked={selectedTools.includes(tool.name)}
-                onChange={() => toggleTool(tool.name)}
-                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-              />
-              <div className="flex-1 min-w-0">
-                <span className="text-sm font-medium text-slate-800">{tool.display_name || tool.name}</span>
-                {tool.description && (
-                  <span className="text-xs text-slate-400 ml-2 truncate">{tool.description}</span>
-                )}
-              </div>
-              {tool.risk_level && (
-                <span className={cn(
-                  "text-xs px-1.5 py-0.5 rounded font-medium",
-                  tool.risk_level === "high" && "bg-red-50 text-red-700",
-                  tool.risk_level === "medium" && "bg-amber-50 text-amber-700",
-                  tool.risk_level === "low" && "bg-green-50 text-green-700",
-                )}>
-                  {tool.risk_level}
-                </span>
-              )}
-            </label>
-          ))}
-        </div>
+        <ToolsPicker
+          tools={toolsData?.items ?? []}
+          selected={selectedTools}
+          onToggle={toggleTool}
+          emptyText="No tools available for your team."
+        />
         <FieldHint>Select platform-managed tools this agent can call. Governance is enforced automatically.</FieldHint>
       </Field>
 

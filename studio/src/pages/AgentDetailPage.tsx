@@ -1,13 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Bot, CheckCircle, Loader2, MessageCircle, Rocket, Send, Trash2, XCircle } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
 import { deleteAgentVersion, getAgent, getDeployments, listProviders, listTools, listVersions, publishAgent, updateAgent, type Agent, type AgentVersion, type Deployment } from "../api/registryApi";
+import { listKBs, getAgentKnowledgeBases, bindAgent, unbindAgent } from "../api/knowledgeApi";
 import DeployModal from "../components/DeployModal";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
 import SettingsTab from "../components/agent-detail/SettingsTab";
 import { shapeLabel } from "../lib/utils";
+import ToolsPicker, { KNOWLEDGE_SEARCH_TOOL } from "../components/agent/ToolsPicker";
+import KnowledgeBasePicker from "../components/agent/KnowledgeBasePicker";
 
 const PUBLISH_STATUS: Record<string, { label: string; cls: string }> = {
   private:        { label: "Private",        cls: "bg-slate-100 text-slate-600" },
@@ -435,6 +438,7 @@ function SettingsContent({ agent }: { agent: Agent }) {
   const [instructions, setInstructions] = useState((meta.instructions as string) ?? "");
   const [selectedProvider, setSelectedProvider] = useState((meta.llm_provider_id as string) ?? "");
   const [selectedTools, setSelectedTools] = useState<string[]>((meta.tools as string[]) ?? []);
+  const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
   const [dirty, setDirty] = useState(false);
 
   const { data: providers } = useQuery({
@@ -445,11 +449,45 @@ function SettingsContent({ agent }: { agent: Agent }) {
     queryKey: ["tools"],
     queryFn: () => listTools(200),
   });
+  const { data: allKbs } = useQuery({
+    queryKey: ["kbs", agent.team],
+    queryFn: () => listKBs(),
+  });
+  // The agent's CURRENT KB bindings — pre-selects the picker; the save reconciles
+  // the selection against this original set (bind added, unbind removed).
+  const { data: boundKbs } = useQuery({
+    queryKey: ["agent-kbs", agent.id],
+    queryFn: () => getAgentKnowledgeBases(agent.id),
+  });
+  const originalKbIds = (boundKbs ?? []).map((k) => k.kb_id);
+  useEffect(() => {
+    // Initialize the picker once the bindings load (before any user edit).
+    if (boundKbs) setSelectedKbIds(boundKbs.map((k) => k.kb_id));
+  }, [boundKbs]);
+
+  // knowledge_search is configured via the Knowledge Bases picker, never as a
+  // hand-selected tool — ToolsPicker filters it from the list and the save below
+  // strips it from metadata.tools (the KB binding is the source of truth).
 
   const save = useMutation({
-    mutationFn: () => {
-      const newMeta = { ...meta, instructions, tools: selectedTools, llm_provider_id: selectedProvider || undefined };
-      return updateAgent(agent.name, {
+    mutationFn: async () => {
+      const newMeta = {
+        ...meta,
+        instructions,
+        // Never persist knowledge_search here — it is derived from KB bindings.
+        tools: selectedTools.filter((t) => t !== KNOWLEDGE_SEARCH_TOOL),
+        llm_provider_id: selectedProvider || undefined,
+      };
+      // Reconcile KB bindings FIRST, then updateAgent. updateAgent rebuilds
+      // agent_tools from metadata.tools and then re-asserts the invariant
+      // (knowledge_search ∈ agent_tools ⟺ the agent has ≥1 KB binding). Running the
+      // bind/unbind before it means updateAgent sees the FINAL binding state, so the
+      // knowledge_search tool ends up attached iff a KB remains bound.
+      const toUnbind = originalKbIds.filter((id) => !selectedKbIds.includes(id));
+      for (const kbId of toUnbind) await unbindAgent(kbId, agent.id);
+      const toBind = selectedKbIds.filter((id) => !originalKbIds.includes(id));
+      for (const kbId of toBind) await bindAgent(kbId, agent.id);
+      await updateAgent(agent.name, {
         description: description.trim() || undefined,
         status: agentStatus !== agent.status ? agentStatus : undefined,
         execution_shape: execShape !== agent.execution_shape ? execShape : undefined,
@@ -462,6 +500,7 @@ function SettingsContent({ agent }: { agent: Agent }) {
       setDirty(false);
       qc.invalidateQueries({ queryKey: ["agent", agent.name] });
       qc.invalidateQueries({ queryKey: ["agents"] });
+      qc.invalidateQueries({ queryKey: ["agent-kbs", agent.id] });
     },
     onError: () => toast.error("Failed to update agent"),
   });
@@ -471,6 +510,13 @@ function SettingsContent({ agent }: { agent: Agent }) {
   const toggleTool = (toolName: string) => {
     setSelectedTools((prev) =>
       prev.includes(toolName) ? prev.filter((t) => t !== toolName) : [...prev, toolName]
+    );
+    markDirty();
+  };
+
+  const toggleKb = (kbId: string) => {
+    setSelectedKbIds((prev) =>
+      prev.includes(kbId) ? prev.filter((k) => k !== kbId) : [...prev, kbId]
     );
     markDirty();
   };
@@ -544,23 +590,24 @@ function SettingsContent({ agent }: { agent: Agent }) {
       </div>
 
       <div>
+        <span className="text-xs text-slate-500 uppercase">Knowledge Bases</span>
+        <div className="mt-1">
+          <KnowledgeBasePicker kbs={allKbs ?? []} selected={selectedKbIds} onToggle={toggleKb} />
+        </div>
+        <p className="mt-1 text-xs text-slate-400">
+          Attaching a KB gives the agent a <code>knowledge_search</code> tool scoped to it — no need to add it under Tools.
+        </p>
+      </div>
+
+      <div>
         <span className="text-xs text-slate-500 uppercase">Tools</span>
-        <div className="mt-1 border border-slate-200 rounded p-3 max-h-48 overflow-y-auto space-y-1">
-          {tools?.items.length === 0 && (
-            <p className="text-xs text-slate-400">No tools registered.</p>
-          )}
-          {tools?.items.map((t) => (
-            <label key={t.name} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-slate-50 px-1 py-0.5 rounded">
-              <input
-                type="checkbox"
-                checked={selectedTools.includes(t.name)}
-                onChange={() => toggleTool(t.name)}
-                className="rounded"
-              />
-              <span className="font-mono text-xs">{t.name}</span>
-              {t.description && <span className="text-xs text-slate-400 truncate">— {t.description}</span>}
-            </label>
-          ))}
+        <div className="mt-1">
+          <ToolsPicker
+            tools={tools?.items ?? []}
+            selected={selectedTools}
+            onToggle={toggleTool}
+            emptyText="No tools registered."
+          />
         </div>
       </div>
 
