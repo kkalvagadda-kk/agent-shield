@@ -477,17 +477,14 @@ async def _halt_for_approval(parent_run_id: str, mode: str, team: str, workflow_
 
 async def _park_or_fail(parent_run_id: str, mode: str, team: str, workflow_id: str, shape: str,
                         cursor: dict | None = None) -> None:
-    """Single decision point for an approval gate (S2). Durable → checkpoint the cursor +
-    park (D3 resumable). Reactive → fail-closed with a clear message: a reactive workflow
-    cannot durably park for async approval (D2). Never swallows the gate and proceeds —
-    a reactive run can never silently run a tool that should have been approved."""
-    if shape == "reactive":
-        await _fail_parent(
-            parent_run_id,
-            "approval gate hit in a reactive workflow — set shape=durable to allow approvals",
-        )
-        logger.info("workflow %s (%s, reactive): approval gate → fail-closed", parent_run_id, mode)
-        return
+    """Single decision point for an approval gate (S2). BOTH shapes checkpoint the cursor +
+    park (D3 resumable): a high-risk member surfaces an INLINE approval and the run resumes
+    after the decision via ``resume_orchestration``. Reactive is included — the parking is a
+    DB checkpoint (``orchestrator_state``), not an in-process hold, so a reactive run ends its
+    stream on the gate and resumes exactly like the single reactive agent's HITL. (Product
+    decision: the execution-models-v2 reactive fail-closed was reverted to restore the inline
+    workflow HITL that shipped in the original pausable orchestrator.) ``shape`` is retained
+    in the signature for callers but no longer branches. Never swallows the gate."""
     await _halt_for_approval(parent_run_id, mode, team, workflow_id, cursor)
 
 
@@ -790,13 +787,10 @@ async def _run_sequential_from(parent_run_id: str, team: str, workflow_id: str,
             else:
                 yield frame
         if status_val == "awaiting_approval":
-            if shape == "reactive":
-                await _fail_parent(
-                    parent_run_id,
-                    "approval gate hit in a reactive workflow — set shape=durable to allow approvals",
-                )
-                logger.info("workflow %s (sequential, reactive): approval gate → fail-closed", parent_run_id)
-                return
+            # BOTH shapes park + resume (inline HITL restored for reactive too — the
+            # execution-models-v2 reactive fail-closed was reverted per product decision).
+            # Parking is a DB checkpoint, so the reactive stream ends on the gate and
+            # resume_orchestration re-enters at next_index after the approval is decided.
             await _save_checkpoint(parent_run_id, {
                 "mode": "sequential",
                 "order": order,

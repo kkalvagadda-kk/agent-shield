@@ -41,15 +41,24 @@ def _get_tool_risk(tool_name: str) -> str:
         return "low"
 
 
-def _extract_interrupts(graph: Any, config: dict) -> list[dict]:
+async def _extract_interrupts(graph: Any, config: dict) -> list[dict]:
     """Extract pending interrupt values from the graph's checkpoint state.
 
     LangGraph does not emit on_interrupt in astream_events(v2). Instead,
     interrupt data lives in graph.get_state().tasks[].interrupts after the
     stream ends. This helper reads those values.
+
+    MUST use the ASYNC ``aget_state`` — in cluster deployments the graph is
+    compiled with ``AsyncPostgresSaver`` (whenever ``DIRECT_DATABASE_URL`` is
+    injected into the agent pod, per POC-0), which only services the async
+    checkpoint API. The synchronous ``get_state`` raises when called from inside
+    the running event loop, which was silently swallowed here and made the
+    parked HITL interrupt invisible → the stream emitted ``done`` instead of
+    ``approval_requested`` and orphaned the run. Mirrors the async read already
+    used by ``workflow_executor.extract_tool_rationale``.
     """
     try:
-        snapshot = graph.get_state(config)
+        snapshot = await graph.aget_state(config)
         interrupts: list[dict] = []
         if hasattr(snapshot, "tasks"):
             for task in snapshot.tasks:
@@ -159,7 +168,7 @@ async def stream_events(
         return
 
     event_counter += 1
-    pending = _extract_interrupts(graph, config)
+    pending = await _extract_interrupts(graph, config)
     if pending:
         interrupt_value = pending[0]
         yield format_sse(

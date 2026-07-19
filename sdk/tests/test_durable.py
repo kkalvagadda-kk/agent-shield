@@ -55,7 +55,7 @@ class FakeGraph:
         for e in self._events:
             yield e
 
-    def get_state(self, config):
+    async def aget_state(self, config):
         if self._interrupt is not None:
             return _Snapshot([_Task([_Intr(self._interrupt)])])
         return _Snapshot([])
@@ -156,7 +156,7 @@ def test_drive_crash_fails_loud():
         async def astream_events(self, *a, **k):
             raise RuntimeError("kaboom")
             yield  # pragma: no cover
-        def get_state(self, config):
+        async def aget_state(self, config):
             return _Snapshot([])
 
     async def _run():

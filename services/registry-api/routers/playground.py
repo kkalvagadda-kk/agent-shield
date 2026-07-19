@@ -1549,6 +1549,30 @@ async def decide_playground_approval(
         approval_id, body.decision, approval.thread_id,
     )
 
+    # WORKFLOW-MEMBER inline resume: a single-agent playground approval is resumed by the
+    # client opening /runs/{run_id}/resume-stream, but a WORKFLOW member has no such client
+    # resume — the paused member pod must be resumed AND the orchestration advanced, or the
+    # run sits at 'awaiting_approval' forever (this was "approved but the chat/eval didn't
+    # continue"). The console decide does this via _resume_and_advance; mirror it here, but
+    # ONLY for workflow members (thread_id → a child AgentRun with a parent) so single-agent
+    # playground resumes stay client-driven and never double-resume.
+    from models import AgentRun
+    member_child = (await db.execute(
+        select(AgentRun.id)
+        .where(AgentRun.thread_id == approval.thread_id, AgentRun.parent_run_id.isnot(None))
+        .limit(1)
+    )).first()
+    if member_child is not None:
+        from routers.approvals import _resume_and_advance
+        asyncio.create_task(_resume_and_advance(
+            approval.agent_name, approval.team, approval.thread_id,
+            db_status, approval.reviewer_id, getattr(body, "reason", None),
+        ))
+        logger.info(
+            "decide_playground_approval: workflow member (thread_id=%s) — scheduled resume+advance",
+            approval.thread_id,
+        )
+
     return {
         "approval_id": approval_id,
         "status": body.decision,

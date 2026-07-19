@@ -11,7 +11,7 @@ vi.mock("../api/registryApi", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-import { listPendingApprovals } from "../api/registryApi";
+import { listPendingApprovals, decideApproval } from "../api/registryApi";
 
 const NOW = new Date().toISOString();
 
@@ -90,5 +90,31 @@ describe("ApprovalsInboxPage (WS-2 T013 — daemon principal + reviewer-role fil
     expect(screen.getByText("wire_transfer")).toBeInTheDocument();
     // The list call was invoked with the selected reviewer scope (T012 param wiring).
     expect(listPendingApprovals).toHaveBeenCalledWith(undefined, undefined, "agent:reviewer");
+  });
+
+  // T007 (production surface) — the console queue re-surfaces a re-parked 2nd gate.
+  // When a reviewer approves a gate and the resumed run trips a second high-risk tool,
+  // the re-park creates a NEW pending approval; the console (refetch on decide) shows it.
+  it("re-surfaces a 2nd approval in the queue after the first is decided (re-park)", async () => {
+    const FIRST = item({ id: "gate-1", tool_name: "wire_transfer", thread_id: "th-9" });
+    const SECOND = item({ id: "gate-2", step_name: "tool:send_email", tool_name: "send_email", thread_id: "th-9" });
+    let calls = 0;
+    (listPendingApprovals as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      calls += 1;
+      return Promise.resolve(calls <= 1 ? [FIRST] : [SECOND]);
+    });
+    (decideApproval as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    renderWithProviders(<ApprovalsInboxPage />);
+    // Gate 1 is in the console queue.
+    expect(await screen.findByText("wire_transfer")).toBeInTheDocument();
+
+    // Decide gate 1 → onSuccess invalidates ["pending-approvals"] → refetch returns the
+    // re-parked 2nd gate the reviewer must now also decide.
+    await userEvent.click(screen.getByRole("button", { name: /^Approve$/ }));
+    await waitFor(() => expect(decideApproval).toHaveBeenCalledWith("gate-1", "approved", 1));
+
+    // The 2nd gate re-appears in the queue — the production/console surface of the re-park.
+    expect(await screen.findByText("send_email")).toBeInTheDocument();
   });
 });
