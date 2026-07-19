@@ -263,16 +263,76 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   The repo is committed at the FINAL (CP2) tags below; scripts/checkpoints/*-deploy.sh
 #   deploy the current committed tags and assert their rollout.
 # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
-REGISTRY_API_TAG="0.2.191"
+# 0.2.192: POC-5 backend — list_conversations aggregate + GET /me/conversations +
+#          GET /agents/{name}/memory/conversations (the POC-5 commit landed the code
+#          but never bumped the tag; this makes it deployable/verifiable).
+# 0.2.193: POC-5 fix — list_conversations used min(deployment_id) but deployment_id
+#          is a UUID and Postgres has no min(uuid) → /me/conversations 500'd on every
+#          call. Pick the thread's first-seen deployment_id via array_agg[1] instead.
+# 0.2.194: Ollama LLM provider — LLM_PROVIDER_SPECS registry + base_url credential +
+#          drop provider CHECK (migration 0066). Pairs with runner 0.1.57 (ChatOllama),
+#          deploy-controller 0.1.39 (OLLAMA_BASE_URL env map), studio 0.1.145 (form).
+# 0.2.195: POC-4 Knowledge Base / RAG — migration 0067 (kb tables + guarded vector(384)),
+#          BlobStore/VectorStore/embedding_client ports, ingest pipeline, knowledge router,
+#          internal /knowledge/search (server-side kb_id, fail-closed S5), knowledge_search tool.
+# 0.2.198: Credentials — AuthConfigResponse.has_credentials (empty-shell detection). A credential
+#   linked to a tool but with no value stored (credentials_encrypted NULL, no K8s secret) fails tool
+#   auth with 403; the value is write-only so the UI couldn't tell it apart from a configured one.
+# 0.2.199: workflows — correct reactive-workflow approval warning (STOPS EARLY, not FAIL — verified vs runtime)
+# 0.2.200: reactive-workflow HITL — _derive_context matches child run by thread_id column (was id-only),
+#   so a playground workflow member approval is playground/inline, not production console
+# 0.2.201: restore inline HITL for REACTIVE workflows — park+resume (revert execution-models-v2 fail-closed)
+# 0.2.202: reactive member/eval HITL resume — post /resume to the agent's ACTUAL env pod, not -production (DNS-failed)
+# 0.2.203: workflow inline HITL — playground decide resumes+advances workflow member (was console-only)
+# 0.2.204: Knowledge Search as special config — multi-KB per agent: bind_agent upsert (was drop-then-insert),
+#   reverse-lookup GET /knowledge-bases/agent-bindings/{id}, internal search fans out across all bound KBs,
+#   updateAgent enforces invariant (knowledge_search ∈ agent_tools ⟺ agent has ≥1 KB binding)
+# 0.2.205: workflow conversations — GET /workflows/{id}/conversations + memory.list_workflow_conversations
+#   (join agent_memory→parent runs by session_id; ownership/name from the parent run, not the member rows)
+# 0.2.206: HITL multi-approval fix — reactive workflow-member resume RE-PARKS when a pending
+#   approval still exists on the thread (mirror the forward path's authoritative pause detection),
+#   instead of completing on the pod's HTTP 200 and orphaning the 2nd gate. approvals.py _resume_and_advance.
+# 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
+#   (parent-run semi-join, dual thread_id ordering: absent→recent DESC / given→message_index ASC).
+#   Backs the empty workflow Memory tab + WorkflowChat past-session replay. No migration.
+REGISTRY_API_TAG="0.2.207"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
+# NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
+EMBEDDING_SIDECAR_TAG="0.1.0"
+# minio-cp1 = official minio + mc client; deploy-cpe2e never built it before (agentshield-minio
+# ImagePullBackOff'd). POC-4 needs MinIO for Source blobs, so build it here.
+MINIO_CP1_TAG="0.1.0"
 # 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
 # they run under a per-agent SA, so a secret on the default SA never reached
 # them and any private-registry pull failed with "no basic auth credentials".
-DEPLOY_CONTROLLER_TAG="0.1.38"
+DEPLOY_CONTROLLER_TAG="0.1.39"
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
-STUDIO_TAG="0.1.144"
+# 0.1.146: POC-4 Knowledge Base pages (list/detail/upload/test-retrieval/attach) + runtime citation chips
+# 0.1.147: POC-5 Conversations — ConversationSidebar + standalone page + docked History (Agent/Catalog chat) + deployment Conversations tab + nav promotion (this image contains BOTH POC-4 + POC-5 frontends)
+# 0.1.149: Credentials page — surface empty-shell credentials ("no key set" badge), require a
+#   secret value on create + when editing a credential with none stored (uses has_credentials).
+# 0.1.150: Workflows — reactive-workflow chat (WorkflowChatPage + /workflows/:id/chat, Open Chat entry +
+#   endpoint listing) and editable workflow Settings (shape/class/orchestration/share-context via PATCH).
+# 0.1.151: workflow chat inline HITL panel + resume poll; Conversations + Memory tabs on workflow deployment
+# 0.1.152: Knowledge Bases picker in agent create + settings (special config) — knowledge_search hidden from the
+#   tool list, agent tied to one/more KBs (bind/unbind on save, pre-selected from bindings); WorkflowChat dedup
+# 0.1.153: add data-testid="tools-picker" to the agent create + settings Tools list (scopes the Playwright
+#   "knowledge_search is hidden from Tools" assertion in e2e/agent-knowledge-config.spec.ts)
+# 0.1.154: workflow deployment Conversations tab now lists via GET /workflows/{id}/conversations
+#   (WorkflowConversationsTab + ConversationSidebar kind:'workflow') — was empty (queried by workflow name)
+# 0.1.155: knowledge_search leak class-fix — the Edit Agent modal (AgentListPage, the 3rd agent-editing
+#   surface Task 13 missed) rendered the RAW tool list, so knowledge_search still showed as a checkable
+#   tool with no KB picker. Extracted shared ToolsPicker (filters knowledge_search) + KnowledgeBasePicker
+#   used by CreateAgentPage, AgentDetailPage AND the modal; the modal now reconciles KB bind/unbind + strips
+#   knowledge_search on save. AgentListPage.test regression + typecheck green.
+# 0.1.156: workflow ledger G1+G2 frontend + HITL 2nd-gate re-surface. G1: WorkflowChatPage.seedFromThread
+#   replays a past ?session (was empty composer). G2: new WorkflowMemoryTab reads GET /workflows/{id}/memory
+#   (member entries via parent-run semi-join) — the workflow Memory tab was empty. HITL: WorkflowChatPage
+#   re-surfaces the 2nd inline approval gate when the resumed member re-parks (listPendingApprovals
+#   correlation by parked child thread_id; poll bound 60→90). vitest green + typecheck.
+STUDIO_TAG="0.1.156"
 EVAL_RUNNER_TAG="0.1.10"
-DECLARATIVE_RUNNER_TAG="0.1.56"
+DECLARATIVE_RUNNER_TAG="0.1.58"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
@@ -330,6 +390,12 @@ docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" servi
 
 echo "  → event-gateway:${EVENT_GATEWAY_TAG} (Phase 9 — public webhook ingress)"
 docker build -t "registry.internal/agentshield/event-gateway:${EVENT_GATEWAY_TAG}" services/event-gateway/
+
+echo "  → embedding-sidecar:${EMBEDDING_SIDECAR_TAG} (POC-4 — fastembed bge-small-en-v1.5, 384-dim; weights baked in)"
+docker build -t "registry.internal/agentshield/embedding-sidecar:${EMBEDDING_SIDECAR_TAG}" services/embedding-sidecar/
+
+echo "  → minio-cp1:${MINIO_CP1_TAG} (official minio + mc client; blob store for POC-4 Sources)"
+docker build -t "registry.internal/agentshield/minio-cp1:${MINIO_CP1_TAG}" services/minio-cp1/
 
 # ── Step 2: Namespaces ────────────────────────────────────────────────────────
 echo ""

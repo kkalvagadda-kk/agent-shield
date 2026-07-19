@@ -85,6 +85,54 @@ test.describe("playground page", () => {
     await page.waitForLoadState("networkidle");
     await expect(page.getByText(/No agent selected/i)).toHaveCount(0);
   });
+
+  test("History dock opens for a reactive deployment and lists its conversations", async ({
+    page,
+  }) => {
+    await page.goto("/playground");
+    await page.waitForLoadState("networkidle");
+
+    const depSelect = page.locator("select").filter({
+      hasText: /pick a deployment/i,
+    });
+    await expect
+      .poll(async () => depSelect.locator("option").count(), { timeout: 15000 })
+      .toBeGreaterThan(1);
+    const options = await depSelect.locator("option").allTextContents();
+    const real = options.filter(
+      (o) => o.trim() !== "" && !/pick a deployment/i.test(o)
+    );
+    if (real.length === 0) {
+      // No running sandbox deployment here — nothing to open History against.
+      test.skip();
+      return;
+    }
+    await depSelect.selectOption({ label: real[0] });
+    await page.waitForLoadState("networkidle");
+
+    // History is only wired for the reactive ChatPane surface — a durable/triggered
+    // deployment renders the InteractionSurface instead (no toggle). Tolerate that,
+    // the same capacity boundary the other playground tests accept.
+    const toggle = page.getByTestId("playground-history-toggle");
+    if ((await toggle.count()) === 0) {
+      test.skip();
+      return;
+    }
+
+    // Opening the dock fires the deployment-scoped conversations query (proves the
+    // network wiring) and renders the shared sidebar with its New-conversation control.
+    const [resp] = await Promise.all([
+      page.waitForResponse((r) => /\/memory\/conversations/.test(r.url()), {
+        timeout: 15000,
+      }),
+      toggle.click(),
+    ]);
+    expect(resp.status()).toBeLessThan(500);
+    await expect(page.getByTestId("playground-history-dock")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /New conversation/i })
+    ).toBeVisible();
+  });
 });
 
 // ---------------------------------------------------------------------------

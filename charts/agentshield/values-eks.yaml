@@ -35,6 +35,12 @@ python-executor:
   image:
     repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/python-executor"
 
+# embedding-sidecar (POC-4 RAG): parent-chart template image -> ECR. Tag is
+# carried from values.yaml (embeddingSidecar.image.tag) unless bumped there.
+embeddingSidecar:
+  image:
+    repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/embedding-sidecar"
+
 # --- eval-runner: full-string image (registry-api spawns eval Jobs) ---
 registry-api:
   evalRunnerImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"

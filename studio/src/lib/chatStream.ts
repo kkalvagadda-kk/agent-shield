@@ -124,3 +124,80 @@ export function attachRationale<M extends AttributedRich>(
   const fresh: M = { ...make(author), rationale };
   return [...messages, fresh];
 }
+
+// ---------------------------------------------------------------------------
+// POC-4 — knowledge_search citations
+//
+// The `knowledge_search` tool returns a KnowledgeSearchResult JSON (see
+// contracts/endpoints.md) whose de-duplicated `citations: {source, kb}[]` is the
+// EXACT shape AttributedBubble.citations wants. The frontend extracts it from
+// the `tool_call_end` result and attaches it to the assistant bubble — no
+// SDK/runner change (F-4).
+// ---------------------------------------------------------------------------
+
+/** One de-duplicated `{source, kb}` pair from a knowledge_search result. `kb`
+ *  is the KB name; `source` is the source filename. */
+export interface Citation {
+  source: string;
+  kb: string;
+}
+
+/** AttributedRich + the POC-4 citations slot. A bubble that never sets it is
+ *  byte-identical to a plain AttributedRich (citations is opt-in). */
+export interface AttributedCited extends AttributedRich {
+  citations?: Citation[];
+}
+
+/**
+ * Extract the `{source, kb}` citation list from a `knowledge_search`
+ * tool_call_end `result` payload. The result is the JSON the internal endpoint
+ * returned (KnowledgeSearchResult); we read its `citations` array. Any parse
+ * failure, missing field, or wrong shape yields `[]` (a tool call that returned
+ * nothing → no chip). Pure — safe to call inside a setState reducer.
+ */
+export function parseKnowledgeCitations(result: unknown): Citation[] {
+  let obj: unknown = result;
+  if (typeof result === "string") {
+    try {
+      obj = JSON.parse(result);
+    } catch {
+      return [];
+    }
+  }
+  if (!obj || typeof obj !== "object") return [];
+  const raw = (obj as { citations?: unknown }).citations;
+  if (!Array.isArray(raw)) return [];
+  const out: Citation[] = [];
+  for (const c of raw) {
+    if (c && typeof c === "object") {
+      const source = (c as { source?: unknown }).source;
+      const kb = (c as { kb?: unknown }).kb;
+      if (typeof source === "string" && typeof kb === "string") {
+        out.push({ source, kb });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Attach a `citations` list to the open assistant bubble for `author`; if the
+ * last bubble is not an open assistant bubble for that author, open a new one
+ * seeded with the citations. Mirrors `attachToolCall`. Pure/immutable — returns
+ * a new array. A caller should skip the update when `citations` is empty (no
+ * chip row) — this reducer sets whatever it is given.
+ */
+export function attachCitations<M extends AttributedCited>(
+  messages: M[],
+  author: string | undefined,
+  citations: Citation[],
+  make: (author?: string) => M
+): M[] {
+  const last = messages[messages.length - 1];
+  if (last && isOpenAssistantFor(last, author)) {
+    const updated: M = { ...last, citations };
+    return [...messages.slice(0, -1), updated];
+  }
+  const fresh: M = { ...make(author), citations };
+  return [...messages, fresh];
+}

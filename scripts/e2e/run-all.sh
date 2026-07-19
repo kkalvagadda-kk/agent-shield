@@ -123,6 +123,10 @@ run_suite "Suite 73: Eval v2 E-5 workflow run-tree (no-fakes)" "suite-73-eval-v2
 run_suite "Suite 74: Eval v2 E-2 side-effect record/mock (no-fakes)" "suite-74-eval-v2-side-effects.sh"
 run_suite "Suite 75: Context Storage (POC-0/1)" "suite-75-context-storage.sh"
 run_suite "Suite 76: User Response Preferences (POC-3)" "suite-76-preferences.sh"
+run_suite "Suite 77: Team Knowledge Base / RAG (POC-4)" "suite-77-knowledge-rag.sh"
+run_suite "Suite 78: Conversations (POC-5 list)" "suite-78-conversations.sh"
+run_suite "Suite 79: Reactive-Workflow inline HITL" "suite-79-workflow-hitl.sh"
+run_suite "Suite 80: Multi-KB agent bindings + derived knowledge_search" "suite-80-agent-knowledge-binding.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

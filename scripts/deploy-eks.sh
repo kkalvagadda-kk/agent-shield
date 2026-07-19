@@ -64,10 +64,10 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.191"   # 0.2.191: POC-3 user response preferences → advisory directive
-DEPLOY_CONTROLLER_TAG="0.1.38"   # >=0.1.38 sets imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.56"   # 0.1.56: POC-3 applies user_directive as leading SystemMessage; carries OPA bypass (task #16)
-STUDIO_TAG="0.1.144"   # 0.1.144: POC-3 Preferences page wired to real data
+REGISTRY_API_TAG="0.2.197"   # 0.2.195: POC-4 Knowledge/RAG (migration 0067 + ports + ingest + routers) (0.2.194 Ollama; 0.2.193 POC-5 min(uuid) fix)
+DEPLOY_CONTROLLER_TAG="0.1.39"   # 0.1.39: per-provider env map (base_url→OLLAMA_BASE_URL); >=0.1.38 imagePullSecrets on agent pods (note 7)
+DECLARATIVE_RUNNER_TAG="0.1.58"   # 0.1.57: SDK ChatOllama (langchain-ollama); 0.1.56 POC-3 user_directive; carries OPA bypass (task #16)
+STUDIO_TAG="0.1.148"   # 0.1.147: POC-5 Conversations UI (+ 0.1.146 POC-4 Knowledge, 0.1.145 Ollama form) — one image, all frontends
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.1"
 PYTHON_EXECUTOR_TAG="0.1.0"

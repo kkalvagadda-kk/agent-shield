@@ -140,4 +140,37 @@ describe("AttributedBubble", () => {
     // No Database citation glyph / chip row for an empty citations array.
     expect(container.querySelector("code")).toBeNull();
   });
+
+  // --- POC-4: the citation slot is now fed by knowledge_search results ---
+
+  it("renders a {source · kb} citation chip for each citation when non-empty", () => {
+    renderWithProviders(
+      <AttributedBubble
+        role="assistant"
+        author="policy-qa"
+        content="Refunds over $500 need manager approval."
+        citations={[
+          { source: "refund-policy.pdf", kb: "Company Policies" },
+          { source: "escalation.md", kb: "Support Runbooks" },
+        ]}
+      />
+    );
+    // Each chip shows the source filename and (· kb name).
+    expect(screen.getByText("refund-policy.pdf")).toBeInTheDocument();
+    expect(screen.getByText(/Company Policies/)).toBeInTheDocument();
+    expect(screen.getByText("escalation.md")).toBeInTheDocument();
+    expect(screen.getByText(/Support Runbooks/)).toBeInTheDocument();
+  });
+
+  it("renders no citation chip row for a user bubble even if citations are passed", () => {
+    renderWithProviders(
+      <AttributedBubble
+        role="user"
+        content="What is the refund policy?"
+        citations={[{ source: "refund-policy.pdf", kb: "Company Policies" }]}
+      />
+    );
+    // hasCitations is gated on !isUser — a user bubble never shows a chip row.
+    expect(screen.queryByText("refund-policy.pdf")).not.toBeInTheDocument();
+  });
 });

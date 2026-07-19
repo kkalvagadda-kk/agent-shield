@@ -22,7 +22,7 @@ import {
   Workflow,
   Wrench,
 } from "lucide-react";
-import { Home, MessagesSquare, SlidersHorizontal, History } from "lucide-react";
+import { SlidersHorizontal, History } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -39,12 +39,6 @@ interface NavItem {
   end?: boolean;
   icon: LucideIcon;
 }
-
-const PREVIEW_ITEMS: NavItem[] = [
-  { label: "Preview Home",    to: "/",                       end: true,  icon: Home },
-  { label: "Multi-agent Chat",to: "/preview/chat",           end: false, icon: MessagesSquare },
-  { label: "Conversations",   to: "/preview/conversations",  end: false, icon: History },
-];
 
 const BUILD_ITEMS: NavItem[] = [
   { label: "Agents",    to: DEMO ? "/agents" : "/", end: !DEMO, icon: Bot },
@@ -233,17 +227,10 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-2 py-2 overflow-y-auto">
-        {/* Context Preview (demo mode only) */}
-        {DEMO && (
-          <>
-            <SectionHeader label="Context Preview" />
-            <div className="space-y-0.5">
-              {PREVIEW_ITEMS.map((i) => (
-                <SideLink key={i.to} to={i.to} label={i.label} end={i.end} icon={i.icon} />
-              ))}
-            </div>
-          </>
-        )}
+        {/* Conversations */}
+        <div className="space-y-0.5 pt-2">
+          <SideLink to="/conversations" label="Conversations" end={false} icon={History} />
+        </div>
 
         {/* Build */}
         <SectionHeader label="Build" />

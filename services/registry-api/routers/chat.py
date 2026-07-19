@@ -995,7 +995,13 @@ async def resume_stream_chat(
     if run.user_id != user_sub:
         raise HTTPException(status_code=403, detail="Not your run")
 
-    thread_id = run_id
+    # The HITL approval + LangGraph checkpoint are keyed by the CONVERSATION id
+    # (session_id since POC-0), NOT the per-turn run_id. Deriving thread_id the
+    # same way the chat dispatch does (chat.py:715/926 `run.session_id or run_id`)
+    # is what lets the approval lookup below match AND the pod /resume/{thread_id}
+    # target the parked checkpoint. Using run_id here (pre-POC-0 assumption) made
+    # the approval lookup 404 and the chat hang after approval.
+    thread_id = run.session_id or run_id
 
     approval_result = await db.execute(
         select(Approval)

@@ -5,13 +5,16 @@ import { toast } from "sonner";
 import TraceDrawer from "./TraceDrawer";
 import SafetyDetails, { SafetyResult } from "./SafetyDetails";
 import AttributedBubble from "../chat/AttributedBubble";
+import { type Citation, parseKnowledgeCitations } from "../../lib/chatStream";
 
-interface Message {
+export interface Message {
   role: "user" | "assistant";
   content: string;
   author?: string;
   chips?: { type: "tool_start" | "tool_end"; label: string; id?: string }[];
   safetyBlock?: SafetyResult;
+  // POC-4: {source, kb}[] parsed from a knowledge_search tool_call_end result.
+  citations?: Citation[];
 }
 
 interface Props {
@@ -28,6 +31,14 @@ interface Props {
   ) => void;
   onResumeComplete: () => void;
   onTraceEvent: (event: { ts: string; event: string; content?: string; tool_name?: string; result?: string }) => void;
+  // POC-5 History: optional seed of a past thread's transcript (plain user/assistant
+  // bubbles). Rendered on mount only — the parent remounts ChatPane (via `key`) when
+  // resuming a conversation, so all live streaming / HITL / trace behavior below is
+  // untouched. Omitted → a fresh empty chat, exactly as before.
+  initialMessages?: Message[];
+  // Reports the in-flight run state up to the parent so it can block History
+  // select/New while streaming (a remount mid-stream would drop the SSE connection).
+  onRunningChange?: (running: boolean) => void;
 }
 
 function coerceToString(val: unknown): string {
@@ -42,8 +53,8 @@ function coerceToString(val: unknown): string {
   return String(val);
 }
 
-export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequested, onResumeComplete, onTraceEvent }: Props) {
-  const [messages, setMessages] = useState<Message[]>([]);
+export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequested, onResumeComplete, onTraceEvent, initialMessages, onRunningChange }: Props) {
+  const [messages, setMessages] = useState<Message[]>(() => initialMessages ?? []);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [currentRunId, setCurrentRunId] = useState<string | null>(null);
@@ -65,6 +76,13 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Surface the run state to the parent (PlaygroundPage) so History select/New can
+  // be disabled while a run is streaming. Setter identity is stable, so this only
+  // fires on an actual running-state change.
+  useEffect(() => {
+    onRunningChange?.(running);
+  }, [running, onRunningChange]);
 
   const connectStream = useCallback((
     url: string,
@@ -124,6 +142,10 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
           const toolName = (payload.tool_name as string) ?? "tool";
           const result = (payload.result as string) ?? "done";
           const callId = (payload.tool_call_id as string) ?? undefined;
+          // POC-4: a knowledge_search result carries the {source, kb}[] the
+          // AttributedBubble citation row renders (F-4 — frontend-only wiring).
+          const citations =
+            toolName === "knowledge_search" ? parseKnowledgeCitations(result) : [];
           setMessages((prev) => {
             const updated = [...prev];
             const last = updated[updated.length - 1];
@@ -135,7 +157,13 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
                 for (let i = chips.length - 1; i >= 0; i--) { if (chips[i].type === "tool_start") { idx = i; break; } }
               }
               if (idx >= 0) chips[idx] = { type: "tool_end", label: `${toolName}: ${String(result).slice(0, 40)}`, id: callId };
-              updated[updated.length - 1] = { ...last, chips };
+              updated[updated.length - 1] = {
+                ...last,
+                chips,
+                ...(citations.length > 0
+                  ? { citations: [...(last.citations ?? []), ...citations] }
+                  : {}),
+              };
             }
             return updated;
           });
@@ -269,6 +297,7 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
             content={msg.content}
             author={msg.author}
             showLabel={false}
+            citations={msg.citations}
           >
             {msg.chips && msg.chips.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-2">

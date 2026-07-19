@@ -181,6 +181,27 @@ spec:
             # Service). Falls back to the in-cluster Service only when neither is set.
             - name: EVENT_GATEWAY_PUBLIC_URL
               value: {{ .Values.eventGatewayPublicUrl | default ((.Values.global).publicUrl) | default (printf "http://%s-event-gateway:8091" .Release.Name) | quote }}
+            {{- /* POC-4 Knowledge Base / RAG: BlobStore (MinIO) creds + embedding
+                   sidecar URL. Without BLOB_STORE_ACCESS_KEY/SECRET_KEY the
+                   MinioBlobStore runs with empty creds → HeadBucket 403 on upload.
+                   Defaults target the in-cluster agentshield-minio + minio-credentials
+                   secret (root-user/root-password). */}}
+            - name: BLOB_STORE_ENDPOINT
+              value: {{ ((.Values.blobStore).endpoint) | default (printf "http://%s-minio:9000" .Release.Name) | quote }}
+            - name: BLOB_STORE_BUCKET
+              value: {{ ((.Values.blobStore).bucket) | default "knowledge-sources" | quote }}
+            - name: BLOB_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ((.Values.blobStore).existingSecret) | default "minio-credentials" }}
+                  key: {{ ((.Values.blobStore).accessKeyKey) | default "root-user" }}
+            - name: BLOB_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ((.Values.blobStore).existingSecret) | default "minio-credentials" }}
+                  key: {{ ((.Values.blobStore).secretKeyKey) | default "root-password" }}
+            - name: EMBEDDING_SIDECAR_URL
+              value: {{ .Values.embeddingSidecarUrl | default (printf "http://%s-embedding-sidecar:8000" .Release.Name) | quote }}
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}

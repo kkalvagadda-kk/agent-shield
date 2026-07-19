@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, Eye, Info, Loader2, Send, ShieldAlert, ThumbsUp, ThumbsDown } from "lucide-react";
+import { ArrowLeft, Bot, Eye, History, Info, Loader2, Send, ShieldAlert, ThumbsUp, ThumbsDown, X } from "lucide-react";
 import { getCatalogDetail } from "../api/catalogApi";
 import {
   startAgentChat,
@@ -9,12 +9,14 @@ import {
   getCompositeWorkflow,
   getChatApprovalStatus,
   workflowRunStreamUrl,
+  listMemory,
   type WorkflowRunTree,
   type WorkflowStreamFrame,
 } from "../api/registryApi";
 import { submitRunFeedback } from "../api/playgroundApi";
 import { getKeycloak } from "../lib/keycloak";
 import AttributedBubble from "../components/chat/AttributedBubble";
+import ConversationSidebar from "../components/conversations/ConversationSidebar";
 import {
   routeToken,
   openAuthorBubble,
@@ -192,7 +194,13 @@ export default function CatalogChatPage() {
       });
     }
   };
-  const [sessionId] = useState(() => crypto.randomUUID());
+  // Session id is seedable from ?session=<thread_id> (a "Continue" deep link from
+  // the standalone Conversations page / deployment tab) and resettable — New
+  // conversation mints a fresh uuid, selecting a past thread re-keys it to that
+  // thread. The next POST reuses this session_id so the runner reloads prior turns.
+  const [sessionId, setSessionId] = useState(() => searchParams.get("session") ?? crypto.randomUUID());
+  // Docked History panel visibility (toggled from the header).
+  const [showHistory, setShowHistory] = useState(true);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // Polls the HITL console for a decision, then auto-resumes — so the consumer
@@ -200,10 +208,50 @@ export default function CatalogChatPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Guards the one-time mount reload so it doesn't re-seed on every render.
   const reloadedRef = useRef(false);
+  // Guards the one-time ?session seed so it fires only on the first render where
+  // the agent name has resolved (both come from the same catalog-detail query).
+  const seededRef = useRef(false);
+
+  // Rehydrate a past thread into the chat pane. Reads the transcript from the
+  // backend (listMemory) — NOT from client state — sets the session id to that
+  // thread so the next POST continues it, and seeds PLAIN user/assistant bubbles.
+  // Rich slots (tool chips / rationale / run tree / citations) are intentionally
+  // NOT reconstructed here — this matches the page's existing non-live reload
+  // branch; only the live workflow/citation paths render the rich slots.
+  const seedFromThread = useCallback(
+    async (agent: string, threadId: string, deploymentId?: string) => {
+      const rows = await listMemory(agent, {
+        thread_id: threadId,
+        deployment_id: deploymentId,
+        limit: 200,
+      });
+      setSessionId(threadId);
+      setMessages(
+        rows
+          .filter((r) => r.role === "user" || r.role === "assistant")
+          .map((r) => ({
+            role: r.role as "user" | "assistant",
+            content: r.content,
+            author: r.agent_name,
+          })),
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // On mount (once the agent name has resolved), if the URL carries
+  // ?session=<thread_id>, rehydrate that thread's prior turns from /memory.
+  useEffect(() => {
+    if (seededRef.current) return;
+    const sessionParam = searchParams.get("session");
+    if (!sessionParam || !agentName) return;
+    seededRef.current = true;
+    void seedFromThread(agentName, sessionParam, activeDeployment?.id);
+  }, [searchParams, agentName, activeDeployment?.id, seedFromThread]);
 
   // Clean up any poll on unmount.
   useEffect(() => {
@@ -592,7 +640,9 @@ export default function CatalogChatPage() {
   const orchestration = workflowMeta?.orchestration;
 
   return (
-    <div className="flex flex-col h-screen bg-white">
+    <div className="flex h-screen bg-white">
+      {/* Chat column (existing vertical stack: header / console / banner / messages / input) */}
+      <div className="flex flex-col flex-1 min-w-0">
       {/* Header */}
       <div className="border-b border-slate-200 px-6 py-3 flex items-center gap-3 shrink-0">
         <Link
@@ -625,6 +675,20 @@ export default function CatalogChatPage() {
             {activeDeployment.version_label}
           </span>
         )}
+        {/* Docked History toggle — opens the conversation list for this production deployment. */}
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          aria-pressed={showHistory}
+          title="Conversation history"
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+            showHistory
+              ? "bg-slate-800 text-white"
+              : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+          }`}
+        >
+          <History size={14} /> History
+        </button>
       </div>
 
       {/* Workflow console shell (2b-iii): member count + shared-thread subtitle
@@ -789,6 +853,41 @@ export default function CatalogChatPage() {
           </button>
         </form>
       </div>
+      </div>
+
+      {/* Docked History panel — one shared ConversationSidebar, scoped to this
+          production deployment's threads. Select rehydrates via seedFromThread;
+          New mints a fresh session. Select/New are blocked while streaming or
+          awaiting approval so a running turn is never interrupted. */}
+      {showHistory && (
+        <aside className="w-80 border-l border-slate-200 flex flex-col shrink-0">
+          <div className="border-b border-slate-200 px-4 py-3 flex items-center justify-between shrink-0">
+            <h2 className="text-sm font-semibold text-slate-900">History</h2>
+            <button
+              type="button"
+              onClick={() => setShowHistory(false)}
+              className="text-slate-400 hover:text-slate-600"
+              title="Close history"
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-3">
+            {agentName && (
+              <ConversationSidebar
+                scope={{ kind: "agent", agentName, deploymentId: activeDeployment?.id }}
+                activeThreadId={sessionId}
+                onSelect={(s) => seedFromThread(agentName, s.thread_id, activeDeployment?.id)}
+                onNew={() => {
+                  setSessionId(crypto.randomUUID());
+                  setMessages([]);
+                }}
+                disabled={isStreaming || !!pendingApproval}
+              />
+            )}
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

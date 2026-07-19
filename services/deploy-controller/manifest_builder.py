@@ -193,17 +193,24 @@ def build_deployment(
     if llm_provider_model:
         env_vars.append(k8s_client.V1EnvVar(name="LLM_MODEL", value=llm_provider_model))
 
-    # Map secret keys to the canonical env var names expected by provider SDKs.
-    _ENV_NAME_MAP = {
-        "aws_access_key_id": "AWS_ACCESS_KEY_ID",
-        "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
-        "aws_region": "AWS_DEFAULT_REGION",
-        "api_key": "ANTHROPIC_API_KEY",
+    # Map secret keys to the canonical env var names expected by each provider's
+    # SDK. Per-provider so `api_key` maps to ANTHROPIC_API_KEY only for anthropic
+    # (not blindly for every provider) and `base_url` maps to OLLAMA_BASE_URL for
+    # ollama. Unmapped keys fall back to key.upper().
+    _PROVIDER_ENV_MAPS = {
+        "anthropic": {"api_key": "ANTHROPIC_API_KEY"},
+        "bedrock": {
+            "aws_access_key_id": "AWS_ACCESS_KEY_ID",
+            "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+            "aws_region": "AWS_DEFAULT_REGION",
+        },
+        "ollama": {"base_url": "OLLAMA_BASE_URL"},
     }
+    _env_map = _PROVIDER_ENV_MAPS.get(llm_provider_type or "", {})
 
     if llm_secret_name and llm_env_keys:
         for key in llm_env_keys:
-            env_name = _ENV_NAME_MAP.get(key, key.upper())
+            env_name = _env_map.get(key, key.upper())
             env_vars.append(
                 k8s_client.V1EnvVar(
                     name=env_name,

@@ -12,6 +12,353 @@
 
 ---
 
+## Workflow deployment Conversations tab — no longer empty — 2026-07-18
+
+**Shipped (registry-api 0.2.205 + studio 0.1.154).** A workflow's Conversations tab was always
+empty. Root cause: a workflow's transcript is authored by its **members** — `agent_memory` rows carry
+`agent_name` = the member (researcher-agent/…), `scope='workflow_run'`, and `user_id` = **NULL** (the
+reactive member dispatch never threads the user through) — but the tab queried
+`GET /agents/{workflow_name}/memory/conversations`, which filters `user_id = :caller AND agent_name =
+:workflow_name` and so matched **nothing** (wrong on both counts).
+
+**Fix (reason-from-data, not a patch).** The workflow's identity + ownership already live on its
+**parent run**: `agent_runs.workflow_id` / `.user_id` / `.session_id` (== the transcript `thread_id`).
+So workflow conversations resolve by joining `agent_memory → the workflow's parent runs` on
+`session_id` (DISTINCT semi-join — no fan-out when a session recurs across runs), taking ownership +
+display name from the parent run, not the member rows. New `memory.list_workflow_conversations` +
+`ConversationStore.list_workflow_conversations` port method + `GET /workflows/{id}/conversations`
+(require_user). Frontend: `ConversationSidebar` gains an explicit `kind:'workflow'` scope (no
+name-type-sniffing), a new `WorkflowConversationsTab` routes click-through to
+`/workflows/:id/d/:depId/chat?session=…`, and `WorkflowDeploymentOverviewPage` mounts it by workflow id.
+
+**Proof.** `suite-78` **T-S78-005** (self-contained: seeds a workflow + parent run + a member-authored
+NULL-user transcript → the workflow endpoint surfaces it for the owner, a non-owner is excluded);
+suite-78 **5/5**. Vitest **339/339** (new `WorkflowConversationsTab.test.tsx` asserts it calls the
+workflow endpoint, NOT the agent one). Playwright `e2e/workflow-conversations.spec.ts` (asserts the tab
+fires `GET /workflows/{id}/conversations` + routes on click). **Live browser** (Platform Admin): the
+`research-summarize` deployment Conversations tab now lists 12 threads (incl. "what is the weather like
+in austin for next 10 days?"), and clicking one routes to `…/chat?session=9a9e2fa3…`.
+
+**Gaps:**
+- **SHIPPED (registry-api 0.2.207 / studio 0.1.156):** `WorkflowChatPage` now **rehydrates** a past
+  `?session` — `seedFromThread` loads the `scope='workflow_run'` transcript via
+  `GET /workflows/{id}/memory?thread_id=` and replays it as attributed member bubbles on mount (was: the
+  pane opened on the empty "Send a message to run this workflow" composer). Proof: `WorkflowChatPage.test.tsx`
+  (Vitest) + `studio/e2e/workflow-memory.spec.ts` (Playwright replay guard).
+- **SHIPPED (registry-api 0.2.207 / studio 0.1.156):** the workflow deployment **Memory** tab is no longer
+  empty — new `WorkflowMemoryTab` reads `GET /workflows/{id}/memory` (member entries resolved through the
+  workflow's parent runs, the same fix class as the Conversations tab), replacing
+  `MemoryTab agentName={workflow.name}` which matched nothing (member-name/NULL-user keying). Proof:
+  `suite-78 T-S78-006` (backend read-back), `WorkflowMemoryTab.test.tsx` (Vitest),
+  `workflow-memory.spec.ts` (Playwright tab guard). Bug doc:
+  `docs/bugs/workflow-ledger-rehydrate-and-memory-tab.md`.
+- **deferred (intentional):** these workflow runs are playground/builder (`workflow_deployment_id`
+  NULL), so the workflow Conversations/Memory lists are scoped by `workflow_id` + owner, NOT by a specific
+  workflow deployment. Per-deployment scoping would first need deployed workflow runs to write the
+  `workflow_deployment_id` at run time — a deployed-runtime change, out of scope for the ledger fix.
+  (No numbered `docs/debugging/NNN` log was written: the diagnosis was a known class — a direct mirror of
+  the shipped Conversations fix — with no multi-layer dead-ends.)
+
+---
+
+## Knowledge Search is a special config, not a listed tool — 2026-07-18
+
+**Shipped (registry-api 0.2.204 + studio 0.1.153).** `knowledge_search` is no longer a hand-picked
+tool. An agent is instead tied to **one or more Knowledge Bases** via a dedicated picker on both the
+**Create Agent** form and the agent **Settings** tab; attaching a KB wires `knowledge_search`
+server-side, and the tool is **hidden from the Tools list** everywhere.
+
+- **Backend.** `bind_agent` is now an **additive upsert** (was drop-then-insert → one KB per agent);
+  new reverse-lookup `GET /knowledge-bases/agent-bindings/{agent_id}` pre-selects the picker;
+  `internal_knowledge_search` **fans out across all bound KBs** (each call still single-KB, S5
+  isolation preserved) and merges by score, tagging each citation with its KB. **Invariant fixed
+  centrally:** `updateAgent` now enforces `knowledge_search ∈ agent_tools ⟺ agent has ≥1 KB binding`
+  — the metadata.tools rebuild used to silently detach the binding-attached tool; now any caller of
+  `PUT /agents/{name}` is protected (the runner reads tools from the `agent_tools` join table via
+  `GET /agents/{name}/tools`, so this is what actually reaches the pod).
+- **Vector store** access stays behind the `VectorStore` Protocol/port (`store_factory.get_vector_store()`),
+  so the multi-KB fan-out required **no** change to the pgvector adapter.
+- **Proof.** `scripts/e2e/suite-80-agent-knowledge-binding.sh` **4/4** (additive bind, unbind sibling
+  survives, **fan-out retrieval across 2 KBs with correct per-KB citations**, derived-tool invariant);
+  suite-77 regression **5/5** (single-KB path + tenant isolation intact). Vitest **336/336** (incl. new
+  CreateAgentPage + AgentDetailPage KB-picker cases). Playwright **`e2e/agent-knowledge-config.spec.ts`
+  2/2** (create-with-KB → hidden tool + binding pre-selected on reload; Settings unbind→save→reload→rebind
+  round-trip). **Live browser** (Platform Admin, gateway): created an agent with a KB → Settings showed
+  the KB pre-selected + `knowledge_search` absent from Tools → unchecked + Save → reload → unbind persisted.
+
+**Gaps:**
+- **deferred (intentional):** the KB picker is on the **no-code** Create form and the agent Settings
+  tab only. The **"Write Python" (SDK-code) create path** (`CreateAgentPage` `CodeForm`) has **no KB
+  picker** — an SDK agent still gets `knowledge_search` the old way (bind from the KB detail page, or
+  list it in code). Wiring the picker into `CodeForm` is the follow-up.
+- **not-yet-wired (debt), pre-existing (NOT from this change):** **stale Playwright fixture sub.** The
+  Keycloak realm was re-seeded — platform-admin's real sub is now `047fad5f-…` (old `75c7c8b3-…` now
+  **401s** on `/me`). `knowledge.spec.ts` + `agent-knowledge-config.spec.ts` were updated to the real
+  sub (both green). **7 other specs still hardcode the stale sub** — `deployment-conversations`,
+  `durable-stream`, `poc2b-rich-console`, `context-attribution`, `zzprobe`, `webhook-public-url`,
+  `conversations-sidebar` — they mostly still pass (their assertions don't cross the header-team↔JWT-team
+  boundary the way knowledge.spec's attach picker does), but the hardcoded sub is fragile. Proper fix:
+  resolve the sub dynamically from `GET /me` in a shared e2e helper instead of hardcoding.
+
+---
+
+## ⚠️ MUST-REVERT BEFORE REBASE — temporary OPA governance bypass — 2026-07-17
+
+**not-yet-wired (debt) — blocks rebase onto main.** `sdk/agentshield_sdk/graph_builder.py`
+(~L279-299, added in commit `c9ef259`) contains a **TEMPORARY fail-open OPA bypass**: when OPA
+returns `deny` the tool call is **allowed anyway** (only a "OPA WOULD DENY … ALLOWING ANYWAY"
+warning is logged; the original fail-closed `return "…denied by policy…"` is commented out). This
+makes tool governance **fail-open for every agent on this branch** and exists only to demo the
+context-storage POC workflow (`poc-research-answer` / `web_search`) where a `user_delegated` tool
+call in an autonomous workflow otherwise hits OPA `default_deny`.
+
+**The proper fix for that underlying issue is already on `main`.** Therefore this bypass MUST be
+reverted **before / as part of rebasing this branch onto main** — otherwise it re-opens governance
+on top of a base that already fixed it correctly. **To revert:** delete the bypass block and
+uncomment the original fail-closed behavior (both in `graph_builder.py`), rebuild the
+declarative-runner, re-materialize agents. Carried in memory (`opa-governance-bypass-revert`).
+
+## Credentials: empty-shell detection + serper HITL verified end-to-end — 2026-07-17
+
+**Shipped (registry-api 0.2.198 + studio 0.1.149).** The root cause of the `web_search` **403** was
+that the `serper-dev` credential was an **empty shell** — a named `auth_config` row linked to the
+`web_search` tool (header `X-API-KEY: {{serper_api_key}}`) but with **no value ever stored**
+(`credentials_encrypted` NULL, no K8s secret). It looked configured because a credential's value is
+write-only (never returned), and the Credentials page **silently omitted `credentials` from a PUT**
+when the value field was left blank while still showing a "Credential updated" toast — so an edit
+that stored nothing read as success.
+
+**Fix (design, not bandaid):** `AuthConfig.has_credentials` (backend property → `AuthConfigResponse`
+field) makes "value actually stored" observable. The Credentials page now (a) **badges** empty
+shells "no key set" in the list, (b) **requires a secret value** on create and when editing a
+credential that has none stored (zod `makeSchema(valueRequired)`), and (c) warns inline — a
+credential can no longer be saved into an unusable empty state.
+
+**Journey proof.** Backend: `scripts/e2e/suite-51-credential-validation.sh` **T-S51-007** (empty-shell
+`has_credentials=false` + no K8s secret → PUT a value → `has_credentials=true` + secret materialized);
+suite **7/7 green** against the deployed image. **Live end-to-end** (the real user journey): set the
+real serper key on `serper-dev` via `PUT /auth-configs/{id}` → secret materialized → **redeployed
+`hitl-agent`** (`POST /agents/hitl-agent/deploy`, sandbox) so the deploy-controller copied the secret
+into `agents-platform` (`serper_api_key: 40 bytes`) and started a fresh pod mounting it via `envFrom`
+→ drove `POST /agents/hitl-agent/chat` → **`approval_requested` (tool=web_search)** → approve →
+resume-stream → **`tool_call_end` with real serper.dev `organic` results, NO 403** → Ollama produced
+a grounded weather answer → **`done`**. This exercises the credential fix, the tool-secret copy, and
+the reactive-HITL streaming fix (runner 0.1.58 `aget_state`) together.
+
+Tagged **deferred (intentional)** unless noted:
+
+- **`serper-agent-4` retired** — *intentional*. Its registry record was already deleted (GET → 404),
+  leaving an orphaned crashlooping k8s Deployment (runner startup 404s on `GET /agents/serper-agent-4`);
+  the Deployment was deleted this session at the user's request. `hitl-agent` (reactive, `web_search`
+  risk=high, Ollama, memory-on, owned by `platform-admin`) is now the canonical reactive-HITL fixture.
+- **suite-45 re-pointed to `hitl-agent`** — its default fixture is now `AGENT="${HITL_AGENT:-hitl-agent}"`
+  (was the deleted `serper-agent-4`). Governance pre-flight **T-S45-001** (OPA bundle has the agent with
+  `web_search` risk=high) and reactive HITL **T-S45-011** now PASS; the live drive above is a stronger
+  form of **T-S45-012**.
+- **suite-45 sandbox-approval tests need a `KALYAN`-owned fixture** — *not-yet-wired (debt)*.
+  **T-S45-003/004/007/008/009** fail with `403 "Only the agent owner can run it in the playground"`
+  because they act as the suite's hardcoded `KALYAN`/`ADMIN` test users, but **every live `web_search`
+  agent is owned by `platform-admin` (`047fad5f`)** — the retired `serper-agent-4` was `KALYAN`-owned.
+  Fix: create a `KALYAN`-owned `web_search` fixture (or align the suite's per-test actor to the fixture
+  owner). Not a regression from the credential change — the `has_credentials` field never touches the
+  sandbox-deployment-chat path.
+- **T-S45-010 pre-existing `KeyError('run_id')`** in the batch-eval auto-approve path — *not-yet-wired
+  (debt)*, unrelated to credentials.
+- **T-S45-012 SKIPs under Ollama non-determinism** — the small local model sometimes answers from its
+  own knowledge instead of calling `web_search` (no tool call → no parking → no approval). Same
+  best-effort boundary the suite already accepts; the live drive (with an explicit "use web search"
+  nudge) reliably parks.
+- **Studio `CredentialsPage.test.tsx` (3 new Vitest cases) not run on host** — *not-yet-wired (debt)*.
+  node/npm isn't installed here, so component Vitest can't run locally; the TypeScript gate ran via the
+  `studio:0.1.149` Docker build (tsc). Run `cd studio && npm run test` where node is available.
+
+- **deploy-controller supersedes a sandbox deploy by DELETING the shared k8s Deployment/Service** —
+  *not-yet-wired (debt), real defect.* All sandbox deployment rows for an agent share one
+  `k8s_deployment_name` (`{agent}-sandbox`). When a new sandbox deploy supersedes older `running` rows,
+  the controller's terminate path deletes the k8s Deployment + Service **by name** without checking
+  whether a still-active row also claims that name — so a redeploy (especially two racing deploys) can
+  leave the agent **permanently down** (Deployment gone, 0 running pods). Observed live: redeploying
+  `hitl-agent` to pick up the serper secret created a duplicate `running` row; the controller then logged
+  `Deleted Deployment/Service agents-platform/hitl-agent-sandbox` ×3 and the resume-stream's pod proxy
+  got `ConnectError` → the chat showed **"[Error: Agent pod is unreachable.]"** *after* approval.
+  **Recovery** (operational): terminate ALL active rows (`PATCH …/deployments/{id}` `{"action":"terminate"}`)
+  so nothing is left to supersede, then create **one** fresh deploy. **Proper fix** (needs deploy-controller
+  rebuild): ref-count the shared k8s resource — on terminate, skip the k8s delete if any other non-terminated
+  row references the same `(k8s_deployment_name, k8s_namespace)`; only delete when the last claimant goes.
+  (Prompt before changing controller behavior.)
+
+- **Post-approval resume was verified in a real browser (Claude-in-Chrome), not just the API** —
+  the deployed-agent chat journey (`/agents/hitl-agent/chat` → send → self-approve panel → **Approve** →
+  resume) now completes with a grounded weather answer and **no "unreachable" error**. The earlier
+  API-level drive passed only because the pod happened to be reachable at that moment; it used the same
+  `/agents/{name}/chat/{run}/resume-stream` endpoint. **`studio/e2e/hitl-deployment-chat.spec.ts` was
+  re-pointed to `hitl-agent` and strengthened** to assert the resume COMPLETES (grounded answer + no
+  `[Error:]`/"unreachable") — the old spec stopped at "approval panel hides" and would have stayed green
+  through this bug. Playwright can't run on this host (no node/npm) — validated behaviorally via the live
+  browser drive; run `bash scripts/studio-e2e.sh e2e/hitl-deployment-chat.spec.ts` where node exists.
+
+## Workflows: INLINE HITL restored (park → inline approve → resume → complete) — 2026-07-18
+
+**Shipped (registry-api 0.2.203 + studio 0.1.151), browser-verified end-to-end.** The reactive-workflow
+HITL that `c11221d` (execution-models-v2) broke is restored: a workflow member's high-risk tool now parks
+the workflow with an **inline** self-approve panel (NOT the production console), and deciding it inline
+**resumes** the member pod and **advances** the orchestration to completion. Four backend root causes,
+all fixed:
+
+1. **`_derive_context` matched the member run by `id`, not the `thread_id` column** (approvals.py) — a
+   reactive member's approval `thread_id` is a `uuid4().hex` in the child's `thread_id` column, not its
+   `id`, so the lookup missed it and fell back to `context=production` (→ console queue). Now matches both.
+2. **Reactive workflows fail-closed on approval gates** (`_park_or_fail` / `_run_sequential_from`) — reverted
+   per product decision so both shapes checkpoint + park (parking is a DB `orchestrator_state`, not an
+   in-process hold, so the reactive stream ends on the gate and resumes exactly like the single agent).
+3. **The member resume posted to `{agent}-production`** (approvals.py `_resume_and_advance`) which DNS-fails
+   for a sandbox member — now resolves the agent's ACTUAL env pod (mirrors the durable path).
+4. **The playground/inline decide didn't resume+advance a workflow member** (playground.py
+   `decide_playground_approval`) — single-agent playground resumes are client-driven (resume-stream), but a
+   workflow has no such client resume, so it sat at `awaiting_approval`. Now triggers `_resume_and_advance`
+   in the background for workflow members only (single-agent stays client-driven; no double-resume).
+
+Frontend (studio 0.1.151): `WorkflowChatPage` shows the real inline `ConversationApprovalPanel` (right rail)
+instead of a notice, and on decide polls the run tree to render the resumed members' output. Conversations
++ Memory tabs added to the workflow deployment overview (agent parity). **Journey proof:**
+`scripts/e2e/suite-79-workflow-hitl.sh` (**T-S79-001** inline/playground context; **T-S79-002** parks not
+fails; **T-S79-003** inline decide → resume → completes with both members) — 3/3 green; plus a live
+Claude-in-Chrome drive (inline panel → Approve → researcher's real search results + summarization →
+completed). **Same fixes cover the eval case** (evals run playground context + sandbox pods).
+
+Follow-ups (small): the resumed-continuation renderer appends the parent's final output even when it equals
+the last member's output (a duplicate bubble — cosmetic); the workflow Conversations tab lists by
+`agent_name = workflow.name`, so it shows "no conversations yet" until workflow-run conversations are
+indexed under the workflow name; a Playwright/Vitest spec for the inline-approve→resume browser journey
+(validated live, but node/npm isn't on this host).
+
+## Workflows: reactive-workflow chat exposed + editable settings — 2026-07-17
+
+**Shipped (studio 0.1.150 + registry-api 0.2.199).** Two user-reported gaps in the workflow UX:
+
+1. **Reactive workflows had no chat entry point.** The chat capability existed (`CatalogChatPage`
+   streams `POST /workflows/{id}/runs/stream`) but was only reachable from the catalog; a draft/deployed
+   reactive workflow like `research-summarize` had no "Open Chat" icon or endpoint listed on its own
+   pages — no way to trigger it. Fix: new **`WorkflowChatPage`** + routes `/workflows/:id/chat` and
+   `/workflows/:id/d/:depId/chat` (self-contained, keyed by workflow id, reuses the shared chat reducers +
+   `AttributedBubble`); **"Open Chat"** on `WorkflowDeploymentOverviewPage` (reactive + running) and on the
+   `WorkflowDetailPage` deployment rows; the **chat endpoint** (`POST /api/v1/workflows/{id}/runs/stream`)
+   is now listed on the deployment overview. Parity with a reactive agent's `DeploymentOverviewPage`.
+2. **Workflow properties were read-only after creation.** The Save Workflow dialog sets Execution Shape /
+   Authority (class) / Orchestration Mode / Share-context, but the Settings tab displayed them read-only.
+   Fix: the **Settings tab is now an editable form** (option labels mirror the create dialog) wired to
+   `PATCH /workflows/{id}` (`updateCompositeWorkflow`), with a save→invalidate round-trip.
+
+Tagged **deferred (intentional)** unless noted:
+
+- **SHIPPED (registry-api 0.2.206 / studio 0.1.156) — reactive-workflow multi-approval resume + re-surface.**
+  A reactive workflow member that trips a HITL gate parks, self-approves inline, and resumes; and if the
+  resumed member trips a **SECOND** gate in the same turn, the run now **re-parks** instead of "completing"
+  with the echoed non-answer + an orphaned 2nd approval (the reported regression). Backend:
+  `_resume_and_advance` mirrors the forward path's authoritative pause detection (re-park while any approval
+  on the thread is still `pending`). Frontend: `WorkflowChatPage.pollResumedResult` re-surfaces the 2nd inline
+  `ConversationApprovalPanel`, correlated by the parked child's `thread_id` via `listPendingApprovals`.
+  **Manual double-approval step:** in a `research-summarize`-style workflow, send a prompt that makes the
+  researcher search twice → approve gate 1 inline → the 2nd gate re-appears in the same panel → approve →
+  the run finishes with the real (searched) answer, no orphaned `pending` approval. Proof:
+  `suite-79 T-S79-004b` (deterministic backstop, RED→GREEN), `WorkflowChatPage.test.tsx` (re-surface Vitest).
+  Docs: `docs/bugs/hitl-multi-approval-resume-regression.md`, `docs/debugging/012-hitl-second-approval-orphaned.md`.
+  **Cross-surface double-approval coverage (deterministic component tests):** single-**agent** re-surface
+  (`AgentChatPage.test.tsx` — resume-stream re-interrupts on a 2nd gate; the agent path was never broken,
+  which is why the bug was workflow-specific), **production console** re-appear (`ApprovalsInboxPage.test.tsx`
+  — the queue refetches the re-parked 2nd gate after a decide), and **eval** results (`EvalResultsPage.test.tsx`
+  — both gates render in the HITL approvals panel). Cross-context wiring proven by `suite-79 T-S79-004c`
+  (both decide endpoints route through the re-parking `_resume_and_advance`).
+  *(This supersedes the "reactive members can't resume at all" note below for the resume path.)*
+- **best-effort / capacity-gated (documented):** the *runtime* bash double-park cases — a single-agent live
+  double-tool-call (suite-45) and a deployed eval/production re-park (suite-73/74) — are **not** deterministic
+  locally (they need the model to call a high-risk tool twice in one turn + a warm deployed fixture), so they
+  are covered deterministically by the component tests above rather than a flaky live suite. A real live
+  double-park is exercised opportunistically by `suite-79 T-S79-004a` (loud SKIP when the model doesn't
+  double-call) and the deterministic backstop `T-S79-004b`.
+- **Reactive-workflow HITL resume is not wired** — *not-yet-wired (debt), real gap.* Verified against the
+  runtime: when a reactive workflow member trips an approval gate, the run emits `approval_requested` (a
+  real approval row IS created) then `agent_end` + `done` — the gated tool never runs, downstream members
+  are skipped, **no error**. There is no reactive-workflow resume path (only *durable* members have
+  `resume_durable_member`). Same class as the single-agent HITL "emit `done` instead of park/resume" bug
+  fixed earlier, at the orchestration layer. `WorkflowChatPage` surfaces the `approval_requested` frame as
+  an honest amber notice ("switch to Durable to run approval-gated tools") rather than ending silently.
+  The old author-warning (`compute_reactive_approval_warnings`) claimed the run would **FAIL** — corrected
+  to "STOPS EARLY" to match reality. For `research-summarize` (member `researcher-agent` → approval-gated
+  `web_search`) chat therefore truncates at the approval; a reactive workflow with no gated tools chats
+  end-to-end.
+- **WorkflowChatPage has no Conversations sidebar / history** — *deferred (intentional).* The MVP is
+  trigger + stream + render + reset. The POC-5 Conversations dock (present on `AgentChatPage`/`CatalogChatPage`)
+  is a follow-up for full agent parity.
+- **Frontend specs not run on host** — *not-yet-wired (debt).* node/npm isn't installed here, so the new
+  page's Vitest and a Playwright spec for the workflow-chat + editable-settings journeys couldn't be
+  written/run locally; the TypeScript gate ran via the `studio:0.1.150` Docker build (tsc), and the flows
+  were driven live in a real browser (Claude-in-Chrome). Add `WorkflowChatPage.test.tsx` + a
+  `workflow-chat.spec.ts` where node exists (save→reload→assert on the editable Settings tab).
+
+## Known gaps (context-storage POC-4 — Team Knowledge Base / RAG) — 2026-07-17
+
+POC-4 shipped: team Knowledge Bases with real retrieval (Sources chunked + embedded with
+`bge-small-en-v1.5`/384-dim into pgvector; MinIO blobs; `knowledge_search` HTTP tool → the
+cluster-internal `POST /api/v1/internal/knowledge/search` backend), structural tenant isolation
+(every KB read/write scoped to the caller's team; `kb_id` resolved server-side from
+`agent_knowledge_bindings`, never the model; `PgVectorStore.search` re-enforces `(team, kb_id)`),
+and the citation chip closing the POC-2b `AttributedBubble.citations` slot.
+
+**Journey proof.** Backend: `scripts/e2e/suite-77-knowledge-rag.sh` (**T-S77-001** create+upload→
+ready+`chunk_count>0`; **T-S77-002** save→reload persistence round-trip on sources+chunks;
+**T-S77-003** test-retrieval ranks the known fact; **T-S77-004** seed tool + bind agent → internal
+search returns chunks **and** `{source,kb}` citations; **T-S77-005** tenant isolation headline —
+team A blocked from team B's KB at BOTH the public `/{kb}/search` API and the internal endpoint,
+fail-closed, a real leak FAILs). Frontend: `studio/e2e/knowledge.spec.ts` drives the real browser
+journey — create KB → upload fixture → **reload → assert the source survived** → test-retrieval →
+attach agent → **reload → assert the binding survived** → on the **playground** surface send a
+question and assert the citation chip. The citation chip is asserted on the **playground
+(ChatPane)** deliberately (see the dormant gap below), and — like the bash suites — the parts that
+need a warm agent pod (the completing tool-calling run) SKIP on capacity rather than fail.
+
+Tagged **deferred (intentional)** unless noted:
+
+- **AgentChatPage (deployed-agent chat) citations are dormant** — *deferred (intentional)*. The
+  page has the full citation wiring (`parseKnowledgeCitations` on `tool_call_end`, `citations`
+  passed to `AttributedBubble`), but its production pod-proxy stream `pod_stream.py::_translate`
+  **drops the successful `tool_call_end` frame** (one chip per call on `tool_call_start`; re-emits
+  only on an *error* end), so no `knowledge_search` result reaches the page. The **playground
+  ChatPane** is the proven live citation surface; feeding the deployed-agent surface means having
+  `_translate` forward the tool result on a successful `tool_call_end` — no frontend change needed.
+- **Playground docked History resumes the VIEW only, not the backend thread** — *not-yet-wired
+  (debt)*. POC-5 added a docked `ConversationSidebar` to the Playground (`PlaygroundPage` →
+  `ChatPane`), scoped to the selected sandbox deployment. Selecting a row seeds `ChatPane` with the
+  thread's transcript (via `listMemory`), but the playground run POST (`startPlaygroundRun` →
+  `PlaygroundRunCreate`) carries **no** `session_id`, so `stream_playground_run` keys the thread on
+  `run_id` every time — the next message starts a **fresh** backend thread rather than continuing
+  the seeded one. The backend already *reads* `run.session_id` at stream time
+  (`thread_id = run.session_id or run_id`); the only missing hop is accepting + persisting
+  `session_id` on `PlaygroundRunCreate` / `create_playground_run`. Until then, Playground History is
+  a browse-and-view lens over past sandbox runs (the AgentChatPage/CatalogChatPage docked History
+  already do full continue-with-context because their POST carries `session_id`).
+- **S7 ingest content-scanning** — *deferred (intentional)* to Tighten. Uploaded Source bytes are
+  chunked/embedded without a malware/PII/prompt-injection scan on the ingested content.
+- **DOCX (and other rich-doc) extraction** — *deferred (intentional)*. POC supports `text/plain`,
+  `text/markdown`, `application/pdf` (`.txt/.md/.pdf`) only; other types → `415`.
+- **Durable ingest worker** — *deferred (intentional)*. Ingest is fire-and-forget via FastAPI
+  `BackgroundTasks` (no queue/retry). A Source stuck in `indexing` (e.g. a pod restart mid-ingest)
+  is recovered by the **Reprocess** button, not an automatic retry.
+- **Multi-KB per agent** — *deferred (intentional)*. POC = **one** binding per agent; binding a new
+  KB replaces the prior one. Fan-out across several KBs is future work.
+- **Orphan-blob GC** — *deferred (intentional)*. Deleting a Source/KB cascades its DB rows + vector
+  rows via FK `ON DELETE CASCADE`, but the MinIO blob is left behind (no best-effort blob delete /
+  sweeper yet).
+- **External embedding providers** — *deferred (intentional)*. Embeddings come only from the
+  in-cluster embedding-sidecar; Voyage/OpenAI-style external providers are not wired.
+- **pgvector-absent keyword degrade** — *deferred (intentional)*. `PgVectorStore` falls back to a
+  team+kb-scoped keyword `ILIKE` (`score=0.0`) only when the vector column is absent (e.g. a dev DB
+  without pgvector). On EKS pgvector is **present** (CP-0), so retrieval is semantic; the degrade is
+  a surfaced-not-silent dev fallback, never an EKS path.
+- **Signed pod↔registry service token for the internal endpoint** — *deferred (intentional)*. The
+  internal `knowledge/search` endpoint trusts the cluster boundary + the fail-closed server-side
+  `(agent_name, team)` binding re-check; a signed pod→registry service token is future hardening.
+
 ## Known gaps (context-storage POC-2b rich console) — 2026-07-16
 
 POC-2b shipped: live multi-agent workflow console (progressive member streaming via

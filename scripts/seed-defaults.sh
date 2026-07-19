@@ -120,6 +120,47 @@ CALC=$(post_idempotent "/api/v1/tools/" \
   "calculator")
 CALC_ID=$(echo "$CALC" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
 
+# --- knowledge_search (HTTP, cluster-internal RAG backend — POC-4) ---
+# The team + agent name in the headers are substituted server-side by HttpToolExecutor
+# from the agent pod's env (AGENTSHIELD_AGENT_TEAM / AGENT_NAME) — unspoofable by the
+# model. {{query}} is the ONLY model-controlled input. kb_id is NEVER in the tool: the
+# internal /knowledge/search endpoint resolves it from agent_knowledge_bindings by
+# (agent_name, team), then PgVectorStore re-enforces (team, kb_id) as required
+# predicates (S5). Body is built with json.dumps so the nested input_schema is exact.
+KNOWLEDGE_SEARCH_BODY=$(python3 <<'PY'
+import json
+print(json.dumps({
+    "name": "knowledge_search",
+    "display_name": "Knowledge Search",
+    "description": "Search the team's knowledge base for passages relevant to a question. Returns the most relevant document chunks with their source. Use this to ground answers in the team's own documents and cite them.",
+    "type": "http",
+    "risk_level": "low",
+    "owner_team": "platform",
+    "side_effecting": False,
+    "http_method": "POST",
+    "http_url": "http://agentshield-registry-api.agentshield-platform.svc.cluster.local:8000/api/v1/internal/knowledge/search",
+    "http_headers": {
+        "Content-Type": "application/json",
+        "X-Agent-Team": "{{AGENTSHIELD_AGENT_TEAM}}",
+        "X-Agent-Name": "{{AGENT_NAME}}",
+    },
+    "http_body_template": "{\"query\": \"{{query}}\", \"k\": 5}",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The question or search phrase to look up in the knowledge base.",
+            },
+        },
+        "required": ["query"],
+    },
+}))
+PY
+)
+KNOWLEDGE_SEARCH=$(post_idempotent "/api/v1/tools/" "$KNOWLEDGE_SEARCH_BODY" "knowledge_search")
+KNOWLEDGE_SEARCH_ID=$(echo "$KNOWLEDGE_SEARCH" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+
 echo ""
 
 # ===========================================================================

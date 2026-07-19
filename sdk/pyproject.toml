@@ -14,6 +14,7 @@ dependencies = [
     "langchain>=0.3",
     "langchain-anthropic>=0.3",
     "langchain-aws>=0.2",
+    "langchain-ollama>=0.2",
     "langchain-core>=0.3",
     # langfuse v2 client is kept only for the SDK's safety-scan tracer; LLM/tool
     # span capture is done via OpenTelemetry (see below), NOT langfuse's langchain

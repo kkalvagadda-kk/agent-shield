@@ -85,22 +85,36 @@ export interface Deployment {
 
 export type DeploymentAction = "suspend" | "resume" | "terminate" | "upgrade";
 
+export type LLMProviderKind = "anthropic" | "bedrock" | "ollama";
+
 export interface LLMProvider {
   id: string;
   name: string;
-  provider: "anthropic" | "bedrock";
+  provider: LLMProviderKind;
   default_model: string;
   team: string;
   created_at: string;
   updated_at: string;
 }
 
+// Credentials are provider-specific, sent as a flat string map:
+//   anthropic → { api_key }
+//   bedrock   → { aws_access_key_id, aws_secret_access_key, aws_region }
+//   ollama    → { base_url }
+export interface LLMProviderCredentials {
+  api_key?: string;
+  aws_access_key_id?: string;
+  aws_secret_access_key?: string;
+  aws_region?: string;
+  base_url?: string;
+}
+
 export interface LLMProviderCreate {
   name: string;
-  provider: "anthropic" | "bedrock";
+  provider: LLMProviderKind;
   default_model: string;
   team: string;
-  credentials: Record<string, string>;
+  credentials: LLMProviderCredentials;
 }
 
 export interface Team {
@@ -755,13 +769,30 @@ export const getWorkflowRunTree = async (
 // stream is consumed via `fetch` + a ReadableStream reader (EventSource is
 // GET-only and the stream needs a POST body), so it is NOT the axios instance.
 export interface WorkflowStreamFrame {
-  type: "agent_start" | "token" | "tool_call" | "rationale" | "agent_end" | "done" | "error";
+  type:
+    | "agent_start"
+    | "token"
+    | "tool_call"
+    | "rationale"
+    | "agent_end"
+    | "done"
+    | "error"
+    // A reactive member can trip a HITL approval gate mid-run: the orchestrator
+    // forwards the member's `approval_requested` frame (see workflow_orchestrator
+    // `_dispatch_stream`). Reactive workflows can't resume through it yet, so the
+    // chat surfaces it as a notice rather than a resumable panel.
+    | "approval_requested";
   author?: string;
   content?: string;
   tool?: string;
   status?: string;
   run_id?: string;
   message?: string;
+  approval_id?: string;
+  thread_id?: string;
+  args?: Record<string, unknown>;
+  risk?: string;
+  reasoning?: string | null;
 }
 
 // FULL path (includes the /api/v1 prefix) because the page's fetch is not the
@@ -904,6 +935,9 @@ export interface AuthConfig {
   owner_team: string | null;
   created_at: string;
   updated_at: string;
+  // True once a secret value has actually been stored. The value itself is never
+  // returned; this distinguishes a configured credential from an empty shell.
+  has_credentials: boolean;
 }
 
 export interface CreateAuthConfigPayload {
@@ -1594,6 +1628,86 @@ export const deleteMemoryThread = async (
 
 export const clearAgentMemory = async (agentName: string): Promise<void> => {
   await http.delete(`/agents/${agentName}/memory/clear`);
+};
+
+// ---------------------------------------------------------------------------
+// Conversations (POC-5)
+// Read-side aggregate over agent_memory: one summary row per thread_id. Both
+// endpoints are ownership-scoped server-side (user_id = caller.sub). `environment`
+// is derived from deployment_id (join production_deployments), so the standalone
+// page's All/Sandbox/Production filter is a pure client predicate.
+// agent_name/last_activity are non-null here — the aggregate guarantees them
+// (min() over a NOT-NULL column / max(created_at)) — even though the Pydantic DTO
+// marks them Optional; this keeps renderers free of spurious null-guards.
+// ---------------------------------------------------------------------------
+export interface ConversationSummary {
+  thread_id: string;
+  session_id: string | null;
+  agent_name: string;
+  title: string | null;
+  message_count: number;
+  last_activity: string;
+  deployment_id: string | null;
+  environment: "sandbox" | "production";
+}
+
+// Scoped list (docked History + deployment Conversations tab).
+// GET /agents/{name}/memory/conversations — filters agent_name = {name}, and
+// deployment_id when provided (sandbox and production threads stay disjoint).
+export const listConversations = async (
+  agentName: string,
+  params?: {
+    deployment_id?: string;
+    limit?: number;
+    offset?: number;
+  }
+): Promise<ConversationSummary[]> => {
+  const resp = await http.get(`/agents/${agentName}/memory/conversations`, { params });
+  return resp.data;
+};
+
+// Cross-agent list (standalone /conversations page). No agent/deployment filter —
+// every thread owned by the caller, each carrying its derived environment.
+export const listMyConversations = async (
+  params?: {
+    limit?: number;
+    offset?: number;
+  }
+): Promise<ConversationSummary[]> => {
+  const resp = await http.get(`/me/conversations`, { params });
+  return resp.data;
+};
+
+// Workflow-scoped list (the workflow deployment Conversations tab). A workflow's
+// transcript is authored by its MEMBERS, so this resolves ownership + identity
+// through the workflow's parent runs server-side (GET /workflows/{id}/conversations)
+// rather than by an agent_name — same ConversationSummary shape.
+export const listWorkflowConversations = async (
+  workflowId: string,
+  params?: {
+    limit?: number;
+    offset?: number;
+  }
+): Promise<ConversationSummary[]> => {
+  const resp = await http.get(`/workflows/${workflowId}/conversations`, { params });
+  return resp.data;
+};
+
+// Workflow-scoped memory ENTRIES (GET /workflows/{id}/memory) — backs BOTH the
+// workflow deployment Memory tab (no thread_id → recent entries, newest-first) and
+// WorkflowChat past-session replay (thread_id → that thread's transcript, oldest-first).
+// Ownership resolves through the workflow's parent runs server-side, like the
+// conversations list — same MemoryMessage shape as the per-agent memory read.
+export const listWorkflowMemory = async (
+  workflowId: string,
+  params?: {
+    thread_id?: string;
+    limit?: number;
+    offset?: number;
+  }
+): Promise<MemoryMessage[]> => {
+  const resp = await http.get(`/workflows/${workflowId}/memory`, { params });
+  return resp.data;
 };
 
 // ---------------------------------------------------------------------------

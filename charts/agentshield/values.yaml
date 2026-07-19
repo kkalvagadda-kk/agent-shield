@@ -108,6 +108,18 @@ python-executor:
 scheduler:
   enabled: true
 
+# embedding-sidecar: POC-4 Knowledge Base / RAG embedding service. A small FastAPI
+# app that turns text into 384-dim vectors (bge-small-en-v1.5, ONNX via fastembed).
+# registry-api's ingest pipeline + internal knowledge/search call it so query and
+# document vectors come from one model. Rendered by the parent-chart template
+# templates/embedding-sidecar.yaml (NOT a sub-chart), so its image lives here.
+embeddingSidecar:
+  enabled: true
+  image:
+    repository: registry.internal/agentshield/embedding-sidecar
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+
 # event-gateway: Phase 9 public webhook ingress. Image tag + tunables come from
 # the sub-chart defaults (charts/event-gateway/values.yaml); Ingress + L4
 # NetworkPolicy are OFF by default there (local Docker Desktop has no ingress
@@ -594,7 +606,22 @@ registry-api:
     # and forced deployment_id IS NULL (excluded deployment-tagged rows). Restore
     # row metadata through the Turn port + reconcile the deployment filter.
     # 0.2.189: SSE token/agent_start frames carry author (POC-2 attribution)
-    tag: "0.2.191"
+    # 0.2.192: POC-5 backend — list_conversations + /me/conversations + /agents/{name}/memory/conversations
+    # 0.2.193: POC-5 fix — list_conversations min(deployment_id) → array_agg[1] (no min(uuid) in Postgres)
+    # 0.2.194: Ollama provider — LLM_PROVIDER_SPECS registry + base_url credential + drop provider CHECK (migration 0066)
+    # 0.2.195: POC-4 Knowledge Base / RAG — migration 0067 + ports + ingest + knowledge/internal routers + knowledge_search tool
+    # 0.2.198: Credentials — AuthConfigResponse.has_credentials (empty-shell detection; 403 root cause)
+    # 0.2.199: workflows — correct reactive-workflow approval warning (STOPS EARLY, not FAIL)
+    # 0.2.200: reactive-workflow HITL — member approval inline (playground), not production console
+    # 0.2.201: restore inline HITL for reactive workflows — park+resume (revert exec-models-v2 fail-closed)
+    # 0.2.202: reactive/eval HITL resume hits the agent's ACTUAL env pod (was -production DNS-fail)
+    # 0.2.203: workflow inline HITL — playground decide resumes+advances the workflow member
+    # 0.2.204: multi-KB per agent (bind upsert + reverse-lookup + search fan-out); updateAgent enforces
+    #   knowledge_search ∈ agent_tools ⟺ ≥1 KB binding
+    # 0.2.205: GET /workflows/{id}/conversations (workflow transcript via parent runs)
+    # 0.2.206: HITL multi-approval fix — reactive member resume re-parks on a still-pending approval
+    # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
+    tag: "0.2.207"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
@@ -659,7 +686,8 @@ deploy-controller:
     # Context Storage POC-0 (T005): injects DIRECT_DATABASE_URL +
     # AGENTSHIELD_DEPLOYMENT_ID into agent pods.
     # 0.1.38: sets imagePullSecrets on agent pods (private-registry pulls).
-    tag: "0.1.38"
+    # 0.1.39: per-provider LLM env map (base_url→OLLAMA_BASE_URL for ollama).
+    tag: "0.1.39"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
@@ -670,7 +698,8 @@ deploy-controller:
   # sdk/agentshield_sdk/ (graph_builder + durable), pip-bundled into this image.
   # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
   # load/save + shared workflow transcript are all baked into this image.
-  declarativeRunnerTag: "0.1.56"
+  # 0.1.57: SDK ChatOllama (langchain-ollama) — LLM_PROVIDER=ollama + OLLAMA_BASE_URL.
+  declarativeRunnerTag: "0.1.58"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -914,7 +943,19 @@ studio:
     repository: registry.internal/agentshield/studio
     # E-2: rebuilt alongside the eval-v2 slice
     # POC-2: per-agent attributed bubbles + eval transcript + share-context toggle
-    tag: "0.1.144"
+    # 0.1.145: Providers form adds Ollama (base_url + freeform model)
+    # 0.1.146: POC-4 Knowledge Base pages + citation chips
+    # 0.1.147: POC-5 Conversations UI (sidebar + standalone page + docked History + deployment tab + nav) — one image, all frontends
+    # 0.1.149: Credentials page — "no key set" badge + require value on create/empty-shell edit (has_credentials)
+    # 0.1.150: Workflows — reactive-workflow chat (WorkflowChatPage + Open Chat + endpoint) + editable Settings
+    # 0.1.151: workflow chat inline HITL panel + resume; Conversations + Memory tabs on workflow deployment
+    # 0.1.152: Knowledge Bases picker in agent create + settings (special config); knowledge_search hidden from tools
+    # 0.1.153: data-testid="tools-picker" on the Tools list (scopes the Playwright knowledge_search-hidden assertion)
+    # 0.1.154: workflow deployment Conversations tab → GET /workflows/{id}/conversations
+    # 0.1.155: knowledge_search leak class-fix — shared ToolsPicker/KnowledgeBasePicker across all 3
+    #   agent-editing surfaces (Create, Settings, Edit modal); modal now hides knowledge_search + has KB picker
+    # 0.1.156: workflow ledger G1+G2 frontend (rehydrate chat + Memory tab) + HITL 2nd-gate re-surface
+    tag: "0.1.156"
     pullPolicy: IfNotPresent
 
   service:
@@ -924,6 +965,18 @@ studio:
   env:
     VITE_REGISTRY_API_URL: "http://agentshield-registry-api:8000"
     VITE_LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
+
+  # Suggested models shown in the LLM Providers form, per provider. Served to the
+  # SPA at runtime via /config.json (nginx ConfigMap), so this list is DYNAMIC —
+  # add a model here + `helm upgrade` (or edit the ConfigMap + restart the studio
+  # pod) and it appears in the form with NO image rebuild. Ollama models are
+  # user-pulled, so the form still accepts any freeform model string; this is a
+  # suggestion/autocomplete list, not an allow-list.
+  providerModels:
+    ollama:
+      - gemma4:12b-mlx
+      - qwen2.5-coder:32b
+      - mistral-small:24b
 
   resources:
     requests:
