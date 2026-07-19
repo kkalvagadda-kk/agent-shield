@@ -646,6 +646,117 @@ A separate, already-existing but unimplemented design, `docs/design/identity-pro
 
 ---
 
+## Decision 30: Webhook Application Identity — RBAC-Scoped Invoker Grants
+
+**Date:** 2026-07-19
+
+**Design doc:** `docs/design/todo/webhook-application-identity.md` (data model, gateway verification flow, API surface, full E2E UX walkthrough, migration plan, test plan)
+
+**Context:** Today (WS-4) a webhook "signing client" is scoped to exactly one trigger — `webhook_clients` is keyed on `(trigger_id, client_id)`, each row with its own independent secret. A real sending application that needs to call N different agents/workflows must be registered N separate times, with N separate secrets to distribute and rotate, and no single place to revoke it. Separately, the trigger and webhook-client management endpoints (`routers/triggers.py`, `routers/webhook_clients.py`) enforce **no authorization at all** today — `get_optional_user` only stamps an audit field, it never gates the call — a gap the `webhook_clients.py` header already names explicitly ("not introduced here — see WS-4 gap ledger").
+
+Decision 25 already defined the right-shaped role for this: `agent-admin`, scoped per artifact (agent/workflow), stored in `artifact_role_grants`, with a documented delegation rule ("agent-admin can grant agent-admin and approver within their artifact scope"). But two things from Decision 25 are still unbuilt: (a) RBAC enforcement is OFF platform-wide (`rbac.py`: `ENFORCE = False`, permit-all-with-warning — explicitly a "Phase 1" stub), and (b) **no grant-management endpoint exists yet for any grantee type** — Decision 25 shipped the data model, the auto-grant-on-create, and a policy-check library (`rbac.has_artifact_role`, `rbac.can_delegate_role`), but never the actual "grant this role to that user/team" API.
+
+Design review (this session) proposed treating a webhook-sending application as a first-class principal, analogous to a user/team, so an `agent-admin` can grant it the ability to invoke their specific agent/workflow — same mechanism as granting a teammate `approver`. Two structural risks surfaced and are designed around explicitly, not glossed over:
+
+1. **Ownership fragmentation.** If creating the application identity is itself a per-agent action, two different agent-admins each independently registering "billing-service" produce two different identities with two different secrets — defeating the entire point of a single reusable credential.
+2. **Use vs. trigger risk asymmetry.** Granting a user "use" access still leaves a human present at any HITL checkpoint mid-session. Granting an application "invoker" access opens an unattended, asynchronous execution path where nobody is present to answer an approval.
+
+**Options considered — application ownership:**
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: Team-owned registry (chosen)** | Application identity created once per owning team; any agent-admin on that team's agents/workflows grants an *existing* application `invoker` on their artifact | Reuses the existing team model (`teams`, `user_team_assignments`); no new persona. Doesn't solve cross-team reuse — an application used by two different teams' agents needs two identities today. |
+| **B: Platform-owned registry** | New platform-admin-only global catalog; any agent-admin can browse/grant any registered application | True cross-team reuse, but requires a new persona + a discovery/visibility UX (does every agent-admin see every application platform-wide?) |
+| **C: Claim-and-attach** | Agent-admin registers inline (today's UX, unchanged); the name becomes a claimed identifier; a second registration attempt becomes an attach-request the original owner approves | Minimal UX change from today, but adds an async approval hop and a name-ownership-transfer problem (creator leaves the team, etc.) |
+
+**Options considered — use vs. trigger risk asymmetry:**
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **1: Same screen, harder confirmation (chosen for v1)** | One grant UI; granting `invoker` requires an explicit "this starts unattended runs with nobody present" acknowledgment, visually distinct from `approver`/user grants | Cheapest — pure UX, no RBAC structure change |
+| **2: Split RBAC capability (deferred, seam preserved)** | Decompose `agent-admin` into manage-user-access vs. manage-application-access, independently assignable | Lets application/integration governance move to a different team later without a migration; not worth building until something asks for it |
+| **3: Bounded unattended-approval policy (deferred, separate decision)** | Per-trigger declared fallback for what happens when an application-triggered run hits an approval gate with nobody present (auto-deny / policy-bounded auto-approve / alert-and-wait-with-timeout) | Orthogonal to RBAC — governs *runtime* behavior, not *grant* behavior. Needed before `invoker` grants are safe to rely on in production; tracked as a required follow-on, not assumed away. |
+
+**Choice:** Option A (team-owned registry) + Option 1 (confirmation-based UX, capability-split seam preserved via a distinct `invoker` role value). Option 3 (bounded unattended-approval policy) is **out of scope for this decision** and must land before production reliance on `invoker` grants.
+
+> **Alignment Check:** The platform's core guarantee is governed execution — every tool call traceable through OPA/HITL to an identity with an auditable grant. Letting an unattended external system trigger agent runs through a *different* mechanism than the one governing human access would quietly open a second, less-audited door — exactly the "two parallel paths" failure mode this codebase has already paid for once (WS-4's own header cites `docs/bugs/side-effecting-lost-on-declarative-runner-path.md`). Routing application grants through `artifact_role_grants` — same table, same enforcement point, same audit trail as human grants — keeps there being one door, not two.
+
+### Detailed Design
+
+**1. New principal — `applications` table (new migration, next available number after 0068):**
+
+```sql
+CREATE TABLE applications (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_name        VARCHAR(255) NOT NULL,         -- owning team (Option A); mirrors agents.team
+    name             VARCHAR(128) NOT NULL,         -- human-chosen, e.g. "billing-service"
+    secret_encrypted TEXT NOT NULL,                 -- Fernet, same AGENTSHIELD_ENCRYPTION_KEY as today
+    enabled          BOOLEAN NOT NULL DEFAULT true,  -- global kill switch, independent of any one grant
+    created_by       VARCHAR(255) NOT NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    rotated_at       TIMESTAMPTZ NULL,
+    CONSTRAINT uq_applications_team_name UNIQUE (team_name, name)
+);
+```
+One secret per application — not one per `(application, trigger)` as today. Rotating it rotates it everywhere the application holds an `invoker` grant, in one action; that's the reuse win the redesign is for. `enabled=false` is a hard kill switch distinct from revoking one grant — "shut this sender off everywhere," which today means hunting down every trigger's `webhook_clients` row individually. Uniqueness is `(team_name, name)`, not global — deliberately, per Option A; cross-team reuse is an explicit, documented non-goal for this decision.
+
+**2. Extend `artifact_role_grants` (widen the two CHECK constraints from migration `0044`, additive):**
+
+```sql
+ALTER TABLE artifact_role_grants DROP CONSTRAINT ck_arg_grantee_type;
+ALTER TABLE artifact_role_grants ADD CONSTRAINT ck_arg_grantee_type
+    CHECK (grantee_type IN ('user','team','application'));
+
+ALTER TABLE artifact_role_grants DROP CONSTRAINT ck_arg_role;
+ALTER TABLE artifact_role_grants ADD CONSTRAINT ck_arg_role
+    CHECK (role IN ('agent-admin','approver','invoker'));
+```
+`grantee_id` (already polymorphic `TEXT`) holds `applications.id::text` when `grantee_type='application'` — no column shape change. New role `invoker`: "this application may trigger this artifact's webhook(s)," scoped per `(artifact_type, artifact_id)` — the same granularity as `agent-admin`/`approver`, **not** per individual trigger row. An artifact with two enabled webhook triggers grants `invoker` to both at once; the trigger's path token still *addresses* which specific URL fires (WS-4 already established this — the token identifies the endpoint, not the caller's identity). This is a deliberate coarsening from today's per-trigger `webhook_clients` granularity, bringing webhook access in line with every other artifact-scoped role. Extend `rbac.can_delegate_role` to accept `target_role='invoker'` under the existing `agent-admin`-can-delegate rule — an `agent-admin` grants `invoker` to an application that **already exists** in their team's registry; they cannot mint a new one (the fix for fragmentation risk #1).
+
+**3. Deprecate `webhook_clients`, migrate its rows (new migration):**
+
+For each existing `webhook_clients` row: insert one `applications` row (`team_name` = the owning agent/workflow's team, `name` = `client_id`, `secret_encrypted` copied as-is — same Fernet key, no forced rotation) and one `artifact_role_grants` row (`role='invoker'`, `artifact_id` = the trigger's `agent_id`/`workflow_id`, `grantee_type='application'`). Where the same `client_id` string was independently used under two different teams, they become two distinct `applications` rows — no silent merge across ownership boundaries. `webhook_clients` + `routers/webhook_clients.py` are retired once the gateway is repointed (§4) but kept read-only for one release before being dropped in a follow-up migration (mirrors how Decision 22 phased the `workflows`→`agent_graphs` rename).
+
+**4. Gateway verification changes (`event-gateway/webhook_auth.py`):**
+
+`_verify_client_signed` currently resolves `lookup_webhook_client(trigger_id, client_id)`. It becomes: resolve the trigger's owning artifact (`agent_id`/`workflow_id` — `_TRIGGER_SQL` already selects this) → look up an `applications` row by `(team, client_id-as-name)` joined through an active, non-revoked `artifact_role_grants(role='invoker', artifact_type, artifact_id, grantee_type='application', grantee_id=applications.id)` → check `applications.enabled` → decrypt `applications.secret_encrypted` → HMAC-verify exactly as today. Same fail-closed posture, same uniform `_DENY`, same "read live on every request, no cache" property (revoking a grant or disabling an application takes effect on the very next webhook) — none of the WS-4 security invariants change, only where the allowlist row lives.
+
+**5. New API surface — generalize the grant endpoint (it doesn't exist for *any* grantee type yet), don't build an application-only one-off:**
+
+```
+POST   /api/v1/artifacts/{artifact_type}/{artifact_id}/grants      — grant a role (user | team | application)
+GET    /api/v1/artifacts/{artifact_type}/{artifact_id}/grants      — list active grants
+DELETE /api/v1/artifacts/{artifact_type}/{artifact_id}/grants/{id} — revoke (sets revoked_at)
+```
+Gated by `rbac.can_delegate_role` (already exists; needs the `invoker` case per §2). This is the first real implementation of Decision 25's documented-but-unbuilt delegation rule — for all three grantee types, not just applications — so this decision also closes that pre-existing gap.
+
+```
+POST   /api/v1/teams/{team}/applications                     — create (team-scoped; secret shown once)
+GET    /api/v1/teams/{team}/applications                     — list (no secret)
+POST   /api/v1/teams/{team}/applications/{id}/rotate-secret  — rotate (secret shown once)
+PATCH  /api/v1/teams/{team}/applications/{id}                — enable/disable kill switch
+DELETE /api/v1/teams/{team}/applications/{id}                — hard delete (cascades grants)
+```
+Create/rotate/disable/delete gated on global role ≥ `contributor` **within the owning team** (mirrors `rbac.can_create_agent`) — deliberately *not* gated on `agent-admin` of any specific artifact, since application identity is team-scoped, not artifact-scoped. That's the actual fix for fragmentation risk #1: creation authority lives one level above any single agent.
+
+**6. Studio UX:**
+
+- New **"Applications"** panel at the team-settings level (not per-agent): create/rotate/disable/delete, reusing the secret-shown-once pattern from today's `ClientPanel` verbatim.
+- Agent/workflow Settings trigger card: replace today's inline-create `ClientPanel` with a **grant picker** — select an existing team application, confirm the unattended-execution acknowledgment (risk-asymmetry Option 1), grant `invoker`. This screen never shows a secret — it only grants access.
+- Closes the parity gap raised earlier in this conversation: the same grant picker ships on `WorkflowTriggersPanel.tsx`, since `invoker` is artifact-type-agnostic by construction — today's agent-only `ClientPanel` has no workflow equivalent.
+
+**7. Deferred / explicitly out of scope (honest gap ledger):**
+
+| Item | Status |
+|------|--------|
+| Cross-team application reuse (Option B/C) | **deferred (intentional)** — revisit if a real cross-team sender appears |
+| Split manage-user-access vs. manage-application-access capability | **deferred (intentional)** — seam preserved: `invoker` is already a distinct role value, not folded into `agent-admin` |
+| Bounded unattended-approval fallback policy (Option 3) | **not-yet-wired (debt)** — `invoker` grants are functionally live without it; a run an application triggers that hits a HITL checkpoint just sits `awaiting_approval` with no one specifically notified faster than the existing failure-alert path (Decision 23). Must land before this is relied on for anything production-critical. |
+| RBAC enforcement is OFF platform-wide (`rbac.py: ENFORCE=False`) | **pre-existing debt, inherited, not introduced here** — the new grant endpoints call the same `can_delegate_role`/`has_artifact_role` functions as everything else; flipping enforcement on is a global change tracked separately (same caution as Decision 26's OPA-enforcement canary) |
+| `webhook_clients` table removal | **phased** — kept read-only for one release after the data migration, dropped in a follow-up migration |
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -679,3 +790,4 @@ A separate, already-existing but unimplemented design, `docs/design/identity-pro
 | 27 | Per-tool-call output-scan + de-anonymize gate | Build generically inside `governed_tool` for all tool types (native/http/python/mcp_tool), not as an MCP-only bolt-on. Includes fixing the `clean_text` field-name bug and adding a new OPA `allow_deanonymize` field. |
 | 28 | stdio MCP server sandboxing (Phase 3) | Dedicated K8s pod per registered stdio server (Option B/C), MCP Proxy as router — not subprocesses inside the shared proxy process. Mirrors Agent-per-Pod (Decision 2). No impact on Phase 1's `/tools-call` contract. |
 | 29 | On-behalf-of identity for internal MCP servers (FR-MCP-21) | Impersonation-based Keycloak token exchange, not Classic exchange (no re-presentable access token ever propagates internally, even under `identity-propagation-architecture.md`) and not JWT-forward (raw JWT confirmed dead past `auth_middleware.py`). Hard dependency on `identity-propagation-architecture.md` Phase 0–2 landing first. |
+| 30 | Webhook application identity & invoker grants | Webhook-sending applications become team-owned, reusable RBAC principals (one secret, many artifacts) instead of per-trigger `webhook_clients` secrets. `artifact_role_grants` extended with `grantee_type='application'` + role `invoker`, scoped per agent/workflow (not per trigger). First real implementation of Decision 25's undelivered delegation endpoint, generalized to all grantee types. `webhook_clients` deprecated and migrated. Deferred: cross-team application reuse, split manage-user vs. manage-application RBAC capability, bounded unattended-approval fallback policy (required before production reliance on `invoker` grants). |
