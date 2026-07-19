@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_config import build_config_snapshot
 from db import get_db
 from models import Agent, AgentRun, AgentTool, AgentVersion, Deployment, ProductionDeployment, PublishedVersion, Tool
 from schemas import AgentVersionCreate, AgentVersionPatch, AgentVersionResponse
@@ -81,8 +82,6 @@ async def create_version(
     max_version = max_result.scalar_one_or_none()
     next_version = (max_version or 0) + 1
 
-    metadata = agent.metadata_ or {}
-
     # Auto-snapshot tools from agent_tools join table (authoritative bindings)
     bound_tools_result = await db.execute(
         select(Tool)
@@ -102,11 +101,7 @@ async def create_version(
             if d.get("name") not in seen:
                 tools_snapshot.append(d)
 
-    config_snapshot = {
-        "instructions": metadata.get("instructions"),
-        "tools": metadata.get("tools", []),
-        "llm_provider_id": metadata.get("llm_provider_id"),
-    }
+    config_snapshot = build_config_snapshot(agent)
 
     version = AgentVersion(
         agent_id=agent.id,

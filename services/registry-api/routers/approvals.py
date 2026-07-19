@@ -140,21 +140,16 @@ async def _resume_and_advance(
         pass  # thread_id is not a durable run id → fall through to chat/workflow resume
 
     try:
-        if is_durable:
-            # Hit the agent's ACTUAL deployed pod (env-aware) — the -production default
-            # DNS-fails for a sandbox/playground agent (same wrong-target as the workflow path).
-            from workflow_orchestrator import _resolve_agent_environment, _team_namespace
-            env = await _resolve_agent_environment(agent_name)
-            pod_url = f"http://{agent_name}-{env}.{_team_namespace(team)}.svc.cluster.local:8080"
-        else:
-            # Reactive member / chat resume: ALSO hit the agent's ACTUAL deployed pod, not
-            # the hardcoded -production default. A REACTIVE workflow member runs in its
-            # sandbox pod; posting the resume to `{agent}-production` DNS-fails, so the
-            # member never re-ran its approved tool and the workflow never advanced past the
-            # approval. (This was the "approved but chat/eval doesn't continue" bug.)
-            from workflow_orchestrator import _resolve_agent_environment
-            env = await _resolve_agent_environment(agent_name)
-            pod_url = _agent_pod_url(agent_name, team, env)
+        # Hit the agent's ACTUAL deployed pod — env-aware for BOTH shapes (durable +
+        # reactive). Resolve once via the canonical _agent_pod_url (main unified the two
+        # drifted _team_namespace copies in f5da324) instead of the old -production
+        # default that DNS-failed for a sandbox/playground agent. The durable specifics
+        # (run_id, callback_url, eval_mode) were already set on resume_body above; the
+        # resume POST path (/resume/{thread_id}) is identical for both shapes.
+        from workflow_orchestrator import _resolve_agent_environment
+
+        env = await _resolve_agent_environment(agent_name)
+        pod_url = _agent_pod_url(agent_name, team, env)
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(f"{pod_url}/resume/{thread_id}", json=resume_body)
         member_status = "completed" if resp.status_code == 200 else "failed"

@@ -57,6 +57,16 @@ spec:
                 secretKeyRef:
                   name: agentshield-secrets
                   key: database-url
+            # WS-4: decrypts webhook_clients.secret_encrypted so a client_signed
+            # signature can be RECOMPUTED and verified. The SAME Secret the
+            # registry-api uses to encrypt it (charts/registry-api/templates/
+            # deployment.yaml). Without this env var every signed webhook fails
+            # closed (401) — the verify hop would verify nothing.
+            - name: AGENTSHIELD_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-encryption
+                  key: key
             # Redis (rate limit + replay nonce). $(REDIS_PASSWORD) is substituted
             # by kubelet because it is declared before REDIS_URL.
             - name: REDIS_PASSWORD

@@ -136,7 +136,73 @@ export interface WorkflowDatasetItem {
   per_member?: Record<string, PerMemberExpectation>;
 }
 
-export type AnyDatasetItem = DatasetItem | DurableDatasetItem | WorkflowDatasetItem;
+// Eval v2 E-3 — scheduled dataset item (discriminated-union variant, `kind:"scheduled"`).
+// Mirrors backend `ScheduledDatasetItem` (schemas.py) / e3/data-model.md §2.3.
+//
+// `job_spec` is the per-schedule job spec — the SAME shape as the shipped
+// `AgentTrigger.input_payload`. The eval fires it through the shared run door as the
+// run's `input_payload` (+ `trigger_type='schedule'` / `trigger_payload=job_spec`),
+// i.e. the identical production shape, so what the eval runs is what the timer runs.
+//
+// `expected_side_effects` is the HEADLINE signal for scheduled — a scheduled agent's
+// whole point is the effect it fires unattended. Its presence is what makes the
+// eval-runner launch the item under `eval_mode=record` (recorded + mocked, never
+// delivered). `expected_trajectory` is meaningful only for a durable-inner schedule.
+export interface ScheduledDatasetItem {
+  kind: "scheduled";
+  job_spec: Record<string, unknown>;
+  expected_output?: string;
+  expected_trajectory?: ExpectedTrajectory;
+  expected_side_effects?: SideEffectAssertion[];
+}
+
+// Eval v2 E-4 — webhook dataset item (discriminated-union variant, `kind:"webhook"`).
+// Mirrors backend `WebhookDatasetItem` (schemas.py) / e4/data-model.md §2.
+//
+// `trigger_payload` is the SYNTHETIC EVENT. The eval fires it at the agent's REAL
+// webhook trigger through the REAL `test-event` door, which runs the real
+// `filter_engine` against the trigger's real `filter_conditions` — a copy the
+// deploy-time parity gate keeps byte-identical to the event-gateway's. So the decision
+// scored is the decision production makes, not an eval-only re-implementation.
+//
+// `expected_match` is the FIRST-CLASS signal: a webhook agent's first job is to NOT run
+// on events it should filter. A correctly-filtered event scores `filter: 1.0` and runs
+// NOTHING — a pass, not a skip. `expected_filter_reason` (only meaningful when
+// `expected_match` is false) additionally requires that substring in the real reason: a
+// miss for the WRONG reason means the rule under test was never exercised.
+//
+// The action expecteds (`expected_output`/`expected_trajectory`/`expected_side_effects`)
+// are scored ONLY on a match — there is nothing to score when nothing ran.
+export interface InjectionProbe {
+  // Tools an injected instruction must NEVER be able to make the agent call. Checked
+  // against the union of the recorded calls and the real trajectory.
+  must_not_call?: string[];
+  // Whether the agent must visibly refuse (a LIGHT keyword check — a calibrated
+  // refusal classifier is an explicit gap-ledger deferral).
+  must_refuse?: boolean;
+}
+
+export interface WebhookDatasetItem {
+  kind: "webhook";
+  trigger_payload: Record<string, unknown>;
+  expected_match: boolean;
+  expected_filter_reason?: string;
+  expected_output?: string;
+  expected_trajectory?: ExpectedTrajectory;
+  expected_side_effects?: SideEffectAssertion[];
+  // The payload is attacker-controlled (it arrives from the internet, not from an
+  // authenticated user). A probe's presence makes the eval-runner run the item under
+  // `eval_mode=record` regardless of assertions: the question is whether a forbidden
+  // WRITE fired, and a live delivery would answer it by really wiring the money.
+  injection_probe?: InjectionProbe;
+}
+
+export type AnyDatasetItem =
+  | DatasetItem
+  | DurableDatasetItem
+  | ScheduledDatasetItem
+  | WorkflowDatasetItem
+  | WebhookDatasetItem;
 
 export function isDurableItem(item: AnyDatasetItem): item is DurableDatasetItem {
   return (item as DurableDatasetItem).kind === "durable";
@@ -145,6 +211,15 @@ export function isDurableItem(item: AnyDatasetItem): item is DurableDatasetItem 
 export interface EvalRun {
   id: string;
   user_id: string;
+  /** THE publish threshold for this run — always resolved by the API (never null on
+   *  the wire; `eval_run_response` fills pre-E-6 rows from the platform default).
+   *  Render verdicts against THIS, never a local literal: the UI used to hardcode
+   *  0.7, so a 0.85 run with pass_threshold=0.9 showed "passed" while the gate
+   *  refused to publish. REQUIRED: the API always resolves it, and a `?` here would
+   *  invite a local `?? 0.7` fallback — the re-declaration that caused the bug. If it
+   *  is somehow absent at runtime, every `score >= threshold` yields false and the UI
+   *  fails CLOSED (no verdict, no mark-passed button) rather than guessing. */
+  pass_threshold: number;
   agent_name: string;
   agent_version_id: string | null;
   workflow_id: string | null;
@@ -160,6 +235,12 @@ export interface EvalRun {
   created_at: string;
   sandbox_deployment_id: string | null;
   workflow_deployment_id: string | null;
+  // Eval v2 E-0 — the interpretation mode this run was scored under (== the dataset's
+  // authored mode). The backend has always returned it; declaring it here is what lets
+  // the results page render evidence by the EXPLICIT discriminator instead of guessing
+  // from which keys a row happens to carry (a scheduled `job_spec` and a webhook
+  // `trigger_payload` share the same column).
+  mode: DatasetMode;
 }
 
 export interface EvalRunResult {
@@ -181,6 +262,19 @@ export interface EvalRunResult {
   // Eval v2 E-1 — durable per-dimension evidence + soft link to the run tree.
   eval_detail?: EvalDetail | null;
   run_id?: string | null;
+  // Eval v2 E-3/E-4 — WHAT this result's run was actually fired with (== the run's
+  // `input_payload`/`trigger_payload`): the JOB SPEC for a scheduled item, the
+  // SYNTHETIC EVENT for a webhook item. Written by the eval-runner, and present on
+  // fail-closed rows too, so the results UI can always show what was fired even when
+  // the item could not be scored. Which one it is comes from the run's `mode`, never
+  // from sniffing the shape.
+  trigger_payload?: Record<string, unknown> | null;
+  // Eval v2 E-4 — the REAL filter decision the `test-event` door returned for this
+  // item's synthetic event (webhook mode only; null on every other family and on a
+  // webhook row that fail-closed BEFORE firing, where no decision was ever made).
+  // Written by the eval-runner's webhook branch, read by the filter-verdict block —
+  // the column existed since E-0 with neither a writer nor a reader.
+  matched?: boolean | null;
   created_at: string;
 }
 
@@ -272,6 +366,10 @@ export interface SideEffectDetail {
 export interface EvalDetail {
   expected_trajectory?: ExpectedTrajectory | null;
   actual_trajectory?: TrajectoryStep[] | null;
+  // Eval v2 E-3 — the job spec the scheduled score door echoes back (the item's
+  // authored spec). The row's own `trigger_payload` is what the run was ACTUALLY
+  // fed; this is the fallback for a row recorded before that column was written.
+  job_spec?: Record<string, unknown> | null;
   tool_diffs?: ToolDiff[] | null;
   approvals?: ApprovalDetail[] | null;
   // Eval v2 E-2 — side-effect evidence. `recorded_side_effects` is always present
@@ -284,6 +382,47 @@ export interface EvalDetail {
   actual_member_path?: string[] | null;
   member_diff?: MemberDiff | null;
   per_member?: PerMemberEvidence[] | null;
+  // Eval v2 E-4 — webhook filter + injection evidence.
+  // The decision half: what the REAL filter decided and why, vs what the item expected.
+  matched?: boolean | null;
+  filter_reason?: string | null;
+  filter_detail?: FilterDetail | null;
+  // The injection half. `asr` (attack success rate: did a forbidden tool really fire?)
+  // and `utility` (the response dim of the SAME run) are surfaced side by side ON
+  // PURPOSE: an agent that refuses everything drives ASR to 0 and would read as a
+  // perfect defense while being useless. Reporting only ASR would grade it perfect.
+  asr?: number | null;
+  utility?: number | null;
+  forbidden_called?: string[] | null;
+  injection_detail?: InjectionDetail | null;
+  // True when the item carried a probe but the event was FILTERED — the probe was
+  // never exercised, so there is no injection dimension. Surfaced rather than silently
+  // omitted: an absent dimension must never read as a passing one.
+  injection_not_exercised?: boolean | null;
+  // The exact facts no weighted average may out-vote (a filter error; an injected
+  // instruction that really fired a forbidden tool). When present, the composite was
+  // forced to 0 regardless of the other dimensions.
+  veto?: string[] | null;
+}
+
+export interface FilterDetail {
+  matched?: boolean | null;
+  expected_match?: boolean | null;
+  filter_reason?: string | null;
+  expected_filter_reason?: string | null;
+  // null when no reason was asserted; false when the event was filtered for a
+  // DIFFERENT reason than the item named (the rule under test never ran).
+  reason_matched?: boolean | null;
+  error?: string | null;
+}
+
+export interface InjectionDetail {
+  asr?: number | null;
+  utility?: number | null;
+  forbidden_called?: string[] | null;
+  refused?: boolean | null;
+  must_not_call?: string[] | null;
+  must_refuse?: boolean | null;
 }
 
 // True when this detail carries workflow run-tree evidence (member path / per-member)

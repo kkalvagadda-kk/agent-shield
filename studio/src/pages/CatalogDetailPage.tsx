@@ -4,8 +4,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowUpCircle,
-  ChevronDown,
-  ChevronRight,
   Clock,
   Copy,
   DollarSign,
@@ -35,6 +33,11 @@ import {
   CatalogStats,
   MemberTopologyEntry,
 } from "../api/catalogApi";
+import { listTriggers } from "../api/registryApi";
+import OverviewForShape, {
+  resolveOverviewShape,
+  type OverviewShape,
+} from "../components/agent-detail/OverviewForShape";
 import TraceDrawer from "../components/playground/TraceDrawer";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -73,6 +76,17 @@ export default function CatalogDetailPage() {
     queryKey: ["catalog-runs", artifactId],
     queryFn: () => listCatalogRuns(artifactId!),
     enabled: !!artifactId && activeTab === "runs",
+  });
+
+  // WS-6 — the catalog page is now trigger-aware. It previously dispatched on
+  // `config_snapshot.execution_shape` alone, which is a 2-value column
+  // (`reactive|durable`), so a scheduled or webhook-driven published artifact could
+  // never reach its own overview. Triggers are agent-scoped; a workflow artifact has
+  // no `/agents/{name}/triggers` route, so the query is gated rather than left to 404.
+  const { data: triggers = [] } = useQuery({
+    queryKey: ["catalog-triggers", data?.artifact.name],
+    queryFn: () => listTriggers(data!.artifact.name),
+    enabled: !!data?.artifact.name && data.artifact.type === "agent",
   });
 
   const deployMutation = useMutation({
@@ -116,6 +130,16 @@ export default function CatalogDetailPage() {
   const activeDeployment = deployments.find(
     (d) => d.status === "running" || d.status === "deploying" || d.status === "suspended" || d.status === "suspending" || d.status === "pending"
   );
+
+  // WS-6 — resolved through the SAME helper DeploymentOverviewPage uses. This is the
+  // parity: one rule, two surfaces. `config_snapshot.execution_shape` is untyped JSON,
+  // which is why the resolver accepts a loose string.
+  const activeVersion = versions.find((v) => v.id === activeDeployment?.version_id) || versions[0];
+  const overviewShape: OverviewShape = resolveOverviewShape({
+    hasWebhook: triggers.some((t) => t.trigger_type === "webhook"),
+    hasSchedule: triggers.some((t) => t.trigger_type === "schedule"),
+    executionShape: activeVersion?.config_snapshot?.execution_shape as string | undefined,
+  });
 
   return (
     <div className="max-w-5xl mx-auto px-6 py-8">
@@ -164,6 +188,7 @@ export default function CatalogDetailPage() {
       {activeTab === "overview" && (
         <OverviewTab
           artifact={artifact}
+          shape={overviewShape}
           deployment={activeDeployment || null}
           allDeployments={deployments}
           versions={versions}
@@ -204,6 +229,7 @@ export default function CatalogDetailPage() {
 // ---------------------------------------------------------------------------
 function OverviewTab({
   artifact,
+  shape,
   deployment,
   allDeployments,
   versions,
@@ -214,6 +240,7 @@ function OverviewTab({
   isActing,
 }: {
   artifact: { id: string; name: string; type: string; team: string; description: string | null };
+  shape: OverviewShape;
   deployment: CatalogDeployment | null;
   allDeployments: CatalogDeployment[];
   versions: CatalogVersion[];
@@ -229,33 +256,7 @@ function OverviewTab({
   const isWorkflow = artifact.type === "workflow";
   const membersReady = !isWorkflow || memberTopology.every((m) => m.has_production_deployment);
 
-  // Derive execution_shape from the active version's config_snapshot
-  const activeVersion = versions.find((v) => v.id === deployment?.version_id) || versions[0];
-  const executionShape = (activeVersion?.config_snapshot?.execution_shape as string) || "reactive";
-
-  const ns = deployment?.namespace || `production-${artifact.name}`;
-  const k8sName = `${artifact.name}-production`;
-  const internalBase = `http://${k8sName}.${ns}:8080`;
   const externalBase = `https://agentshield.127.0.0.1.nip.io:8443/api/v1/agents/${artifact.name}`;
-
-  // Internal endpoints filtered by execution_shape
-  const endpoints: { label: string; value: string; method: string }[] = [];
-  if (executionShape === "reactive") {
-    endpoints.push(
-      { label: "Chat", value: `${internalBase}/chat`, method: "POST" },
-      { label: "Chat (stream)", value: `${internalBase}/chat/stream`, method: "POST" },
-    );
-  } else if (executionShape === "durable") {
-    endpoints.push(
-      { label: "Run", value: `${internalBase}/run`, method: "POST" },
-      { label: "Status", value: `${internalBase}/run/{run_id}`, method: "GET" },
-    );
-  } else if (executionShape === "scheduled") {
-    endpoints.push(
-      { label: "Trigger", value: `${internalBase}/trigger`, method: "POST" },
-    );
-  }
-  endpoints.push({ label: "Health", value: `${internalBase}/health`, method: "GET" });
 
   return (
     <div className="space-y-6">
@@ -296,8 +297,12 @@ function OverviewTab({
               <span className="text-sm font-medium text-slate-700">
                 {deployment.version_label || "—"}
               </span>
+              {/* The namespace is whatever the backend recorded on the deployment.
+                  It used to fall back to a hand-built `production-{name}` guess, which
+                  was a SECOND, wrong copy of a naming rule the backend owns (it stamps
+                  `production-{name}-{id8}`). No deployment → nothing to show. */}
               <span className="text-xs text-slate-400">
-                ns: {deployment.namespace || ns}
+                ns: {deployment.namespace || "—"}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -437,7 +442,7 @@ function OverviewTab({
       )}
 
       {/* Production Chat Card — reactive agents only */}
-      {deployment && deployment.status === "running" && executionShape === "reactive" && (
+      {deployment && deployment.status === "running" && shape === "reactive" && (
         <div className="card p-5 border-blue-200 bg-blue-50/30">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-semibold text-slate-700 flex items-center gap-2">
@@ -468,11 +473,17 @@ function OverviewTab({
         </div>
       )}
 
-      {/* Internal API Card — collapsible */}
+      {/* Shape-specific operate surface — the SAME shared components the deployment
+          page mounts (WS-6). Replaces a hand-written 3-branch endpoint chain that had
+          no event-driven case and a `scheduled` case that could never fire. Catalog
+          artifacts are published/production by definition, so `context` is passed
+          explicitly rather than inherited from a default. */}
       {deployment && deployment.status === "running" && (
-        <InternalApiCard
-          endpoints={endpoints}
-          executionShape={executionShape}
+        <OverviewForShape
+          shape={shape}
+          agentName={artifact.name}
+          deploymentId={deployment.id}
+          context="production"
         />
       )}
 
@@ -490,7 +501,7 @@ function OverviewTab({
           </div>
           <div>
             <p className="text-xs text-slate-400 uppercase mb-0.5">Execution Shape</p>
-            <p className="font-mono text-slate-700">{executionShape}</p>
+            <p className="font-mono text-slate-700">{shape}</p>
           </div>
           {artifact.description && (
             <div className="col-span-2">
@@ -584,53 +595,6 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
         {label}
       </div>
       <p className="text-lg font-semibold text-slate-800">{value}</p>
-    </div>
-  );
-}
-
-function EndpointRow({ label, value, method }: { label: string; value: string; method: string }) {
-  return (
-    <div className="flex items-center gap-3">
-      <span className="badge bg-blue-50 text-blue-600 text-[10px] font-mono w-10 text-center">{method}</span>
-      <span className="text-xs text-slate-600 w-28">{label}</span>
-      <code className="text-xs bg-slate-50 text-slate-700 px-2 py-1 rounded flex-1 truncate">{value}</code>
-      <button
-        onClick={() => { navigator.clipboard.writeText(value); toast.success("Copied"); }}
-        className="text-slate-400 hover:text-slate-600"
-      >
-        <Copy size={12} />
-      </button>
-    </div>
-  );
-}
-
-function InternalApiCard({
-  endpoints,
-  executionShape,
-}: {
-  endpoints: { label: string; value: string; method: string }[];
-  executionShape: string;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="card p-4 border-slate-200">
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex items-center justify-between w-full text-left"
-      >
-        <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-          Internal API (cluster only)
-          <span className="badge bg-slate-100 text-slate-400 text-[10px] normal-case">{executionShape}</span>
-        </h3>
-        {open ? <ChevronDown size={14} className="text-slate-400" /> : <ChevronRight size={14} className="text-slate-400" />}
-      </button>
-      {open && (
-        <div className="mt-3 space-y-2">
-          {endpoints.map((ep) => (
-            <EndpointRow key={ep.label} label={ep.label} value={ep.value} method={ep.method} />
-          ))}
-        </div>
-      )}
     </div>
   );
 }

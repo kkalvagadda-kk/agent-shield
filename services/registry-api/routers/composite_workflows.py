@@ -765,12 +765,19 @@ async def create_workflow_trigger(
     armed_by = (user or {}).get("sub") or x_user_sub
     plaintext = None
     token_hash = None
+    # WS-4: born `token`, upgraded to `client_signed` on FIRST client registration —
+    # the SAME rule as the agent producer (routers/triggers.py, where the full
+    # rationale lives), the same column, the same gateway verify hop. A workflow
+    # trigger is an `agent_triggers` row with `workflow_id` set, so the upgrade is
+    # performed by the same shared registration endpoint with no per-shape copy.
+    auth_mode = "token"
     if body.trigger_type == "webhook":
         plaintext, token_hash = _new_token()
     trigger = AgentTrigger(
         workflow_id=wf.id,
         agent_id=None,
         trigger_type=body.trigger_type,
+        auth_mode=auth_mode,
         cron_expression=body.cron_expression,
         timezone=body.timezone,
         enabled=body.enabled,

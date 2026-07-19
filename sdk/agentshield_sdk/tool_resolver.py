@@ -49,6 +49,19 @@ async def resolve_tools(tool_names: list[str]) -> list[Any]:
                     f"Register it at {config.AGENTSHIELD_REGISTRY_URL}/api/v1/tools/ first."
                 )
             tool_def = items[0]
+            # FAIL-CLOSED: never bind a tool the platform didn't ask for. The `name`
+            # filter above was silently ignored by the API until it was added as a real
+            # query param — FastAPI drops unknown params, so this call returned the
+            # FIRST tool in the registry and `items[0]` bound it under the requested
+            # name (observed: asking for 'http_echo' resolved a critical-risk OPA
+            # fixture). A wrong tool is a governance breach, not a glitch: the agent
+            # would call it under the risk/approval policy of the name it asked for.
+            # Verify rather than trust, so a filter regression can never re-open this.
+            if tool_def.get("name") != name:
+                raise RuntimeError(
+                    f"Tool resolution mismatch: asked the registry for '{name}' but it "
+                    f"returned '{tool_def.get('name')}'. Refusing to bind the wrong tool."
+                )
             callable_ = _build_executor(tool_def)
             resolved.append(callable_)
             logger.info(

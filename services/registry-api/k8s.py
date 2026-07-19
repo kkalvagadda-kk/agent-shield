@@ -69,6 +69,27 @@ async def upsert_secret(name: str, namespace: str, data: dict[str, str]) -> None
     await asyncio.to_thread(_upsert_secret_sync, name, namespace, data)
 
 
+def _secret_exists_sync(name: str, namespace: str) -> bool:
+    _init_k8s()
+    v1 = client.CoreV1Api()
+    try:
+        v1.read_namespaced_secret(name=name, namespace=namespace)
+        return True
+    except ApiException as exc:
+        if exc.status == 404:
+            return False
+        # Any OTHER API error (403, timeout, …) is NOT evidence of absence. Raising
+        # keeps the caller from "healing" a secret that is actually there, or from
+        # reporting a phantom as present — either way, never infer from an error we
+        # did not ask about.
+        raise
+
+
+async def secret_exists(name: str, namespace: str) -> bool:
+    """True iff the Secret exists. 404 ⇒ False; any other API error raises."""
+    return await asyncio.to_thread(_secret_exists_sync, name, namespace)
+
+
 def _delete_secret_sync(name: str, namespace: str) -> None:
     _init_k8s()
     v1 = client.CoreV1Api()

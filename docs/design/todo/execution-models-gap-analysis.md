@@ -73,9 +73,27 @@ Each TODO below carries a **Parity** and a **Golden-path** line stating how it c
 
 ## What's MISSING — TODO Items
 
-### TODO-1: Global Approvals Inbox Badge (Production doc §8.1)
+### TODO-1: Global Approvals Inbox Badge (Production doc §8.1) — ✅ RESOLVED (WS-6, studio 0.1.145)
 
-➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — sequenced there because it pairs with that plan's WS-1 Global Approvals Inbox. Full detail (impl, parity, golden-path) lives in WS-6.
+**Shipped.** The pending-count pill lives on the existing Approvals nav item in
+`studio/src/components/Sidebar.tsx` (`data-testid="approvals-badge"`), routes to `/approvals`, and
+hides at 0 (a "0" chip is noise that trains operators to ignore the badge).
+
+**The count reuses the EXISTING producer — `listPendingApprovals()` (`registryApi.ts`). No new
+endpoint, and deliberately no `getPendingApprovalsCount`:** a second API method over the same GET
+would be a second path to one fact, which is the drift class WS-6 exists to delete.
+
+Proven by: `Sidebar.test.tsx` (count N / absent at 0 / API-failure degrades to no-badge without
+taking out navigation), `studio/e2e/approvals-badge.spec.ts` (real backend, no `page.route` stubs;
+the DOM must match the count the real API returned), and `suite-79` **T-S79-003** (the producer is
+live and honours `status=pending`).
+
+> **Wire-shape note for anyone touching this:** `GET /approvals/` returns an **`{items, total}`
+> envelope**, *not* a bare list — `listPendingApprovals` unwraps `.items`. The WS-6 plan asserted
+> the endpoint "already returns `ApprovalInboxItem[]`", which is true of the client function
+> *after* it unwraps and false of the wire; suite-79's first draft believed the plan and failed.
+> Unfiltered, the endpoint also returns decided rows, so the `status=pending` param is
+> load-bearing: drop it and the badge over-counts and never reaches 0.
 
 ---
 
@@ -97,13 +115,60 @@ Each TODO below carries a **Parity** and a **Golden-path** line stating how it c
 
 ### TODO-3: Auto-set `eval_passed` from Passing EvalRun (T-4) — ✅ RESOLVED
 
-**Shipped.** `eval_passed` is auto-set on a passing EvalRun (score ≥ threshold) — see `services/registry-api/routers/eval_runner.py:309,326` and `slice-implementation-assessment.md`. Tracked in `execution-models-v2-e2e.md` WS-6 as a **done dependency** of the v2 publish gate.
+**Shipped.** `eval_passed` is auto-set on a passing EvalRun (score ≥ threshold) — in
+`services/registry-api/routers/eval_runner.py`, search `auto-set eval_passed=True` (one site for the
+agent version, one for the workflow version). Tracked in `execution-models-v2-e2e.md` WS-6 as a
+**done dependency** of the v2 publish gate.
+
+> **WS-6 (2026-07-15): no work was owed here and none was done.** The plan listed TODO-3 as a WS-6
+> deliverable, but its only deliverable was *this ledger line*, which was already on the page —
+> so the task was **deleted**, not performed.
+>
+> The citation is now by **symbol, not line number**. It previously read `:309,326`; the real sites
+> were `:576`/`:593` at the time of writing. Note the WS-6 task doc had *also* re-grounded that
+> citation — to `:531`/`:548` — and was **itself already stale** within a day, because the file is
+> under concurrent edit. Three different line numbers for one unchanged fact is the argument
+> against line citations in prose: they rot silently and cost a re-verification every time. Grep
+> the symbol.
 
 ---
 
-### TODO-4: CatalogDetailPage — Reuse Mode-Aware Overviews (Gap #3)
+### TODO-4: CatalogDetailPage — Reuse Mode-Aware Overviews (Gap #3) — ✅ RESOLVED (WS-6, studio 0.1.145)
 
-➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — it's a parity fix (shared, parameterized Overview components for sandbox + production; former "Option B: accept the split" rejected). Full detail lives in WS-6.
+**Shipped.** `studio/src/components/agent-detail/OverviewForShape.tsx` is now the ONE place that
+answers "which Overview does this shape get". Both operate surfaces —
+`pages/DeploymentOverviewPage.tsx` and `pages/CatalogDetailPage.tsx` — mount it, and **zero** direct
+`Overview*` mounts remain in any page. The inline fork (its hand-derived `executionShape` and
+3-branch `endpoints` builder) is **deleted**, not guarded.
+
+**Correcting the record on two counts:**
+
+1. **The fork's counterpart was `DeploymentOverviewPage`, not `AgentDetailPage`.** The plan said
+   "`AgentDetailPage` uses them"; `AgentDetailPage` has **zero** `Overview*` references (its tabs
+   are deployments/versions/settings). Fixing the fork against the page named in the plan would
+   have converged the wrong two files.
+2. **The fork had ALREADY drifted before anyone collapsed it.** It handled
+   `reactive`/`durable`/`scheduled` and had **no event-driven branch at all**, while the shared set
+   has **four** components — and its `scheduled` branch was unreachable dead code, because it
+   dispatched on `config_snapshot.execution_shape` alone (a stored 2-value column: `reactive` |
+   `durable`; `scheduled` and `event_driven` are **derived from triggers**, never stored). So the
+   drift this item predicted *in the abstract* had already happened *in the concrete*. Collapsing
+   the fork **restored event-driven to the catalog for free**.
+
+**Design:** an **explicit `Record<OverviewShape, Component>` map, not a priority chain** — a new
+shape is a compile error at the map rather than a silent fallthrough. On an unknown shape the
+dispatcher **fails closed and loud** (visible error card + `console.error`), never a quiet fallback
+to Reactive: *a quiet default is exactly how the fork lost event-driven without anyone noticing.*
+`resolveOverviewShape` is the one place the webhook⇒`event_driven` / schedule⇒`scheduled` /
+`durable` / else `reactive` derivation lives.
+
+Proven by: `suite-79` **T-S79-000** (1 map, 2 consumers, **0** inline forks, all 4 shapes, fail-loud
+present), `OverviewForShape.test.tsx` (all four shapes incl. `event_driven`; unknown shape ⇒ loud
+card, asserted explicitly so a future refactor cannot quietly re-add the default),
+`CatalogDetailPage.test.tsx`, and `studio/e2e/catalog-overview-parity.spec.ts` — which asserts the
+**same** `data-testid="overview-for-shape"` renders on **both** the catalog artifact page and
+`/agents/:name/d/:depId`. That cross-page identity IS the parity proof, and it **cannot** pass
+against an inline fork, which never rendered that node.
 
 ---
 
@@ -160,21 +225,128 @@ Each TODO below carries a **Parity** and a **Golden-path** line stating how it c
 
 ---
 
-### TODO-7: Sandbox Run TTL / Auto-Cancel (Playground doc T-11)
+### TODO-7: Sandbox Run TTL / Auto-Cancel (Playground doc T-11) — ✅ ALREADY SHIPPED (the item was backwards)
 
-➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — shares the timeout worker with the production run-timeout (`approval_timeout_worker.py`, one worker parameterized by scope). Full detail in WS-6.
+**This gap does not exist, and never did in the form written.** `_sweep_stale_durable_runs()` in
+`services/registry-api/approval_timeout_worker.py` sweeps **`PlaygroundRun`** — the
+**sandbox/playground** run table — and filters on `execution_shape` / `status` / `started_at` **only,
+with no environment or context predicate at all**. It has always swept every durable playground run
+past `_DURABLE_RUN_TTL_MINUTES` (10).
+
+The WS-6 plan described the worker as production-only and proposed "extend the same worker to also
+sweep sandbox", i.e. **the exact inverse of the code**. There is no production-only scoping to
+extend, and `PlaygroundRun` carries no `environment` column to scope *by* (it has `deployment_id`
+**and** `production_deployment_id`). Building the planned `_sweep_once(scope)` would have
+**manufactured a parameter for a distinction the table does not draw** — a fork invented to satisfy
+a doc. **Task deleted in WS-6; no code written.**
+
+> **The real bug in this worker is a different one, and it is still OPEN** — see the "Agent pod-URL
+> resolution" entry below. Reading TODO-7 as "the timeout worker is fine now" would be exactly
+> backwards.
 
 ---
 
-## Current UI Bug: Browser Cache
+### TODO-8: Agent pod-URL resolution — `environment="production"` default is never threaded — ✅ RESOLVED 2026-07-15
 
-➡️ **Moved to `execution-models-v2-e2e.md` WS-6** (2026-07-12) — the `window.__STUDIO_BUILD` cache-bust marker + "ensure every Studio image bump carries a unique hash" prevention is tracked there. (Immediate workaround for a stale bundle: hard refresh — Cmd+Shift+R / Ctrl+Shift+R.)
+**✅ RESOLVED 2026-07-15 — both halves.** The LIVE defect was fixed in `4f2abee` (found independently
+while debugging a demo: `_agent_pod_url`'s `environment` default REMOVED — not corrected — so a wrong
+default is a TypeError at import rather than invisible at the call site; both call sites now resolve the
+real environment). The ARCHITECTURAL half landed in the follow-up: `services/registry-api/agent_endpoints.py`
+is now the single home for `team_namespace` + `agent_pod_base`, and `workflow_orchestrator`,
+`routers/internal` and `approval_timeout_worker` all import it — proven by identity on the running pod
+(`w._team_namespace is team_namespace is i._team_namespace` → True), not by matching text.
+
+WS-6's filing was right on every point, including the one it could not have known mattered: the two
+`_team_namespace` copies **had already drifted** — `(team or 'platform')` vs a bare `team.lower()`, so an
+empty team resolved to `agents-platform` in one and the invalid `agents-` in the other, and `None` raised
+AttributeError in one. Latent only because `agents.team` is NOT NULL and no row is empty: one nullable
+column away from live, with nothing to flag it.
+
+*Original filing follows.*
+
+`_agent_pod_url(agent_name, team, environment: str = "production")` in
+`services/registry-api/approval_timeout_worker.py` is **parameterized but never threaded**: both
+call sites take the default (`_notify_agent`, and `routers/approvals.py`'s console-decide branch).
+Sandbox Services are named **`{agent}-sandbox`** (`deploy-controller/manifest_builder.py` builds
+`f"{agent_name}-{environment}"`), so a **sandbox** approval's `/resume` POST is addressed to a
+**non-existent `-production` pod** — and the resulting `httpx.RequestError` is **swallowed to a
+`logger.warning`**. The approval still gets marked resolved, so **the DB row looks correct while the
+agent was never actually resumed.**
+
+This is the textbook shape of the repo's #1 bug class: *two parallel paths drift while a safe
+default hides it.* **The repo already knows** — `routers/approvals.py` works around it for the
+durable branch with an inline hand-built f-string whose own comment names the bug ("the
+`-production` default DNS-fails for a sandbox/playground agent"). **One concern, two builders, one
+fixed and one not.**
+
+**The fix (specified, not written)** — `services/registry-api/agent_endpoints.py` as the single home:
+`team_namespace(team)` (today duplicated in `workflow_orchestrator.py` **and** `routers/internal.py`),
+`agent_pod_base(agent_name, team, environment)` with **`environment` REQUIRED and NO default**, and
+`async resolve_agent_pod_base(agent_name, team)`. The no-default is the load-bearing choice, not
+style: the entire bug is a default two callers silently fell into, so forgetting to thread it must
+become a **`TypeError` at the call site** rather than something a runtime check guards. Then delete
+`_agent_pod_url` and the inline duplicate (`is_durable` may decide the resume *body*; it must not
+decide the *URL*), and make `internal.py`'s deliberate `-production` an **explicit argument**.
+~8 hand-built pod-URL f-strings span 5 files.
+
+**Ledger:** `workflow_orchestrator.py`'s workflow-orchestrator pod URL and `playground.py`'s
+`k8s_namespace`-derived URL are **out of scope** — different naming conventions; folding them in
+would widen the helper to two conventions (the fork-by-generalisation trap).
+
+**Testing note:** `suite-79` **deliberately does not assert** `def agent_pod_base`. Asserting
+symbols nobody in that lane could write would either fail honestly or invite a stub — and a stub in
+this exact seam is the fake that hides this exact bug (`docs/bugs/durable-workflow-live-path.md`:
+six faked suites shipped green while the real path was broken). The gate is owed **with** the fix.
+
+---
+
+## Current UI Bug: Browser Cache — ✅ RESOLVED (WS-6, studio 0.1.145)
+
+**Shipped.** `STUDIO_BUILD` now has ONE definition (`studio/src/lib/build.ts`) and **two readers**:
+the `window.__STUDIO_BUILD` runtime marker (`main.tsx`) and a visible `data-testid="studio-build"`
+element in the sidebar. It must equal `STUDIO_TAG` (`scripts/deploy-cpe2e.sh`) and the chart pin
+(`charts/agentshield/values.yaml`).
+
+**What it was:** `window.__STUDIO_BUILD` was assigned in `main.tsx` and **read by nothing** — a
+grep across `studio/src`, `studio/e2e`, `scripts`, and `charts` returned exactly one line, its own
+assignment. It sat at `"0.1.76"` while `STUDIO_TAG` reached `0.1.143`: **67 tags of a marker that
+silently lied**, because *a value nothing reads cannot fail loudly*. It was a live orphan (DoD #3).
+
+**Enforcement (this is the part that matters):** `suite-79` **T-S79-002** asserts a **five-way**
+agreement — `build.ts` == `STUDIO_TAG` == chart pin == the **live pod's image tag** == the marker
+in the **served bundle**. E-3 (`docs/bugs/e3-never-ran-tag-not-bumped.md`) proved agreement between
+the two tag *files* is worthless on its own: they agreed **on a stale tag** while the cluster
+faithfully served old code and every check stayed green. The live pod and the served bytes are the
+two that cannot lie. `scripts/check-tag-content-coupling.sh` covers the complementary half
+(source changed ⇒ tag bumped).
+
+> **A marker must be greppable in the artifact to prove anything.** WS-6 shipped `0.1.144` with the
+> badge testid composed at runtime (`` `${badgeKey}-badge` ``). The DOM was correct and Vitest
+> passed — and the served-bundle grep still read **0 occurrences**, because the literal string never
+> existed in the bundle. Vitest could never have caught it; only the content grep could. The testid
+> is now a literal (`NavItem.badgeTestId`), and `0.1.145` is the tag that carries the fix.
 
 ---
 
 ## Build Priority Order
 
-Remaining in this doc (the 5 moved items — TODO-1, TODO-3, TODO-4, TODO-7, Browser Cache — are now in `execution-models-v2-e2e.md` WS-6):
+**Status as of 2026-07-15 (WS-6 landed its studio half).** Of the 5 items moved to WS-6:
+**TODO-1** (nav badge), **TODO-4** (Overview fork), and **Browser Cache** (build marker) are
+**✅ RESOLVED** above. **TODO-3** was **already shipped and already recorded** — the plan owed only
+a ledger line that was on the page, so the task was deleted. **TODO-7** was **already shipped and
+the item was written backwards** — deleted, no code. **[WS-0 OQ-10]** ("fold
+`WORKFLOW_REACTIVE_TIMEOUT_S` into the timeout worker") is **REJECTED as a regression**, not
+deferred: the reactive cap is an **in-request `asyncio.wait_for`** holding the caller's connection,
+while `approval_timeout_worker` is a **60s-poll background sweep** of abandoned rows — a background
+poll cannot cap an in-request await, and folding them would leave a reactive caller hanging up to
+60s past its own cap. Two mechanisms that share the word "timeout"; correctly separate.
+
+**One item moved the other way:** WS-6 found a live defect the plan never saw and filed it as
+**TODO-8 (Agent pod-URL resolution)** above — 🔴 **OPEN**. Sandbox approval resumes are still sent
+to a non-existent `-production` pod and the failure is still swallowed. **It is the highest-value
+item in this doc.**
+
+Remaining in this doc:
 
 ```
 TODO-2 (Alerting)            — production safety net, 1-2 days

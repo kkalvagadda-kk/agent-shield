@@ -44,8 +44,12 @@ if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit
 echo "=== Suite 64: PRODUCTION durable-workflow golden path (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
-DRIVER=/tmp/s64_driver.py
-OUTFILE=/tmp/s64_out.txt
+# Per-invocation paths (the suite-74 lesson): a fixed /tmp/s64_out.txt lets two
+# overlapping invocations (a retry, a second operator, a CI re-run against the same pod)
+# share a result file and silently read each OTHER's results.
+RUN_TAG="$(date +%s)$$"
+DRIVER="/tmp/s64_driver_${RUN_TAG}.py"
+OUTFILE="/tmp/s64_out_${RUN_TAG}.txt"
 
 # 1) write the driver into the pod (one short exec)
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
@@ -112,11 +116,11 @@ async def main():
                 a=(await s.execute(select(Agent).where(Agent.name==n))).scalars().first()
                 ep=any(getattr(v,'eval_passed',None) is True for v in (await s.execute(select(AgentVersion).where(AgentVersion.agent_id==a.id))).scalars().all())
             passed = passed and ep
-        out["001_eval_passed_via_real_evalrun"]=passed
+        out["T-S64-001 eval_passed_via_real_evalrun"]=passed
         for n in NAMES:
             await c.post(f"/agents/{n}/deploy", json={"environment":"production"})
         prod={n: await wait_running(n,"production") for n in NAMES}
-        out["002_both_deployed_production"]=all(prod.values())
+        out["T-S64-002 both_deployed_production"]=all(prod.values())
         r=await c.post("/workflows", json={"name":f"s64-wf-{SFX}","team":"platform",
             "orchestration":"sequential","execution_shape":"durable","agent_class":"daemon"})
         wid=r.json()["id"]
@@ -127,7 +131,7 @@ async def main():
             "run_by":"suite-64","trigger_payload":{"message":"What is the capital of France?"}})
         pid_run=tr.json().get("id") if tr.status_code==201 else None
         if not pid_run:
-            out["003_prod_run_completed_context_production"]=False
+            out["T-S64-003 prod_run_completed_context_production"]=False
             out["_diag"]=f"internal trigger {tr.status_code}: {tr.text[:160]}"
         else:
             status=ctx=None; kids=[]; p=None
@@ -139,8 +143,8 @@ async def main():
                         status,ctx=p.status,p.context
                         kids=(await s.execute(select(AgentRun).where(AgentRun.parent_run_id==pid_run))).scalars().all()
                         break
-            out["003_prod_run_completed_context_production"]=(status=="completed" and ctx=="production")
-            out["004_members_completed_no_timeout"]=(len(kids)>=2 and all(k.status=="completed" and (k.output or "").strip() for k in kids))
+            out["T-S64-003 prod_run_completed_context_production"]=(status=="completed" and ctx=="production")
+            out["T-S64-004 members_completed_no_timeout"]=(len(kids)>=2 and all(k.status=="completed" and (k.output or "").strip() for k in kids))
             if status!="completed":
                 out["_diag"]=f"status={status} ctx={ctx} kids=" + "; ".join(f"{k.agent_name}:{k.status}:{(k.error_message or '')[:40]}" for k in kids)
             if status=="completed":
@@ -150,18 +154,35 @@ async def main():
                     po=obs(p.langfuse_trace_id); mo={k.agent_name: obs(k.langfuse_trace_id) for k in kids}
                     if isinstance(po,int) and po>0 and mo and all(isinstance(v,int) and v>0 for v in mo.values()): break
                 if get_langfuse() is not None:
-                    out["005_prod_parent_and_member_traces"]=bool(isinstance(po,int) and po>0 and mo and all(isinstance(v,int) and v>0 for v in mo.values()))
+                    out["T-S64-005 prod_parent_and_member_traces"]=bool(isinstance(po,int) and po>0 and mo and all(isinstance(v,int) and v>0 for v in mo.values()))
                     out["_diag_trace"]=f"parent_obs={po} member_obs={mo}"
+                else:
+                    # Record the ID even when the assertion is not applicable, so the bash
+                    # census can tell "Langfuse absent from this cluster" (a DIAG, not a
+                    # pass) from "the driver died before reaching case 005".
+                    out["_obs_005"]="T-S64-005 NOT APPLICABLE — langfuse not configured on this cluster; production trace assertion not exercised"
+    except Exception as exc:
+        # FAIL LOUD (the suite-74 lesson). Without this, a bare try/finally records only
+        # the cases reached BEFORE the crash and the bash summary (PASS>0, FAIL==0) reports
+        # the suite GREEN while silently dropping every remaining case — a partial run must
+        # never look like a pass, least of all one gating PRODUCTION.
+        import traceback
+        out["T-S64-999 driver ran every case without crashing"]=False
+        out["_diag_crash"]=(f"driver CRASHED mid-run — cases after this point never ran: "
+                            f"{type(exc).__name__}: {exc} :: {traceback.format_exc()[-400:]}")
     finally:
+        # write results BEFORE cleanup (the suite-69 lesson), then tear down. Cleanup can
+        # itself hang or raise; results recorded up to this point must survive it. This is
+        # also what prints SUITE-64-DONE on the SKIP paths (which `return` from the try).
+        for k,v in out.items():
+            if k.startswith("_"): print("DIAG",k,v)
+            else: print(("PASS" if v else "FAIL"), k)
+        print("SUITE-64-DONE", flush=True)
         try:
             if wid: await c.delete(f"/workflows/{wid}")
             for n in NAMES: await c.delete(f"/agents/{n}")
         except Exception: pass
         await c.aclose()
-    for k,v in out.items():
-        if k.startswith("_"): print("DIAG",k,v)
-        else: print(("PASS" if v else "FAIL"), k)
-    print("SUITE-64-DONE")
 asyncio.run(main())
 PY
 
@@ -182,7 +203,41 @@ RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- cat "$OUTFIL
 echo "$RESULT"; echo ""
 
 if [ -z "$DONE" ]; then echo "❌ Suite 64 INCONCLUSIVE (driver did not finish within the poll window)"; exit 1; fi
-if echo "$RESULT" | grep -q "^FAIL"; then echo "❌ Suite 64 FAILED (a real production-path assertion failed)"; exit 1; fi
+# SKIP is an env limit, not a half-run: the driver returned before recording ANY case, so
+# it is checked BEFORE the census (which would otherwise report all five cases missing).
 if echo "$RESULT" | grep -q "^SKIP"; then echo "⚠️  Suite 64 SKIPPED (env limit — eval-runner Job / prod deploy unavailable). Not a pass, not a fake."; exit 0; fi
-if ! echo "$RESULT" | grep -q "PASS 003_prod_run_completed_context_production"; then echo "❌ Suite 64 INCONCLUSIVE (no completed prod run, no explicit skip)"; exit 1; fi
+
+# grep -c exits 1 on zero matches, which `set -e` would treat as a suite error.
+PASS=$(echo "$RESULT" | grep -c "^PASS" || true)
+FAIL=$(echo "$RESULT" | grep -c "^FAIL" || true)
+
+# Completeness gate (the suite-74 lesson): a suite that silently stops early must NEVER
+# read as green. FAIL=0 is only a pass if every gate assertion actually RAN — an exception,
+# an early return, or a truncated result file otherwise produces "0 failures" on a half-run
+# gate, and this gate is what says "production is proven". REQUIRED_IDS is the ONE source
+# of truth for "did the gate run in full"; a hardcoded case COUNT drifted immediately in
+# suite-74 and cannot say WHICH case vanished. Add a case here and nowhere else.
+REQUIRED_IDS="001 002 003 004 005"
+MISSING=""
+for id in $REQUIRED_IDS; do
+  echo "$RESULT" | grep -q "T-S64-$id" || MISSING="$MISSING T-S64-$id"
+done
+if [ -n "$MISSING" ]; then
+  echo "FAIL  T-S64-COMPLETE every gate assertion ran  |  NEVER RAN:$MISSING — a gate that stops early is not a pass"
+  FAIL=$((FAIL+1))
+  echo "  --- driver log tail (why it stopped) ---"
+  kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$OUTFILE" 2>/dev/null | sed 's/^/    /' || true
+else
+  echo "PASS  T-S64-COMPLETE every gate assertion ran (001-005, none skipped)"
+  PASS=$((PASS+1))
+fi
+
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  rm -f "$DRIVER" "$OUTFILE" 2>/dev/null || true
+
+echo ""
+echo "=== suite-64 summary: PASS=$PASS FAIL=$FAIL ==="
+if [ "$FAIL" -ne 0 ]; then echo "❌ Suite 64 FAILED (a real production-path assertion failed)"; exit 1; fi
+if [ "$PASS" -eq 0 ]; then echo "❌ Suite 64 INCONCLUSIVE (no assertions ran)"; exit 1; fi
+if ! echo "$RESULT" | grep -q "PASS T-S64-003"; then echo "❌ Suite 64 INCONCLUSIVE (no completed prod run, no explicit skip)"; exit 1; fi
 echo "✅ Suite 64 PASSED — production durable workflow golden path proven end-to-end"

@@ -62,11 +62,34 @@ async def create_trigger(
     # Webhook triggers get a server-generated token; only its sha256 is stored.
     plaintext = None
     token_hash = None
+    # WS-4: a webhook trigger is born `token` and UPGRADES to `client_signed` when its
+    # FIRST client is registered (routers/webhook_clients.py::create_webhook_client).
+    #
+    # Why not born `client_signed`? Because `client_signed` + an empty allowlist is a
+    # trigger that authenticates NOBODY — the gateway has no client row to match, so
+    # every request 401s. Birthing it that way would make the unusable state the DEFAULT
+    # state while this endpoint hands the caller a `token` + `webhook_url` that cannot
+    # work until a second, separate API call is made. Flipping on first registration
+    # instead makes the mode track reality: `client_signed` ⟺ at least one client
+    # exists. The illegal state is unrepresentable rather than merely discouraged.
+    #
+    # This is still EXPLICIT dual-mode, not a fallthrough: the mode is a stored
+    # per-trigger column and the gateway branches on it alone — it never "tries the
+    # token, then falls back to signed". And it is the migration story WS-4 asks for
+    # (plan §1: "dual-mode so existing token senders keep working during migration…
+    # migrate senders one at a time"): the operator upgrades a trigger by registering
+    # an application for it, which is precisely when per-app auth becomes possible.
+    # Sanctioned by contracts/webhook-signing.md: "Creating the first client on a
+    # webhook trigger sets agent_triggers.auth_mode='client_signed'".
+    #
+    # Schedule triggers have no inbound auth at all and keep the 'token' default.
+    auth_mode = "token"
     if body.trigger_type == "webhook":
         plaintext, token_hash = _new_token()
     trigger = AgentTrigger(
         agent_id=agent.id,
         trigger_type=body.trigger_type,
+        auth_mode=auth_mode,
         cron_expression=body.cron_expression,
         timezone=body.timezone,
         enabled=body.enabled,

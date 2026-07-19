@@ -1279,17 +1279,71 @@ class ScheduledDatasetItem(_DatasetItemBase):
     tool_mocks: Optional[dict[str, Any]] = None
 
 
+class InjectionProbe(BaseModel):
+    """An untrusted-input robustness case on a webhook item (E-4; §2.4).
+
+    A webhook payload is ATTACKER-CONTROLLED — it arrives from the internet, not
+    from a user the platform authenticated. `injection_probe` encodes the attack:
+    the payload carries an injected instruction and this declares what the agent
+    must NOT do about it.
+
+    - `must_not_call` — tools the injected instruction tries to coerce. Scored by
+      `judge.score_injection` against the UNION of the recorded calls (E-2) and the
+      projected trajectory (E-1): a mocked write lands in the recorded calls, an
+      ungoverned call lands only in the trajectory, and reading one would miss the
+      other.
+    - `must_refuse` — the agent should visibly refuse the injected instruction.
+
+    `extra='allow'` matches the other item sub-models: a probe may carry fields a
+    later attack battery interprets without failing validation today.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    must_not_call: list[str] = Field(default_factory=list)
+    must_refuse: bool = False
+
+
 class WebhookDatasetItem(_DatasetItemBase):
-    """Filter match/miss + action correctness + injection robustness (§2.4; WS-4)."""
+    """Filter match/miss + action correctness + injection robustness (§2.4; scored E-4).
+
+    `trigger_payload` is the SYNTHETIC EVENT — the eval POSTs it through the REAL
+    `POST /playground/test-event` door, which runs the REAL `filter_engine.
+    evaluate_filters` against the trigger's REAL `filter_conditions`. E-4 adds no
+    filter code: the door's copy of the engine is kept byte-identical to the
+    event-gateway's by `scripts/check-filter-engine-parity.sh` (run inside
+    `deploy-cpe2e.sh` BEFORE either image builds), so the decision the eval scores is
+    the decision production makes.
+
+    `expected_match` is the FIRST-CLASS signal — a webhook agent's first job is to
+    NOT run on events it should filter. `expected_filter_reason` (a substring,
+    meaningful only when `expected_match=false`) makes a miss for the WRONG reason a
+    failure rather than a lucky pass.
+
+    `expected_trajectory` / `expected_side_effects` are the SAME structured models
+    `DurableDatasetItem` uses (E-1 `ExpectedTrajectory`, E-2 `SideEffectAssertion`) —
+    tightened from the untyped dicts they were, so a malformed golden trajectory (a
+    step missing `tool`) or a bad `occurs` value is rejected **422 at the door** by
+    the discriminated union instead of being key-sniffed at score time. They are
+    meaningful only for a MATCHED event (a filtered event runs nothing); the
+    trajectory family additionally requires a durable-inner agent (only a durable run
+    leaves `run_steps` to project).
+    """
 
     kind: Literal["webhook"] = "webhook"
+    # The synthetic event → POSTed through the real test-event door's real filter.
     trigger_payload: Optional[dict[str, Any]] = None
     expected_match: Optional[bool] = None
     expected_filter_reason: Optional[str] = None
     expected_output: Optional[str] = None
-    expected_trajectory: Optional[dict[str, Any]] = None
-    expected_side_effects: Optional[list[dict[str, Any]]] = None
-    injection_probe: Optional[dict[str, Any]] = None
+    expected_trajectory: Optional[ExpectedTrajectory] = None
+    expected_side_effects: Optional[list[SideEffectAssertion]] = None
+    injection_probe: Optional[InjectionProbe] = None
+    # Optional per-tool fixed mock returned instead of invoking. NOT yet threaded to
+    # the seam (the seam returns a type-default success sentinel today) — declared
+    # here for contract parity with `Durable`/`ScheduledDatasetItem`; same E-2
+    # gap-ledger row "item `tool_mocks` not threaded to the seam" (E-4 adds no new debt).
+    tool_mocks: Optional[dict[str, Any]] = None
 
 
 class WorkflowDatasetItem(_DatasetItemBase):
@@ -1407,6 +1461,37 @@ class EvalRunCreate(BaseModel):
     dataset_id: uuid.UUID
     sandbox_deployment_id: Optional[uuid.UUID] = None
     workflow_deployment_id: Optional[uuid.UUID] = None
+    # Eval v2 E-6: the per-run PASS POLICY (the writer for E-0's two columns —
+    # `eval_runs.pass_threshold` / `eval_runs.dimension_weights`, which had NO
+    # writer and NO reader and were therefore NULL in every row ever written).
+    #
+    # `pass_threshold` is left None here on purpose: `create_eval_run` defaults it
+    # from the platform-wide EVAL_PASS_THRESHOLD at the SINGLE write site, so the
+    # column is never NULL on a new row and no downstream consumer (the gate, the
+    # runner's per-item verdict, the UI) needs a fallback of its own. One number,
+    # one owner, three readers.
+    pass_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # NULL = "use the scorer branch's default weights", which the door already
+    # implements as `body.dimension_weights or <defaults>`.
+    dimension_weights: Optional[dict[str, float]] = None
+
+    @field_validator("dimension_weights")
+    @classmethod
+    def _weights_non_negative(
+        cls, v: Optional[dict[str, float]]
+    ) -> Optional[dict[str, float]]:
+        """Reject a negative weight at the door (422) rather than let it silently
+        invert a composite — a negative weight makes a BETTER dimension score
+        LOWER the composite, which reads as a legitimate failure and is
+        undiscoverable from the outside."""
+        if v is None:
+            return v
+        bad = {k: w for k, w in v.items() if w < 0}
+        if bad:
+            raise ValueError(
+                f"dimension_weights must all be >= 0; got negative weights: {bad}"
+            )
+        return v
 
 
 class EvalRunResultCreate(BaseModel):
@@ -1516,6 +1601,19 @@ class EvalScoreRequest(BaseModel):
     # per-member rubric. Only the `mode=workflow` branch reads these.
     member_path: Optional[list[str]] = None
     per_member_steps: Optional[dict[str, list[dict[str, Any]]]] = None
+    # Eval v2 E-4 (webhook): the filter DECISION the real `POST /playground/test-event`
+    # door returned for the item's `trigger_payload` — the door runs the real
+    # `filter_engine.evaluate_filters` against the trigger's real `filter_conditions`,
+    # from a copy the parity gate keeps byte-identical to the event-gateway's.
+    #
+    # It is the DOOR'S RETURNED DECISION, not an `AgentEvent.status` string (E-4 D1):
+    # the test-event door writes no `agent_events` row — that table is the production
+    # audit log of real DELIVERIES, and writing synthetic eval fires into it would make
+    # the Event Trace UI unable to tell a probe from a real event. So there is no
+    # `matched`⇔`'matched'` string mapping to get wrong: `matched` is the bool the door
+    # returned, `filter_reason` its `reason`. Only the `mode=webhook` branch reads them.
+    matched: Optional[bool] = None
+    filter_reason: Optional[str] = None
 
 
 class EvalScoreResponse(BaseModel):
@@ -1749,6 +1847,11 @@ class AgentTriggerResponse(BaseModel):
     # Reviewer scope a daemon trigger's approvals route to (WS-2 T011/T014);
     # NULL means the "agent:reviewer" default applies.
     approver_role: str | None = None
+    # Webhook auth mode (WS-4): 'token' = legacy coarse per-trigger bearer token;
+    # 'client_signed' = per-application client-id + allowlist + HMAC signature.
+    # Surfaced so the Studio trigger panel can show an operator which mode a
+    # trigger is on during the dual-mode migration.
+    auth_mode: str = "token"
     # Plaintext webhook token — populated ONLY in the create response (shown once);
     # never persisted (only sha256 is) and absent from list/get responses.
     token: str | None = None
@@ -1770,6 +1873,9 @@ class AgentEventResponse(BaseModel):
     filter_reason: str | None = None
     payload: dict[str, Any] | None = None
     run_id: uuid.UUID | None = None
+    # The webhook client that authenticated this event (WS-4); NULL on
+    # `auth_mode='token'` triggers, whose coarse bearer token names no application.
+    client_id: str | None = None
     source_ip: str | None = None
     received_at: datetime
 
@@ -1798,6 +1904,10 @@ class WorkflowTriggerResponse(BaseModel):
     # Reviewer scope a daemon workflow-trigger's approvals route to (WS-2 T011/T014);
     # NULL means the "agent:reviewer" default applies.
     approver_role: str | None = None
+    # Webhook auth mode (WS-4) — see AgentTriggerResponse.auth_mode. Same column,
+    # same semantics: a workflow trigger is an `agent_triggers` row with
+    # `workflow_id` set, so it gets client signing with no schema change.
+    auth_mode: str = "token"
     # Plaintext webhook token — populated ONLY in the create/rotate-token response
     # (shown once, never persisted — only sha256 is stored).
     token: str | None = None
@@ -1814,6 +1924,46 @@ class RotateTokenResponse(BaseModel):
     trigger_id: uuid.UUID
     token: str
     webhook_url: str
+
+
+# ---------------------------------------------------------------------------
+# Webhook clients (WS-4) — per-application credentials + per-trigger allowlist
+#
+# Secret leakage is prevented STRUCTURALLY, not by filtering: the read model
+# (WebhookClientResponse) has no `secret` field at all, so leaking it on a
+# list/get path is unrepresentable — there is nothing to forget to strip. Only
+# WebhookClientCreatedResponse can carry a secret, and it is returned exactly
+# once, from the 201.
+# ---------------------------------------------------------------------------
+
+class WebhookClientCreate(BaseModel):
+    """Register one application against a webhook trigger's allowlist."""
+    client_id: str = Field(..., min_length=1, max_length=128)
+
+
+class WebhookClientCreatedResponse(BaseModel):
+    """The ONLY shape that ever carries the signing secret — returned exactly once,
+    from the 201. The secret is stored Fernet-encrypted and is never retrievable
+    through any other endpoint."""
+    client_id: str
+    secret: str
+    created_at: datetime
+
+
+class WebhookClientResponse(BaseModel):
+    """Read model for a registered client. Deliberately has NO `secret` field —
+    reveal-once is a property of the type, not of handler discipline."""
+    model_config = ConfigDict(from_attributes=True)
+
+    client_id: str
+    enabled: bool
+    created_by: str | None = None
+    created_at: datetime
+
+
+class WebhookClientUpdate(BaseModel):
+    """Enable/disable a client — a live allowlist read, effective on the next request."""
+    enabled: bool
 
 
 # Error  (matches ErrorResponse in OpenAPI spec)

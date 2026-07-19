@@ -10,8 +10,11 @@ Race safety: uses a single UPDATE ... WHERE status='pending' AND expires_at < no
 RETURNING ... statement so only one worker wins even if deploy-controller's
 timeout_worker.py runs simultaneously.
 
-Agent pod URL is derived from the approval's agent_name + team fields:
-    http://{agent_name}-production.agents-{team}.svc.cluster.local:8080
+Agent pod URL comes from `agent_endpoints.agent_pod_base(agent_name, team, environment)`
+— the ONE definition. `environment` is resolved per agent, never assumed: this module
+used to hardcode `-production`, so every sandbox approval's resume POST went to a
+Service that does not exist, the RequestError was swallowed to a warning below, and the
+approval was still marked resolved (TODO-8).
 """
 
 from __future__ import annotations
@@ -33,16 +36,18 @@ _RESUME_TIMEOUT_SECONDS = 5
 _DURABLE_RUN_TTL_MINUTES = 10
 
 
-def _agent_pod_url(agent_name: str, team: str, environment: str = "production") -> str:
-    """Derive the agent pod's K8s cluster-internal service URL."""
-    svc_name = f"{agent_name}-{environment}"
-    namespace = f"agents-{team}"
-    return f"http://{svc_name}.{namespace}.svc.cluster.local:8080"
+from agent_endpoints import agent_pod_base as _agent_pod_url
 
 
 async def _notify_agent(agent_name: str, team: str, thread_id: str, approval_id: str) -> None:
     """POST /resume/{thread_id} to the agent pod with a timed_out decision."""
-    base_url = _agent_pod_url(agent_name, team)
+    # Resolve the agent's ACTUAL running environment — a sandbox agent has no
+    # `{agent}-production` Service, so the old default silently DNS-failed and the
+    # timeout was recorded without the agent ever being told.
+    from workflow_orchestrator import _resolve_agent_environment
+
+    environment = await _resolve_agent_environment(agent_name)
+    base_url = _agent_pod_url(agent_name, team, environment)
     url = f"{base_url}/resume/{thread_id}"
     payload = {
         "decision": "timed_out",

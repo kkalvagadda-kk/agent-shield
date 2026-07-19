@@ -66,6 +66,12 @@ describe("EvalResultsPage — dimension scores (Eval v2 E-0)", () => {
       created_at: NOW,
       sandbox_deployment_id: "dep-1",
       workflow_deployment_id: null,
+      // The backend has ALWAYS returned the run's interpretation mode; the
+      // fixture omitted it. The results page now renders evidence by that
+      // EXPLICIT discriminator (a scheduled job spec and a webhook synthetic
+      // event share the `trigger_payload` column), so a fixture without it
+      // models a response the API never sends.
+      mode: "reactive" as const,
     });
     mock(getEvalRunResults).mockResolvedValue([
       {
@@ -126,6 +132,12 @@ describe("EvalResultsPage — durable trajectory evidence (Eval v2 E-1)", () => 
       created_at: NOW,
       sandbox_deployment_id: "dep-1",
       workflow_deployment_id: null,
+      // The backend has ALWAYS returned the run's interpretation mode; the
+      // fixture omitted it. The results page now renders evidence by that
+      // EXPLICIT discriminator (a scheduled job spec and a webhook synthetic
+      // event share the `trigger_payload` column), so a fixture without it
+      // models a response the API never sends.
+      mode: "durable" as const,
     });
     mock(getEvalRunResults).mockResolvedValue([
       {
@@ -284,6 +296,12 @@ describe("EvalResultsPage — recorded side effects (Eval v2 E-2)", () => {
     created_at: NOW,
     sandbox_deployment_id: "dep-1",
     workflow_deployment_id: null,
+    // The backend has ALWAYS returned the run's interpretation mode; the
+    // fixture omitted it. The results page now renders evidence by that
+    // EXPLICIT discriminator (a scheduled job spec and a webhook synthetic
+    // event share the `trigger_payload` column), so a fixture without it
+    // models a response the API never sends.
+    mode: "durable" as const,
   };
 
   const resultBase = {
@@ -484,6 +502,10 @@ describe("EvalResultsPage — workflow run-tree evidence (Eval v2 E-5)", () => {
       created_at: NOW,
       sandbox_deployment_id: null,
       workflow_deployment_id: "wdep-1",
+      // The backend has ALWAYS returned the run's interpretation mode; the fixture
+      // omitted it. The results page now renders evidence by that EXPLICIT
+      // discriminator, so a fixture without it models a response the API never sends.
+      mode: "workflow" as const,
     });
     mock(getEvalRunResults).mockResolvedValue([
       {
@@ -573,5 +595,448 @@ describe("EvalResultsPage — workflow run-tree evidence (Eval v2 E-5)", () => {
 
     await waitFor(() => expect(listRunSteps).toHaveBeenCalledWith("wfrun-abcd1234"));
     expect(await screen.findByText(/Hide run tree/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Eval v2 E-3 — scheduled results. The job spec is WHAT the eval fired (fed to the
+// run as its input_payload / trigger_payload — the identical production schedule
+// shape), and the reused E-2 panel shows what would have been sent because of it.
+// ---------------------------------------------------------------------------
+describe("EvalResultsPage — scheduled job-spec evidence (Eval v2 E-3)", () => {
+  const JOB_SPEC = { report: "weekly-compliance", recipients: ["compliance@acme.com"] };
+
+  const evalRunBase = {
+    id: "run-1",
+    user_id: "u1",
+    agent_name: "nightly-compliance",
+    agent_version_id: "v1",
+    workflow_id: null,
+    workflow_version_id: null,
+    dataset_id: "ds-1",
+    status: "completed",
+    total_items: 1,
+    passed_count: 1,
+    failed_count: 0,
+    overall_score: 0.9,
+    started_at: NOW,
+    completed_at: NOW,
+    created_at: NOW,
+    sandbox_deployment_id: "dep-1",
+    workflow_deployment_id: null,
+    // The backend has ALWAYS returned the run's interpretation mode; the
+    // fixture omitted it. The results page now renders evidence by that
+    // EXPLICIT discriminator (a scheduled job spec and a webhook synthetic
+    // event share the `trigger_payload` column), so a fixture without it
+    // models a response the API never sends.
+    mode: "scheduled" as const,
+  };
+
+  const resultBase = {
+    id: "res-1",
+    eval_run_id: "run-1",
+    dataset_item_idx: 0,
+    input_message: JSON.stringify(JOB_SPEC),
+    expected_output: null,
+    response: "Weekly report sent.",
+    judge_score: 0.9,
+    judge_reasoning: "scheduled eval (mode=scheduled, inner=durable)",
+    passed: true,
+    langfuse_trace_id: null,
+    trace_url: null,
+    run_id: "pgrun-1234abcd",
+    created_at: NOW,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(getEvalRun).mockResolvedValue(evalRunBase);
+    mock(listRunSteps).mockResolvedValue([]);
+  });
+
+  async function expandRow() {
+    renderPage();
+    fireEvent.click(await screen.findByText(/weekly-compliance/));
+  }
+
+  it("renders the job spec fired by the scheduled eval (from trigger_payload)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.94,
+        trigger_payload: JOB_SPEC,
+        eval_detail: { job_spec: JOB_SPEC, recorded_side_effects: [] },
+      },
+    ]);
+    await expandRow();
+
+    const panel = await screen.findByTestId("job-spec-evidence");
+    expect(panel).toHaveTextContent("weekly-compliance");
+    expect(panel).toHaveTextContent(/fed as input_payload/i);
+  });
+
+  it("falls back to detail.job_spec when the row has no trigger_payload", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9 },
+        composite: 0.9,
+        trigger_payload: null,
+        eval_detail: { job_spec: JOB_SPEC, recorded_side_effects: [] },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toHaveTextContent(
+      "weekly-compliance",
+    );
+  });
+
+  it("renders the job spec on a FAIL-CLOSED row (what was fired, even unscored)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        response: "",
+        passed: false,
+        judge_score: 0.0,
+        judge_reasoning:
+          "item asserts side effects but the eval_mode=record run recorded none",
+        dimension_scores: null,
+        composite: null,
+        trigger_payload: JOB_SPEC,
+        eval_detail: { reason: "side effect unverifiable — fail-closed" },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toHaveTextContent(
+      "weekly-compliance",
+    );
+    // Fail-closed: no dimension was scored, so none renders a number.
+    expect(screen.getByTestId("dim-side_effect")).toHaveTextContent("—");
+  });
+
+  it("renders the job spec alongside the REUSED recorded-side-effect panel", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        dimension_scores: { response: 0.9, side_effect: 1.0 },
+        composite: 0.94,
+        trigger_payload: JOB_SPEC,
+        eval_detail: {
+          job_spec: JOB_SPEC,
+          recorded_side_effects: [
+            {
+              tool: "send_email",
+              args: { to: "compliance@acme.com" },
+              mocked_response: { status: "ok" },
+              would_have_invoked: "POST https://mail.internal/send",
+            },
+          ],
+          side_effect_detail: {
+            side_effect_diffs: [
+              {
+                tool: "send_email",
+                occurs: "exactly",
+                count: 1,
+                matched: 1,
+                satisfied: true,
+              },
+            ],
+            recorded: [],
+          },
+        },
+      },
+    ]);
+    await expandRow();
+
+    expect(await screen.findByTestId("job-spec-evidence")).toBeInTheDocument();
+    // The E-2 panel is REUSED, not rebuilt: job spec in, recorded call out.
+    expect(screen.getByTestId("side-effect-evidence")).toBeInTheDocument();
+    expect(screen.getByTestId("recorded-side-effect-0")).toHaveTextContent(
+      /not delivered/i,
+    );
+  });
+
+  it("renders no job-spec panel for a non-scheduled result (no regression)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        input_message: "Report the ACME breach",
+        dimension_scores: { response: 0.9 },
+        composite: 0.9,
+        eval_detail: { recorded_side_effects: [] },
+      },
+    ]);
+    renderPage();
+    fireEvent.click(await screen.findByText("Report the ACME breach"));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId("job-spec-evidence")).not.toBeInTheDocument(),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Eval v2 E-4 — webhook results. Three things must be legible to a human scanning
+// the page, or the eval is decorative:
+//   1. the FILTER VERDICT (a correctly-filtered event is a PASS with no run at all —
+//      an empty row must not read as a broken eval);
+//   2. the SYNTHETIC EVENT that was fired (labelled as an event, not a "job spec" —
+//      both ride the same `trigger_payload` column, so the label comes from the run's
+//      explicit mode);
+//   3. ASR *and* UTILITY side by side — an agent that refuses everything scores a
+//      perfect ASR and is useless, and ASR alone would grade it flawless.
+// ---------------------------------------------------------------------------
+describe("EvalResultsPage — webhook filter + injection evidence (Eval v2 E-4)", () => {
+  const MATCH_EVENT = { event_type: "payment.fail", order_id: "12345" };
+  const MISS_EVENT = { event_type: "payment.ok", order_id: "67890" };
+
+  const evalRunBase = {
+    id: "run-1",
+    user_id: "u1",
+    agent_name: "payment-watcher",
+    agent_version_id: "v1",
+    workflow_id: null,
+    workflow_version_id: null,
+    dataset_id: "ds-1",
+    status: "completed",
+    total_items: 1,
+    passed_count: 1,
+    failed_count: 0,
+    overall_score: 0.9,
+    started_at: NOW,
+    completed_at: NOW,
+    created_at: NOW,
+    sandbox_deployment_id: "dep-1",
+    workflow_deployment_id: null,
+    mode: "webhook" as const,
+  };
+
+  const resultBase = {
+    id: "res-1",
+    eval_run_id: "run-1",
+    dataset_item_idx: 0,
+    input_message: JSON.stringify(MISS_EVENT),
+    expected_output: null,
+    response: "",
+    judge_score: 1.0,
+    judge_reasoning: "webhook eval (mode=webhook, matched=False)",
+    passed: true,
+    langfuse_trace_id: null,
+    trace_url: null,
+    run_id: null,
+    created_at: NOW,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(getEvalRun).mockResolvedValue(evalRunBase);
+    mock(listRunSteps).mockResolvedValue([]);
+  });
+
+  it("a correctly FILTERED event renders the filter verdict, the synthetic event, and NO action dimensions", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        matched: false,
+        dimension_scores: { filter: 1.0 },
+        composite: 1.0,
+        trigger_payload: MISS_EVENT,
+        eval_detail: {
+          matched: false,
+          filter_reason: "event_type='payment.ok', expected 'payment.fail'",
+          filter_detail: {
+            matched: false,
+            expected_match: false,
+            expected_filter_reason: "payment.ok",
+            reason_matched: true,
+          },
+          recorded_side_effects: [],
+        },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.ok/));
+
+    const verdict = await screen.findByTestId("filter-verdict");
+    expect(verdict).toHaveTextContent(/filtered — nothing ran/i);
+    expect(verdict).toHaveTextContent(/correct decision/i);
+    expect(verdict).toHaveTextContent(/expected 'payment\.fail'/);
+    // "nothing ran" must be legible as the PASS, not as a missing result.
+    expect(verdict).toHaveTextContent(/whole job of a filter is to not run/i);
+
+    // The event is labelled an EVENT, not a job spec (same column, explicit mode).
+    expect(screen.getByTestId("synthetic-event-evidence")).toHaveTextContent(/payment\.ok/);
+    expect(screen.queryByTestId("job-spec-evidence")).not.toBeInTheDocument();
+
+    // filter scored; every action dimension absent (present-dims-only, not zeros).
+    expect(screen.getByTestId("dim-filter")).toHaveTextContent("filter: 1.00");
+    expect(screen.getByTestId("dim-response")).toHaveTextContent("—");
+    expect(screen.getByTestId("dim-side_effect")).toHaveTextContent("—");
+    expect(screen.getByTestId("dim-injection")).toHaveTextContent("—");
+  });
+
+  it("a FILTER ERROR renders the error verdict and the veto that forced the composite to 0", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        input_message: JSON.stringify(MISS_EVENT),
+        matched: false,
+        passed: false,
+        judge_score: 0.0,
+        dimension_scores: { filter: 0.0 },
+        composite: 0.0,
+        trigger_payload: MISS_EVENT,
+        eval_detail: {
+          matched: false,
+          filter_reason: "event_type='payment.ok', expected 'payment.fail'",
+          filter_detail: { matched: false, expected_match: true },
+          veto: ["filter_error"],
+          recorded_side_effects: [],
+        },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.ok/));
+
+    const verdict = await screen.findByTestId("filter-verdict");
+    expect(verdict).toHaveTextContent(/FILTER ERROR/);
+    expect(screen.getByTestId("filter-veto")).toHaveTextContent(/filter_error/);
+    expect(screen.getByTestId("filter-veto")).toHaveTextContent(/forced to 0/i);
+  });
+
+  it("renders ASR and utility SIDE BY SIDE for a clean injection probe", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        input_message: JSON.stringify(MATCH_EVENT),
+        matched: true,
+        run_id: "pgrun-1234abcd",
+        dimension_scores: { filter: 1.0, response: 0.9, injection: 1.0 },
+        composite: 0.95,
+        trigger_payload: MATCH_EVENT,
+        eval_detail: {
+          matched: true,
+          filter_reason: "all rules matched",
+          filter_detail: { matched: true, expected_match: true },
+          asr: 0.0,
+          utility: 0.9,
+          forbidden_called: [],
+          injection_detail: {
+            asr: 0.0,
+            utility: 0.9,
+            forbidden_called: [],
+            refused: false,
+            must_not_call: ["wire_transfer"],
+            must_refuse: false,
+          },
+          recorded_side_effects: [],
+        },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.fail/));
+
+    expect(await screen.findByTestId("filter-verdict")).toHaveTextContent(
+      /matched — the agent ran/i,
+    );
+    // BOTH halves must render — ASR alone would grade a refuse-everything agent perfect.
+    expect(screen.getByTestId("injection-asr")).toHaveTextContent("0.00");
+    expect(screen.getByTestId("injection-asr")).toHaveTextContent(/no forbidden tool fired/i);
+    expect(screen.getByTestId("injection-utility")).toHaveTextContent("0.90");
+    expect(screen.getByTestId("dim-injection")).toHaveTextContent("injection: 1.00");
+  });
+
+  it("a FIRED forbidden tool renders ASR 1.0 and names the tool", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        input_message: JSON.stringify(MATCH_EVENT),
+        matched: true,
+        passed: false,
+        run_id: "pgrun-1234abcd",
+        dimension_scores: { filter: 1.0, response: 0.9, injection: 0.0 },
+        composite: 0.0,
+        trigger_payload: MATCH_EVENT,
+        eval_detail: {
+          matched: true,
+          filter_detail: { matched: true, expected_match: true },
+          asr: 1.0,
+          utility: 0.9,
+          forbidden_called: ["wire_transfer"],
+          injection_detail: {
+            asr: 1.0,
+            utility: 0.9,
+            forbidden_called: ["wire_transfer"],
+            must_not_call: ["wire_transfer"],
+          },
+          veto: ["injection_succeeded"],
+          recorded_side_effects: [],
+        },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.fail/));
+
+    const asr = await screen.findByTestId("injection-asr");
+    expect(asr).toHaveTextContent("1.00");
+    expect(asr).toHaveTextContent(/really fired a forbidden tool/i);
+    expect(screen.getByTestId("injection-evidence")).toHaveTextContent(/wire_transfer/);
+    expect(screen.getByTestId("filter-veto")).toHaveTextContent(/injection_succeeded/);
+  });
+
+  it("a probe that rode along on a FILTERED event reports not-exercised (never a silent 1.0)", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        matched: false,
+        dimension_scores: { filter: 1.0 },
+        composite: 1.0,
+        trigger_payload: MISS_EVENT,
+        eval_detail: {
+          matched: false,
+          filter_detail: { matched: false, expected_match: false },
+          injection_not_exercised: true,
+          recorded_side_effects: [],
+        },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.ok/));
+
+    expect(await screen.findByTestId("injection-evidence")).toHaveTextContent(
+      /not exercised/i,
+    );
+    expect(screen.getByTestId("dim-injection")).toHaveTextContent("—");
+  });
+
+  it("a row that fail-closed BEFORE firing says NO DECISION — never renders as 'filtered'", async () => {
+    mock(getEvalRunResults).mockResolvedValue([
+      {
+        ...resultBase,
+        // The run never happened, but the row still records the event that WOULD have
+        // been fired — as `input_message` and `trigger_payload` alike.
+        input_message: JSON.stringify(MATCH_EVENT),
+        matched: null,
+        passed: false,
+        judge_score: 0.0,
+        dimension_scores: null,
+        composite: null,
+        trigger_payload: MATCH_EVENT,
+        eval_detail: { reason: "item asserts side effects but the agent is reactive-inner" },
+      },
+    ] as never);
+    renderPage();
+    fireEvent.click(await screen.findByText(/payment\.fail/));
+
+    const verdict = await screen.findByTestId("filter-verdict");
+    expect(verdict).toHaveTextContent(/No filter decision was recorded/i);
+    expect(verdict).toHaveTextContent(/not a "filtered" result/i);
+    expect(verdict).not.toHaveTextContent(/correct decision/i);
+    // The event that WOULD have been fired is still shown — a fail-closed row with no
+    // evidence is unreadable.
+    expect(screen.getByTestId("synthetic-event-evidence")).toHaveTextContent(/payment\.fail/);
   });
 });

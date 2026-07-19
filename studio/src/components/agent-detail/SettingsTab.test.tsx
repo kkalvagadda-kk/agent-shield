@@ -11,11 +11,16 @@ vi.mock("../../api/registryApi", () => ({
   rotateToken: vi.fn(),
   createTrigger: vi.fn(),
   updateAgent: vi.fn(),
+  createTriggerClient: vi.fn(),
+  listTriggerClients: vi.fn(),
+  setClientEnabled: vi.fn(),
+  deleteTriggerClient: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import {
   listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
+  createTriggerClient, listTriggerClients, setClientEnabled, deleteTriggerClient,
 } from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
@@ -44,8 +49,16 @@ const webhookTrigger: AgentTrigger = {
   filter_conditions: null,
   alert_email: null,
   alert_on_failure: false,
+  auth_mode: "client_signed",
   created_at: NOW,
   updated_at: NOW,
+};
+
+const registeredClient = {
+  client_id: "billing-service",
+  enabled: true,
+  created_by: "75c7c8b3-admin-sub",
+  created_at: NOW,
 };
 
 describe("SettingsTab", () => {
@@ -63,6 +76,17 @@ describe("SettingsTab", () => {
       webhook_url: "https://example.com/hooks/my-agent/newtok",
     });
     (updateAgent as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (createTriggerClient as ReturnType<typeof vi.fn>).mockResolvedValue({
+      client_id: "billing-service",
+      secret: "whsec_abc123secret",
+      created_at: NOW,
+    });
+    (setClientEnabled as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...registeredClient,
+      enabled: false,
+    });
+    (deleteTriggerClient as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
   });
 
   it("shows empty-state copy when there are no triggers", async () => {
@@ -238,5 +262,134 @@ describe("SettingsTab", () => {
     await waitFor(() =>
       expect(updateAgent).toHaveBeenCalledWith("my-agent", { memory_enabled: true })
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // WS-4 — webhook signing-client panel
+  // -------------------------------------------------------------------------
+  describe("signing clients (WS-4)", () => {
+    const openAddForm = async () => {
+      await userEvent.click(await screen.findByRole("button", { name: /add client/i }));
+      await userEvent.type(screen.getByPlaceholderText("billing-service"), "billing-service");
+    };
+
+    it("shows the trigger's auth_mode so an operator can see which door is open", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      expect(await screen.findByText("client_signed")).toBeInTheDocument();
+    });
+
+    it("falls back to token mode display for a pre-WS-4 trigger", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { ...webhookTrigger, auth_mode: undefined },
+      ]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      expect(await screen.findByText("token")).toBeInTheDocument();
+    });
+
+    it("renders the registered client list with its audit fields", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      expect(await screen.findByText("billing-service")).toBeInTheDocument();
+      expect(screen.getByText(/75c7c8b3-admin-sub/)).toBeInTheDocument();
+      await waitFor(() => expect(listTriggerClients).toHaveBeenCalledWith("t2"));
+    });
+
+    it("shows the loading state while clients are in flight", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      expect(await screen.findByText(/loading clients/i)).toBeInTheDocument();
+    });
+
+    it("shows the empty state when no clients are registered", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      expect(await screen.findByText(/no clients registered/i)).toBeInTheDocument();
+    });
+
+    it("shows an error state when the client list fails to load", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      expect(await screen.findByText(/failed to load clients/i)).toBeInTheDocument();
+    });
+
+    it("registers a client and reveals the secret exactly once", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      await openAddForm();
+      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
+
+      await waitFor(() =>
+        expect(createTriggerClient).toHaveBeenCalledWith("t2", { client_id: "billing-service" })
+      );
+      expect(await screen.findByTestId("client-secret")).toHaveTextContent("whsec_abc123secret");
+      expect(screen.getByText(/won't be shown again/i)).toBeInTheDocument();
+    });
+
+    it("does not show the secret again once the reveal is dismissed", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      // The refetch after registering returns the read model — which structurally
+      // has no secret field, so there is nothing for the panel to re-render.
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      await openAddForm();
+      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
+      await screen.findByTestId("client-secret");
+
+      await userEvent.click(screen.getByRole("button", { name: /^done$/i }));
+
+      await waitFor(() => expect(screen.queryByTestId("client-secret")).not.toBeInTheDocument());
+      expect(screen.queryByText("whsec_abc123secret")).not.toBeInTheDocument();
+      // The client itself survives — only the secret is gone.
+      expect(await screen.findByText("billing-service")).toBeInTheDocument();
+    });
+
+    it("surfaces the 409 duplicate-client-id error inline", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (createTriggerClient as ReturnType<typeof vi.fn>).mockRejectedValue({
+        response: {
+          status: 409,
+          data: { detail: "Client 'billing-service' is already registered on this trigger" },
+        },
+      });
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      await openAddForm();
+      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
+
+      expect(await screen.findByText(/already registered on this trigger/i)).toBeInTheDocument();
+      // No secret is invented on a failed registration.
+      expect(screen.queryByTestId("client-secret")).not.toBeInTheDocument();
+    });
+
+    it("disables a client via setClientEnabled(false)", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      await userEvent.click(
+        await screen.findByRole("checkbox", { name: /enabled billing-service/i })
+      );
+      await waitFor(() =>
+        expect(setClientEnabled).toHaveBeenCalledWith("t2", "billing-service", false)
+      );
+    });
+
+    it("revokes a client via deleteTriggerClient", async () => {
+      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
+      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
+      renderWithProviders(<SettingsTab agentName="my-agent" />);
+
+      await userEvent.click(await screen.findByRole("button", { name: /revoke billing-service/i }));
+      await waitFor(() =>
+        expect(deleteTriggerClient).toHaveBeenCalledWith("t2", "billing-service")
+      );
+    });
   });
 });

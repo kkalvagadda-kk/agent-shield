@@ -120,12 +120,34 @@ embeddingSidecar:
     tag: "0.1.0"
     pullPolicy: IfNotPresent
 
-# event-gateway: Phase 9 public webhook ingress. Image tag + tunables come from
-# the sub-chart defaults (charts/event-gateway/values.yaml); Ingress + L4
-# NetworkPolicy are OFF by default there (local Docker Desktop has no ingress
-# controller / non-enforcing CNI — tests hit the Service in-cluster).
+# event-gateway: Phase 9 public webhook ingress. Ingress + L4 NetworkPolicy are OFF by
+# default in the sub-chart (local Docker Desktop has no ingress controller /
+# non-enforcing CNI — tests hit the Service in-cluster).
+#
+# The image tag is pinned HERE, not left to the sub-chart default, and that is
+# load-bearing (WS-4). `helm dependency update` packages charts/event-gateway/ into
+# charts/event-gateway-0.1.0.tgz, and a PACKAGED sub-chart's values shadow the source
+# directory's. That .tgz is a build artifact which had gone stale at tag 0.1.1 —
+# regenerating it is supposed to fix that, except `helm dependency update` currently
+# FAILS (unrelated: "can't get a valid version for repositories envoy-gateway") and
+# deploy-cpe2e.sh:386 swallows the error with `2>/dev/null || true`. Net effect: editing
+# charts/event-gateway/values.yaml did NOTHING — the deploy served 0.1.1 under a bumped
+# tag, silently, which is the "a tag is a claim about content" trap.
+#
+# A top-level value always wins over a sub-chart default, packaged or not, so pinning it
+# here is immune to the artifact's state. This also makes event-gateway consistent with
+# every other service (registry-api, deploy-controller, studio all pin their tag here)
+# and with the CLAUDE.md rule: bump the tag in deploy-cpe2e.sh AND in this file.
+# Keep this in lockstep with EVENT_GATEWAY_TAG in scripts/deploy-cpe2e.sh.
 event-gateway:
   enabled: true
+  image:
+    # Pinned HERE, top-level, on purpose: the sub-chart's own values.yaml is shadowed by
+    # a stale charts/event-gateway-*.tgz whenever `helm dependency update` fails (it does,
+    # and deploy-cpe2e.sh swallows the error) — a sub-chart tag edit then silently no-ops
+    # and helm deploys the OLD image while reporting success. The top-level pin wins
+    # regardless of the artifact's state. See the WS-4 gap ledger.
+    tag: "0.1.3"
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
@@ -624,7 +646,7 @@ registry-api:
     tag: "0.2.207"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.10"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   service:
@@ -650,7 +672,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.10"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.14"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   resources:
@@ -733,7 +755,15 @@ safety-orchestrator:
 
   image:
     repository: registry.internal/agentshield/safety-orchestrator
-    tag: "0.1.0"
+    # Keep in lockstep with SAFETY_ORCHESTRATOR_TAG in scripts/deploy-cpe2e.sh.
+    # This block is the AUTHORITATIVE pin: `safety-orchestrator:` appears TWICE as a
+    # top-level key in this file (see also ~L172) and YAML is last-wins, so this one is
+    # what helm resolves — the earlier block is dead. The pin had drifted to 0.1.0 while
+    # deploy-cpe2e.sh built 0.1.3 (the tag was bumped in cdfe0ef; this pin was last
+    # touched in de6c46b and never followed). It went unnoticed only because the
+    # component ships `enabled: false` — the moment it is enabled, helm would serve the
+    # OLD image while every check stayed green. Found by scripts/check-tag-content-coupling.sh.
+    tag: "0.1.3"
     pullPolicy: IfNotPresent
 
   service:

@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import (  # type: ignore[import]
     CONTENT_TYPE_LATEST,
@@ -170,12 +170,49 @@ async def _resume_interrupted_runs() -> None:
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+async def _bind_user_context(request: Request) -> None:
+    """Bind the caller's identity onto the ContextVar `governed_tool` reads for OPA.
+
+    App-wide on purpose. This used to be set by hand inside `/chat/stream` ONLY, so
+    every other entrypoint — `/chat`, `/workflow-run`, `/resume/*`, `/run` — reached
+    `governed_tool` with an empty context and sent OPA `user_id: ""`. Once WS-2 added
+    the `user_identity_ok` floor (a `user_delegated` agent MUST present a live user),
+    that empty string became a DENY on every tool call: the agent politely reported a
+    "policy restriction on the search tool" while nothing errored anywhere. One path
+    was wired, four were not, and the miss failed CLOSED — invisible.
+
+    Declared as an app-level dependency rather than per-route so a NEW route cannot
+    forget it: the binding is structural, not a thing to remember. A dependency (not
+    BaseHTTPMiddleware) because it must run in the SAME task as the handler — a
+    ContextVar set in a `@app.middleware("http")` wrapper is set in the middleware's
+    own task, and only propagates by copy-on-task-creation, which is exactly the kind
+    of subtlety that produced this bug.
+
+    Daemon agents legitimately have no user: they send `user_id: ""` and OPA's
+    `agent_class == "daemon"` branch admits them. Absent header ⇒ "" is therefore the
+    correct, fail-closed default for a user_delegated agent — deny, never a silent
+    downgrade to the service identity.
+    """
+    from agentshield_sdk.graph_builder import _current_user_context
+
+    _current_user_context.set({
+        "user_id": request.headers.get("x-user-sub", ""),
+        "user_team": request.headers.get("x-agent-team", ""),
+        # Batch/dataset eval sets this (registry-side, only for the eval-runner
+        # identity) so high-risk tools auto-approve instead of hanging on HITL.
+        "auto_approve": request.headers.get(
+            "x-agentshield-auto-approve", ""
+        ).lower() == "true",
+    })
+
+
 app = FastAPI(
     title="AgentShield Declarative Runner",
     version="0.1.0",
     docs_url="/docs",
     redoc_url=None,
     lifespan=lifespan,
+    dependencies=[Depends(_bind_user_context)],
 )
 
 
@@ -607,7 +644,15 @@ async def chat_stream(req: ChatRequest, request: Request):
     # SDK additionally gates it on a trusted batch identity (defense-in-depth).
     auto_approve = request.headers.get("x-agentshield-auto-approve", "").lower() == "true"
 
+    # MERGE NOTE: the OPA user-context is now bound APP-WIDE by `_bind_user_context`
+    # (the app-level dependency from main) so every entrypoint gets identity — we do
+    # NOT re-set it in the handler body here (main's fix, honored). The import below is
+    # ONLY for the sse_generator's §6.3 leak-fix re-bind (a StreamingResponse generator
+    # runs in its own task, so it re-sets + captures a reset token so this request's
+    # identity never leaks into the next one). deployment_id/conversation_id/auto_approve
+    # above are POC-0/1 memory needs, not the OPA identity binding.
     from agentshield_sdk.graph_builder import _current_user_context
+
 
     async def sse_generator():
         import asyncio

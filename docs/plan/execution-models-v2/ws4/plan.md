@@ -8,13 +8,28 @@
 > **Migration PROVISIONAL** — next free after the spine's migrations. WS-4 adds `webhook_clients` +
 > `agent_triggers.auth_mode`. Confirm head at impl.
 
-> ⚠️ **Plan status — design stable, specifics indicative.** The architecture, sequencing, and locked
-> decisions (D1–D4, R1–R3, parity gates, gap ledger) here are **stable and reviewable now** — that is what
-> writing ahead buys. The execution specifics — `file:line`, migration numbers, image tags, orphan-greps,
-> exact task order — are **indicative against the 2026-07-12 tree** and WILL drift as the WS-0→ spine merges.
-> **Re-ground every specific against live code when this slice is minted into its own `tasks.md`** (the
-> just-in-time step). Never treat a `file:line` or migration number here as ground truth. (CLAUDE.md: design
-> docs go stale — verify in code before relying.)
+> ⚠️ **Plan status — design stable, specifics RE-GROUNDED 2026-07-15.** The architecture, sequencing, and
+> locked decisions (D1–D4, R1–R3, parity gates, gap ledger) here are **stable**. The execution specifics
+> below (`file:line`, migration numbers, image tags, route prefixes) were **indicative against the
+> 2026-07-12 tree** and **have since drifted**. They were re-verified against live code on **2026-07-15**
+> and the corrections are recorded in the table below — **`ws4/tasks.md` is authoritative where it conflicts
+> with this document.** (CLAUDE.md DoD #6: design docs go stale — verify in code before relying.)
+
+### Re-grounding record (verified against live code, 2026-07-15)
+
+| This plan says | Live truth (verified 2026-07-15) |
+|---|---|
+| suite `59` | **TAKEN** — `scripts/e2e/suite-59-workflow-orchestrations-live.sh`; suites 1..75 all exist. WS-4 = **`suite-76-webhook-client-signing.sh`**, test IDs **`T-S76-00x`**, registered after suite-75. |
+| migration `00NN` | Alembic head = **`0063`**. WS-4 = **`0064_webhook_clients.py`**, `down_revision="0063"`. |
+| `POST /api/v1/triggers/{id}/clients` on `routers/triggers.py` | **No `/api/v1/triggers` prefix exists.** `routers/triggers.py` is mounted at `/api/v1/agents`; workflow triggers live in `routers/composite_workflows.py` at `/api/v1/workflows`. **Resolution: a NEW dedicated router `routers/webhook_clients.py`** mounted at `/api/v1/triggers`, keyed on `trigger_id` **alone** — ONE router serves agent **and** workflow triggers (workflow triggers are `agent_triggers` rows with `workflow_id` set). Bolting `/clients` onto both existing routers would manufacture the exact two-parallel-paths bug class WS-4 guards against. |
+| uniform-401 body `{"detail": "unauthorized"}` (contracts doc) | **CONFLICTS with live code.** `_uniform_401()` (`event-gateway/main.py:149-151`) already returns **`{"detail": "invalid webhook credentials"}`**. **The code is authoritative; the contract doc is corrected** — changing the body would break existing token senders for zero security gain. |
+| (silent) | **PRE-EXISTING 401 ORACLE.** The stale-timestamp branches return a **different** body — `{"detail": "stale webhook timestamp"}` (`main.py:262` workflow, `:366` agent). That is an enumeration oracle today; WS-4's byte-identity assertion forces it through `_uniform_401()`. |
+| `secret_hash` (goal #1, data-model) | **Renamed `secret_encrypted`.** The gateway must **recompute** the HMAC, so it needs the raw secret back — a one-way hash is unimplementable here. Stored as a **Fernet** token via `crypto.py:34` (`encrypt_json`), keyed by `AGENTSHIELD_ENCRYPTION_KEY` from the `agentshield-encryption` K8s Secret. `secret_hash` would be an actively misleading name. |
+| `AgentDetailPage.tsx` (trigger config) | **WRONG FILE.** Trigger config UI is **`studio/src/components/agent-detail/SettingsTab.tsx`** (`WebhookRow`, `rotateToken`); test file = `SettingsTab.test.tsx`. |
+| bump tags in `deploy-cpe2e.sh` + `charts/agentshield/values.yaml` | **event-gateway's tag is NOT in the top-level values.yaml** — it lives in the **sub-chart** `charts/agentshield/charts/event-gateway/values.yaml`. WS-4 bumps **THREE** files. |
+| `agent_events` at `models.py:1673` | Drift — `class AgentEvent` is at `models.py:1741`; `class AgentTrigger` at `:1679`. |
+| replay nonce = "deferred, v1 uses the 300s window only" | **PARTIALLY STALE.** Replay protection already ships for the token path (`X-Webhook-Timestamp` skew + `X-Webhook-Nonce` via `_rl.check_nonce`, Redis `SET NX`, fail-closed). The real gap is narrower: it is **opt-in** and keyed on **agent_name, not client_id**. See the corrected ledger in `tasks.md`. |
+| data-model `ADD CONSTRAINT IF NOT EXISTS` | **Not valid PostgreSQL.** House style: raw `op.execute("CREATE TABLE IF NOT EXISTS …")` / `ADD COLUMN IF NOT EXISTS`, and constraints inside a **`DO $$ … pg_constraint …$$`** guard (mirror `0063`). |
 
 ## 1. Goal
 

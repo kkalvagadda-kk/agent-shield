@@ -154,6 +154,13 @@
 #   - registry-api:0.2.135 / studio:0.1.111 / declarative-runner:0.1.31 (Multi-tool HITL: provider-agnostic post_model_hook trims a turn to ONE high-risk tool call only when 2+ are high-risk (no concurrent-interrupt collision / duplicate execution); idempotent create_approval (no phantom duplicate on node re-run); resume chaining — resume proxies forward approval_requested + AgentChatPage/ChatPane handle re-interrupt during resume (ref + nonce); Evaluate-tab HitlPanel shows WHO. Needs agent redeploy.)
 #   - registry-api:0.2.134 / studio:0.1.110 / declarative-runner:0.1.29 (HITL approval context WHO/WHY/WHAT: SDK captures LLM reasoning via InjectedState on governed_tool + system-prompt nudge; migration 0053 approvals.reasoning; reasoning threaded hitl.py→approval record + approval_requested SSE; session_approvals adds reasoning + requester username/team; ConversationApprovalPanel/HitlPanel/HITLDashboard render who/why/what. Needs agent redeploy.)
 #   - registry-api:0.2.133 / studio:0.1.109 / declarative-runner:0.1.28 (Sandbox HITL 3 cases: (1) registry-derived approval context — sandbox deployment approvals routed to 'sandbox' out of the prod queue, migration 0052 playground_runs session_id + requester username/team, deployment_id on start_chat, session-approvals endpoint; studio env-aware AgentChatPage + ConversationApprovalPanel self-approve + HITL console username/team; (3) batch-eval auto-approve — registry sets x-agentshield-auto-approve only for eval-runner identity, runner threads it, SDK governed_tool skips the HITL interrupt gated on a trusted identity (defense-in-depth). Case 3 needs an agent redeploy.)
+#   - eval-runner:0.1.11   (E-3 scheduled eval SHIPS: 9f6603a added `_run_scheduled_item` to eval-runner
+#                           but did NOT bump the tag off 0.1.10 (set by 6d93401/E-2). With
+#                           imagePullPolicy=IfNotPresent the node kept the cached E-2 image, so every
+#                           MODE=scheduled Job silently fell through to the generic reactive path:
+#                           response-only dims, no trigger_payload, no fail-closed. E-3's code had never
+#                           once executed. suite-75 caught it (6/6 FAIL). NEVER reuse a tag — a code
+#                           change without a bump does not reach the cluster.)
 #   - registry-api:0.2.132 (OPA bundle cold-start fix: bundle_generator includes 'deploying' deployments (not just 'running') so a new agent's identity is in the OPA bundle immediately; OPA sidecar poll delays lowered 30/60→5/15s)
 #   - registry-api:0.2.131 (Deployment-chat HITL: migration 0051 playground_runs.deployment_id; GET /agents/{n}/chat/{run}/approval-status (requester-scoped poll); list_approvals provenance enrichment (requested_by/deployment_name/environment via thread_id→run join))
 #   - studio:0.1.108       (Deployment-chat HITL: AgentChatPage waiting-banner + poll + auto-resume (no inline approve/deny); HITL console requested_by + deployment/env columns)
@@ -231,6 +238,46 @@ KC_REVIEWER_PASS="Reviewer2024"
 ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 
 # ── Image tags ────────────────────────────────────────────────────────────────
+# E-4 (phases 1-4, registry-api only): webhook eval — the filter decision as a
+# first-class dimension + injection robustness (ASR vs utility reported separately).
+#   * D2 — ONE run door: `test-event` no longer hand-builds a SECOND PlaygroundRun.
+#     `_create_and_dispatch_playground_run` is now the single builder (1 def, 2 call
+#     sites), which closes three live defects at once: test-event now threads
+#     `eval_mode` (it defaulted to 'live', so a matched webhook eval would have
+#     DELIVERED REAL SIDE EFFECTS), now DISPATCHES durable runs (they hung at
+#     'running' forever), and now carries the Langfuse trace + agent_version_id.
+#   * launch guard opens for mode='webhook' (was a hard 422 "not implemented yet")
+#   * /eval/score mode='webhook' branch (was 501): score_filter + score_injection
+#     (both pure code), action dims reused verbatim from E-0/E-1/E-2, plus a SAFETY
+#     VETO — an exact filter error or a really-fired forbidden tool cannot be
+#     out-voted by a weighted mean (both otherwise composited ABOVE the publish gate).
+#   * NO new filter code — the parity-gated filter_engine is the only decider.
+#
+# E-4 P5 (eval-runner 0.1.12): the webhook eval branch — `MODE=webhook` fires each
+# item's synthetic `trigger_payload` at the REAL test-event door, scores the REAL
+# filter decision it returns, and only on a MATCH drives + scores the action (durable
+# -inner → poll + project run_steps; reactive-inner → drive the stream) under E-2's
+# record seam. A correct MISS creates NO run (run_id IS NULL — the evidence nothing
+# ran). Writes `eval_run_results.matched`, orphaned since E-0 (no writer, no reader).
+#   * FAIL-CLOSED DISPATCH (the load-bearing fix): `run_eval` dispatched by PRIORITY
+#     FALLTHROUGH, so any MODE without a branch dropped through to the reactive tail —
+#     no `eval_mode` (⇒ 'live' ⇒ REAL SIDE EFFECTS DELIVERED), no filter, and a
+#     plausible `{"response": x}` PASS for an eval that tested nothing. CP1a opening
+#     the guard for `webhook` one phase before this branch existed made that live and
+#     reachable by API. Dispatch is now an explicit mode→handler MAP: `reactive` is a
+#     registered handler, not the default tail, and an unhandled MODE resolves to None
+#     ⇒ every item recorded FAILED with no run created. A missing branch is now a loud
+#     error by construction instead of a fake green (proven by T-S77-010).
+#
+# E-4 P5b (registry-api 0.2.189): test-event now feeds a matched event the IDENTICAL
+# production shape — `input_payload=payload` + the driving turn derived with
+# internal.py's own line (`payload.get("message") or json.dumps(payload)`). The durable
+# dispatch body carries ONLY `input_payload`, so passing None (as the D2 rewire did)
+# dispatched `{}` and the agent answered "I have not been provided with any event
+# payload": a REAL matched run, really scored, that never saw the event. Invisible
+# until D2 made this door dispatch durable at all, and caught by suite-77's POSITIVE
+# CONTROL — the exact failure a filter-miss-only test cannot see.
+#
 # E-2 (phases 1-3): side-effect record/mock seam. Migration 0063 adds
 # `tools.side_effecting` (fail-closed backfill: only HTTP GET/HEAD is read-only) +
 # `playground_runs.eval_mode` (PERSISTED — a durable HITL resume re-drives the graph
@@ -331,11 +378,11 @@ DEPLOY_CONTROLLER_TAG="0.1.39"
 #   re-surfaces the 2nd inline approval gate when the resumed member re-parks (listPendingApprovals
 #   correlation by parked child thread_id; poll bound 60→90). vitest green + typecheck.
 STUDIO_TAG="0.1.156"
-EVAL_RUNNER_TAG="0.1.10"
+EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.58"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
-EVENT_GATEWAY_TAG="0.1.1"
+EVENT_GATEWAY_TAG="0.1.3"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -363,8 +410,44 @@ fi
 #     registry-api=registry.internal/agentshield/registry-api:$REGISTRY_API_TAG \
 #     -n agentshield-platform
 
+# ── PRE-BUILD SOURCE GATES (Eval v2 E-6) ─────────────────────────────────────
+# This is the choke point: the deploy-script-only rule means EVERY service change
+# runs this script, so a gate here is the one gate guaranteed to execute. Putting
+# the cluster-free checks BEFORE the build makes their failure modes UNDEPLOYABLE
+# rather than merely detectable — enforcement, not discipline.
+#
+# `run-fast-gates.sh --source-only` is pure grep + git-log (~5s, no cluster, no
+# docker, no node). It runs, among others, the filter-engine parity gate that used
+# to be invoked directly here — the same script, now one tier up, NOT a second copy.
+# It also gates:
+#   * tag ⇄ content coupling — a tag is a CLAIM ABOUT CONTENT. E-3's code never ran
+#     for an entire slice because a tag was never bumped: both tag files agreed on a
+#     stale tag and the cluster faithfully matched it, so every check stayed green
+#     while the feature was absent. This now fails the DEPLOY, by name.
+#   * suite guards + the registration census — run-all.sh's run_suite() returns 0 for
+#     a MISSING file, so deleting a suite made the runner GREENER. (It caught a real
+#     one: suite-46 was registered but had never been committed.)
+#   * the E-6 orphan sweep — every producer has a reader; one threshold, not four.
+#
+# Deliberately NOT here: pytest and npm. The source tier must stay in the SECONDS
+# range or it gets bypassed, and a bypassed gate is worse than none because it reads
+# as protection. Those live in the full tier: `bash scripts/e2e/run-fast-gates.sh`.
+if ! bash "$(dirname "${BASH_SOURCE[0]}")/e2e/run-fast-gates.sh" --source-only; then
+  echo ""
+  echo "❌ DEPLOY BLOCKED — the pre-build source gates failed (see above)."
+  echo ""
+  echo "   These gates are cluster-free and take ~5 seconds; each one exists because"
+  echo "   the corresponding failure ALREADY shipped here silently. In particular, an"
+  echo "   unbumped tag means the image is never rebuilt and the cluster keeps running"
+  echo "   the OLD code while every check stays green (docs/bugs/e3-never-ran-tag-not-bumped.md)."
+  echo ""
+  echo "   Fix the named gate and re-run. Do NOT comment this out to get a deploy through:"
+  echo "   a deploy that ships code the tag does not describe is the bug, not the gate."
+  exit 1
+fi
+
 echo "[1/8] Building images..."
-echo "  → registry-api:${REGISTRY_API_TAG} (WS-2 CP2 + fix: durable trigger dispatch now targets the agent's own pod (runner_url) not the non-existent shared declarative-runner Service — production trigger→single-agent durable runs reach the pod; plus reviewer_scope/principal_display/403, migration 0062 approver_role, daemon workflow identity)"
+echo "  → registry-api:${REGISTRY_API_TAG} (E-6: per-run pass policy — EvalRunCreate accepts pass_threshold/dimension_weights (422 on out-of-range / negative weight), create_eval_run defaults the threshold at the single write site so the E-0 column is never NULL again, and the eval_passed gate reads effective_pass_threshold(run) instead of the global constant)"
 docker build -t "registry.internal/agentshield/registry-api:${REGISTRY_API_TAG}" services/registry-api/
 
 echo "  → safety-orchestrator:${SAFETY_ORCHESTRATOR_TAG} (per-scanner Langfuse spans, trace_id propagation)"
@@ -379,7 +462,7 @@ docker build -t "registry.internal/agentshield/declarative-runner:${DECLARATIVE_
 echo "  → studio:${STUDIO_TAG} (WS-3 scheduled operate surface: OverviewScheduled now renders next-fire + rolled-up schedule-health badge from getAgentHealth, plus an alert-config summary (alert_email/alert_on_failure) from the trigger)"
 docker build -t "registry.internal/agentshield/studio:${STUDIO_TAG}" studio/
 
-echo "  → eval-runner:${EVAL_RUNNER_TAG} (NEW — batch eval K8s Job image)"
+echo "  → eval-runner:${EVAL_RUNNER_TAG} (E-6: resolves the RUN's pass policy once at startup — _RUN_PASS_THRESHOLD drives all five per-item verdicts (was the env global) and _RUN_DIMENSION_WEIGHTS rides the score body, so the door keeps ONE weights source. Fails LOUDLY if it cannot read its own policy rather than scoring against a threshold nobody chose)"
 docker build -t "registry.internal/agentshield/eval-runner:${EVAL_RUNNER_TAG}" services/eval-runner/
 
 echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"
@@ -388,7 +471,7 @@ docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR
 echo "  → scheduler:${SCHEDULER_TAG} (Phase 7 — fires scheduled agents on cron, HA)"
 docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" services/scheduler/
 
-echo "  → event-gateway:${EVENT_GATEWAY_TAG} (Phase 9 — public webhook ingress)"
+echo "  → event-gateway:${EVENT_GATEWAY_TAG} (WS-4: ONE shared verify_webhook_auth wrapping BOTH hooks — per-application client-id + allowlist + HMAC signing; uniform-401 enumeration oracle CLOSED (stale-ts had its own body); +cryptography +AGENTSHIELD_ENCRYPTION_KEY so it can decrypt the client secret)"
 docker build -t "registry.internal/agentshield/event-gateway:${EVENT_GATEWAY_TAG}" services/event-gateway/
 
 echo "  → embedding-sidecar:${EMBEDDING_SIDECAR_TAG} (POC-4 — fastembed bge-small-en-v1.5, 384-dim; weights baked in)"
@@ -498,6 +581,39 @@ echo "  All secrets applied."
 # ── Step 4: Helm dependency update ───────────────────────────────────────────
 echo ""
 echo "[4/8] Updating Helm dependencies..."
+
+# Purge stale PACKAGED copies of sub-charts we author in-tree.
+#
+# A packaged `charts/<name>-<ver>.tgz` SHADOWS the `charts/<name>/` source directory,
+# so helm renders the tarball and silently ignores your edit. `helm dependency update`
+# is supposed to repackage them, but it currently FAILS here ("can't get a valid
+# version for repositories envoy-gateway") and the `|| true` below swallows it — so a
+# stale .tgz can outlive its source indefinitely. These are gitignored build artifacts:
+# deleting them makes helm read the source dir, which is always what we want for a
+# chart we author.
+#
+# This has bitten twice in one day, both silently:
+#   1. WS-4: an event-gateway tag bump did nothing — deploy reported "successfully
+#      rolled out" while serving the OLD image.
+#   2. A Jul-8 deploy-controller-0.1.7.tgz pinned LANGFUSE_HOST to a BARE service name
+#      while the source template had long since been fixed to the namespace-qualified
+#      FQDN. Agent pods in production-* namespaces therefore could not resolve Langfuse,
+#      silently emitted NO spans, and every trace showed $0.00 cost. Cost a live demo.
+# Third-party deps (postgresql, redis, langfuse, keycloak, …) have no source dir here
+# and are left untouched.
+_purged=0
+for _tgz in "$CHART"/charts/*.tgz; do
+  [ -e "$_tgz" ] || continue
+  _base="$(basename "$_tgz" .tgz)"
+  _name="$(echo "$_base" | sed -E 's/-[0-9]+\.[0-9]+\.[0-9]+$//')"
+  if [ -d "$CHART/charts/$_name" ]; then
+    echo "  ⚠ purging stale packaged sub-chart: $_base.tgz (shadows charts/$_name/ source)"
+    rm -f "$_tgz"
+    _purged=$((_purged + 1))
+  fi
+done
+[ "$_purged" -eq 0 ] && echo "  no stale packaged sub-charts (source dirs are authoritative)"
+
 helm dependency update "$CHART" 2>/dev/null || true
 
 # Apply Langfuse-specific infra (ClickHouse + S3 alias Services).

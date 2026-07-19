@@ -1,3 +1,11 @@
 1. **Traffic splitting / canary support** — split traffic % between two deployments of the same artifact on a shared endpoint. Enables gradual rollout without separate URLs.
 2. **Deployment event log** — live stream of infra events alongside the overview (pulling image, creating pods, health check passed/failed, scaling events). Makes status transitions visible to the user rather than opaque badge changes.
 3. **Blue-green rollback** — one-click rollback to previous version using `previous_version_id`. Drain in-flight requests before terminating old deployment.
+4. **Run 2 versions side-by-side live (Playground version compare)** — in the Playground, enter a comparison mode, send one prompt, and run it against two agent versions *in parallel*. Show both outputs, trace depth, and token/cost deltas side by side, so a developer can judge a version bump without leaving Studio. This is the *live* counterpart to the already-shipped post-hoc trace compare (`ObservabilityComparePage.tsx`, reachable via Traces → select 2 → Compare), which only diffs two runs that already happened. Here both runs are fired on demand from the same prompt.
+   - **Spec already done (design complete, code not started):**
+     - `docs/spec.md` FR-026 (P2) — requirement: "Playground: side-by-side version comparison" (`spec.md:195`)
+     - `docs/spec.md` acceptance criterion #5 — two versions run in parallel; outputs, trace depth, token cost appear side by side (`spec.md:82`)
+     - `docs/spec.md` endpoint contract — `POST /api/v1/playground/compare` with body `{ agent_name, version_a, version_b, message, sandbox }` → returns `{ run_id_a, run_id_b }`, traces fetched independently (`spec.md:613-622`)
+     - `docs/spec.md` Milestone 13 + Playground exit criteria "compares two versions" (`spec.md:1100`, `spec.md:1110`)
+   - **Not yet built:** `POST /api/v1/playground/compare` endpoint absent from `services/registry-api/routers/playground.py`; no client method in `studio/src/api/playgroundApi.ts`; no compare mode in `PlaygroundPage.tsx`. Backend is an orphan spec.
+   - **Reuse:** the diff-rendering + judge-score/duration delta layout in `ObservabilityComparePage.tsx` and the neutral `NormalizedTrace` shape (`getTraceDetail`) can back the side-by-side result view once both `run_id`s resolve to traces.

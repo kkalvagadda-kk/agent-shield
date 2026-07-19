@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { KeyRound, Copy, Check, Plus, Trash2 } from "lucide-react";
 import {
   listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
+  createTriggerClient, listTriggerClients, setClientEnabled, deleteTriggerClient,
 } from "../../api/registryApi";
 
 interface Props {
@@ -253,6 +254,7 @@ function WebhookRow({
     id: string;
     enabled: boolean;
     filter_conditions: Record<string, unknown> | Record<string, unknown>[] | null;
+    auth_mode?: "token" | "client_signed";
   };
 }) {
   const [newUrl, setNewUrl] = useState<string | null>(null);
@@ -274,6 +276,8 @@ function WebhookRow({
     setTimeout(() => setCopied(false), 1500);
   };
 
+  const authMode = trigger.auth_mode ?? "token";
+
   return (
     <div className="border border-slate-200 rounded-lg p-4 space-y-3">
       <div className="flex items-center justify-between">
@@ -286,6 +290,18 @@ function WebhookRow({
           <KeyRound size={12} />
           {rotate.isPending ? "Rotating…" : "Rotate Token"}
         </button>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-500 uppercase">Auth mode</span>
+        <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${authMode === "client_signed" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-slate-100 text-slate-600 border border-slate-200"}`}>
+          {authMode}
+        </span>
+        <span className="text-xs text-slate-400">
+          {authMode === "client_signed"
+            ? "Each sender signs with its own client-id + secret."
+            : "Legacy: one shared bearer token names no application."}
+        </span>
       </div>
 
       {newUrl ? (
@@ -309,6 +325,165 @@ function WebhookRow({
           <pre className="mt-1 text-xs bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto">
             {JSON.stringify(trigger.filter_conditions, null, 2)}
           </pre>
+        </div>
+      )}
+
+      <ClientPanel triggerId={trigger.id} />
+    </div>
+  );
+}
+
+// WS-4 — the per-application allowlist for one webhook trigger. Each registered
+// client signs with its own secret, so a compromised sender is revoked on its own
+// rather than by rotating the token every other sender shares.
+function ClientPanel({ triggerId }: { triggerId: string }) {
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [clientId, setClientId] = useState("");
+  const [secret, setSecret] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const { data: clients = [], isLoading, isError } = useQuery({
+    queryKey: ["trigger-clients", triggerId],
+    queryFn: () => listTriggerClients(triggerId),
+  });
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["trigger-clients", triggerId] });
+
+  const register = useMutation({
+    mutationFn: () => createTriggerClient(triggerId, { client_id: clientId.trim() }),
+    onSuccess: (res) => {
+      // The only moment this value will ever exist in the UI — the read model has
+      // no secret field, so a refetch cannot bring it back.
+      setSecret(res.secret);
+      setError(null);
+      setClientId("");
+      toast.success("Client registered — copy the secret now.");
+      invalidate();
+    },
+    onError: (e) => {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail ?? "Failed to register client");
+      toast.error(detail ?? "Failed to register client");
+    },
+  });
+
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      setClientEnabled(triggerId, id, enabled),
+    onSuccess: (_r, v) => { toast.success(v.enabled ? "Client enabled" : "Client disabled"); invalidate(); },
+    onError: () => toast.error("Failed to update client"),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => deleteTriggerClient(triggerId, id),
+    onSuccess: () => { toast.success("Client revoked"); invalidate(); },
+    onError: () => toast.error("Failed to revoke client"),
+  });
+
+  const closeAdd = () => { setAdding(false); setSecret(null); setError(null); setClientId(""); };
+
+  return (
+    <div className="border-t border-slate-100 pt-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-slate-500 uppercase">Signing clients</span>
+        {!adding && (
+          <button onClick={() => setAdding(true)} className="btn-secondary text-xs py-1">
+            <Plus size={12} /> Add client
+          </button>
+        )}
+      </div>
+
+      {adding && (secret ? (
+        <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-4 space-y-2">
+          <p className="text-sm font-medium text-emerald-800">
+            Copy this signing secret now — it won&apos;t be shown again.
+          </p>
+          <div className="flex items-center gap-2">
+            <code data-testid="client-secret" className="flex-1 text-xs bg-white border border-emerald-200 rounded px-2 py-1.5 break-all">
+              {secret}
+            </code>
+            <button
+              onClick={() => { navigator.clipboard.writeText(secret); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+              className="btn-secondary text-xs py-1.5"
+              aria-label="Copy secret"
+            >
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+            </button>
+          </div>
+          <p className="text-xs text-emerald-700">
+            It is stored encrypted for the gateway and is never retrievable. If you lose it, revoke this client and register a new one.
+          </p>
+          <div className="flex justify-end">
+            <button onClick={closeAdd} className="btn-primary text-xs py-1.5">Done</button>
+          </div>
+        </div>
+      ) : (
+        <div className="border border-slate-200 rounded-lg p-4 space-y-2 bg-slate-50/50">
+          <label className="block">
+            <span className="text-xs text-slate-500 uppercase">Client ID — names the sending application</span>
+            <input
+              value={clientId}
+              onChange={(e) => { setClientId(e.target.value); setError(null); }}
+              placeholder="billing-service"
+              className="mt-1 w-full font-mono text-sm border border-slate-300 rounded px-2 py-1.5"
+            />
+          </label>
+          {error && <p className="text-xs text-red-600">{error}</p>}
+          <div className="flex justify-end gap-2">
+            <button onClick={closeAdd} className="btn-secondary text-xs py-1.5">Cancel</button>
+            <button
+              onClick={() => register.mutate()}
+              disabled={register.isPending || !clientId.trim()}
+              className="btn-primary text-xs py-1.5 disabled:opacity-50"
+            >
+              {register.isPending ? "Registering…" : "Register"}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {isLoading ? (
+        <p className="text-xs text-slate-400">Loading clients…</p>
+      ) : isError ? (
+        <p className="text-xs text-red-600">Failed to load clients.</p>
+      ) : clients.length === 0 ? (
+        <p className="text-xs text-slate-400">
+          No clients registered. Senders must present a registered client-id and signature.
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {clients.map((c) => (
+            <div key={c.client_id} data-testid={`client-row-${c.client_id}`} className="flex items-center justify-between gap-3 border border-slate-200 rounded px-3 py-2">
+              <div className="min-w-0">
+                <code className="text-xs text-slate-700">{c.client_id}</code>
+                <p className="text-xs text-slate-400">
+                  Registered by <span className="font-mono text-slate-500">{c.created_by ?? "unknown"}</span> on {new Date(c.created_at).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <label className="inline-flex items-center gap-1.5 text-xs text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={c.enabled}
+                    disabled={toggle.isPending}
+                    onChange={(e) => toggle.mutate({ id: c.client_id, enabled: e.target.checked })}
+                    className="rounded"
+                    aria-label={`Enabled ${c.client_id}`}
+                  />
+                  Enabled
+                </label>
+                <button
+                  onClick={() => remove.mutate(c.client_id)}
+                  disabled={remove.isPending}
+                  className="text-slate-400 hover:text-red-500"
+                  aria-label={`Revoke ${c.client_id}`}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>

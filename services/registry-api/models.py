@@ -1695,6 +1695,10 @@ class AgentTrigger(Base):
             "trigger_type IN ('schedule','webhook')",
             name="ck_agent_triggers_type",
         ),
+        CheckConstraint(
+            "auth_mode IN ('token','client_signed')",
+            name="ck_agent_triggers_auth_mode",
+        ),
         Index("idx_agent_triggers_agent", "agent_id"),
     )
 
@@ -1720,6 +1724,15 @@ class AgentTrigger(Base):
         Boolean, nullable=False, server_default=text("true")
     )
     token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Dual-mode webhook auth (WS-4). 'token' = the legacy coarse per-trigger bearer
+    # token above; 'client_signed' = per-application client-id + allowlist + HMAC
+    # signature (see webhook_clients). The gateway branches on this stored mode
+    # EXPLICITLY — never "try token, fall back to signed" (priority fallthrough is
+    # the No-Bandaid anti-pattern). Existing rows take the 'token' server default
+    # (migration 0064) so no live sender breaks mid-migration.
+    auth_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'token'")
+    )
     filter_conditions: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True
     )
@@ -1744,6 +1757,53 @@ class AgentTrigger(Base):
     )
 
     agent: Mapped["Agent"] = relationship("Agent")
+
+
+# ---------------------------------------------------------------------------
+# webhook_clients — per-application webhook credentials + allowlist (WS-4)
+# ---------------------------------------------------------------------------
+class WebhookClient(Base):
+    """One application allowlisted to send signed webhooks to one trigger.
+
+    Keyed on `trigger_id` ALONE — which is why the same table serves agent
+    triggers AND workflow triggers with no schema change (a workflow trigger is
+    an `agent_triggers` row with `workflow_id` set). One producer, one reader,
+    no per-shape copy.
+    """
+
+    __tablename__ = "webhook_clients"
+    __table_args__ = (
+        UniqueConstraint(
+            "trigger_id", "client_id", name="uq_webhook_clients_trigger_client"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    trigger_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID,
+        ForeignKey("agent_triggers.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Fernet token (crypto.encrypt_json), NOT a hash: the gateway must RECOMPUTE
+    # HMAC_SHA256(secret, ...) to verify a signature, so the raw secret has to be
+    # recoverable — a one-way hash is unimplementable here, and `secret_hash`
+    # would be an actively misleading name. Reveal-once is enforced structurally
+    # at the API instead (WebhookClientResponse has no secret field to leak).
+    secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Live allowlist read on every request — flipping this false denies the client
+    # on the very next webhook (not a cached decision).
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    trigger: Mapped["AgentTrigger"] = relationship("AgentTrigger")
 
 
 # ---------------------------------------------------------------------------
@@ -1776,6 +1836,11 @@ class AgentEvent(Base):
     run_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
     # workflow_id is set when the event is matched to a workflow trigger (nullable)
     workflow_id: Mapped[uuid.UUID | None] = mapped_column(_UUID, nullable=True)
+    # The webhook client that authenticated this event (WS-4), resolved by the
+    # gateway's verify hop. NULL for events on `auth_mode='token'` triggers, where
+    # the coarse per-trigger bearer token identifies no application. Read by the
+    # event-log audit UI. A plain column (not payload JSON) so it is queryable.
+    client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_ip: Mapped[str | None] = mapped_column(INET, nullable=True)
     received_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW

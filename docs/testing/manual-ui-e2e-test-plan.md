@@ -456,6 +456,29 @@ Tagged **deferred (intentional)**:
   `WorkflowPropertiesPanel` member `routing` config (arch doc §10) does not yet carry a
   per-member context-scope; every member still reads the full shared transcript. Not in POC-2
   scope.
+## Known gaps — Eval v2 E-6 (regression gate + per-run pass policy) · 2026-07-15
+
+**Shipped + proven (`suite-80`, 12 PASS / 1 FAIL — the FAIL is the ledgered UI gap below):**
+the E-0 columns `eval_runs.pass_threshold` / `dimension_weights` finally have **both** a
+writer and a reader (they were NULL in every row ever written); the publish threshold is
+**one** number the gate and the eval-runner's per-item verdict both read; and the headline
+Eval v2 claim is asserted for the first time — **T-S80-005**: on a real durable run a
+dropped **trajectory** (`0.0`) fails the gate while the **response** is still correct
+(`1.0`), composite `0.4 < 0.7`, `eval_passed` stays `False`; the golden baseline then flips
+it `True` on the same agent (T-S80-002), and the **same** composite `0.85` publishes at
+threshold `0.7` but not at `0.9` (T-S80-003).
+
+| Item | Status | Note |
+|---|---|---|
+| **The Studio still re-declares the publish threshold** (`EvalResultsPage.tsx:51` colour band, `:194` verdict) | **not-yet-wired (debt) — ACTIVE PRODUCT BUG** | E-6's tasks T006/T007/T020–T022 own this, but `studio/**` was assigned to a **concurrent WS-6 agent** this session, so E-6 did not touch it. **Consequence today: the product lies.** A run with `pass_threshold=0.9` scoring `0.85` renders **"passed"** in the UI while the gate refuses to publish — the backend now honours a per-run threshold the UI does not read. `suite-80` **T-S80-000b fails by design** until this lands; it is the single red in an otherwise green suite. `EvalRunResponse` already returns `pass_threshold` — only the TS type omits it. |
+| Per-run pass policy on the **launch surface** (threshold + weight inputs) | **not-yet-wired (debt)** | The API accepts + persists + validates it (422 on out-of-range / negative weight — proven in `suite-80` T-S80-001); no UI control authors it yet, so today it is API-only. Same WS-6 ownership boundary. |
+| Playwright journey for the pass policy (`eval-v2-regression.spec.ts`) | **not-yet-wired (debt)** | Blocked on the two rows above — there is no UI control to drive. DoD #1/#2 for this surface are carried by `suite-80`'s API-level save→reload (T-S80-001) until then. |
+| `run_suite()` returns **0 for a missing suite file** (`run-all.sh:38-41`) | **deferred (intentional)** | *"Don't count missing future suites as failures"* — so deleting or renaming any suite makes the runner **greener**. Not changed here: suites are being registered concurrently by other workstreams and altering the runner's failure contract mid-flight would break their landings. `scripts/check-suite-guards.sh` closes the hole from the **outside** and fails just as loudly. **It already caught a real one:** `suite-46-chat-deployment-pinning.sh` was registered at `run-all.sh:95` but had **never been committed** — it lived only in a stash, so run-all.sh had been silently skipping it and reporting green since 2026-07-11. Restored from stash `9aa948a` (158 lines; the `_deployment_for_run` / `_pinned_deployment` functions it tests still exist). **It has not been run on a cluster** — that is the next open item for whoever owns chat pinning. |
+| The **63 bash-only suites** are outside the guard meta-gate's reach | **deferred (intentional)** | The crash-loud + ID-census guards are defined over the **driver + result-file** pattern (15 suites). The rest are plain bash+curl with no driver process to crash-wrap and no results file to census. Asserting the guards over all 78 would be a gate satisfiable only by rewriting 63 suites — a gate nobody runs, which is worse than none because it reads as protection. They are **reported by name** on every run of `check-suite-guards.sh`, never silently excluded. |
+| event-gateway **sub-chart vs top-level tag pin disagree** (`values.yaml:132-138` = `0.1.3`, sub-chart = `0.1.2`) | **deferred (intentional)** | They disagree **on purpose**: the sub-chart is shadowed by a stale packaged `.tgz`, so a sub-chart edit silently no-ops and the top-level pin wins. `check-tag-content-coupling.sh` encodes **which pin is authoritative per service** rather than "all pins agree" — the latter would false-fail on a correct tree and be disabled within a day. |
+| Judge calibration / human-agreement study | **deferred (intentional)** | Out of scope; E-6 applies known bias-mitigation practice, not new research. |
+| Flaky-judge retry / quorum on the LLM dims | **not-yet-hardened (debt, low)** | Deterministic dims (trajectory/tool_call/filter) are stable; the LLM `response` dim may need retry/quorum if CI flakiness shows. Not seen across suite-80's runs (`response` scored `1.0` consistently). |
+| "Run the real regression eval in CI" (the plan's open row) | **RESOLVED — not a gap** | There is no CI here and the real suites structurally cannot run on a hosted runner (they need a live cluster, deployed pods, real LLM keys). Resolved by tiering: the cluster-free gates run **pre-build inside `deploy-cpe2e.sh`** (the one command guaranteed to execute on every service change), with `.github/workflows/fast-gates.yml` as a **secondary** net calling the same script. Every gate it runs is already enforced by the deploy hook, so if Actions is never adopted nothing is lost. |
 
 ---
 
@@ -543,6 +566,109 @@ token/URL is shown **once** on create/rotate (stored hashed); use **Rotate** to 
 
 ---
 
+## Known gaps — Eval v2 E-4 (webhook eval: filter decision + action + prompt-injection robustness)
+
+**E-4 is COMPLETE end-to-end** (P1–P7). A `webhook` dataset is authorable in Studio, launches a real
+eval-runner Job, fires each synthetic event at the **real** parity-gated filter, scores the decision, runs the
+matched action under the record seam, probes injection, and renders it all. Landed across **registry-api
+0.2.189 / eval-runner 0.1.12 / studio 0.1.143** (no migration — E-4 owns none; head stays **0064**).
+Gated by `scripts/e2e/suite-77-eval-v2-webhook.sh` (`T-S77-000`–`010`, registered in `run-all.sh`) +
+`studio/e2e/eval-v2-webhook.spec.ts`.
+
+> **Three silent failures were found and fixed during this slice — all of them failed *safe-looking*
+> (nothing errored, no pod crashed, no static check went red). Written up in
+> `docs/bugs/webhook-eval-door-silent-failures.md`:** the runner's priority-fallthrough dispatch running a
+> webhook eval **live** on the reactive path; `test-event` feeding a matched durable run `input_payload=None`
+> so the agent never saw its own event; and a helper inserted under `@router.post("/test-event")` **stealing
+> the route** so the door echoed its own request body with a 200. The third passed *every* content-verification
+> grep — the code was in the image, just wired to the wrong name — and only a real HTTP request (suite-22)
+> caught it.
+
+**Landed in this slice:**
+- **D2 — ONE run door.** `test-event` no longer hand-builds a second `PlaygroundRun`;
+  `_create_and_dispatch_playground_run` is the single builder (1 def, 2 call sites). This closed **three live
+  defects** that had been failing *safe* (so nothing ever errored): test-event never threaded `eval_mode` (the
+  column defaulted `'live'`, so **a matched webhook eval would have DELIVERED REAL SIDE EFFECTS** — E-2's seam
+  reads the persisted column); it never dispatched durable runs (a durable webhook agent's run hung at
+  `running` forever); it dropped the Langfuse trace + `agent_version_id`.
+- **Launch guard opens for `webhook`** (was a hard 422 "not implemented yet (E-4)"): requires an armed webhook
+  trigger; workflow-level webhook eval rejected.
+- **`/eval/score` `mode=webhook`** (was 501): `score_filter` + `score_injection` (both pure code), action dims
+  reused verbatim from E-0/E-1/E-2, present-dims-only, ASR and utility reported **separately**.
+- **Safety veto.** An exact filter error, or a really-fired forbidden tool, vetoes the composite to 0.0. On the
+  data-model's weights alone both composited **above** the 0.7 publish gate (0.75 and 0.73) — i.e. a weighted
+  mean silently let through the exact two failures E-4 exists to catch. Safety facts gate; they are not averaged.
+- **eval-runner webhook branch** (P5): `MODE=webhook` fires the item's `trigger_payload` at the real
+  `test-event` door and scores the returned decision. A correct **miss creates no run at all**
+  (`eval_run_results.run_id IS NULL` — the evidence nothing ran). A match drives the action under
+  `eval_mode=record` whenever the item asserts side effects **or carries an injection probe**. Writes
+  `eval_run_results.matched`.
+- **Fail-closed dispatch** (P5): the runner now dispatches through an explicit **mode→handler map** with
+  `reactive` REGISTERED, not a priority if-chain with a reactive tail. See the resolved hazard below.
+- **Studio** (P6): the webhook item editor (synthetic event + `expected_match` + `expected_filter_reason` +
+  injection probe) and the results evidence (filter verdict + synthetic event + ASR/utility side by side).
+  `eval_run_results.matched`'s **first reader**.
+
+**RESOLVED in this slice (was the P1–P4 ledger's 🔴 row) — an unhandled MODE no longer degrades into a live run:**
+- CP1a opened the launch guard for `webhook` one phase before the runner had a branch, and the runner dispatched
+  by **priority fallthrough** — so `MODE=webhook` fell through to the **reactive tail**: an empty
+  `input_message`, **no `eval_mode` ⇒ `'live'` ⇒ real side effects delivered**, the filter never fired, and a
+  plausible `{"response": x}` **PASS**. Fixed **structurally**, not with another `if`: dispatch is an explicit
+  map, so a mode with no handler resolves to `None` and every item is recorded **failed** with the mode named,
+  having created **no run**. Proven live by **`T-S77-010`** (the REAL eval-runner image, launched by the
+  product's own Job builder with an unhandled MODE, asserted to create **zero** `playground_runs`).
+  The same class of hazard was closed in Studio: with every mode now having an editor, the old "editor coming
+  later — create an empty dataset" fallthrough became a **fail-closed refusal** (an empty dataset launches an
+  eval that scores nothing and reports a clean pass).
+
+**RESOLVED in this slice (found by suite-77's positive control, T-S77-004):**
+- **`test-event` fed a matched durable run `input_payload=None`.** The durable dispatch body carries **only**
+  `input_payload` (`durable_dispatch.py` — the runner derives its turn from it), so `input_message` never
+  reaches a durable agent. A matched webhook run therefore dispatched `{}` and the agent answered *"I have not
+  been provided with any event payload"* — a REAL run, really scored, that never saw the event. Invisible until
+  D2 made this door dispatch durable **at all** (it previously hung forever). The door now feeds the
+  **identical production shape** the real webhook door uses (`input_payload=payload` + a driving turn derived
+  with `internal.py`'s own line). **This is exactly the failure a filter-miss-only test cannot see** — a miss
+  scoring 1.0 and "the eval never ran" are the same observable, which is why `T-S77-004` is mandatory.
+
+**not-yet-wired (debt):**
+- **Item `tool_mocks` not threaded to the seam** — inherited E-2 debt; declared on `WebhookDatasetItem` for
+  contract parity with `Durable`/`ScheduledDatasetItem`. E-4 adds no new debt here.
+- **`suite-75` is FLAKY on the OPA bundle cold start (pre-existing, not E-4).** Observed 10/2 then **12/0 on a
+  re-run of identical code**. The eval's FIRST item fires ~60s after the agent's deployment flips `running`,
+  which is inside the documented ~5-minute window where the OPA bundle does not yet contain the new agent's
+  identity (`docs/debugging/003-opa-bundle-5min-cold-start.md`), so its tool call is denied
+  `deny_agent_unauthenticated` while a later item on the SAME pod succeeds 13s later. Diagnosis is exact, not
+  inferred: both runs were structurally identical (`eval_mode=record`, `trigger=schedule`, `shape=durable`,
+  same steps) and only the OPA decision differed. `suite-77` is incidentally immune — its first item is a
+  filter MISS that runs nothing, so its first real run fires later in the pod's life. **A cold-start retry/wait
+  in the eval-runner or the suites would close this; E-4 does not own it.**
+
+**deferred (intentional):**
+- **The eval scores the `test-event` door's returned decision, not an `AgentEvent.status` row** (E-4 **D1**).
+  `test-event` writes no `agent_events` row, and it should not: that table is the production audit log of real
+  **deliveries**, and writing synthetic eval fires into it would leave the Event Trace UI unable to tell a probe
+  from a real event (that needs a `source` discriminator + its own readers). The decision is real and
+  parity-gated. **`T-S77-009` is the live differential control**: the same payloads through the REAL
+  event-gateway (real WS-4-signed, the product's own `sign_webhook`) must produce `agent_events.status`
+  `matched`/`filtered` agreeing with the eval door's decision. **Verified green.**
+- **Webhook eval fires through `test-event`, not the signed gateway edge.** The gateway edge threads no
+  `eval_mode` (it would deliver for real). The eval drives the **same** parity-gated filter engine and the
+  **same** run door under the record seam. Mirrors E-3's D1.
+- **LLM-semantic refusal detection.** `score_injection`'s `must_refuse` uses a **light keyword** check; a
+  calibrated classifier is a follow-up. Deliberately it does **not** veto — only the *exact* ASR half
+  (a forbidden tool really fired) gates. Fuzzy signals get weight, exact ones gate.
+- **Full AgentDojo/InjecAgent attack battery** — E-4 ships single-payload `injection_probe` items.
+- **Reactive-inner webhook agents cannot record.** E-2's seam is armed only on the durable `/run` dispatch, so a
+  reactive-inner agent whose item asserts side effects (or carries a probe) is **refused before the event is
+  fired** rather than delivering for real. Inherited E-2/E-3 limitation, fail-closed by design.
+- **`filter_engine.py` duplicated in registry-api + event-gateway** (pre-existing). Each service builds from its
+  own Docker context, so neither can import a shared module without changing both builds.
+  `scripts/check-filter-engine-parity.sh` runs inside `deploy-cpe2e.sh` **before either image builds**, making
+  divergence **undeployable** — enforcement, not discipline. **E-4 depends on this gate** (it is what makes the
+  eval honest: without it E-4 would score a filter production never runs) and asserts it (`T-S77-000a`); it does
+  not close it.
+
 ## Known gaps — Execution Models v2 WS-0 (agent_class authoring + shape-aware dispatch)
 
 **Landed in this slice** (registry-api 0.2.156 / deploy-controller 0.1.36 / studio 0.1.127; migration 0058; suite-54): `agent_class` NOT NULL + CHECK on agents **and** workflows; create wizard split into Shape · Trigger · Class (R1); Settings + Workflow Save-modal Class selectors + save-time high-risk warnings (S2); shared `durable_dispatch.py` (single `/run` POST, parity); shape-aware production dispatch + `POST /internal/runs/{id}/step-update` callback writing `run_steps`; reactive workflow synchronous + wall-clock capped (M6/D2); reactive approval gate fail-closed via `_park_or_fail` (S2).
@@ -602,6 +728,53 @@ resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarati
 **not-yet-wired (verify at deploy time):**
 - **Live-pod inline leg.** The Playwright spec stubs the trigger/tree/approvals/decide endpoints (no durable member pod parks a real sandbox approval on this cluster — same fixture boundary suite-55/56 accept). **Manual check:** run one of the seeded durable workflows (`flow-conditional` / `flow-handoff` / `flow-supervisor`, member `wf-payout` calls high-risk `refund_action`) from the builder run panel → confirm the parent parks at `awaiting_approval` → the inline card appears under the parked step → click Approve → confirm the run advances (no console visit). Its green Playwright run is deploy-gated — `bash scripts/studio-e2e.sh`.
 
+---
+
+### WS-6 part 2 — operate-surface parity (studio 0.1.145, 2026-07-15)
+
+**Landed in this slice** (studio-only; no backend, no migration): **one** `OverviewForShape`
+dispatcher (explicit shape→component map, fail-closed + `console.error` on an unknown shape) mounted
+by **both** `DeploymentOverviewPage` and `CatalogDetailPage` — the catalog's inline overview fork is
+**deleted**, which **restored event-driven to the catalog** (the fork had only 3 of 4 branches, and
+its `scheduled` branch was unreachable dead code). Plus the Sidebar **approvals-count badge**
+(reusing `listPendingApprovals`; **no new endpoint**) and `STUDIO_BUILD` — one definition, **two
+readers** (`window.__STUDIO_BUILD` + a visible `data-testid="studio-build"`), after **67 tags** as an
+unread orphan. Proven by `suite-79` (5/5: fork-convergence grep, served-bundle content,
+five-way tag⇄content agreement, live badge producer), Vitest **318** green
+(`OverviewForShape.test.tsx`, `CatalogDetailPage.test.tsx`, `Sidebar.test.tsx`), and Playwright
+`catalog-overview-parity.spec.ts` (2/2 — the **same** shared testid on **both** pages, the parity
+proof) + `approvals-badge.spec.ts` (3/3, real backend, no `page.route` stubs).
+
+**🔴 not-yet-wired (DEBT — the MVP gate of this slice's own plan, and a LIVE bug):**
+- **Agent pod-URL resolution is still broken for sandbox.** `_agent_pod_url`'s
+  `environment="production"` default is **never threaded** by either call site, so a **sandbox**
+  approval's `/resume` still POSTs to a **non-existent `-production` pod**, and the `RequestError`
+  is still **swallowed to a `logger.warning`** — the approval row is marked resolved while the agent
+  was never resumed. `agent_endpoints.py` (the specified one-resolver fix) **does not exist**.
+  Not built because `services/registry-api/**` was owned by a concurrent lane. Full spec + fix in
+  `docs/design/todo/execution-models-gap-analysis.md` **TODO-8**. **suite-79 deliberately does not
+  assert it** — a gate for unwritten code either fails honestly or invites a stub, and a stub in
+  this seam is the fake that hides this exact bug. **WS-6's green does NOT mean this is fixed.**
+
+**deferred (intentional):**
+- **The badge's non-zero count is not exercised end-to-end in a browser.** This cluster had **0**
+  pending approvals, so `approvals-badge.spec.ts` took the "0 ⇒ no badge" branch and suite-79's
+  `T-S79-003` status-filter assertion was **vacuous over an empty list** (the suite says so in its
+  own output rather than implying more). The count>0 path is covered by `Sidebar.test.tsx` (Vitest,
+  mocked N). Exercising it live needs a real parked approval, which needs a deployed agent pod with
+  a high-risk tool — the same fixture boundary the other UI specs accept.
+- **`docs/experience/playground.md` deliberately NOT updated.** WS-6 changes no playground SSE
+  event, endpoint, panel, or routing rule; the badge and Overview dispatcher are outside its covered
+  surface. Recorded here rather than left as an unexplained skip of the CLAUDE.md §3 check.
+
+**pre-existing breakage found (NOT caused by WS-6, NOT fixed here):**
+- **`studio/e2e/deployment-overview.spec.ts` is stale and fails.** It navigates to
+  `/agents/:name/deploy`, a route that **no longer exists** (deploy is now a modal on
+  `AgentDetailPage` — `App.tsx:61` says so), and its create helper waits for `/agents/{name}` while
+  the wizard navigates to the agent **list**. Both stale paths were copied into
+  `catalog-overview-parity.spec.ts` at first draft and made it fail; the new spec drives the real
+  modal instead. The old spec needs the same treatment.
+
 ## Known gaps — WS-2 (durable daemon: identity + async approval routing)
 
 **Landed in this slice** (registry-api 0.2.178+ / studio 0.1.135; migrations 0061 `agent_triggers.armed_by` + 0062 `approver_role`): a daemon trigger run now carries a **service identity** as `run_by`, decided by one shared `resolve_principal` / `resolve_workflow_principal` helper (`services/registry-api/identity.py`) keyed on JWT-presence — `/chat` = the caller, a trigger run = the service identity (daemon) or the arming human (user_delegated). The OPA `user_identity_ok` floor allows daemon + empty user and denies user_delegated + empty user (`missing_user_identity`). A daemon run's parked approval routes to a reviewer scope (`agent:reviewer` by default, or the trigger's `approver_role`), renders `principal_display` (`"service:X on behalf of Y"` / `"workflow:X (service) on behalf of Y"`) in the Global Approvals Inbox, and a **non-reviewer decide is rejected 403**. `armed_by` (the authorizing human) is captured on trigger arm/create.
@@ -618,6 +791,132 @@ resume, single-agent too). Fixed in registry-api `0.2.160→0.2.164` + declarati
 **not-yet-wired (debt):**
 - **Trigger-run OPA-input propagation to the pod** → **identity-propagation initiative.** registry-api decides identity + stamps `run_by`, but does **not** propagate `principal.user_id` / `trigger_type` onto the agent pod's SDK OPA input for a `/internal/runs/start` durable/reactive dispatch (`agent_class` **does** reach the pod via the deploy env `AGENTSHIELD_AGENT_CLASS`). Effect: a `user_delegated` trigger tool-call currently **over-denies** at the pod (`user_id=""` → `missing_user_identity`) — this is **fail-closed-safe, not a leak** — rather than presenting the arming human. The OPA rule + the `run_by` identity decision are proven (CP1c); end-to-end reason propagation is the deferred piece.
 - **Daemon workflow service-identity subject.** A daemon **workflow**'s audit principal uses a deterministic SA-name convention (`system:serviceaccount:production-<wf>:agent-<wf>-sa`) replicated across the service boundary (deploy-controller) rather than reading a stored `AgentIdentity` row. Cross-boundary naming drift risk. Low-severity — it is an **audit principal only** (the workflow parent orchestrates members and makes no tool calls itself), so a naming mismatch mis-labels the audit line, it does not mis-authorize a call.
+
+---
+
+## Known gaps — Eval v2 E-3 (scheduled eval: job_spec datasets + side-effect assertions)
+
+**What the slice is for:** a scheduled agent's whole point is the side effect it fires
+unattended on a job spec ("did the nightly compliance job send the right email?").
+Response-only eval says nothing about that, so the publish gate was meaningless for
+scheduled agents. E-3 restores it by asserting the **recorded** side effect against a
+golden job spec. E-3 adds **no new scorer and no new dispatch** — it feeds the job spec
+through the shared run path under E-2's record seam (parity-gated by `T-S75-000`).
+
+**Landed in this slice** (registry-api 0.2.185 / studio 0.1.140; **no migration** — E-3
+owns none, head stays 0063): `ScheduledDatasetItem` tightened to the structured E-1/E-2
+models; `_resolve_eval_mode` + `_assert_mode_compatible` resolve `mode='scheduled'` from
+the agent's **armed schedule trigger** rather than `execution_shape` (before E-3 every
+scheduled dataset 422'd at launch and nothing downstream was reachable); the
+`/eval/score mode=scheduled` branch (was 501) reusing `score_response`/`score_trajectory`/
+`score_tool_calls`/`score_side_effects` with side-effect-skewed weights; the eval-runner
+`MODE=scheduled` branch; the Studio job-spec editor + job-spec evidence render.
+
+**Acceptance proof:** `scripts/e2e/suite-75-eval-v2-scheduled.sh` (`T-S75-000`–`009`) +
+Playwright `studio/e2e/eval-v2-scheduled.spec.ts` + `scripts/deploy-cp1-e3.sh` /
+`scripts/smoke-test-cp1-e3-{infra,behaviour,constitution}.sh`.
+
+### ✅ RESOLVED — the blocker below is fixed; kept as the record of a whole failure class
+
+**`9f6603a` ("E-3 scheduled eval P1-P4") changed four service directories and bumped only
+two tags**, so the eval-runner and Studio code it added was never built into an image.
+With `imagePullPolicy: IfNotPresent` the node kept serving the pre-E-3 images and **E-3's
+code had never executed once**. Its own `e3/tasks.md` T019 specified the exact bumps
+(`eval-runner 0.1.11`, `studio 0.1.141`); execution dropped them.
+
+| Service dir changed by `9f6603a` | Tag bumped by `9f6603a`? | Now |
+|---|---|---|
+| `services/registry-api/` | ✅ 0.2.184→0.2.185 | live |
+| `sdk/agentshield_sdk/` | ✅ 0.1.47→0.1.48 | live |
+| `services/eval-runner/` (2 files) | ❌ stayed `0.1.10` (E-2's tag) | **fixed → 0.1.11** |
+| `studio/src/` (5 files) | ❌ stayed `0.1.140` (E-2's tag) | **fixed → 0.1.142** |
+
+**Why every guard missed it — the lesson worth keeping.** `smoke-test-cp1-e3-constitution.sh`
+caught "bumped one file only"; `smoke-test-cp1-e3-infra.sh` caught "the cluster does not
+match the tag files". This was a **third case neither covered**: the source changed and
+the tag was never bumped *at all*, so **both tag files agreed — on a stale tag — and the
+cluster faithfully matched it**. Nothing was inconsistent. Every check was green while the
+feature was absent. Agreement is not correctness when all sources agree on a number that
+no longer describes the code.
+
+⚠️ **It was safety-relevant, not just a false red.** On the stale image the reactive-inner
+item E-3 must *refuse* **fired a real run** (`playground_runs` = 1 where the gate asserts
+0) — a scheduled eval would have **delivered the real side effect**, the exact hazard E-3
+exists to remove.
+
+**Class fix (shipped):** `smoke-test-cp1-e3-constitution.sh` now asserts, per commit, that
+a change under a service dir is coupled to that service's tag bump. Pointed at the real
+offender it reproduces the defect in seconds:
+`AUDIT_REF=9f6603a bash scripts/smoke-test-cp1-e3-constitution.sh` → FAILs eval-runner +
+studio, PASSes registry-api + SDK. Run it before committing service code. Rule: **a tag is
+a claim about content — after deploying, grep the image/bundle for a symbol the change
+introduced.** Full write-up: `docs/bugs/e3-never-ran-tag-not-bumped.md`.
+
+**Resolved state (verified, not inferred):** eval-runner `0.1.11` contains
+`_run_scheduled_item`; the served Studio bundle carries `scheduled-job-spec` +
+`job-spec-evidence` (both were 0). **suite-75 = PASS 12 / FAIL 0**, all 10 required cases
+reported; `studio/e2e/eval-v2-scheduled.spec.ts` green.
+
+**Honest limitation (not a gap — a property of the fixture):** `T-S75-007`'s *weight-set*
+assertion is **vacuous when all four dimensions score 1.0** — the skewed, durable and
+equal-weight sets all collapse to the same composite, so the composite cannot discriminate
+them. The suite prints `discriminating=False` and says so rather than claiming a proof it
+did not earn. The load-bearing half (all four dimensions present ⇒ E-1's scorers reused,
+no scheduled-only fork) does hold.
+
+
+**not-yet-wired (debt):**
+- **Reactive-inner scheduled items cannot assert side effects.** E-2's record seam is
+  armed only on the **durable** `/run` dispatch (the SDK/declarative-runner `/run` +
+  `/resume` carry `eval_mode` and arm the ContextVar the governed-tool delivery edge
+  reads); the reactive `/chat` path threads none. So a reactive-inner scheduled agent
+  cannot record, and asking it to would silently **deliver** the real email/ticket/
+  payment. The runner **refuses before creating the run** (`_run_scheduled_item`,
+  `services/eval-runner/main.py:727-739`) and records the item FAILED — fail-closed, not
+  a silent pass. Closing this needs `eval_mode` threaded onto the reactive `/chat`
+  dispatch. `T-S75-008` is the gate.
+- **The reactive-inner weight branch is dead code until the row above lands.** The score
+  door's reactive-inner default weights `{response .4, side_effect .6}`
+  (`services/registry-api/routers/playground.py:1311`) can never be reached with a
+  `side_effect` dimension present: the only items that get one are items asserting side
+  effects, and those are exactly the items the runner refuses for a reactive-inner agent.
+  The branch is kept (not deleted) because it is the correct weighting the moment the
+  seam rides `/chat` — but it is **unexercised** today. No test asserts it end-to-end,
+  by construction.
+- **Item `tool_mocks` not threaded to the seam** — inherited from E-2, no new debt. T001
+  declares the field on `ScheduledDatasetItem` for contract parity with
+  `DurableDatasetItem`; the seam still returns a type-default success sentinel
+  (`{"status":"ok","id":"mock-<uuid>"}`) rather than the item's fixed mock.
+
+**deferred (intentional):**
+- **The eval fires through the SANDBOX door, not `/internal/runs/start`** (`e3/tasks.md`
+  §D1). The real scheduled door is production-only, threads no `eval_mode`, and is
+  **circular** with the publish gate (`deployments.py:560` requires `eval_passed` to
+  deploy to production — you would need a published prod pod to earn the eval that
+  publishes it). E-3 drives the identical job-spec shape (`input_payload=job_spec` +
+  `trigger_type='schedule'` + `trigger_payload=job_spec`) through the **same**
+  `dispatch_durable_run` → declarative-runner `/run`. `T-S75-009` keeps the real door
+  honest with a live-delivery control. Revisit only if evals must run against published
+  production agents (needs `agent_runs.eval_mode` + a non-circular deploy story).
+- **Daemon identity on a trigger fire (`resolve_principal`) not re-proven by E-3** —
+  WS-3's surface, gated by `suite-71` T-S71-001. E-3 scores run behavior, not identity
+  resolution.
+- **Cron-timing eval (does it fire at the right time?)** — E-3 fires the job spec once
+  ("fire once, don't wait for cron"). Next-fire timing is WS-3's operate surface
+  (`suite-26`/`suite-71`), not an eval dimension.
+- **Alert-on-failure as an eval dimension** — out of scope; WS-3 verifies alerting
+  end-to-end. E-3 scores the run's behavior, not the alert transport.
+- **Record-once cassette replay for scheduled** — inherits E-2's mock-only limitation.
+
+**boundary (Playwright, by design):** `studio/e2e/eval-v2-scheduled.spec.ts` proves the
+authoring journey + save→reload→assert for real, but its **results-render half is
+conditional**: rendering the job-spec evidence needs an already-completed scheduled
+EvalRun, which needs a live daemon pod + the eval-runner Job + minutes of real LLM tool
+calls — too slow/flaky for a browser test. It discovers a real completed run from the
+backend (no `page.route`, no fabricated rows) and annotates a loud skip if none exists.
+The real recorded-not-delivered + score persistence is suite-75's job. **While the
+eval-runner image is stale, no completed scheduled EvalRun can exist, so that half always
+skips** — it unblocks itself with the same one-line bump.
 
 ---
 
@@ -1055,3 +1354,79 @@ After testing, remove what you created so you don't pollute the platform (isolat
 | event-gateway-threat-model.md | token, cross-agent, enumeration, filter, size, rotation, event log | T4.4–4.5 |
 
 **Not covered here (deferred / out of UI scope):** rate-limit 429 + replay 409 (threat model T-3/T-4 — automated in suite-28, hard to trigger by hand), safety-orchestrator input scan (G-2, service off), non-sequential workflow-HITL auto-advance (G-9, deferred(intentional)), organic OPA require_approval firing (G-9, not-yet-wired — suite-37 gated on OPA bundle/identity allow-path canary).
+
+## Known gaps — WS-4 (webhook client-id + allowlist + HMAC signing)
+
+**What the slice is for:** a webhook trigger authenticated with **one coarse bearer token**
+shared by every sender — no per-application identity, no revocation short of rotating the
+token on everyone, and no request integrity. WS-4 adds per-application **client-id +
+allowlist + HMAC request signing**, dual-mode so existing token senders keep working.
+
+**Landed in this slice** (registry-api 0.2.186 / event-gateway 0.1.2 / studio 0.1.142;
+**migration 0064**): `webhook_clients` (`secret_encrypted` TEXT, Fernet) +
+`agent_triggers.auth_mode` + `agent_events.client_id`; a NEW `routers/webhook_clients.py`
+at `/api/v1/triggers` keyed on `trigger_id` **alone** — one router serves agent **and**
+workflow triggers; `event-gateway/webhook_auth.py` with **one** `verify_webhook_auth`
+called by **both** hook handlers; the Studio client panel (register / reveal-once /
+enable-disable / revoke / audit).
+
+**Acceptance proof:** `scripts/e2e/suite-76-webhook-client-signing.sh` (`T-S76-000`–`009`,
+**11/0**) + Playwright `studio/e2e/webhook-clients.spec.ts` (**3/3**, incl. a real
+gateway 401 for a disabled client) + `scripts/deploy-cp1-ws4.sh` /
+`scripts/smoke-test-cp1-ws4-{infra,behaviour}.sh`.
+
+**Design decisions worth knowing:**
+- **The secret is Fernet-encrypted, NOT hashed.** The gateway must *recompute* the HMAC,
+  so it needs the raw secret back; a one-way hash is unimplementable here. Named
+  `secret_encrypted` so the column does not lie about what it holds.
+- **A webhook trigger is born `token` and upgrades to `client_signed` one-way on its first
+  client registration** (invariant: `client_signed` ⟺ ≥1 client). Birthing it
+  `client_signed` with an empty allowlist would mean a trigger that authenticates
+  **nobody**, and — since `auth_mode` is not on `AgentTriggerUpdate` — there would be no
+  API path to a token-mode trigger at all, so the legacy-token case could only be tested
+  with a hand-crafted DB row (the exact fake the suite forbids). `T-S76-009` is the gate.
+- **Revoking the last client does NOT revert to `token`.** A revoke must lock the door, not
+  silently reopen the coarse bearer-token path.
+- **Uniform 401 is structural, not remembered.** `_uniform_401()` takes **no arguments**, so
+  the failure reason cannot leak into the response even by mistake; the diagnosis goes to
+  the gateway log (`_deny(reason, **ctx)`). Two audiences, deliberately separated.
+  `T-S76-003` asserts all five failure modes are **byte-identical**
+  (`distinct_bodies=1`) — status codes alone would not prove the absence of an oracle.
+  This also **closed a pre-existing oracle**: stale-timestamp used to return a different
+  body (`main.py:262`/`:366`).
+
+**deferred (intentional):**
+- **Replay nonce is opt-in and keyed on `agent_name`, not `client_id`.** Contrary to the
+  plan's "v1 uses the 300s window only", replay protection already ships
+  (`X-Webhook-Nonce` → `rate_limiter.py::check_nonce`, Redis `SET NX`, fail-closed). The
+  real, narrower gap: a sender that omits the nonce header gets window-only protection, so
+  a replay **inside 300s** is possible; and the nonce namespace is per-agent, so it does
+  not isolate one client from another. Making it mandatory + client-scoped is a follow-up.
+- **Per-client rate limits.** Rate limiting stays per-trigger (the existing `rate_limiter`);
+  a noisy client can still exhaust a quiet one's budget. Per-client limits are a follow-up.
+
+**not-yet-wired (debt):**
+- **No trigger-scoped ownership check on the client router.** Any authenticated caller who
+  knows a `trigger_id` can register/revoke clients on it. This mirrors the sibling trigger
+  routers (which have the same gap) and was deliberately not widened here, but it IS a real
+  authz hole — a client registration is a credential grant. Documented in the router's
+  module docstring. Fix = the same scoping the trigger routers need.
+- **Senders are not migrated off `token`, and the flag is not deleted.** Dual-mode ships;
+  every existing trigger stays `token` until a client is registered on it. Deleting
+  `auth_mode` waits until every sender is on `client_signed`.
+- **`charts/agentshield/charts/*.tgz` shadow their source sub-charts — a live landmine.**
+  The event-gateway tag bump silently did nothing (deploy reported "successfully rolled
+  out" while serving **0.1.1**) because a stale untracked `event-gateway-0.1.0.tgz` pinned
+  the old tag and `helm dependency update` fails inside `deploy-cpe2e.sh:386`, swallowed by
+  `2>/dev/null || true`. Worked around by pinning the tag in the **top-level** values.yaml
+  (the pattern registry-api/studio/deploy-controller already use, immune to the artifact).
+  **Still-stale `.tgz` files remain for studio, deploy-controller, scheduler, python-executor
+  and others** — any future sub-chart tag edit will silently no-op the same way. Real fix =
+  make `deploy-cpe2e.sh` fail loudly on a dep-update error and stop committing/keeping stale
+  `.tgz` artifacts; deferred because it needs an unrelated envoy-gateway constraint fixed.
+
+**manual check (suite boundary):** `suite-76` and `suite-28` share one pod IP and suite-28
+exhausts the per-IP rate-limit budget by design, so `smoke-test-cp1-ws4-behaviour.sh` waits
+65s between them. `suite-66` (production webhook triggers, ~30-40min real-LLM) was not
+re-run; its workflow bare-token path is the same `verify_webhook_auth`, covered structurally
+by `T-S76-004` + suite-28.

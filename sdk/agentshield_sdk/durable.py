@@ -80,13 +80,26 @@ class StepEmitter:
         self._url = callback_url
         self._http = http
         self._bookmark = bookmark
+        # The skip is about ONE question: "was this step already durably recorded by a
+        # PREVIOUS drive (crash-restart), so re-emitting would double-write?" That is a
+        # RESUME FLOOR, frozen here — before the drive starts — not a live watermark.
+        #
+        # Comparing against the live `bookmark.last_completed_step` (which `emit` keeps
+        # raising as the drive runs) silently DROPS out-of-order completions: step
+        # numbers are assigned at `on_tool_start`, but completions arrive at
+        # `on_tool_end`. Two parallel tool calls ⇒ A=step2, B=step3; B finishes first and
+        # lifts the mark to 3; A then finishes and `2 <= 3` skips it. A strands at
+        # `running` and its `recorded_side_effects` NEVER persist — which makes an Eval
+        # v2 `occurs:"never"` assertion pass for the WRONG reason (fail-OPEN: the eval
+        # certifies "the write never fired" when it did). The floor fixes the class.
+        self._resume_floor = bookmark.last_completed_step if bookmark is not None else -1
 
     async def emit(self, upd: StepUpdate) -> dict:
         if (
             self._bookmark is not None
             and upd.status == "completed"
             and not upd.run_completed
-            and upd.step_number <= self._bookmark.last_completed_step
+            and upd.step_number <= self._resume_floor
         ):
             logger.info("StepEmitter: skip already-recorded step %d (bookmark)", upd.step_number)
             return {}
