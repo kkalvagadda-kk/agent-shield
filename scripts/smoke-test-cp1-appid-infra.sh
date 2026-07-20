@@ -8,7 +8,7 @@
 # checks the tag AND greps the RUNNING image for symbols that exist only in this change
 # (matches the precedent/lesson already captured in scripts/smoke-test-cp1-ws4-infra.sh).
 #
-#   T-CP1B-APPID-001  registry-api pods Running on image tag 0.2.211, 0 crashloops
+#   T-CP1B-APPID-001  registry-api pods Running on image tag 0.2.224, 0 crashloops
 #   T-CP1B-APPID-002  alembic head == 0071
 #   T-CP1B-APPID-003  schema landed: applications table (+ uq_applications_team_name,
 #                     idx_applications_team), widened ck_arg_role/ck_arg_grantee_type CHECKs
@@ -48,7 +48,7 @@ check_pods() {  # $1=label $2=want_tag $3=test_id $4=human
   fi
   pass "$3 $4 pods Running on image tag $2, no crashloops"
 }
-check_pods "registry-api" "0.2.221" "T-CP1B-APPID-001" "registry-api"
+check_pods "registry-api" "0.2.224" "T-CP1B-APPID-001" "registry-api"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)

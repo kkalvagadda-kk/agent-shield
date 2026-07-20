@@ -7,7 +7,7 @@
 # passes against the wrong bytes). CLAUDE.md's mandatory per-change image-tag bump (never reuse
 # a tag) is done in the SAME commit as this script, in deploy-cpe2e.sh + values.yaml.
 #
-# Scope built here: registry-api:0.2.221 + event-gateway:0.1.4 — migrations 0070/0071,
+# Scope built here: registry-api:0.2.224 + event-gateway:0.1.4 — migrations 0070/0071,
 # Application model, rbac.py extensions, artifact_grants.py + applications.py routers
 # (Phases 2-3, T001-T008), plus the gateway cutover + trigger soft-auth (Phases 4-5,
 # T009-T013) — all landed in the same source tree by the time this checkpoint runs, so
@@ -20,7 +20,7 @@ cd "$REPO_ROOT"
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 
-echo "==> Webhook Application Identity CP1 deploy: registry-api 0.2.221 + event-gateway 0.1.4"
+echo "==> Webhook Application Identity CP1 deploy: registry-api 0.2.224 + event-gateway 0.1.4"
 echo "    (migrations 0070/0071 apply via the registry-api alembic init container)"
 echo ""
 

@@ -64,12 +64,12 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.197"   # 0.2.195: POC-4 Knowledge/RAG (migration 0067 + ports + ingest + routers) (0.2.194 Ollama; 0.2.193 POC-5 min(uuid) fix)
+REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002). 0.2.221: Decision 30 — matches values.yaml
 DEPLOY_CONTROLLER_TAG="0.1.39"   # 0.1.39: per-provider env map (base_url→OLLAMA_BASE_URL); >=0.1.38 imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.58"   # 0.1.57: SDK ChatOllama (langchain-ollama); 0.1.56 POC-3 user_directive; carries OPA bypass (task #16)
-STUDIO_TAG="0.1.148"   # 0.1.147: POC-5 Conversations UI (+ 0.1.146 POC-4 Knowledge, 0.1.145 Ollama form) — one image, all frontends
+DECLARATIVE_RUNNER_TAG="0.1.59"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
+STUDIO_TAG="0.1.158"   # 0.1.158: matches values.yaml (branch made no studio source change — CP3/frontend rebuilds this again after Phases 6-8)
 SCHEDULER_TAG="0.1.1"
-EVENT_GATEWAY_TAG="0.1.1"
+EVENT_GATEWAY_TAG="0.1.4"   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"
 EVAL_RUNNER_TAG="0.1.10"
 MINIO_CP1_TAG="0.1.0"
@@ -98,7 +98,18 @@ echo "    ns      : ${NS}"
 # ── Step 0: preflight ────────────────────────────────────────────────────────
 echo ""
 echo "[0/7] Preflight..."
-kubectl get --raw='/readyz' >/dev/null || { echo "FATAL: cluster unreachable (VPN up?)"; exit 1; }
+# Retry, don't abort on the first blip: the private API endpoint (VPN) flaps, and a
+# single failed /readyz should not throw away a 30-min build. ~5 min of patience.
+_wait_reachable() {
+  local i
+  for i in $(seq 1 30); do
+    kubectl get --raw='/readyz' >/dev/null 2>&1 && return 0
+    echo "  cluster not reachable yet (attempt $i/30) — retry in 10s (VPN flapping?)"
+    sleep 10
+  done
+  return 1
+}
+_wait_reachable || { echo "FATAL: cluster unreachable after ~5min (VPN up?)"; exit 1; }
 kubectl get storageclass block-storage >/dev/null 2>&1 || echo "  WARN: no 'block-storage' StorageClass — PVCs may not bind"
 kubectl get deploy -n kube-system aws-load-balancer-controller >/dev/null 2>&1 || echo "  WARN: aws-load-balancer-controller absent — the internal NLB won't provision"
 # Warn loudly if nodes lack AVX-512 — we ship the portable pgvector anyway, but
@@ -126,13 +137,23 @@ else
   docker buildx inspect eksbuilder >/dev/null 2>&1 || docker buildx create --name eksbuilder >/dev/null
   docker buildx use eksbuilder
   b() { # <svc> <tag> <context> [dockerfile]
-    local svc="$1" tag="$2" ctx="$3" df="${4:-}"
+    local svc="$1" tag="$2" ctx="$3" df="${4:-}" attempt
     echo "  -> $svc:$tag"
-    if [ -n "$df" ]; then
-      docker buildx build --platform linux/amd64 -t "$ECR/agentshield/$svc:$tag" -f "$df" --push "$ctx" >/dev/null
-    else
-      docker buildx build --platform linux/amd64 -t "$ECR/agentshield/$svc:$tag" --push "$ctx" >/dev/null
-    fi
+    # Retry build+push: the ECR push is the other thing the flapping VPN/DNS kills
+    # ("no such host" / EOF mid-upload). buildx layer cache makes a retry cheap (only
+    # the missing layers re-push), and we refresh the ECR token each round in case it
+    # was the ~12h expiry rather than the network.
+    for attempt in 1 2 3 4; do
+      if [ -n "$df" ]; then
+        docker buildx build --platform linux/amd64 -t "$ECR/agentshield/$svc:$tag" -f "$df" --push "$ctx" >/dev/null && return 0
+      else
+        docker buildx build --platform linux/amd64 -t "$ECR/agentshield/$svc:$tag" --push "$ctx" >/dev/null && return 0
+      fi
+      echo "     $svc:$tag build/push attempt $attempt/4 failed — refresh ECR auth + retry in 15s"
+      aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR" >/dev/null 2>&1 || true
+      sleep 15
+    done
+    echo "FATAL: $svc:$tag failed to build/push after 4 attempts (VPN/DNS?)"; return 1
   }
   b registry-api        "$REGISTRY_API_TAG"       services/registry-api/
   b deploy-controller   "$DEPLOY_CONTROLLER_TAG"  services/deploy-controller/
@@ -335,10 +356,33 @@ helm upgrade --install "$RELEASE" "$CHART" -f "$VALUES" -n "$NS" \
 # ── Step 7: verify ───────────────────────────────────────────────────────────
 echo ""
 echo "[7/7] Waiting for rollouts..."
-for d in registry-api studio deploy-controller scheduler event-gateway python-executor; do
+# registry-api is the MIGRATION GATE. A broken/blocked alembic migration leaves the OLD
+# pod Running while the new one sits Pending — and a mere WARN here silently ships stale
+# code (observed 2026-07-20: migration 0070's dangling down_revision '0069' KeyError left
+# registry-api on the old image; every API check then passed against the wrong bytes). So
+# registry-api failing to roll out is FATAL, not a warning.
+if kubectl rollout status "deploy/${RELEASE}-registry-api" -n "$NS" --timeout=300s; then
+  echo "  ok  registry-api"
+else
+  echo "FATAL: registry-api did not roll out. Most likely the alembic-migrate init" >&2
+  echo "       container failed. Inspect it:" >&2
+  echo "  kubectl -n ${NS} get pods -l app.kubernetes.io/name=registry-api" >&2
+  echo "  kubectl -n ${NS} logs \$(kubectl -n ${NS} get pods -l app.kubernetes.io/name=registry-api --field-selector=status.phase=Pending -o name | head -1) -c alembic-migrate" >&2
+  exit 1
+fi
+for d in studio deploy-controller scheduler event-gateway python-executor; do
   kubectl rollout status "deploy/${RELEASE}-${d}" -n "$NS" --timeout=240s >/dev/null 2>&1 \
     && echo "  ok  ${d}" || echo "  WARN ${d} not ready"
 done
+
+# Pin the platform-admin global role to the LIVE Keycloak sub (self-healing across realm
+# recreations — see scripts/seed-platform-admin-role.sh header). Without this the Studio
+# Admin menu silently disappears whenever the realm's admin sub changes. Non-fatal: a
+# fresh cluster may still be settling Keycloak; the message tells the operator to re-run.
+echo ""
+echo "[7b/7] Seeding platform-admin role (live Keycloak sub)..."
+bash scripts/seed-platform-admin-role.sh \
+  || echo "  WARN seed-platform-admin-role failed — re-run: bash scripts/seed-platform-admin-role.sh"
 
 echo ""
 echo "=== Done ==="

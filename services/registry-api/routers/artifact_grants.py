@@ -195,6 +195,45 @@ async def create_grant(
 
     grant = dict(result.mappings().one())
 
+    # WS-4 upgrade-on-first-grant (design doc §9.4, test T-SYY-002). Granting an
+    # application `invoker` on this artifact is the moment per-application signed auth
+    # becomes possible, so EVERY webhook trigger on the artifact switches to
+    # `client_signed` — in the SAME transaction as the grant insert (get_db commits on
+    # handler return), so the stored mode and the grant can never disagree. Without
+    # this, the trigger stays `auth_mode='token'` and the event-gateway's `token`
+    # branch authenticates anyone holding the path token, never consulting the invoker
+    # grant — i.e. the grant would buy nothing. This mirrors the retired
+    # webhook_clients.create_webhook_client upgrade exactly, now driven by an invoker
+    # grant instead of a webhook_clients row.
+    #
+    # ONE-WAY on purpose, matching that old path: revoke_grant never reverts to
+    # `token`. A trigger whose last invoker grant is revoked stays `client_signed` and
+    # correctly authenticates nobody (fail closed) rather than silently re-opening the
+    # coarse per-trigger bearer token the operator upgraded away from.
+    #
+    # `artifact_type` is an explicit context parameter — already validated to
+    # {agent,workflow} by _resolve_artifact above — mapped to the matching FK column by
+    # a fixed two-way choice, never type-sniffed and never raw-interpolated from user
+    # input. `artifact_id` is a bound parameter.
+    if body.role == "invoker" and body.grantee_type == "application":
+        trigger_fk = "agent_id" if artifact_type == "agent" else "workflow_id"
+        flipped = await db.execute(
+            text(f"""
+                UPDATE agent_triggers
+                   SET auth_mode = 'client_signed'
+                 WHERE {trigger_fk} = :aid
+                   AND trigger_type = 'webhook'
+                   AND auth_mode <> 'client_signed'
+            """),
+            {"aid": artifact_id},
+        )
+        if flipped.rowcount:
+            logger.info(
+                "artifact_grants: invoker grant to application '%s' on %s:%s flipped "
+                "%d webhook trigger(s) auth_mode token -> client_signed",
+                body.grantee_id, artifact_type, artifact_id, flipped.rowcount,
+            )
+
     grantee_label = None
     if body.grantee_type == "application":
         grantee_label = await _application_name(db, body.grantee_id)

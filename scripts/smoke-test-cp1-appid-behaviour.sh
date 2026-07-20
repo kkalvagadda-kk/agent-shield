@@ -37,6 +37,17 @@ import urllib.request
 PASS = 0
 FAIL = 0
 
+# FastAPI's redirect_slashes answers a missing/extra trailing slash with a 307
+# (e.g. POST /api/v1/agents -> /api/v1/agents/). Stock urllib REFUSES to follow a
+# 307/308 on POST (raises HTTPError), so re-issue the same method+body+headers to
+# the redirect target ourselves. Bounded to one hop (FastAPI redirects once).
+class _Redirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return urllib.request.Request(
+            newurl, data=req.data, method=req.get_method(),
+            headers={k: v for k, v in req.header_items()})
+_OPENER = urllib.request.build_opener(_Redirect)
+
 def ok(msg):
     global PASS
     print(f"PASS  {msg}")
@@ -55,7 +66,7 @@ def call(method, path, token=None, body=None):
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        resp = urllib.request.urlopen(req)
+        resp = _OPENER.open(req)
         return resp.status, json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         raw = e.read()

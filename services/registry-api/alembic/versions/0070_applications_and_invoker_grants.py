@@ -5,21 +5,27 @@ Additive only — does not touch the live gateway auth path (that cutover is a
 separate code change, not a migration) and does not move any existing data
 (migration 0071 does the webhook_clients backfill).
 
-Originally numbered 0069/down_revision=0068. Renumbered to 0070/down_revision=0069
-during CP1 deployment (2026-07-19) after discovering the live database already had
-an UNRELATED migration ("0069_mcp_server_fields.py", a concurrent, independent
-workstream forking from the same 0068 parent) stamped as "0069" — same revision ID,
-different content. Alembic tracks applied migrations by ID string only, so ours
-would have been silently skipped as "already applied" while its DDL never ran.
-Chained off the real current head instead of re-claiming a taken slot.
+Revision ID kept at 0070 (renamed from 0069 to avoid colliding with the concurrent,
+UNRELATED "0069_mcp_server_fields.py" from the MCP-tools workstream, which also claims
+revision "0069" — same ID string, different DDL — and would silently shadow this one).
+
+down_revision is 0068, the REAL parent that exists in this branch's tree. An earlier
+renumber set it to "0069" on the assumption that the MCP branch's 0069 would already be
+applied ahead of us; that file is NOT part of this (webhook-application-identity) branch,
+so on any database where it hasn't landed, alembic raises `KeyError: '0069'` and the
+whole upgrade aborts (observed at CP deploy 2026-07-20 against a DB at head 0064). This
+migration has NO data dependency on the MCP fields — it only creates `applications` and
+widens `artifact_role_grants` (from 0044) — so it correctly chains off 0068. When the two
+branches later meet on main, 0068 has two children (this 0070 and MCP's 0069); reconcile
+with a standard `alembic merge` at that point, not by coupling them here.
 
 Revision ID: 0070
-Revises: 0069
+Revises: 0068
 """
 from alembic import op
 
 revision = "0070"
-down_revision = "0069"
+down_revision = "0068"
 
 
 def upgrade() -> None:

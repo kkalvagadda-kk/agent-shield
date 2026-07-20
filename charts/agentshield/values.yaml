@@ -660,7 +660,21 @@ registry-api:
     #   can_manage_artifact, artifact_grants.py + applications.py routers, gateway cutover).
     #   Originally 0.2.211/migrations 0069+0070 — see deploy-cpe2e.sh header for the tag
     #   collision + migration-number collision this went through to get here.
-    tag: "0.2.221"
+    # 0.2.222: fix — create_grant (artifact_grants.py) now flips a webhook trigger's
+    #   auth_mode token -> client_signed on the first application invoker grant
+    #   (upgrade-on-first-grant, one-way). Phase 3 shipped the grant insert but NOT this
+    #   flip, so the gateway stayed in token mode and the invoker grant bought nothing —
+    #   design doc T-SYY-002 requires it. Mirrors the retired webhook_clients upgrade.
+    # 0.2.223: fix migration 0070 down_revision 0069 -> 0068. "0069" is the concurrent
+    #   MCP-tools branch's migration (0069_mcp_server_fields.py), absent from this branch,
+    #   so alembic raised `KeyError: '0069'` and every registry-api pod init-crashed. 0070
+    #   has no dependency on the MCP fields; it chains off the real parent 0068.
+    # 0.2.224: + HITL reactive-chat approval-status fix. chat.py now derives the approval/
+    #   checkpoint thread via a shared _chat_thread_id(run, run_id) keyed by session_id
+    #   (not run_id), so a production chat parked on a high-risk tool auto-resumes after a
+    #   reviewer approves instead of hanging. Cherry-picked from fix/reactive-hitl-approval-
+    #   poll (922c04b); see docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md.
+    tag: "0.2.224"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

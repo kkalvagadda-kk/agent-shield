@@ -366,7 +366,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.221"
+REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -808,6 +808,13 @@ REGISTRY_URL="http://localhost:8001" bash scripts/seed-defaults.sh || true
 
 kill $PF2_PID 2>/dev/null || true
 wait $PF2_PID 2>/dev/null || true
+
+# Pin the platform-admin global role to the LIVE Keycloak sub (self-healing across realm
+# recreations). Without it the Studio Admin menu silently disappears when the admin sub
+# changes — /me reads role from user_team_assignments by sub, and nothing else seeds it.
+# Uses kubectl exec (no port-forward needed).
+bash scripts/seed-platform-admin-role.sh \
+  || echo "  WARN seed-platform-admin-role failed — re-run: bash scripts/seed-platform-admin-role.sh"
 
 echo ""
 echo "================================================================"
