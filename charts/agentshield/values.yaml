@@ -645,7 +645,10 @@ registry-api:
     # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
     # 0.2.209: deploy-time tool-access auto-grant (AssetGrant for the agent's own tools, both
     #   deploy paths) — fixes fail-closed tool_not_granted denials; high-risk tools still HITL-park
-    tag: "0.2.210"
+    # 0.2.215: reactive-chat HITL poll fix — chat_approval_status/session_approvals key the approval
+    #   lookup by session_id (via _chat_thread_id), not run_id — production chat no longer hangs after
+    #   approval. (Built off origin/main; excludes unpushed webhook work in 0.2.212-214.)
+    tag: "0.2.215"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

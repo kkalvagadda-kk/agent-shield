@@ -348,7 +348,13 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.210"
+# 0.2.215: reactive-chat HITL poll FIX — chat_approval_status (+ session_approvals) keyed the approval
+#   lookup by run_id, but the pod creates it under thread_id=session_id (session_id != run_id since
+#   POC-0), so the PRODUCTION chat's approval-status poll returned status="none" forever and the chat
+#   hung after a reviewer approved. New shared _chat_thread_id(run, run_id) helper used by the poll,
+#   the resume path, and the session-approvals list so they can't drift. No migration.
+#   (NOTE: built off origin/main; does NOT include the unpushed webhook-app-identity work in 0.2.212-214.)
+REGISTRY_API_TAG="0.2.215"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"

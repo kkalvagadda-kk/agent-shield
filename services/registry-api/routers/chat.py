@@ -104,6 +104,22 @@ async def _resolve_session_id(
     return supplied
 
 
+def _chat_thread_id(run, run_id: str) -> str:
+    """The thread a chat run's HITL approval + LangGraph checkpoint are keyed by.
+
+    Since POC-0 the checkpoint/approval key is the CONVERSATION id (``session_id``),
+    NOT the per-turn ``run_id``. EVERY path that looks up (or resumes) a chat run's
+    approval MUST derive the thread the same way, or one drifts: the approval-status
+    poll matched ``Approval.thread_id == run_id`` while the pod created the approval
+    under ``session_id`` (``session_id != run_id`` since POC-0), so a session-keyed
+    approval was invisible to the poll → it returned ``status="none"`` forever and the
+    chat hung after a reviewer approved. Single source of truth so the poll and the
+    resume path can never diverge again (see docs/bugs/reactive-hitl-approval-status-
+    session-run-mismatch.md).
+    """
+    return run.session_id or run_id
+
+
 async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
     """Return True if team holds an active, non-expired grant on the given agent."""
     now = datetime.now(tz=timezone.utc)
@@ -995,13 +1011,10 @@ async def resume_stream_chat(
     if run.user_id != user_sub:
         raise HTTPException(status_code=403, detail="Not your run")
 
-    # The HITL approval + LangGraph checkpoint are keyed by the CONVERSATION id
-    # (session_id since POC-0), NOT the per-turn run_id. Deriving thread_id the
-    # same way the chat dispatch does (chat.py:715/926 `run.session_id or run_id`)
-    # is what lets the approval lookup below match AND the pod /resume/{thread_id}
-    # target the parked checkpoint. Using run_id here (pre-POC-0 assumption) made
-    # the approval lookup 404 and the chat hang after approval.
-    thread_id = run.session_id or run_id
+    # Shared derivation (see _chat_thread_id): the approval + LangGraph checkpoint are
+    # keyed by the conversation session_id, not the per-turn run_id. The approval-status
+    # poll MUST use this same helper so it can never drift from this resume path again.
+    thread_id = _chat_thread_id(run, run_id)
 
     approval_result = await db.execute(
         select(Approval)
@@ -1160,9 +1173,14 @@ async def chat_approval_status(
     if run.user_id != caller.get("sub", ""):
         raise HTTPException(status_code=403, detail="Not your chat run.")
 
+    # BUGFIX: key the lookup by the conversation thread (session_id), not the per-turn
+    # run_id. The pod creates the approval under thread_id = session_id, and since POC-0
+    # session_id != run_id, so matching on run_id returned status="none" forever and the
+    # PRODUCTION chat hung after a reviewer approved. Same derivation as the resume path.
+    thread_id = _chat_thread_id(run, run_id)
     approval_result = await db.execute(
         select(Approval)
-        .where(Approval.thread_id == run_id)
+        .where(Approval.thread_id == thread_id)
         .order_by(Approval.created_at.desc())
         .limit(1)
     )
@@ -1222,23 +1240,26 @@ async def session_approvals(
             )
         )
     ).all()
-    run_ids = [str(r.id) for r in run_rows]
-    if not run_ids:
+    if not run_rows:
+        # Caller owns no runs in this session → nothing to show (also the auth gate).
         return {"session_id": session_id, "approvals": []}
-    prov = {
-        str(r.id): (r.requested_by_username, r.requested_by_team) for r in run_rows
-    }
+    # Provenance (WHO requested) is per-session — the same owner across every turn of
+    # the conversation — so take it from the session's runs (any non-null value).
+    req_username = next((r.requested_by_username for r in run_rows if r.requested_by_username), None)
+    req_team = next((r.requested_by_team for r in run_rows if r.requested_by_team), None)
 
+    # BUGFIX (same class as chat_approval_status, see _chat_thread_id): approvals are keyed
+    # by the CONVERSATION thread = session_id (POC-0), NOT the per-turn run ids. Matching on
+    # run ids returned an empty list, so the sandbox self-approve panel could not populate.
     approvals = (
         await db.execute(
             select(Approval)
-            .where(Approval.thread_id.in_(run_ids))
+            .where(Approval.thread_id == session_id)
             .order_by(Approval.created_at.desc())
         )
     ).scalars().all()
 
     def _row(a) -> dict[str, Any]:
-        username, team = prov.get(a.thread_id, (None, None))
         return {
             "approval_id": str(a.id),
             "run_id": a.thread_id,
@@ -1247,8 +1268,8 @@ async def session_approvals(
             "args": a.tool_args or {},    # WHAT (arguments)
             "risk": a.risk_level,
             "reasoning": a.reasoning,     # WHY (best-effort LLM reason)
-            "requested_by": username,     # WHO
-            "requested_by_team": team,
+            "requested_by": req_username, # WHO (session-level provenance)
+            "requested_by_team": req_team,
             "context": a.context,
             "created_at": a.created_at.isoformat() if a.created_at else None,
             "decided": a.status in ("approved", "rejected"),

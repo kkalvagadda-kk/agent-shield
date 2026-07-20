@@ -12,6 +12,29 @@
 
 ---
 
+## Production reactive-chat HITL: no longer hangs after approval — 2026-07-19
+
+**Shipped (registry-api 0.2.215).** A production agent chat that parked on a high-risk tool hung
+forever after a reviewer approved: `chat_approval_status` (the poll `AgentChatPage` runs behind the
+`hitl-waiting-banner`) keyed the approval lookup by `run_id`, but the approval is keyed by the
+conversation `session_id` (`session_id != run_id` since POC-0) → the poll returned `status="none"`
+forever. Fixed via a shared `_chat_thread_id(run, run_id)` used by the poll, the resume path, and the
+`session_approvals` list. See `docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md`.
+
+- **Deterministic guard (green):** `scripts/e2e/suite-45-hitl-e2e.sh` **T-S45-013** — drives the real
+  reactive chat → park → `GET /chat/{run_id}/approval-status`, asserts `status="pending"` (RED on
+  0.2.214, GREEN on 0.2.215). Also un-hid **T-S45-007** (was silently `SKIP`ping without a deployment).
+- **Known gap — browser journey (not-yet-wired, fixture-blocked):** `studio/e2e/hitl-production-chat.spec.ts`
+  drives the full browser journey (production chat → waiting-banner → console approve → auto-resume) and is
+  wired into `scripts/studio-journeys-e2e.sh`, but it **skips** in the current cluster: `hitl-agent`'s
+  production deployment lives in the `production_deployments` table and is not surfaced by the
+  `deployments` API the spec discovers through, so the spec can't reach the production chat surface. It is
+  RED-capable once a production deployment is reachable via that API (or the spec's discovery is pointed at
+  the production-deployment surface). The backend fault it guards is fully covered deterministically by
+  T-S45-013 in the meantime.
+
+---
+
 ## Workflow deployment Conversations tab — no longer empty — 2026-07-18
 
 **Shipped (registry-api 0.2.205 + studio 0.1.154).** A workflow's Conversations tab was always

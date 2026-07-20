@@ -621,6 +621,63 @@ if echo "$RESUME_CHECK" | grep -q "^OK:"; then pass
 elif echo "$RESUME_CHECK" | grep -q "^SKIP:"; then echo "SKIP ($RESUME_CHECK)"; SKIP=$((SKIP + 1))
 else fail "$RESUME_CHECK"; fi
 
+# ---------------------------------------------------------------------------
+# T-S45-013: REACTIVE chat POLL — /chat/{run_id}/approval-status must reflect the
+#   PENDING approval. This is the exact endpoint AgentChatPage polls in the
+#   PRODUCTION path (the hitl-waiting-banner loop). The bug: the poll looks up
+#   Approval.thread_id == run_id, but the pod created the approval with
+#   thread_id = session_id, and since POC-0 session_id != run_id (the browser
+#   mints a fresh conversation session). So the poll returns {"status":"none"}
+#   forever and the chat hangs even after a reviewer approves in the console.
+#   Uses a FRESH UUID session (as the browser does) so session_id != run_id — the
+#   condition T-S45-007 (deployment chat, skips w/o a running deployment) and
+#   T-S45-011/012 (stream + resume-stream, which correctly key by session_id)
+#   never assert against. RED on the buggy code (status=none), GREEN once the poll
+#   derives the thread from run.session_id like the resume path already does.
+# ---------------------------------------------------------------------------
+run_test "T-S45-013" "Reactive chat approval-status POLL reflects the pending approval (not 'none')"
+POLL_CHECK=$(api "
+import asyncio, json, uuid, httpx
+async def test():
+    base='http://localhost:8000/api/v1'; root='http://localhost:8000'
+    tr=httpx.post('http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token',
+        data={'grant_type':'password','client_id':'agentshield-studio','username':'platform-admin','password':'PlatformAdmin2024'},timeout=10)
+    if tr.status_code!=200: print(f'SKIP:no-token={tr.status_code}'); return
+    auth={'Authorization':f\"Bearer {tr.json()['access_token']}\"}
+    sess=str(uuid.uuid4())  # fresh UUID conversation session, as the browser mints -> session_id != run_id
+    async with httpx.AsyncClient(timeout=60) as c:
+        r=await c.post(f'{base}/agents/${REACTIVE_AGENT}/chat',
+            json={'message':'What is the current weather in Austin Texas right now?','session_id':sess,'context':'playground'},headers=auth)
+        if r.status_code!=200: print(f'SKIP:chat-start={r.status_code}'); return
+        b=r.json(); su=root+b['stream_url']; run_id=str(b['run_id']); appr=None
+    if run_id==sess: print('SKIP:session==run (cannot exercise the divergence)'); return
+    async with httpx.AsyncClient(timeout=90) as c:
+        async with c.stream('GET',su,headers=auth) as resp:
+            async for line in resp.aiter_lines():
+                if not line.startswith('data: '): continue
+                try: ev=json.loads(line[6:].strip())
+                except: continue
+                if ev.get('type')=='approval_requested': appr=ev.get('approval_id'); break
+                if ev.get('type') in ('done','error'): break
+    if not appr: print('SKIP:no-approval (risk not high / agent not parking)'); return
+    # The regression: the poll the UI depends on MUST see the pending approval.
+    async with httpx.AsyncClient(timeout=20) as c:
+        s=await c.get(f'{base}/agents/${REACTIVE_AGENT}/chat/{run_id}/approval-status',headers=auth)
+        if s.status_code!=200: print(f'FAIL:poll-http={s.status_code}'); return
+        body=s.json()
+    if body.get('status')=='pending' and body.get('tool')=='web_search':
+        print('OK:poll reflects pending approval id='+str(body.get('approval_id') or '')[:8])
+    elif body.get('status')=='none':
+        print('FAIL:poll returned status=none (bug: approval keyed by session_id, poll matched run_id -> chat hangs after approval)')
+    else:
+        print('FAIL:unexpected poll body='+json.dumps(body))
+try: asyncio.run(test())
+except Exception as e: print(f'FAIL:exc={e!r}')
+")
+if echo "$POLL_CHECK" | grep -q "^OK:"; then pass
+elif echo "$POLL_CHECK" | grep -q "^SKIP:"; then echo "SKIP ($POLL_CHECK)"; SKIP=$((SKIP + 1))
+else fail "$POLL_CHECK"; fi
+
 # ===========================================================================
 echo ""
 echo "=== Suite 45 Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped ==="
