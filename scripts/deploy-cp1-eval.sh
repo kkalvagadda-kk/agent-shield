@@ -42,6 +42,9 @@ helm upgrade --install "$RELEASE" "$CHART" \
 echo "==> [CP1] Rolling out registry-api (alembic-migrate init runs upgrade head -> 0059/0060) ..."
 kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --timeout="$TIMEOUT"
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 echo "==> [CP1] registry-api pod:"
 kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api
 

@@ -340,6 +340,10 @@ for d in registry-api studio deploy-controller scheduler event-gateway python-ex
     && echo "  ok  ${d}" || echo "  WARN ${d} not ready"
 done
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed —
+# EKS sets langfuse.enabled=false, so this is a no-op there but stays correct if it's enabled).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NS"
+
 echo ""
 echo "=== Done ==="
 echo ""

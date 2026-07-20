@@ -681,6 +681,12 @@ kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeou
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
 
+# Reconcile the Langfuse SSO hostAlias to the LIVE gateway-port-8443 ClusterIP (dynamic per
+# cluster — a value baked into values.yaml goes stale on a cluster move and silently breaks
+# trace-link SSO). Self-skips if langfuse is not deployed. See the helper header +
+# docs/bugs/langfuse-hostalias-stale-clusterip.md.
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 # Create Keycloak client for Langfuse SSO (idempotent — skips if exists)
 echo "  Creating Keycloak client 'langfuse' for SSO..."
 kubectl exec -n "$NAMESPACE" deploy/agentshield-registry-api -c registry-api -- python3 -c "

@@ -80,6 +80,9 @@ kubectl rollout status deployment/agentshield-deploy-controller \
   -n "$NAMESPACE" \
   --timeout=3m
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 echo ""
 echo "Checkpoint 2 deploy complete."
 echo "Run scripts/smoke-test-cp2-deploy.sh and scripts/smoke-test-cp2-opa.sh to verify."

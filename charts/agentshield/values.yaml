@@ -469,12 +469,19 @@ langfuse:
           secretKeyRef:
             name: langfuse-api-keys
             key: secret-key
+      # Seed the Langfuse project OWNER with the SAME email as the Keycloak `platform-admin`
+      # user (platform-admin@agentshield.local). Langfuse authorizes trace access by PROJECT
+      # MEMBERSHIP keyed by email, and account-links an SSO login to an existing user with the
+      # matching email. If this differs from the Keycloak admin's email, the SSO user is NOT a
+      # member → "You do not have access to this trace" even after a successful Sign In.
+      # (Additional users must be provisioned into Langfuse when created — see the follow-up in
+      # docs/bugs/langfuse-trace-access-sso-and-membership.md.)
       - name: LANGFUSE_INIT_USER_EMAIL
-        value: "admin@agentshield.local"
+        value: "platform-admin@agentshield.local"
       - name: LANGFUSE_INIT_USER_PASSWORD
         value: "AdminPass2024"
       - name: LANGFUSE_INIT_USER_NAME
-        value: "AgentShield Admin"
+        value: "Platform Admin"
       # Keycloak SSO — single login covers Studio + Langfuse
       - name: AUTH_KEYCLOAK_CLIENT_ID
         value: "langfuse"
@@ -488,11 +495,20 @@ langfuse:
         value: "true"
       - name: NODE_TLS_REJECT_UNAUTHORIZED
         value: "0"
-    # hostAliases: pod must reach Keycloak OIDC at :8443 (nip.io → 127.0.0.1 = loopback inside K8s).
-    # Points to gateway-port-8443 Service in envoy-gateway-system (maps 8443→Gateway HTTPS).
+    # hostAliases: langfuse-web must reach Keycloak's OIDC endpoints at the PUBLIC issuer host
+    # (agentshield.127.0.0.1.nip.io:8443) from INSIDE the cluster, where that name resolves to
+    # 127.0.0.1 (loopback). We redirect it to the in-cluster gateway-port-8443 Service in
+    # envoy-gateway-system (maps 8443 → Gateway HTTPS).
+    # ⚠️ The IP below is a PLACEHOLDER. gateway-port-8443's ClusterIP is assigned dynamically by
+    #    Kubernetes and is DIFFERENT on every fresh cluster, so every install/update script runs
+    #    scripts/reconcile-langfuse-hostalias.sh after `helm upgrade` to fetch the LIVE ClusterIP
+    #    and patch this hostAlias to match. Do NOT rely on this value — a stale IP silently breaks
+    #    trace-link SSO ("You do not have access to this trace / Sign In"). A raw `helm upgrade`
+    #    without the script leaves it stale until you run the reconcile helper yourself.
+    #    See docs/bugs/langfuse-hostalias-stale-clusterip.md.
     web:
       hostAliases:
-        - ip: "10.96.203.50"
+        - ip: "10.96.158.172"   # PLACEHOLDER — reconciled to the live gateway-port-8443 ClusterIP at deploy time
           hostnames:
             - "agentshield.127.0.0.1.nip.io"
 

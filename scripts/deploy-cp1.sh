@@ -143,6 +143,10 @@ kubectl wait pods \
 echo "==> Deployed pods:"
 kubectl get pods -n "$NAMESPACE"
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed —
+# CP1 sets langfuse.enabled=false, so this is a no-op here but stays correct if it's enabled).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 echo ""
 echo "Checkpoint 1 deploy complete."
 echo "Run scripts/smoke-test-cp1-infra.sh and scripts/smoke-test-cp1-registry.sh to verify."

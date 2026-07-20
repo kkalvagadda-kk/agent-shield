@@ -50,6 +50,9 @@ echo "==> [CP2] Waiting for rollouts ..."
 kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --timeout="$TIMEOUT"
 kubectl rollout status deployment/agentshield-studio       -n "$NAMESPACE" --timeout="$TIMEOUT" || echo "  (studio starting)"
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 echo "==> [CP2] pods:"
 kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api
 kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=studio
