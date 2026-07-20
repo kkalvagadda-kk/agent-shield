@@ -31,6 +31,7 @@ SPECS=(
   e2e/workflow-conversations.spec.ts        # workflow ledger — Conversations tab
   e2e/workflow-memory.spec.ts               # workflow ledger — Memory tab + past-session replay
   e2e/approvals-inbox.spec.ts               # HITL — production console queue (ApprovalCard + decide)
+  e2e/hitl-production-chat.spec.ts          # HITL — PRODUCTION chat: waiting-banner → console approve → auto-resume
 )
 
 # NOT in the curated set (fixture-dependent LIVE run, not deterministic): the workflow
