@@ -3,7 +3,13 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.211 + event-gateway:0.1.4 (Decision 30 — Webhook Application Identity &
+#   - registry-api:0.2.220 + event-gateway:0.1.4 (Decision 30 — Webhook Application Identity &
+#     NOTE: 0.2.211 was originally used for this build but collided with a DIFFERENT,
+#     unrelated build (0069_mcp_server_fields.py, a concurrent MCP-workstream migration)
+#     that got tagged 0.2.211 in the shared local Docker image store AFTER this one —
+#     Docker image tags are mutable pointers, so the shared store silently served the
+#     wrong content under our tag. Bumped to 0.2.220, clear of the other workstream's
+#     high-water mark at the time, to avoid a repeat.
 #     Invoker Grants, T001-T013: migrations 0069/0070 (applications table + widened
 #     artifact_role_grants CHECKs + webhook_clients backfill), Application ORM model, rbac.py
 #     (can_delegate_role widened for 'invoker', can_create_application, can_manage_artifact,
@@ -358,7 +364,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.211"
+REGISTRY_API_TAG="0.2.220"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
