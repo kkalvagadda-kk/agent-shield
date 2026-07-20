@@ -3,12 +3,16 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.211 (Decision 30 CP1 — Webhook Application Identity & Invoker Grants:
-#     migrations 0069/0070 (applications table + widened artifact_role_grants CHECKs +
-#     webhook_clients backfill), Application ORM model, rbac.py (can_delegate_role widened
-#     for 'invoker', can_create_application, can_manage_artifact, ENFORCE_TRIGGER_MGMT=False),
-#     new routers artifact_grants.py + applications.py registered in main.py. Gateway cutover
-#     and webhook_clients retirement land in a later checkpoint (CP2), not yet in this tag.)
+#   - registry-api:0.2.211 + event-gateway:0.1.4 (Decision 30 — Webhook Application Identity &
+#     Invoker Grants, T001-T013: migrations 0069/0070 (applications table + widened
+#     artifact_role_grants CHECKs + webhook_clients backfill), Application ORM model, rbac.py
+#     (can_delegate_role widened for 'invoker', can_create_application, can_manage_artifact,
+#     ENFORCE_TRIGGER_MGMT=False soft-enforcement on trigger CRUD), new routers
+#     artifact_grants.py + applications.py registered in main.py, event-gateway cutover to
+#     applications/artifact_role_grants (webhook_auth.py: lookup_application +
+#     has_active_invoker_grant replace lookup_webhook_client), webhook_clients write
+#     endpoints retired to 410 Gone. Known gap: ~16 legacy e2e suites that never sent a real
+#     bearer token will now 401 on trigger CRUD — see docs/testing/manual-ui-e2e-test-plan.md.)
 #   - registry-api:0.2.188 (Context Storage — fix Memory-tab regression: restore cross-thread
 #     conversation LIST. POC-0 made GET /agents/{name}/memory return [] whenever thread_id was
 #     omitted ("the legacy cross-thread list isn't a store operation") — but the Studio Memory tab
@@ -398,7 +402,7 @@ EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
-EVENT_GATEWAY_TAG="0.1.3"
+EVENT_GATEWAY_TAG="0.1.4"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
