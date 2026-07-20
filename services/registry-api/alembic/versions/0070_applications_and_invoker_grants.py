@@ -3,15 +3,23 @@ and 'application' grantee type (Decision 30).
 
 Additive only — does not touch the live gateway auth path (that cutover is a
 separate code change, not a migration) and does not move any existing data
-(migration 0070 does the webhook_clients backfill).
+(migration 0071 does the webhook_clients backfill).
 
-Revision ID: 0069
-Revises: 0068
+Originally numbered 0069/down_revision=0068. Renumbered to 0070/down_revision=0069
+during CP1 deployment (2026-07-19) after discovering the live database already had
+an UNRELATED migration ("0069_mcp_server_fields.py", a concurrent, independent
+workstream forking from the same 0068 parent) stamped as "0069" — same revision ID,
+different content. Alembic tracks applied migrations by ID string only, so ours
+would have been silently skipped as "already applied" while its DDL never ran.
+Chained off the real current head instead of re-claiming a taken slot.
+
+Revision ID: 0070
+Revises: 0069
 """
 from alembic import op
 
-revision = "0069"
-down_revision = "0068"
+revision = "0070"
+down_revision = "0069"
 
 
 def upgrade() -> None:

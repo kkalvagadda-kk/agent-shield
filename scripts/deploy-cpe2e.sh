@@ -3,14 +3,8 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
-#   - registry-api:0.2.220 + event-gateway:0.1.4 (Decision 30 — Webhook Application Identity &
-#     NOTE: 0.2.211 was originally used for this build but collided with a DIFFERENT,
-#     unrelated build (0069_mcp_server_fields.py, a concurrent MCP-workstream migration)
-#     that got tagged 0.2.211 in the shared local Docker image store AFTER this one —
-#     Docker image tags are mutable pointers, so the shared store silently served the
-#     wrong content under our tag. Bumped to 0.2.220, clear of the other workstream's
-#     high-water mark at the time, to avoid a repeat.
-#     Invoker Grants, T001-T013: migrations 0069/0070 (applications table + widened
+#   - registry-api:0.2.221 + event-gateway:0.1.4 (Decision 30 — Webhook Application Identity &
+#     Invoker Grants, T001-T013: migrations 0070/0071 (applications table + widened
 #     artifact_role_grants CHECKs + webhook_clients backfill), Application ORM model, rbac.py
 #     (can_delegate_role widened for 'invoker', can_create_application, can_manage_artifact,
 #     ENFORCE_TRIGGER_MGMT=False soft-enforcement on trigger CRUD), new routers
@@ -18,7 +12,15 @@
 #     applications/artifact_role_grants (webhook_auth.py: lookup_application +
 #     has_active_invoker_grant replace lookup_webhook_client), webhook_clients write
 #     endpoints retired to 410 Gone. Known gap: ~16 legacy e2e suites that never sent a real
-#     bearer token will now 401 on trigger CRUD — see docs/testing/manual-ui-e2e-test-plan.md.)
+#     bearer token will now 401 on trigger CRUD — see docs/testing/manual-ui-e2e-test-plan.md.
+#     NOTE on the tag/migration churn (0.2.211->0.2.220->0.2.221, migrations 0069/0070
+#     ->0070/0071): the live shared database already had an UNRELATED migration
+#     (0069_mcp_server_fields.py, a concurrent MCP workstream forking from the same 0068
+#     parent) stamped as "0069" — same revision ID, different content — so ours would have
+#     silently no-opped while the downstream backfill crashed on a missing table. Renumbered
+#     to chain off the real current head instead. Separately, 0.2.211 got its image content
+#     overwritten in the shared local Docker store by an unrelated concurrent build reusing
+#     the same tag number — bumped twice more to guarantee a clean re-pull.)
 #   - registry-api:0.2.188 (Context Storage — fix Memory-tab regression: restore cross-thread
 #     conversation LIST. POC-0 made GET /agents/{name}/memory return [] whenever thread_id was
 #     omitted ("the legacy cross-thread list isn't a store operation") — but the Studio Memory tab
@@ -364,7 +366,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.220"
+REGISTRY_API_TAG="0.2.221"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"

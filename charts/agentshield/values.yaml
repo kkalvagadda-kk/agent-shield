@@ -655,12 +655,12 @@ registry-api:
     # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
     # 0.2.209: deploy-time tool-access auto-grant (AssetGrant for the agent's own tools, both
     #   deploy paths) — fixes fail-closed tool_not_granted denials; high-risk tools still HITL-park
-    # 0.2.220: Decision 30 — Webhook Application Identity & Invoker Grants, T001-T013
-    #   (migrations 0069/0070, Application model, rbac.py invoker/can_create_application/
+    # 0.2.221: Decision 30 — Webhook Application Identity & Invoker Grants, T001-T013
+    #   (migrations 0070/0071, Application model, rbac.py invoker/can_create_application/
     #   can_manage_artifact, artifact_grants.py + applications.py routers, gateway cutover).
-    #   Originally 0.2.211, bumped to 0.2.220 after that tag collided with an unrelated
-    #   concurrent build in the shared local Docker image store — see deploy-cpe2e.sh header.
-    tag: "0.2.220"
+    #   Originally 0.2.211/migrations 0069+0070 — see deploy-cpe2e.sh header for the tag
+    #   collision + migration-number collision this went through to get here.
+    tag: "0.2.221"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

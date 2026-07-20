@@ -12,7 +12,7 @@ docs/plan/webhook-application-identity/contracts/artifact-grants.md
 
 Why raw SQL, no ORM model
 --------------------------
-`artifact_role_grants` (migration 0044, widened by 0069) is deliberately
+`artifact_role_grants` (migration 0044, widened by 0070) is deliberately
 polymorphic: `grantee_id` is a bare TEXT column that means a user sub, a team
 name, or an application UUID depending on `grantee_type`. No single
 SQLAlchemy relationship/FK can describe that, so — per research.md §3 — this

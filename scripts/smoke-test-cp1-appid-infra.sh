@@ -9,7 +9,7 @@
 # (matches the precedent/lesson already captured in scripts/smoke-test-cp1-ws4-infra.sh).
 #
 #   T-CP1B-APPID-001  registry-api pods Running on image tag 0.2.211, 0 crashloops
-#   T-CP1B-APPID-002  alembic head == 0070
+#   T-CP1B-APPID-002  alembic head == 0071
 #   T-CP1B-APPID-003  schema landed: applications table (+ uq_applications_team_name,
 #                     idx_applications_team), widened ck_arg_role/ck_arg_grantee_type CHECKs
 #   T-CP1B-APPID-004  mapper-config gate — configure_mappers() with the new Application model
@@ -48,7 +48,7 @@ check_pods() {  # $1=label $2=want_tag $3=test_id $4=human
   fi
   pass "$3 $4 pods Running on image tag $2, no crashloops"
 }
-check_pods "registry-api" "0.2.211" "T-CP1B-APPID-001" "registry-api"
+check_pods "registry-api" "0.2.221" "T-CP1B-APPID-001" "registry-api"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -58,7 +58,7 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
-# --- T-CP1B-APPID-002: alembic head advanced to 0070 --------------------------------
+# --- T-CP1B-APPID-002: alembic head advanced to 0071 --------------------------------
 HEAD=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   bash -c "cd /tmp && PYTHONPATH=/app python3 -" <<'PY' 2>&1 || true
 import asyncio
@@ -73,10 +73,10 @@ async def main():
 asyncio.run(main())
 PY
 )
-if echo "$HEAD" | grep -q "^HEAD=0070$"; then
-  pass "T-CP1B-APPID-002 alembic head is 0070 (0069+0070 applied by the rollout's init container)"
+if echo "$HEAD" | grep -q "^HEAD=0071$"; then
+  pass "T-CP1B-APPID-002 alembic head is 0071 (0070+0071 applied by the rollout's init container)"
 else
-  fail "T-CP1B-APPID-002 alembic head is 0070" "got: $(echo "$HEAD" | tr '\n' ' ' | tail -c 200)"
+  fail "T-CP1B-APPID-002 alembic head is 0071" "got: $(echo "$HEAD" | tr '\n' ' ' | tail -c 200)"
 fi
 
 # --- T-CP1B-APPID-003: schema really landed ------------------------------------------

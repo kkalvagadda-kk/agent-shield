@@ -4,7 +4,7 @@ already exist (ON CONFLICT DO NOTHING against uq_applications_team_name), and
 skips (artifact, role, grantee) grants that already exist (ON CONFLICT DO
 NOTHING against uq_arg_active_grant).
 
-Preconditions: migration 0069 has run (applications table + widened
+Preconditions: migration 0070 has run (applications table + widened
 artifact_role_grants constraints must already exist).
 
 Does NOT touch or drop webhook_clients — it stays in place, read-only-in-
@@ -13,13 +13,16 @@ write endpoints return 410 once the gateway cutover ships; GET keeps working
 so pre-existing rows this migration is about to consume remain independently
 inspectable during the rollback window).
 
-Revision ID: 0070
-Revises: 0069
+Originally numbered 0070/down_revision=0069; renumbered to 0071/down_revision=0070
+in lockstep with the applications-table migration — see that file's header for why.
+
+Revision ID: 0071
+Revises: 0070
 """
 from alembic import op
 
-revision = "0070"
-down_revision = "0069"
+revision = "0071"
+down_revision = "0070"
 
 
 def upgrade() -> None:
@@ -33,7 +36,7 @@ def upgrade() -> None:
     INSERT INTO applications (team_name, name, secret_encrypted, enabled, created_by, created_at)
     SELECT DISTINCT ON (team_name, client_name)
         team_name, client_name, secret_encrypted, true,
-        COALESCE(created_by, 'system:backfill-0070'), created_at
+        COALESCE(created_by, 'system:backfill-0071'), created_at
     FROM (
         SELECT
             wc.client_id AS client_name,
@@ -64,7 +67,7 @@ def upgrade() -> None:
         'invoker',
         'application',
         app.id::text,
-        'system:backfill-0070'
+        'system:backfill-0071'
     FROM (
         SELECT
             t.agent_id, t.workflow_id,
@@ -87,14 +90,14 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # Remove ONLY the rows this migration could have produced (grantee_type=
-    # 'application' AND granted_by='system:backfill-0070') — never touch grants
+    # 'application' AND granted_by='system:backfill-0071') — never touch grants
     # a human created through the new API after this migration ran, and never
     # touch applications a human created directly through POST /teams/{team}/
-    # applications (created_by would not be 'system:backfill-0070' for those).
+    # applications (created_by would not be 'system:backfill-0071' for those).
     op.execute("""
         DELETE FROM artifact_role_grants
-        WHERE grantee_type = 'application' AND granted_by = 'system:backfill-0070'
+        WHERE grantee_type = 'application' AND granted_by = 'system:backfill-0071'
     """)
     op.execute("""
-        DELETE FROM applications WHERE created_by = 'system:backfill-0070'
+        DELETE FROM applications WHERE created_by = 'system:backfill-0071'
     """)
