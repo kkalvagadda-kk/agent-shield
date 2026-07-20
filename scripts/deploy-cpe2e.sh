@@ -3,6 +3,12 @@
 #
 # Creates all required secrets, builds Phase 9.3 + 10.x images, and deploys
 # the full AgentShield stack:
+#   - registry-api:0.2.211 (Decision 30 CP1 — Webhook Application Identity & Invoker Grants:
+#     migrations 0069/0070 (applications table + widened artifact_role_grants CHECKs +
+#     webhook_clients backfill), Application ORM model, rbac.py (can_delegate_role widened
+#     for 'invoker', can_create_application, can_manage_artifact, ENFORCE_TRIGGER_MGMT=False),
+#     new routers artifact_grants.py + applications.py registered in main.py. Gateway cutover
+#     and webhook_clients retirement land in a later checkpoint (CP2), not yet in this tag.)
 #   - registry-api:0.2.188 (Context Storage — fix Memory-tab regression: restore cross-thread
 #     conversation LIST. POC-0 made GET /agents/{name}/memory return [] whenever thread_id was
 #     omitted ("the legacy cross-thread list isn't a store operation") — but the Studio Memory tab
@@ -348,7 +354,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.210"
+REGISTRY_API_TAG="0.2.211"
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -680,6 +686,50 @@ kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --
 kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeout=3m || echo "  (Scheduler starting)"
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
+
+# ── Reconcile Langfuse SSO hostAlias -> live gateway-port-8443 ClusterIP ───────
+# langfuse-web reaches Keycloak's OIDC endpoints at the PUBLIC issuer host
+# (agentshield.127.0.0.1.nip.io:8443) from INSIDE the cluster, where that name
+# resolves to 127.0.0.1 (loopback). A hostAlias redirects it to the in-cluster
+# gateway-port-8443 Service. That Service's ClusterIP is assigned dynamically by
+# Kubernetes and is DIFFERENT on every fresh cluster, so any IP baked into
+# values.yaml goes stale the moment you redeploy on a new cluster — and langfuse-web
+# then silently fails the SSO back-channel: trace links show "You do not have access
+# to this trace / Sign In" even with a valid Studio login. Never hardcode it: fetch
+# the live ClusterIP and reconcile the hostAlias to match. Idempotent — patches (and
+# rolls) only when the IP has actually drifted.
+# See docs/bugs/langfuse-hostalias-stale-clusterip.md.
+echo "  Reconciling Langfuse SSO hostAlias -> live gateway-port-8443 ClusterIP..."
+GW_IP=""
+for _ in $(seq 1 30); do
+  GW_IP=$(kubectl get svc gateway-port-8443 -n envoy-gateway-system -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
+  [ -n "$GW_IP" ] && [ "$GW_IP" != "None" ] && break
+  sleep 2
+done
+if [ -z "$GW_IP" ]; then
+  echo "  WARNING: gateway-port-8443 Service not found in envoy-gateway-system —"
+  echo "           Langfuse trace-link SSO will fail until reconciled. Skipping."
+else
+  CUR_IP=$(kubectl get deploy agentshield-langfuse-web -n "$NAMESPACE" \
+    -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
+  if [ "$CUR_IP" = "$GW_IP" ]; then
+    echo "  hostAlias already current ($GW_IP) — no change."
+  else
+    echo "  hostAlias ${CUR_IP:-<none>} -> $GW_IP (patching + rolling langfuse-web)"
+    kubectl patch deploy agentshield-langfuse-web -n "$NAMESPACE" --type=merge \
+      -p "{\"spec\":{\"template\":{\"spec\":{\"hostAliases\":[{\"ip\":\"$GW_IP\",\"hostnames\":[\"agentshield.127.0.0.1.nip.io\"]}]}}}}"
+    kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=3m || true
+  fi
+  # Self-verify the OIDC back-channel from inside the (re)rolled pod.
+  LF_POD=$(kubectl get pod -n "$NAMESPACE" --no-headers 2>/dev/null | grep langfuse-web | grep Running | awk '{print $1}' | head -1)
+  if [ -n "$LF_POD" ] && kubectl exec -n "$NAMESPACE" "$LF_POD" -c langfuse-web -- \
+       wget -qO- --no-check-certificate --timeout=8 \
+       "https://agentshield.127.0.0.1.nip.io:8443/realms/agentshield/.well-known/openid-configuration" >/dev/null 2>&1; then
+    echo "  Verified: langfuse-web reaches Keycloak OIDC discovery (SSO back-channel OK)."
+  else
+    echo "  WARNING: langfuse-web still cannot reach Keycloak OIDC discovery — trace-link SSO may fail."
+  fi
+fi
 
 # Create Keycloak client for Langfuse SSO (idempotent — skips if exists)
 echo "  Creating Keycloak client 'langfuse' for SSO..."

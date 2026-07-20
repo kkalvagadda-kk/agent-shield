@@ -34,7 +34,7 @@ import asyncio
 from auth_middleware import get_optional_user, require_user
 from db import get_db
 from observability_backend import get_observability_backend
-from rbac import grant_creator_admin
+from rbac import ENFORCE_TRIGGER_MGMT, can_manage_artifact, grant_creator_admin
 from models import Agent, AgentMemory, AgentRun, AgentTool, AgentTrigger, AgentVersion, CompositeWorkflow, RunStep, Tool, WorkflowEdge, WorkflowMember
 from schemas import (
     AgentMemoryResponse,
@@ -757,9 +757,17 @@ async def create_workflow_trigger(
     body: AgentTriggerCreate,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
     user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentTrigger:
     wf = await _get_workflow(workflow_id, db)
+    if not await can_manage_artifact(db, claims["sub"], wf.id):
+        if ENFORCE_TRIGGER_MGMT:
+            raise HTTPException(403, "agent-admin required to manage triggers on this agent")
+        logger.warning(
+            "trigger-mgmt: %s lacks agent-admin on agent %s — PERMITTED (ENFORCE_TRIGGER_MGMT=False)",
+            claims["sub"], wf.id,
+        )
     # The human who arms the workflow trigger — authorizes the standing daemon
     # workflow run; audit reads "workflow:X (service) on behalf of {armed_by}".
     armed_by = (user or {}).get("sub") or x_user_sub
@@ -840,9 +848,17 @@ async def update_workflow_trigger(
     workflow_id: uuid.UUID,
     trigger_id: uuid.UUID,
     body: AgentTriggerUpdate,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentTrigger:
-    await _get_workflow(workflow_id, db)
+    wf = await _get_workflow(workflow_id, db)
+    if not await can_manage_artifact(db, claims["sub"], wf.id):
+        if ENFORCE_TRIGGER_MGMT:
+            raise HTTPException(403, "agent-admin required to manage triggers on this agent")
+        logger.warning(
+            "trigger-mgmt: %s lacks agent-admin on agent %s — PERMITTED (ENFORCE_TRIGGER_MGMT=False)",
+            claims["sub"], wf.id,
+        )
     result = await db.execute(
         select(AgentTrigger).where(
             AgentTrigger.id == trigger_id,
@@ -870,9 +886,17 @@ async def update_workflow_trigger(
 async def delete_workflow_trigger(
     workflow_id: uuid.UUID,
     trigger_id: uuid.UUID,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
-    await _get_workflow(workflow_id, db)
+    wf = await _get_workflow(workflow_id, db)
+    if not await can_manage_artifact(db, claims["sub"], wf.id):
+        if ENFORCE_TRIGGER_MGMT:
+            raise HTTPException(403, "agent-admin required to manage triggers on this agent")
+        logger.warning(
+            "trigger-mgmt: %s lacks agent-admin on agent %s — PERMITTED (ENFORCE_TRIGGER_MGMT=False)",
+            claims["sub"], wf.id,
+        )
     result = await db.execute(
         select(AgentTrigger).where(
             AgentTrigger.id == trigger_id,
@@ -894,11 +918,19 @@ async def delete_workflow_trigger(
 async def rotate_workflow_trigger_token(
     workflow_id: uuid.UUID,
     trigger_id: uuid.UUID,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> RotateTokenResponse:
     """Generate a new webhook token for a workflow trigger, store its sha256, and
     return the plaintext ONCE. The old hash is invalidated immediately."""
     wf = await _get_workflow(workflow_id, db)
+    if not await can_manage_artifact(db, claims["sub"], wf.id):
+        if ENFORCE_TRIGGER_MGMT:
+            raise HTTPException(403, "agent-admin required to manage triggers on this agent")
+        logger.warning(
+            "trigger-mgmt: %s lacks agent-admin on agent %s — PERMITTED (ENFORCE_TRIGGER_MGMT=False)",
+            claims["sub"], wf.id,
+        )
     result = await db.execute(
         select(AgentTrigger).where(
             AgentTrigger.id == trigger_id,

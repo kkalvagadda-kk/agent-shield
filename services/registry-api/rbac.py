@@ -87,6 +87,14 @@ async def can_deploy_to_production(db: AsyncSession, user_sub: str, artifact_id:
     return await has_artifact_role(db, user_sub, artifact_id, "agent-admin", team)
 
 
+async def can_manage_artifact(db: AsyncSession, user_sub: str, artifact_id: uuid.UUID) -> bool:
+    role = await get_user_global_role(db, user_sub)
+    if role == "platform-admin":
+        return True
+    team = await get_user_team(db, user_sub)
+    return await has_artifact_role(db, user_sub, artifact_id, "agent-admin", team)
+
+
 async def can_approve_hitl(db: AsyncSession, user_sub: str, artifact_id: uuid.UUID) -> bool:
     role = await get_user_global_role(db, user_sub)
     if role == "platform-admin":
@@ -111,10 +119,19 @@ async def can_delegate_role(
     role = await get_user_global_role(db, caller_sub)
     if role == "platform-admin":
         return True
-    if target_role not in ("agent-admin", "approver"):
+    if target_role not in ("agent-admin", "approver", "invoker"):
         return False
     team = await get_user_team(db, caller_sub)
     return await has_artifact_role(db, caller_sub, artifact_id, "agent-admin", team)
+
+
+async def can_create_application(db: AsyncSession, user_sub: str, team_name: str) -> bool:
+    role = await get_user_global_role(db, user_sub)
+    if role == "platform-admin":
+        return True
+    if ROLE_HIERARCHY.get(role, 0) < ROLE_HIERARCHY["contributor"]:
+        return False
+    return await get_user_team(db, user_sub) == team_name
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +171,15 @@ async def get_user_artifact_roles(db: AsyncSession, user_sub: str, user_team: st
     """)
     rows = await db.execute(sql, {"sub": user_sub, "team": user_team or ""})
     return [{"artifact_id": str(r.artifact_id), "artifact_type": r.artifact_type, "role": r.role} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Enforcement flags
+# ---------------------------------------------------------------------------
+
+# Currently permit-all for trigger/webhook management checks (can_manage_artifact).
+# Flip ENFORCE_TRIGGER_MGMT to True once frontend guards for trigger CRUD land.
+ENFORCE_TRIGGER_MGMT: bool = False
 
 
 # ---------------------------------------------------------------------------

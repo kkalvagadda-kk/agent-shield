@@ -1,10 +1,24 @@
 """
 Webhook client registration (WS-4) — per-application credentials + allowlist.
 
-  POST   /api/v1/triggers/{trigger_id}/clients              — register (secret shown ONCE)
+  POST   /api/v1/triggers/{trigger_id}/clients              — RETIRED, 410 Gone
   GET    /api/v1/triggers/{trigger_id}/clients              — list (never the secret)
-  PATCH  /api/v1/triggers/{trigger_id}/clients/{client_id}  — enable/disable
-  DELETE /api/v1/triggers/{trigger_id}/clients/{client_id}  — revoke
+  PATCH  /api/v1/triggers/{trigger_id}/clients/{client_id}  — RETIRED, 410 Gone
+  DELETE /api/v1/triggers/{trigger_id}/clients/{client_id}  — RETIRED, 410 Gone
+
+Write endpoints retired (webhook-application-identity T011)
+-------------------------------------------------------------
+The event-gateway no longer reads `webhook_clients` for signature verification —
+it resolves `applications` + `artifact_role_grants` instead (T009/T010). Creating,
+updating, or deleting a row here would be a dead end: the gateway would never see
+it. `create_webhook_client`, `update_webhook_client`, and `delete_webhook_client`
+therefore return `410 Gone` unconditionally, before any DB access, redirecting
+callers to `POST /api/v1/teams/{team}/applications` (create a reusable
+application) followed by `POST /api/v1/artifacts/{artifact_type}/{artifact_id}/grants`
+with `role='invoker'` (authorize it). See
+`docs/design/todo/webhook-application-identity.md`. `list_webhook_clients` (GET)
+is untouched — existing rows (including ones backfilled into `applications` by
+migration 0070) remain visible for operator reference.
 
 Why this is its own router, keyed on `trigger_id` ALONE
 -------------------------------------------------------
@@ -111,6 +125,10 @@ async def create_webhook_client(
 
     The plaintext secret is returned HERE AND NOWHERE ELSE, ever.
     """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="webhook_clients registration is retired. Use POST /api/v1/teams/{team}/applications to create a reusable application, then POST /api/v1/artifacts/{artifact_type}/{artifact_id}/grants with role='invoker' to authorize it — see docs/design/todo/webhook-application-identity.md.",
+    )
     trigger = await _get_trigger(trigger_id, db)
     if trigger.trigger_type != "webhook":
         raise HTTPException(
@@ -201,6 +219,10 @@ async def update_webhook_client(
 ) -> WebhookClient:
     """Enable/disable a client. The gateway reads `enabled` on every request, so a
     disable takes effect on the very next webhook — no cache to invalidate."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="webhook_clients registration is retired. Use POST /api/v1/teams/{team}/applications to create a reusable application, then POST /api/v1/artifacts/{artifact_type}/{artifact_id}/grants with role='invoker' to authorize it — see docs/design/todo/webhook-application-identity.md.",
+    )
     client = await _get_client(trigger_id, client_id, db)
     client.enabled = body.enabled
     await db.commit()
@@ -230,6 +252,10 @@ async def delete_webhook_client(
 ) -> None:
     """Revoke a client permanently. Its secret is unrecoverable — re-registering
     mints a new one."""
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="webhook_clients registration is retired. Use POST /api/v1/teams/{team}/applications to create a reusable application, then POST /api/v1/artifacts/{artifact_type}/{artifact_id}/grants with role='invoker' to authorize it — see docs/design/todo/webhook-application-identity.md.",
+    )
     client = await _get_client(trigger_id, client_id, db)
     await db.delete(client)
     await db.commit()

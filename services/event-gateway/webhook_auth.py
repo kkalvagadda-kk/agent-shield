@@ -147,9 +147,18 @@ def _deny(reason: str, **ctx: object) -> WebhookAuthResult:
 # adding a target means adding a query here, and BOTH hooks pick it up because they
 # share this module. `workflow_id` is selected as NULL for agents so the result shape
 # is identical regardless of kind — the caller never branches on it.
+#
+# `artifact_id`/`team_name` (the two trailing columns) are the artifact's own id and
+# owning team — needed by `_verify_client_signed`'s application/grant resolution
+# (`lookup_application(team_name, ...)`, `has_active_invoker_grant(artifact_type,
+# artifact_id, ...)`). `artifact_type` itself is not a column: the `kind` parameter
+# already distinguishes "agent"/"workflow" one-to-one with
+# `artifact_role_grants.artifact_type`'s own CHECK values, so `lookup_triggers`
+# carries it through into the row dict instead of selecting it redundantly.
 _TRIGGER_SQL = {
     "agent": """
-        SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, NULL
+        SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, NULL,
+               a.id::text, a.team
         FROM agent_triggers t
         JOIN agents a ON t.agent_id = a.id
         WHERE a.name = %s
@@ -157,7 +166,8 @@ _TRIGGER_SQL = {
           AND t.enabled = true
     """,
     "workflow": """
-        SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, w.id::text
+        SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, w.id::text,
+               w.id::text, w.team
         FROM agent_triggers t
         JOIN workflows w ON t.workflow_id = w.id
         WHERE w.name = %s
@@ -191,6 +201,9 @@ def lookup_triggers(kind: str, name: str) -> list[dict]:
                     "filter_conditions": row[2],
                     "auth_mode": row[3],
                     "workflow_id": row[4],
+                    "artifact_id": row[5],
+                    "team_name": row[6],
+                    "artifact_type": kind,
                 }
                 for row in cur.fetchall()
             ]
@@ -201,40 +214,81 @@ def lookup_triggers(kind: str, name: str) -> list[dict]:
         conn.close()
 
 
-def lookup_webhook_client(trigger_id: str, client_id: str) -> dict | None:
-    """Resolve one allowlisted application for one trigger.
+def lookup_application(team_name: str, name: str) -> dict | None:
+    """Resolve one application by (owning team, name).
 
-    Read live on EVERY request — there is no cache — which is what makes a disable
-    take effect on the very next webhook (suite-76 T-S76-008 asserts the re-enable
-    round-trip against exactly this property).
+    Deliberately NOT filtered on `enabled` here — the enabled check is a separate
+    explicit step in `_verify_client_signed` so "unknown application" and "disabled
+    application" can each be logged with their own real reason server-side (still
+    the same uniform `_DENY` to the caller either way). Read live on EVERY request —
+    there is no cache — same live-no-cache posture the pre-cutover `webhook_clients`
+    lookup this module used to have used.
     """
     try:
         conn = psycopg2.connect(_pg_dsn())
     except Exception as exc:
-        logger.error("client lookup: cannot connect to Postgres: %s", exc)
+        logger.error("application lookup: cannot connect to Postgres: %s", exc)
         return None
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id::text, client_id, secret_encrypted, enabled
-                FROM webhook_clients
-                WHERE trigger_id = %s AND client_id = %s
+                SELECT id::text, secret_encrypted, enabled
+                FROM applications
+                WHERE team_name = %s AND name = %s
                 """,
-                (trigger_id, client_id),
+                (team_name, name),
             )
             row = cur.fetchone()
             if not row:
                 return None
             return {
                 "id": row[0],
-                "client_id": row[1],
-                "secret_encrypted": row[2],
-                "enabled": row[3],
+                "secret_encrypted": row[1],
+                "enabled": row[2],
             }
     except Exception as exc:
-        logger.error("client lookup query failed for trigger=%s: %s", trigger_id, exc)
+        logger.error(
+            "application lookup query failed for team=%s name=%s: %s",
+            team_name, name, exc,
+        )
         return None
+    finally:
+        conn.close()
+
+
+def has_active_invoker_grant(artifact_type: str, artifact_id: str, application_id: str) -> bool:
+    """Active (`revoked_at IS NULL`) invoker grant for this application on this artifact.
+
+    `artifact_type` is passed explicitly (not re-derived from `application_id` or
+    anything else) — the No-Bandaid rule this module's own header already documents:
+    an explicit context parameter, never type-sniffed. Read live on EVERY request —
+    there is no cache — so a revoked grant takes effect on the very next webhook.
+    """
+    try:
+        conn = psycopg2.connect(_pg_dsn())
+    except Exception as exc:
+        logger.error("invoker grant lookup: cannot connect to Postgres: %s", exc)
+        return False
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1 FROM artifact_role_grants
+                WHERE artifact_type = %s AND artifact_id = %s AND role = 'invoker'
+                  AND grantee_type = 'application' AND grantee_id = %s
+                  AND revoked_at IS NULL
+                LIMIT 1
+                """,
+                (artifact_type, artifact_id, application_id),
+            )
+            return cur.fetchone() is not None
+    except Exception as exc:
+        logger.error(
+            "invoker grant lookup failed for artifact_type=%s artifact_id=%s application_id=%s: %s",
+            artifact_type, artifact_id, application_id, exc,
+        )
+        return False
     finally:
         conn.close()
 
@@ -308,33 +362,45 @@ def _fresh(ts_raw: str | None) -> bool:
 
 
 def _verify_client_signed(trigger: dict, headers, raw_body: bytes) -> WebhookAuthResult:
-    """Per-application credential check. Verify order per contracts/webhook-signing.md:
-    allowlist+enabled → freshness → constant-time HMAC."""
+    """Per-application credential check. Verify order per
+    contracts/gateway-verification.md (verbatim, do not reorder):
+    application lookup → active invoker grant → enabled → freshness → constant-time HMAC.
+
+    The grant check runs BEFORE the enabled check on purpose: a disabled application
+    with an otherwise-valid grant must log "application disabled" (not "no active
+    invoker grant") so the two failure reasons stay meaningfully distinct for an
+    operator reading gateway logs. This costs nothing security-wise — the caller
+    still gets the same uniform `_DENY` either way (see the module header docstring's
+    "Uniform 401" section).
+    """
     client_id = headers.get(H_CLIENT_ID)
     if not client_id:
         return _deny("no X-Client-Id on a client_signed trigger", trigger=trigger["id"])
 
-    client = lookup_webhook_client(trigger["id"], client_id)
-    if client is None:
-        # Covers BOTH "unknown client" and "client registered on a DIFFERENT trigger"
-        # — the allowlist is keyed (trigger_id, client_id), so a wrong-trigger client
-        # is simply not found here. One boundary, one check.
-        return _deny("client not on this trigger's allowlist",
+    application = lookup_application(trigger["team_name"], client_id)
+    if application is None:
+        return _deny("no application matches this team/client_id",
                      trigger=trigger["id"], client=client_id)
-    if not client["enabled"]:
-        return _deny("client disabled", trigger=trigger["id"], client=client_id)
+
+    if not has_active_invoker_grant(
+        trigger["artifact_type"], trigger["artifact_id"], application["id"]
+    ):
+        return _deny("no active invoker grant", trigger=trigger["id"], client=client_id)
+
+    if not application["enabled"]:
+        return _deny("application disabled", trigger=trigger["id"], client=client_id)
 
     if not _fresh(headers.get(H_TIMESTAMP)):
         return _deny("timestamp missing/stale/malformed",
                      trigger=trigger["id"], client=client_id)
 
     try:
-        secret = _decrypt_secret(client["secret_encrypted"])
+        secret = _decrypt_secret(application["secret_encrypted"])
     except (InvalidToken, ValueError, KeyError, RuntimeError) as exc:
         # Fail CLOSED: a key mismatch or corrupt row denies, never opens. Logged at
         # error because it is an operator problem (wrong AGENTSHIELD_ENCRYPTION_KEY),
         # not a sender problem.
-        logger.error("cannot decrypt secret for client=%s on trigger=%s: %s",
+        logger.error("cannot decrypt secret for application=%s on trigger=%s: %s",
                      client_id, trigger["id"], exc)
         return _deny("secret undecryptable", trigger=trigger["id"], client=client_id)
 

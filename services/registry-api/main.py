@@ -69,6 +69,8 @@ from routers.workflows import router as agent_graphs_router
 from routers.composite_workflows import router as composite_workflows_router
 from routers.triggers import router as triggers_router
 from routers.webhook_clients import router as webhook_clients_router
+from routers.artifact_grants import router as artifact_grants_router
+from routers.applications import router as applications_router
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -185,6 +187,10 @@ def create_app() -> FastAPI:
     # Webhook client registration (WS-4) — /api/v1/triggers/{id}/clients, keyed on
     # trigger_id alone so ONE router serves agent AND workflow triggers.
     app.include_router(webhook_clients_router)
+    # Decision 30 — generic artifact_role_grants delegation + team-scoped
+    # applications (webhook-sending identity), successor to webhook_clients.
+    app.include_router(artifact_grants_router)
+    app.include_router(applications_router)
 
     # --- Phase 2 gap routers ---
     app.include_router(approvals_router)

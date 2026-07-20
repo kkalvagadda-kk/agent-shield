@@ -488,11 +488,18 @@ langfuse:
         value: "true"
       - name: NODE_TLS_REJECT_UNAUTHORIZED
         value: "0"
-    # hostAliases: pod must reach Keycloak OIDC at :8443 (nip.io → 127.0.0.1 = loopback inside K8s).
-    # Points to gateway-port-8443 Service in envoy-gateway-system (maps 8443→Gateway HTTPS).
+    # hostAliases: langfuse-web must reach Keycloak's OIDC endpoints at the PUBLIC issuer
+    # host (agentshield.127.0.0.1.nip.io:8443) from INSIDE the cluster, where that name
+    # resolves to 127.0.0.1 (loopback). We redirect it to the in-cluster gateway-port-8443
+    # Service (maps 8443 → Gateway HTTPS) in envoy-gateway-system.
+    # ⚠️ The IP below is a PLACEHOLDER. gateway-port-8443's ClusterIP is assigned dynamically
+    #    by Kubernetes and is DIFFERENT on every fresh cluster, so scripts/deploy-cpe2e.sh
+    #    fetches the live ClusterIP after `helm upgrade` and reconciles this hostAlias to match.
+    #    Do NOT rely on this value — a stale IP silently breaks trace-link SSO ("You do not have
+    #    access to this trace / Sign In"). See docs/bugs/langfuse-hostalias-stale-clusterip.md.
     web:
       hostAliases:
-        - ip: "10.96.203.50"
+        - ip: "10.96.158.172"   # PLACEHOLDER — reconciled to the live gateway-port-8443 ClusterIP at deploy time
           hostnames:
             - "agentshield.127.0.0.1.nip.io"
 
@@ -645,7 +652,10 @@ registry-api:
     # 0.2.207: workflow ledger G2 backend — GET /workflows/{id}/memory + memory.list_workflow_memory
     # 0.2.209: deploy-time tool-access auto-grant (AssetGrant for the agent's own tools, both
     #   deploy paths) — fixes fail-closed tool_not_granted denials; high-risk tools still HITL-park
-    tag: "0.2.210"
+    # 0.2.211: Decision 30 CP1 — Webhook Application Identity & Invoker Grants (migrations
+    #   0069/0070, Application model, rbac.py invoker/can_create_application/can_manage_artifact,
+    #   artifact_grants.py + applications.py routers). Gateway cutover lands at CP2.
+    tag: "0.2.211"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

@@ -1807,6 +1807,43 @@ class WebhookClient(Base):
 
 
 # ---------------------------------------------------------------------------
+# applications — reusable webhook-sending identities (Decision 30)
+#
+# One row per real sending system, owned by exactly one team. Replaces the
+# per-trigger WebhookClient as the credential that backs `client_signed`
+# webhook auth — the trigger it may call is no longer stored here at all;
+# that's an artifact_role_grants row with role='invoker' (see rbac.py).
+# ---------------------------------------------------------------------------
+class Application(Base):
+    __tablename__ = "applications"
+    __table_args__ = (
+        UniqueConstraint("team_name", "name", name="uq_applications_team_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        _UUID, primary_key=True, server_default=_GEN_UUID
+    )
+    team_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Fernet token (crypto.encrypt_json), NOT a hash — same reasoning as
+    # WebhookClient.secret_encrypted: the gateway must RECOMPUTE the HMAC to
+    # verify a signature, so the raw secret must be recoverable.
+    secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    # Kill switch — INDEPENDENT of any one artifact_role_grants row. Disabling
+    # denies this application on every artifact it holds `invoker` on at once;
+    # revoking one grant (a DELETE on the grants router) denies only that one
+    # artifact. Read live on every gateway request — no cache.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    rotated_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+
+
+# ---------------------------------------------------------------------------
 # agent_events — inbound webhook log (Phase 9 event gateway)
 # ---------------------------------------------------------------------------
 

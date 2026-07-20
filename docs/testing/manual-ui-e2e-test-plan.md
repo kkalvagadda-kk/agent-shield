@@ -12,6 +12,20 @@
 
 ---
 
+## Webhook Application Identity (Decision 30) — trigger-CRUD `require_user` breaks ~16 legacy e2e suites — 2026-07-19
+
+**not-yet-wired (debt), real gap, explicitly deferred by user decision.** T012/T013 (`docs/plan/webhook-application-identity/tasks.md`, Phase 5) add `claims: dict = Depends(require_user)` to all 8 trigger-CRUD endpoints (`create/update/delete/rotate-token`, both `routers/triggers.py` and `routers/composite_workflows.py`) — a request with **no bearer token at all** now gets `401` unconditionally, independent of the new `rbac.ENFORCE_TRIGGER_MGMT` soft-enforcement flag (which only gates the 403 authorization decision, not the 401 authentication requirement). This was a deliberate part of the plan's design (`docs/plan/webhook-application-identity/research.md` §5), reviewed and approved earlier in the same session that implemented it.
+
+That research doc's own safety argument — "none of the 16 pre-existing bash e2e suites send zero Authorization header on these endpoints" — was verified against the actual suite files (not assumed) and found **false**: of the 18 suites that call trigger-CRUD endpoints, 16 send **no** `Authorization: Bearer` header anywhere in the file (only `X-User-Sub`, which `require_user` ignores, or nothing at all). Only `suite-45-hitl-e2e.sh` and `suite-79-workflow-hitl.sh` show real bearer-token usage. Affected suites (confirmed via direct grep of each file, 2026-07-19):
+
+`suite-10-multi-agent.sh`, `suite-19-execution-shape.sh`, `suite-21-scheduled-playground.sh`, `suite-22-event-playground.sh`, `suite-26-scheduler.sh`, `suite-27-alerting.sh`, `suite-28-event-gateway.sh`, `suite-31-wizard-triggers.sh`, `suite-32-schedule-payload.sh`, `suite-34-workflow-triggers.sh`, `suite-66-production-triggers.sh`, `suite-70-daemon-identity.sh`, `suite-71-scheduled-e2e.sh`, `suite-75-eval-v2-scheduled.sh`, `suite-76-webhook-client-signing.sh`, `suite-77-eval-v2-webhook.sh`.
+
+This also contradicts `tasks.md`'s own Checkpoint 2 gate text ("trigger CRUD still works unauthenticated (soft-enforcement, warning-only)") — CP2's own smoke test (`scripts/smoke-test-cp2-appid-behaviour.sh`) instead exercises the soft-RBAC path with a **real bearer token**, proving the intended behavior (permitted despite no `agent-admin` grant, with a warning) correctly, rather than reproducing the now-known-false "zero auth headers" assumption.
+
+**User decision (2026-07-19):** keep `require_user` hard-required as already coded (it is the deliberately reviewed design, not a bug); do not weaken it to unblock these suites. The real fix — adding a real bearer token to each suite's trigger-CRUD call sites — is genuine Phase 10 work (`docs/plan/webhook-application-identity/tasks.md` T026-T029), explicitly out of the "Through CP2 only" scope chosen for this implementation pass. **These 16 suites will fail on their trigger-CRUD calls with `401` until that fix lands.** Do not report this plan's work as fully regression-clean until that phase closes this gap.
+
+---
+
 ## Workflow deployment Conversations tab — no longer empty — 2026-07-18
 
 **Shipped (registry-api 0.2.205 + studio 0.1.154).** A workflow's Conversations tab was always

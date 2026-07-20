@@ -1966,6 +1966,85 @@ class WebhookClientUpdate(BaseModel):
     enabled: bool
 
 
+# ---------------------------------------------------------------------------
+# Artifact role grants (Decision 25/30) — generic delegation of agent-admin /
+# approver / invoker to a user, team, or application. First live write path
+# for the artifact_role_grants table.
+# ---------------------------------------------------------------------------
+
+class ArtifactRoleGrantCreate(BaseModel):
+    """Grant a role to a user, team, or application on one artifact."""
+    grantee_type: str = Field(..., pattern="^(user|team|application)$")
+    grantee_id: str = Field(..., min_length=1)
+    role: str = Field(..., pattern="^(agent-admin|approver|invoker)$")
+
+
+class ArtifactRoleGrantResponse(BaseModel):
+    """Read model for an active (non-revoked, unless explicitly queried) grant.
+    `grantee_label` is resolved server-side from `applications.name` for
+    grantee_type="application" grants only; null for user/team grantees."""
+    id: uuid.UUID
+    artifact_type: str
+    artifact_id: uuid.UUID
+    role: str
+    grantee_type: str
+    grantee_id: str
+    granted_by: str
+    granted_at: datetime
+    revoked_at: datetime | None = None
+    grantee_label: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Applications (WS-4 successor) — team-owned, reusable sending-system identity.
+# Secret leakage is prevented STRUCTURALLY, same pattern as WebhookClient*
+# above: ApplicationResponse has no `secret` field at all, so leaking it on a
+# list/get path is unrepresentable. Only ApplicationCreatedResponse and
+# ApplicationRotateSecretResponse ever carry a secret.
+# ---------------------------------------------------------------------------
+
+class ApplicationCreate(BaseModel):
+    """Register a new team-owned application (sending-system identity)."""
+    name: str = Field(..., min_length=1, max_length=128)
+
+
+class ApplicationCreatedResponse(BaseModel):
+    """The ONLY shape (besides rotate-secret) that ever carries the signing
+    secret — returned exactly once, from the 201. The secret is stored
+    Fernet-encrypted and is never retrievable through any other endpoint."""
+    id: uuid.UUID
+    name: str
+    secret: str
+    created_at: datetime
+
+
+class ApplicationResponse(BaseModel):
+    """Read model for an application. Deliberately has NO `secret` field —
+    reveal-once is a property of the type, not of handler discipline."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    team_name: str
+    name: str
+    enabled: bool
+    created_by: str
+    created_at: datetime
+    rotated_at: datetime | None = None
+
+
+class ApplicationUpdate(BaseModel):
+    """Kill switch — disables the application on every artifact it holds
+    invoker on, effective on the next gateway request."""
+    enabled: bool
+
+
+class ApplicationRotateSecretResponse(BaseModel):
+    """The second (and only other) shape that ever carries a secret."""
+    id: uuid.UUID
+    secret: str
+    rotated_at: datetime
+
+
 # Error  (matches ErrorResponse in OpenAPI spec)
 # ---------------------------------------------------------------------------
 class ErrorResponse(BaseModel):
