@@ -278,7 +278,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
 
 ## Phase 10 — Backend E2E Suites
 
-- [ ] [T026] Suite A — `scripts/e2e/suite-82-artifact-grants.sh` (T-ARG-001…010) — `scripts/e2e/suite-82-artifact-grants.sh`
+- [X] [T026] Suite A — `scripts/e2e/suite-82-artifact-grants.sh` (T-ARG-001…010) — `scripts/e2e/suite-82-artifact-grants.sh`
   - **Do:** bash + in-pod Python/`httpx` driver against `http://localhost:8000/api/v1`, following `suite-78-conversations.sh`'s pattern for real Keycloak tokens (`grant_type=password`, `agentshield-studio` client). Creates its OWN scoped test users via `POST /api/v1/admin/users` (as `platform-admin`) for the agent-admin / plain-contributor / second-team-member personas — since only `platform-admin`/`agent-reviewer` are pre-seeded — and clears `requiredActions`/sets a non-temporary password immediately after creation, per the exact `quickstart.md` §3 recipe (load-bearing: skipping either PUT makes `grant_type=password` 400 and the suite falsely SKIP instead of FAIL).
   - **Test cases (verbatim IDs — do not renumber):**
 
@@ -298,7 +298,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
   - **Deps:** T006, T008 (endpoint registered), T004, T005.
   - **Verify:** `bash scripts/e2e/suite-82-artifact-grants.sh`
 
-- [ ] [T027] Suite B — `scripts/e2e/suite-83-webhook-applications.sh` (T-SYY-001…010) — `scripts/e2e/suite-83-webhook-applications.sh`
+- [X] [T027] Suite B — `scripts/e2e/suite-83-webhook-applications.sh` (T-SYY-001…010) — `scripts/e2e/suite-83-webhook-applications.sh`
   - **Do:** same in-pod driver pattern as T026; additionally uses the `sign_webhook` AST-extraction technique `suite-76` already established (extract the real signer function from `services/event-gateway/webhook_auth.py` at runtime rather than hand-copying it, so the suite can never silently drift from the product's actual signing behavior).
   - **Test cases (verbatim IDs):**
 
@@ -318,7 +318,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
   - **Deps:** T026 (Suite A validates the delegation endpoint Suite B's grant steps reuse — run order matters), T007, T008, T010 (gateway cutover).
   - **Verify:** `bash scripts/e2e/suite-83-webhook-applications.sh`
 
-- [ ] [T028] Register Suite 82 + Suite 83 in `run-all.sh` — `scripts/e2e/run-all.sh`
+- [X] [T028] Register Suite 82 + Suite 83 in `run-all.sh` — `scripts/e2e/run-all.sh`
   - **Do:** append immediately after `run_suite "Suite 81: Deploy-time tool-access auto-grant" "suite-81-deploy-tool-autograt.sh"` (confirmed today at line 138):
     ```bash
     run_suite "Suite 82: Artifact Delegation Foundation (grants API)"  "suite-82-artifact-grants.sh"
@@ -328,7 +328,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
   - **Deps:** T026, T027.
   - **Verify:** `grep -A2 "Suite 81" scripts/e2e/run-all.sh`
 
-- [ ] [T029] Update `suite-76-webhook-client-signing.sh` for the cutover — `scripts/e2e/suite-76-webhook-client-signing.sh`
+- [X] [T029] Update `suite-76-webhook-client-signing.sh` for the cutover — `scripts/e2e/suite-76-webhook-client-signing.sh`
   - **Do:** every setup step currently calling `POST /api/v1/triggers/{id}/clients` is replaced with `POST /api/v1/teams/{team}/applications` (create) → `POST /api/v1/artifacts/{agent|workflow}/{id}/grants` `{grantee_type:"application", grantee_id, role:"invoker"}` (grant), using a REAL bearer token (`platform-admin` password-grant pattern, borrowed from `suite-78` — the new endpoints are hard-enforced). Every existing assertion (T-S76-000…009) preserved in spirit, retargeted to fire on the new setup mechanism (e.g. T-S76-009's "upgrade to `client_signed`" now fires on the first `invoker` GRANT, not the first client registration). **New** T-S76-010: `POST /api/v1/triggers/{id}/clients` → `410`, body contains the redirect message from T011.
   - **Acceptance:** `bash scripts/e2e/suite-76-webhook-client-signing.sh` green with the SAME 10 original claims (0–9) still true, plus T-S76-010 — the concrete proof the gateway cutover (T010) didn't quietly break WS-4's own acceptance gate.
   - **Deps:** T011 (410 retirement), T010 (gateway cutover), T027 (establishes the exact application-create + invoker-grant setup pattern this task reuses).
