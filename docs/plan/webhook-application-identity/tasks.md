@@ -262,7 +262,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
   - **Deps:** T018.
   - **Verify:** `cd studio && npm run test -- SettingsTab`
 
-- [ ] [T024] [P] Vitest — `ApplicationsPage` — `studio/src/pages/ApplicationsPage.test.tsx`
+- [X] [T024] [P] Vitest — `ApplicationsPage` — `studio/src/pages/ApplicationsPage.test.tsx`
   - **Do:** cover: create shows secret once, list renders without a secret field, enable/disable toggle, delete confirmation.
   - **Acceptance:** `cd studio && npm run test -- ApplicationsPage` green.
   - **Deps:** T020.
