@@ -202,6 +202,14 @@ spec:
                   key: {{ ((.Values.blobStore).secretKeyKey) | default "root-password" }}
             - name: EMBEDDING_SIDECAR_URL
               value: {{ .Values.embeddingSidecarUrl | default (printf "http://%s-embedding-sidecar:8000" .Release.Name) | quote }}
+            {{- /* MCP-as-tool-source (T033): the MCP Proxy the mcp_servers router
+                   calls POST /internal/discover against, and the path of the
+                   projected SA token it presents as a Bearer (audience
+                   agentshield-mcp-proxy; see the volume/mount below). */}}
+            - name: MCP_PROXY_URL
+              value: {{ .Values.mcpProxyUrl | default "http://agentshield-mcp-proxy.agentshield-platform:8080" | quote }}
+            - name: MCP_PROXY_SA_TOKEN_PATH
+              value: "/var/run/secrets/mcp-proxy-token/mcp-proxy-token"
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}
@@ -222,3 +230,24 @@ spec:
             initialDelaySeconds: 20
             periodSeconds: 10
             failureThreshold: 3
+          volumeMounts:
+            # MCP-as-tool-source (T033): projected SA token (audience
+            # agentshield-mcp-proxy) that mcp_proxy_client reads fresh on every
+            # /internal/discover call. Read-only — the app never writes it.
+            - name: mcp-proxy-token
+              mountPath: /var/run/secrets/mcp-proxy-token
+              readOnly: true
+      volumes:
+        # MCP-as-tool-source (T033): projected bound SA token (audience
+        # agentshield-mcp-proxy, TTL 1h) so registry-api can authenticate to the
+        # MCP Proxy's admin-plane /internal/discover. The proxy verifies it via
+        # TokenReview and checks the subject equals registry-api's SA. Distinct
+        # audience from the agents' OPA token — mirrors the deploy-controller
+        # projected-token shape (manifest_builder.py).
+        - name: mcp-proxy-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: agentshield-mcp-proxy
+                  expirationSeconds: 3600
+                  path: mcp-proxy-token

@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  # Renders to `agentshield-mcp-proxy` (release name is `agentshield`) — the stable
+  # DNS the SDK/runner + registry-api dial (agentshield-mcp-proxy.agentshield-platform:8080).
+  name: {{ .Release.Name }}-mcp-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}

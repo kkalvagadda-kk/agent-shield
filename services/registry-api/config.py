@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     agentshield_encryption_key: str = ""
 
     # ------------------------------------------------------------------ #
+    # MCP Proxy (MCP-as-tool-source)                                       #
+    # ------------------------------------------------------------------ #
+    # In-cluster URL of the MCP Proxy service. registry-api calls its
+    # POST /internal/discover on MCP-server register / sync (mcp_proxy_client).
+    mcp_proxy_url: str = "http://agentshield-mcp-proxy.agentshield-platform:8080"
+    # Path to the projected K8s ServiceAccount token (audience
+    # `agentshield-mcp-proxy`) registry-api presents as a Bearer to the proxy.
+    # The token ROTATES — mcp_proxy_client re-reads it from disk on every call.
+    mcp_proxy_sa_token_path: str = "/var/run/secrets/mcp-proxy-token/mcp-proxy-token"
+
+    # ------------------------------------------------------------------ #
     # Server                                                               #
     # ------------------------------------------------------------------ #
     port: int = 8000

@@ -211,6 +211,39 @@ spec:
           port: 8000
 
 ---
+# Egress: agent pods → MCP Proxy in agentshield-platform (port 8080)
+# Agents call the MCP Proxy for governed MCP tool calls (POST /internal/tools/call).
+# The proxy is the ONLY platform component permitted egress to external MCP server
+# hosts — agent pods must NOT reach those hosts directly (this file grants no such
+# egress), or the central-credential model is void. All external MCP traffic flows
+# agent pod → MCP Proxy → external server.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-egress-mcp-proxy
+  namespace: agents-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+    agentshield.io/namespace-type: agents
+spec:
+  podSelector:
+    matchLabels:
+      agentshield.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mcp-proxy
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
 # Egress: agent pods → internal tool APIs (CIDR 10.0.0.0/8, port 443)
 # Covers internal HTTP tool endpoints called by agent workflows.
 apiVersion: networking.k8s.io/v1

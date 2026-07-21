@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mcp-proxy
+description: AgentShield MCP Proxy — centralized MCP client for tool discovery + governed tool calls
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

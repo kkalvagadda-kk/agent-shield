@@ -43,6 +43,7 @@ from models import (
     WorkflowDeployment,
 )
 from policy_generator import generate_and_store
+from tool_access import team_may_use_tool
 from schemas import (
     AgentRunResponse,
     AgentStatsResponse,
@@ -588,20 +589,15 @@ async def deploy_agent(
             },
         )
 
-    # Gate 2: verify active grants for cross-team tools (own-team tools are
-    # implicitly granted — only foreign tools need an explicit AssetGrant).
+    # Gate 2: verify active grants for cross-team tools via the SINGLE shared
+    # resolver (`tool_access.team_may_use_tool`) — own-team/team-less tools are
+    # implicitly granted; only foreign tools need an explicit AssetGrant. This is
+    # the SAME resolver the internal MCP authz endpoint calls; the grant logic is
+    # not forked (design §3b/§8). Behavior-neutral extraction of the former inline
+    # loop — the `422 tool_grants_missing` set is unchanged.
     missing_grants: list[str] = []
     for tool in agent_tools:
-        if tool.owner_team == deployer_team or tool.owner_team is None:
-            continue
-        grant_result = await db.execute(
-            select(AssetGrant.id).where(
-                AssetGrant.asset_id == tool.id,
-                AssetGrant.grantee_team == deployer_team,
-                AssetGrant.revoked_at.is_(None),
-            ).limit(1)
-        )
-        if grant_result.scalar_one_or_none() is None:
+        if not await team_may_use_tool(db, deployer_team, tool.id):
             missing_grants.append(tool.name)
     if missing_grants:
         raise HTTPException(

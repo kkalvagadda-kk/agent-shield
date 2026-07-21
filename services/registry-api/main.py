@@ -88,6 +88,8 @@ from routers.chat import router as chat_router, deployment_chat_router
 from routers.me import router as me_router
 from routers.memory import router as memory_router
 from routers.internal import router as internal_router
+from routers.internal_mcp import router as internal_mcp_router
+from routers.mcp_servers import router as mcp_servers_router
 from routers.events import router as events_router
 from routers.observability import router as observability_router
 from routers.knowledge import router as knowledge_router
@@ -236,6 +238,12 @@ def create_app() -> FastAPI:
 
     # --- Internal run-start router (Phase 7: scheduler/event gateway) ---
     app.include_router(internal_router)
+
+    # --- Internal MCP authz router (MCP-as-tool-source: proxy cross-team grant check) ---
+    app.include_router(internal_mcp_router)
+
+    # --- MCP Servers router (MCP-as-tool-source: register→discover→bind CRUD + /sync) ---
+    app.include_router(mcp_servers_router)
 
     # --- Agent events router (Phase 9: event gateway webhook log) ---
     app.include_router(events_router)

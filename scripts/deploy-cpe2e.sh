@@ -366,7 +366,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
+REGISTRY_API_TAG="0.2.225"   # 0.2.225: MCP-as-tool-source Phase 1 — migration 0072 (6 mcp_servers cols + tools.pii_deanonymize_allowed), MCPServer/Tool schema, mcp_servers CRUD+/sync router, shared team_may_use_tool + deploy-gate refactor, per-server secret materializer, internal authorize-tool-call endpoint. 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -376,7 +376,7 @@ MINIO_CP1_TAG="0.1.0"
 # 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
 # they run under a per-agent SA, so a secret on the default SA never reached
 # them and any private-registry pull failed with "no basic auth credentials".
-DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) — fixes sandbox HITL approval context (inline + resumable)
+DEPLOY_CONTROLLER_TAG="0.1.41"   # 0.1.41: project 2nd SA token (audience agentshield-mcp-proxy, path mcp-proxy-token) into agent pods for MCP proxy auth. 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) — fixes sandbox HITL approval context (inline + resumable)
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
 # 0.1.146: POC-4 Knowledge Base pages (list/detail/upload/test-retrieval/attach) + runtime citation chips
 # 0.1.147: POC-5 Conversations — ConversationSidebar + standalone page + docked History (Agent/Catalog chat) + deployment Conversations tab + nav promotion (this image contains BOTH POC-4 + POC-5 frontends)
@@ -411,6 +411,7 @@ DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"
+MCP_PROXY_TAG="0.1.0"   # 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -495,6 +496,10 @@ docker build -t "registry.internal/agentshield/eval-runner:${EVAL_RUNNER_TAG}" s
 
 echo "  → python-executor:${PYTHON_EXECUTOR_TAG} (new — sandboxed Python tool runner)"
 docker build -t "registry.internal/agentshield/python-executor:${PYTHON_EXECUTOR_TAG}" services/python-executor/
+
+echo "  → mcp-proxy:${MCP_PROXY_TAG} (new — MCP tool-source proxy)"
+# NOTE: repo-root build context (.) is REQUIRED — the Dockerfile COPYs scripts/e2e/fixtures/stub_mcp_server.py
+docker build -f services/mcp-proxy/Dockerfile -t "registry.internal/agentshield/mcp-proxy:${MCP_PROXY_TAG}" .
 
 echo "  → scheduler:${SCHEDULER_TAG} (Phase 7 — fires scheduled agents on cron, HA)"
 docker build -t "registry.internal/agentshield/scheduler:${SCHEDULER_TAG}" services/scheduler/
@@ -695,6 +700,7 @@ kubectl rollout status deployment/agentshield-registry-api -n "$NAMESPACE" --tim
 kubectl rollout status deployment/agentshield-deploy-controller -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-studio -n "$NAMESPACE" --timeout=3m
 kubectl rollout status deployment/agentshield-python-executor -n "$NAMESPACE" --timeout=3m
+kubectl rollout status deployment/agentshield-mcp-proxy -n "$NAMESPACE" --timeout=3m || echo "  (MCP proxy starting)"
 kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeout=3m || echo "  (Scheduler starting)"
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"

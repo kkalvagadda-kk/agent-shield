@@ -23,6 +23,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from auth_middleware import get_optional_user
 from db import get_db
@@ -67,7 +68,11 @@ def infer_side_effecting(tool_type: str | None, http_method: str | None) -> bool
 
 
 async def _get_tool(tool_id: uuid.UUID, db: AsyncSession) -> Tool:
-    result = await db.execute(select(Tool).where(Tool.id == tool_id))
+    result = await db.execute(
+        select(Tool)
+        .options(selectinload(Tool.mcp_server))
+        .where(Tool.id == tool_id)
+    )
     tool = result.scalar_one_or_none()
     if tool is None:
         raise HTTPException(
@@ -75,6 +80,29 @@ async def _get_tool(tool_id: uuid.UUID, db: AsyncSession) -> Tool:
             detail=f"Tool '{tool_id}' not found.",
         )
     return tool
+
+
+def _to_tool_response(tool: Tool) -> ToolResponse:
+    """Build a ToolResponse, denormalizing the source MCP server onto the 3
+    `mcp_server_*` fields so the ToolsPicker can badge the source server and the
+    SDK can decide `scan_results` without a second lookup. For a non-mcp tool
+    (`mcp_server_id is None`) the relationship is never touched — the fields stay
+    None. Callers rendering `mcp_tool` rows MUST eager-load `Tool.mcp_server`
+    (`selectinload`) so this never triggers an async lazy load.
+    """
+    resp = ToolResponse.model_validate(tool)
+    if tool.mcp_server_id is None:
+        return resp
+    server = tool.mcp_server
+    if server is None:
+        return resp
+    return resp.model_copy(
+        update={
+            "mcp_server_name": server.name,
+            "mcp_server_is_external": server.is_external,
+            "mcp_server_scan_results": server.scan_results,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +148,11 @@ async def create_tool(
     db.add(tool)
     await db.commit()
     await db.refresh(tool)
-    return ToolResponse.model_validate(tool)
+    # Only an mcp_tool row (created here only if a caller explicitly passes
+    # mcp_server_id) needs the source server eager-loaded for the denorm.
+    if tool.mcp_server_id is not None:
+        await db.refresh(tool, ["mcp_server"])
+    return _to_tool_response(tool)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +183,7 @@ async def list_tools(
 ) -> PaginatedResponse[ToolResponse]:
     caller = (user or {}).get("sub") or x_user_sub
 
-    q = select(Tool)
+    q = select(Tool).options(selectinload(Tool.mcp_server))
 
     # Visibility: published tools visible to all; private only to creator.
     if caller:
@@ -175,7 +207,7 @@ async def list_tools(
 
     rows = (await db.execute(q.offset(offset).limit(limit))).scalars().all()
     return PaginatedResponse(
-        items=[ToolResponse.model_validate(t) for t in rows],
+        items=[_to_tool_response(t) for t in rows],
         total=total,
     )
 
@@ -192,7 +224,7 @@ async def get_tool(
     tool_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ) -> ToolResponse:
-    return ToolResponse.model_validate(await _get_tool(tool_id, db))
+    return _to_tool_response(await _get_tool(tool_id, db))
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +264,11 @@ async def update_tool(
 
     await db.commit()
     await db.refresh(tool)
-    return ToolResponse.model_validate(tool)
+    # _get_tool eager-loaded mcp_server; only a change to mcp_server_id makes that
+    # stale, so reload the relationship just in that case before denormalizing.
+    if "mcp_server_id" in updates:
+        await db.refresh(tool, ["mcp_server"])
+    return _to_tool_response(tool)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +284,20 @@ async def delete_tool(
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     tool = await _get_tool(tool_id, db)
+    # An mcp_tool row's lifecycle is owned solely by its MCPServer (discovery/sync/
+    # delete) — it is never independently deletable. Reject BEFORE the soft-delete so
+    # the row can never be deprecated out from under the server that manages it. It
+    # goes away only when the server is deleted (blocked while bound); vanished-upstream
+    # tools are marked status='inactive' on /sync, never row-deleted (models.py Tool
+    # invariant; docs/design/mcp-tool-source-architecture.md §8).
+    if tool.type == "mcp_tool":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This tool's lifecycle is owned by the MCP server that discovered it; "
+                "delete it via the server (DELETE /api/v1/mcp-servers/{id}), not here."
+            ),
+        )
     tool.status = "deprecated"
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

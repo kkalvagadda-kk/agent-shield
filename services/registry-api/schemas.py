@@ -632,6 +632,8 @@ class ToolCreate(BaseModel):
     # "not stated" → the door INFERS it from the method (routers/tools.py
     # ::infer_side_effecting), fail-closed. Set it only to override the inference.
     side_effecting: bool | None = None
+    # Decision 27 / FR-MCP-51: per-tool de-anonymize permission (every tool type).
+    pii_deanonymize_allowed: bool = False
     auth_config_id: uuid.UUID | None = None
     owner_team: str | None = None
     # HTTP-specific
@@ -660,6 +662,8 @@ class ToolUpdate(BaseModel):
     # the door re-infers the classification from the new method (a GET→POST edit must
     # not leave a write tool classified read-only) — routers/tools.py::update_tool.
     side_effecting: bool | None = None
+    # Decision 27 / FR-MCP-51: per-tool de-anonymize permission (every tool type).
+    pii_deanonymize_allowed: bool = False
     auth_config_id: uuid.UUID | None = None
     http_method: str | None = None
     http_url: str | None = None
@@ -687,6 +691,9 @@ class ToolResponse(BaseModel):
     # delivery edge with no extra lookup. Defaults to True (fail-closed) if a legacy
     # row somehow lacks it, so an unclassifiable tool is mocked, never invoked.
     side_effecting: bool = True
+    # Decision 27 / FR-MCP-51: served so the SDK/runner can stamp the de-anonymize
+    # permission onto the resolved callable. Fail-closed default (False).
+    pii_deanonymize_allowed: bool = False
     auth_config_id: uuid.UUID | None
     owner_team: str | None
     version: int
@@ -698,6 +705,13 @@ class ToolResponse(BaseModel):
     http_timeout_ms: int | None
     mcp_server_id: uuid.UUID | None
     mcp_tool_name: str | None
+    # Denormalized from the owning MCPServer (populated by routers/tools.py
+    # ::_to_tool_response from `tool.mcp_server`; None for non-mcp_tool rows). Let
+    # the ToolsPicker badge the source server and the SDK decide scan_results without
+    # a second lookup.
+    mcp_server_name: str | None = None
+    mcp_server_is_external: bool | None = None
+    mcp_server_scan_results: bool | None = None
     python_code: str | None
     created_by: str | None = None
     publish_status: str = "published"
@@ -842,6 +856,61 @@ class MCPServerCreate(BaseModel):
     transport: str = Field("streamable_http", pattern="^(streamable_http|stdio)$")
     auth_config_id: uuid.UUID | None = None
     owner_team: str | None = None
+    # MCP Proxy runtime fields (migration 0072). `health_detail` and
+    # `list_changed_supported` are NOT client-settable — they are computed by the
+    # discover/sync path — so they appear only on the response, not here (contract
+    # POST body). Leaving them off Create keeps illegal client-set states
+    # unrepresentable.
+    identity_mode: str = Field(
+        "none", pattern="^(on_behalf_of|service_identity|none)$"
+    )
+    is_external: bool = False
+    transport_config: dict[str, Any] | None = None
+    scan_results: bool = True
+
+    @model_validator(mode="after")
+    def _check_identity_and_transport(self) -> "MCPServerCreate":
+        if self.transport == "stdio":
+            raise ValueError("stdio transport is not available until Phase 3")
+        if self.is_external and self.identity_mode != "none":
+            raise ValueError(
+                "an external server must use identity_mode='none' "
+                "(identity modes are an internal-server concept)"
+            )
+        return self
+
+
+class MCPServerUpdate(BaseModel):
+    """Partial update — mirrors ToolUpdate's exclude_unset semantics. `name`,
+    `server_url`, `transport`, `is_external` are immutable and rejected 422 by the
+    router if set to a differing value; they are accepted here so the router can
+    compare against the current row. The cross-field is_external/identity_mode check
+    on the MERGED post-update state is the router's job; the validator below only
+    catches an obviously-illegal combo sent together in one payload (partial-safe)."""
+
+    name: str | None = Field(None, max_length=256)
+    description: str | None = None
+    server_url: str | None = None
+    transport: str | None = Field(None, pattern="^(streamable_http|stdio)$")
+    auth_config_id: uuid.UUID | None = None
+    owner_team: str | None = None
+    identity_mode: str | None = Field(
+        None, pattern="^(on_behalf_of|service_identity|none)$"
+    )
+    is_external: bool | None = None
+    transport_config: dict[str, Any] | None = None
+    scan_results: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_identity_and_transport(self) -> "MCPServerUpdate":
+        if self.transport == "stdio":
+            raise ValueError("stdio transport is not available until Phase 3")
+        if self.is_external is True and self.identity_mode not in (None, "none"):
+            raise ValueError(
+                "an external server must use identity_mode='none' "
+                "(identity modes are an internal-server concept)"
+            )
+        return self
 
 
 class MCPServerResponse(BaseModel):
@@ -852,6 +921,12 @@ class MCPServerResponse(BaseModel):
     transport: str
     auth_config_id: uuid.UUID | None
     owner_team: str | None
+    identity_mode: str
+    is_external: bool
+    transport_config: dict[str, Any] | None
+    health_detail: dict[str, Any]
+    list_changed_supported: bool
+    scan_results: bool
     status: str
     last_synced_at: datetime | None
     discovered_tool_count: int
@@ -859,6 +934,27 @@ class MCPServerResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MCPServerDetailResponse(MCPServerResponse):
+    """Detail view — the base server fields plus every child Tool row (including
+    `inactive` ones, which the detail page greys out). Read by GET /mcp-servers/{id}."""
+
+    tools: list[ToolResponse] = Field(default_factory=list)
+
+
+class MCPServerSyncRequest(BaseModel):
+    """Optional body for POST /mcp-servers/{id}/sync."""
+
+    acknowledge_schema_drift: bool = False
+
+
+class MCPServerSyncResponse(BaseModel):
+    server: MCPServerResponse
+    tools_added: int
+    tools_updated: int
+    tools_inactivated: int
+    schema_drift_detected: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

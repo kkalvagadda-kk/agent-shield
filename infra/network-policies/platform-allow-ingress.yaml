@@ -218,6 +218,42 @@ spec:
           port: 8000
 
 ---
+# 4b. Allow MCP Proxy ingress from agent pods and registry-api on port 8080
+#     Agent pods call the proxy for governed MCP tool calls (POST /internal/tools/call);
+#     registry-api calls it for discovery (POST /internal/discover).
+#     NOTE: the MCP Proxy is the ONLY platform component permitted egress to external
+#     MCP server hosts (its egress allow is out of scope here / Phase 3 SR-04). Agent
+#     pods are denied direct egress to those hosts (see agents-allow-egress.yaml), so all
+#     external MCP traffic is funneled through this proxy — the central-credential model.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-proxy-ingress
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: registry-api
+        - namespaceSelector:
+            matchLabels:
+              agentshield.io/namespace-type: agents
+          podSelector:
+            matchLabels:
+              agentshield.io/role: agent
+      ports:
+        - protocol: TCP
+          port: 8080
+
+---
 # 5. Allow Postgres/PgBouncer ingress from all platform services on port 5432
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

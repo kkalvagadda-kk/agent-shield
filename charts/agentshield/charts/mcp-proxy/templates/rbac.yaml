@@ -1,0 +1,72 @@
+---
+# ClusterRole: TokenReview only — the TokenReview half of the built-in
+# `system:auth-delegator`, scoped down to `tokenreviews: create` (nothing else).
+# The proxy authenticates inbound caller SA tokens by creating a TokenReview and
+# checking status.authenticated + audience (§3b AuthN). This is the ENTIRE
+# cluster-scoped grant the proxy has — no secrets cluster-wide, no DB, no pods,
+# never AGENTSHIELD_ENCRYPTION_KEY.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-mcp-proxy-tokenreview
+  labels:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-mcp-proxy-tokenreview
+  labels:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-mcp-proxy
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ .Release.Name }}-mcp-proxy-tokenreview
+  apiGroup: rbac.authorization.k8s.io
+---
+# Role: `get` on Secrets, namespaced to agentshield-mcp ONLY (per-server MCP
+# credential Secrets `agentshield-mcp-server-{id}`). Namespaced deliberately so the
+# proxy provably cannot read Secrets in agentshield-platform (§3b credential
+# containment). No list/watch/create/update/delete — get only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-mcp-proxy-secrets-reader
+  namespace: {{ .Values.secretsNamespace }}
+  labels:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-mcp-proxy-secrets-reader
+  namespace: {{ .Values.secretsNamespace }}
+  labels:
+    app.kubernetes.io/name: mcp-proxy
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Release.Name }}-mcp-proxy
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ .Release.Name }}-mcp-proxy-secrets-reader
+  apiGroup: rbac.authorization.k8s.io

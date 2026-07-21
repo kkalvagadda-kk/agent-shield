@@ -177,6 +177,13 @@ def build_deployment(
             name="AGENTSHIELD_SA_TOKEN_PATH",
             value="/var/run/secrets/sa-token/token",
         ),
+        # MCP tool source (T012): second projected SA token path, audience
+        # agentshield-mcp-proxy. The SDK/runner MCP tool executors read it and send
+        # it as a Bearer token to the MCP proxy (separate audience from OPA's).
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_MCP_PROXY_SA_TOKEN_PATH",
+            value="/var/run/secrets/mcp-proxy-token/token",
+        ),
         # HITL approval context is decided by these at the pod (SDK hitl.require_approval
         # reads AGENTSHIELD_PLAYGROUND: "true" -> context="playground" -> the approval is
         # inline in the sandbox chat and the chat auto-resumes on approve; "false" ->
@@ -320,7 +327,13 @@ def build_deployment(
                 name="sa-token",
                 mount_path="/var/run/secrets/sa-token",
                 read_only=True,
-            )
+            ),
+            # MCP tool source (T012): mount second projected SA token for the MCP proxy
+            k8s_client.V1VolumeMount(
+                name="mcp-proxy-token",
+                mount_path="/var/run/secrets/mcp-proxy-token",
+                read_only=True,
+            ),
         ],
         resources=k8s_client.V1ResourceRequirements(
             requests={"cpu": "100m", "memory": "256Mi"},
@@ -389,6 +402,23 @@ def build_deployment(
                     k8s_client.V1VolumeProjection(
                         service_account_token=k8s_client.V1ServiceAccountTokenProjection(
                             audience="agentshield-opa",
+                            expiration_seconds=3600,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        ),
+        # MCP tool source (T012): second projected bound SA token
+        # (audience=agentshield-mcp-proxy, TTL=1h) — alongside, not replacing, the
+        # OPA token. The MCP proxy verifies it via TokenReview for AuthN.
+        k8s_client.V1Volume(
+            name="mcp-proxy-token",
+            projected=k8s_client.V1ProjectedVolumeSource(
+                sources=[
+                    k8s_client.V1VolumeProjection(
+                        service_account_token=k8s_client.V1ServiceAccountTokenProjection(
+                            audience="agentshield-mcp-proxy",
                             expiration_seconds=3600,
                             path="token",
                         )

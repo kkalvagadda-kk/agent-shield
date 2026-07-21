@@ -105,6 +105,15 @@ deploy-controller:
 python-executor:
   enabled: true
 
+# mcp-proxy: centralized MCP client (tool discovery + governed tool calls). Image tag
+# is pinned HERE (not just the sub-chart default) so the CLAUDE.md mirror rule holds —
+# deploy-cpe2e.sh's MCP_PROXY_TAG and this tag must move together.
+mcp-proxy:
+  enabled: true
+  image:
+    repository: registry.internal/agentshield/mcp-proxy
+    tag: "0.1.0"
+
 scheduler:
   enabled: true
 
@@ -691,7 +700,7 @@ registry-api:
     #   (not run_id), so a production chat parked on a high-risk tool auto-resumes after a
     #   reviewer approves instead of hanging. Cherry-picked from fix/reactive-hitl-approval-
     #   poll (922c04b); see docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md.
-    tag: "0.2.224"
+    tag: "0.2.225"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -762,7 +771,7 @@ deploy-controller:
     #   production-context HITL approvals → OPA parked low-risk tools + the inline sandbox
     #   approve/resume never worked (chat hung after approval). Now derived from the
     #   deployment's `environment`. See docs/bugs/sandbox-hitl-playground-context.md.
-    tag: "0.1.40"
+    tag: "0.1.41"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)

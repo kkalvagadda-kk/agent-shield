@@ -1004,6 +1004,36 @@ class MCPServer(Base):
     discovered_tool_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    # ── MCP Proxy runtime fields (migration 0072) ──
+    # identity_mode: 'on_behalf_of'|'service_identity'|'none'. Always 'none' for an
+    # external server (identity modes are an internal-server concept); the
+    # MCPServerCreate/Update validators reject is_external=true with a non-'none' mode.
+    # Settable in Phase 1 but has zero runtime effect until Phase 2.
+    identity_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default=text("'none'")
+    )
+    # is_external drives the mandatory output-scan CALL for untrusted results and
+    # gates which identity modes are legal.
+    is_external: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Transport-specific extra config (HTTP-relevant keys only in Phase 1).
+    transport_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # health_detail: {"last_error", "last_success_at", "consecutive_failures",
+    # "schema_drift": [...]} — written by the discover/sync path.
+    health_detail: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # Whether the server advertised notifications/tools/list_changed at initialize.
+    list_changed_supported: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Per-server opt-out of the per-tool-call output-scan CALL — INTERNAL servers only.
+    # governed_tool ignores this and always scans when is_external=true (enforced in
+    # code, not by a DB constraint).
+    scan_results: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1064,6 +1094,13 @@ class Tool(Base):
     # ::infer_side_effecting) and overridable per tool; fail-closed — anything not
     # provably read-only (HTTP GET/HEAD) is true. Migration 0063.
     side_effecting: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # Decision 27 / FR-MCP-51: per-tool de-anonymize permission. Applies to EVERY tool
+    # type (not just mcp_tool). When set, governed_tool de-anonymizes the tool's args
+    # (restores real PII values) immediately before the real call. Fail-closed default
+    # (false). Mirrors side_effecting (migration 0072).
+    pii_deanonymize_allowed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")
     )
     auth_config_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -1,0 +1,20 @@
+# Dedicated namespace for the per-server MCP credential Secrets
+# (agentshield-mcp-server-{id}, materialized by registry-api at register/sync).
+# Deliberately separate from agentshield-platform so the proxy's `get secrets` RBAC
+# (Role/RoleBinding in this ns, see rbac.yaml) provably cannot reach the master
+# AGENTSHIELD_ENCRYPTION_KEY Secret (§3b least-privilege / credential containment).
+#
+# Guarded for safe re-apply: `helm.sh/resource-policy: keep` retains the namespace
+# (and the live credential Secrets it holds) across `helm upgrade`/uninstall, so a
+# re-run never prunes or orphans in-use creds. The name comes from a single source
+# (.Values.secretsNamespace) shared with rbac.yaml + the proxy's MCP_SECRETS_NAMESPACE.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.secretsNamespace }}
+  labels:
+    app.kubernetes.io/part-of: agentshield
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    agentshield.io/purpose: mcp-server-secrets
+  annotations:
+    helm.sh/resource-policy: keep

@@ -127,6 +127,12 @@ dependencies:
     repository: "file://charts/python-executor"
     condition: python-executor.enabled
 
+  # ── MCP tool-source proxy (local sub-chart) ──────────────────────────────
+  - name: mcp-proxy
+    version: "0.1.0"
+    repository: "file://charts/mcp-proxy"
+    condition: mcp-proxy.enabled
+
   # ── API gateway (local sub-chart; STUB — no templates yet, disabled by default) ──
   - name: envoy-gateway
     version: "0.2.0"
