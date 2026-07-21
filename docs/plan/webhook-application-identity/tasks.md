@@ -360,7 +360,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
 
 ## Phase 12 — Polish & Cross-Cutting
 
-- [ ] [T033] Official image tag bumps — `scripts/deploy-cpe2e.sh`, `charts/agentshield/values.yaml`
+- [X] [T033] Official image tag bumps — `scripts/deploy-cpe2e.sh`, `charts/agentshield/values.yaml`
   - **Do:** `deploy-cpe2e.sh`: `REGISTRY_API_TAG "0.2.210"→"0.2.211"` (L351), `STUDIO_TAG "0.1.158"→"0.1.159"` (L390), `EVENT_GATEWAY_TAG "0.1.3"→"0.1.4"` (L395) — all confirmed still-current/free against the live repo as of today. Add a new header changelog-comment entry summarizing this feature (matches the file's own established convention). `values.yaml`: mirror all three at their **top-level** `tag:` lines (registry-api L648, studio L992, event-gateway L768 — confirmed today; the event-gateway **sub-chart** pin at L150 is deliberately left alone — it's shadowed by a stale packaged `.tgz`, a pre-existing, documented condition per `docs/testing/manual-ui-e2e-test-plan.md`'s gap ledger, not something this task should "fix").
   - **Acceptance:** `grep 'tag: "0.2.211"' charts/agentshield/values.yaml`, `grep 'tag: "0.1.159"' charts/agentshield/values.yaml`, `grep 'tag: "0.1.4"' charts/agentshield/values.yaml` all match; `grep REGISTRY_API_TAG scripts/deploy-cpe2e.sh` shows `0.2.211`.
   - **Deps:** T001–T032 (every code-change task — this is the last code task; run once all changes are final).

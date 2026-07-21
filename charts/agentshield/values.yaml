@@ -1042,8 +1042,10 @@ studio:
     # 0.1.158: sync STUDIO_BUILD marker (build.ts) to the deployed tag — the merge left it at 0.1.147
     # 0.1.159: webhook application-identity UI (Decision 30, Phases 6-8) — InvokeAccessPanel +
     #   ArtifactGrantsList on agent+workflow surfaces, ApplicationsPage + /applications route,
-    #   ClientPanel retired. (This is T033's studio bump, pulled forward for the CP3 deploy.)
-    tag: "0.1.159"
+    #   ClientPanel retired.
+    # 0.1.160: human-grantee grant creation in ArtifactGrantsList (agent-admin/approver to
+    #   user/team) + ApplicationsPage Vitest (T024). Official ship of the Studio feature.
+    tag: "0.1.160"
     pullPolicy: IfNotPresent
 
   service:

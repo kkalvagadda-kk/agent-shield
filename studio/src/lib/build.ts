@@ -17,4 +17,4 @@
  * every check stayed green. Only an assertion against what was actually served catches
  * that class — and that needs a reader.
  */
-export const STUDIO_BUILD = "0.1.159";
+export const STUDIO_BUILD = "0.1.160";
