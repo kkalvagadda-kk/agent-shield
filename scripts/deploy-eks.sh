@@ -67,7 +67,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002). 0.2.221: Decision 30 — matches values.yaml
 DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) so sandbox HITL approvals are playground-context (inline + resumable), not routed to the reviewer console. 0.1.39: per-provider env map; >=0.1.38 imagePullSecrets on agent pods (note 7)
 DECLARATIVE_RUNNER_TAG="0.1.59"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
-STUDIO_TAG="0.1.158"   # 0.1.158: matches values.yaml (branch made no studio source change — CP3/frontend rebuilds this again after Phases 6-8)
+STUDIO_TAG="0.1.159"   # 0.1.159: webhook application-identity UI (Decision 30, Phases 6-8) — CP3 deploy
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"
@@ -365,23 +365,38 @@ if [ -n "$NLB_IP" ]; then
   LF_SETS+=(--set-string "global.langfuseUrl=https://${LF_HOST}")
   LF_SETS+=(--set-string "envoy-gateway.gateway.langfuseHostname=${LF_HOST}")
   LF_SETS+=(--set-string "langfuse.langfuse.nextauth.url=https://${LF_HOST}")
-  # Add LF_HOST to the gateway-tls SAN — the base cert only covers *.elb.<region>.amazonaws.com,
-  # so a browser hitting the langfuse subdomain would otherwise get CERT_COMMON_NAME_INVALID.
-  TLSDIR2="$(mktemp -d)"
-  if openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
-      -keyout "$TLSDIR2/tls.key" -out "$TLSDIR2/tls.crt" \
-      -subj "/CN=AgentShield Gateway/O=AgentShield" \
-      -addext "subjectAltName=DNS:*.elb.${REGION}.amazonaws.com,DNS:${ELB},DNS:${LF_HOST}" \
-      -addext "basicConstraints=critical,CA:FALSE" \
-      -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
-      -addext "extendedKeyUsage=serverAuth" 2>/dev/null; then
-    kubectl create secret tls gateway-tls --cert="$TLSDIR2/tls.crt" --key="$TLSDIR2/tls.key" \
-      -n "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    echo "    gateway-tls SAN now covers ${LF_HOST}"
+  # Ensure the gateway-tls SAN covers LF_HOST — the base cert (Step 4b) only covers
+  # *.elb.<region>.amazonaws.com, so a browser hitting the langfuse subdomain would
+  # otherwise get CERT_COMMON_NAME_INVALID.
+  #
+  # IDEMPOTENT: only (re)mint when the CURRENT cert does not already cover both ${ELB}
+  # and ${LF_HOST}. A self-signed cert is trusted per-fingerprint, so regenerating it on
+  # every deploy invalidates every browser's accepted exception — and a cert interstitial
+  # that pops mid-OAuth-redirect reads to the user as "login redirect is broken" (it
+  # silently blocks the 302 back to Studio). Regenerate ONLY when the SAN set actually
+  # needs to change (first langfuse-adding deploy, or a changed NLB IP). See
+  # docs/bugs/eks-gateway-tls-regen-breaks-login.md
+  CUR_SAN="$(kubectl get secret gateway-tls -n "$NS" -o jsonpath='{.data.tls\.crt}' 2>/dev/null \
+    | base64 -d 2>/dev/null | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)"
+  if echo "$CUR_SAN" | grep -q "DNS:${LF_HOST}" && echo "$CUR_SAN" | grep -q "DNS:${ELB}"; then
+    echo "    gateway-tls already covers ${ELB} + ${LF_HOST} — keeping it (preserves browser cert trust)"
   else
-    echo "    WARN: cert regen for ${LF_HOST} failed — langfuse SSO may hit a cert warning"
+    TLSDIR2="$(mktemp -d)"
+    if openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+        -keyout "$TLSDIR2/tls.key" -out "$TLSDIR2/tls.crt" \
+        -subj "/CN=AgentShield Gateway/O=AgentShield" \
+        -addext "subjectAltName=DNS:*.elb.${REGION}.amazonaws.com,DNS:${ELB},DNS:${LF_HOST}" \
+        -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+        -addext "extendedKeyUsage=serverAuth" 2>/dev/null; then
+      kubectl create secret tls gateway-tls --cert="$TLSDIR2/tls.crt" --key="$TLSDIR2/tls.key" \
+        -n "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+      echo "    gateway-tls SAN now covers ${LF_HOST} (regenerated — browsers must re-accept the new cert once)"
+    else
+      echo "    WARN: cert regen for ${LF_HOST} failed — langfuse SSO may hit a cert warning"
+    fi
+    rm -rf "$TLSDIR2"
   fi
-  rm -rf "$TLSDIR2"
 else
   echo "    WARN: could not resolve NLB IP for ${ELB} — langfuse subdomain routing skipped"
 fi

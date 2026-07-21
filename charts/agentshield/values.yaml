@@ -1040,7 +1040,10 @@ studio:
     # 0.1.156: workflow ledger G1+G2 frontend (rehydrate chat + Memory tab) + HITL 2nd-gate re-surface
     # 0.1.157: origin/main merge (WS-1..E-6 exec-models-v2 + eval-v2 frontends)
     # 0.1.158: sync STUDIO_BUILD marker (build.ts) to the deployed tag — the merge left it at 0.1.147
-    tag: "0.1.158"
+    # 0.1.159: webhook application-identity UI (Decision 30, Phases 6-8) — InvokeAccessPanel +
+    #   ArtifactGrantsList on agent+workflow surfaces, ApplicationsPage + /applications route,
+    #   ClientPanel retired. (This is T033's studio bump, pulled forward for the CP3 deploy.)
+    tag: "0.1.159"
     pullPolicy: IfNotPresent
 
   service:

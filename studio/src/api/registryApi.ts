@@ -1332,64 +1332,12 @@ export const deleteTrigger = async (
 };
 
 // ---------------------------------------------------------------------------
-// Webhook Clients (WS-4) — per-application credentials on a webhook trigger.
-//
-// Keyed on the trigger's own id, so ONE set of methods serves both agent and
-// workflow triggers (a workflow trigger is an agent_triggers row with
-// workflow_id set) — mirroring the single backend router.
+// Webhook Clients (WS-4) — RETIRED (Decision 30). The per-trigger webhook_clients
+// write endpoints now return 410; the client-side methods (createTriggerClient /
+// listTriggerClients / setClientEnabled / deleteTriggerClient) and their WebhookClient
+// types were removed with their only consumer (SettingsTab's ClientPanel, T018).
+// Reusable webhook identities now live as Applications + invoker grants below.
 // ---------------------------------------------------------------------------
-export interface WebhookClient {
-  client_id: string;
-  enabled: boolean;
-  created_by: string | null;
-  created_at: string;
-}
-
-// The create response is the ONLY shape that ever carries `secret` — the read
-// model has no secret field at all, so it cannot be re-fetched. A lost secret
-// is unrecoverable; delete the client and register a new one.
-export interface WebhookClientCreated {
-  client_id: string;
-  secret: string;
-  created_at: string;
-}
-
-export const createTriggerClient = async (
-  triggerId: string,
-  body: { client_id: string }
-): Promise<WebhookClientCreated> => {
-  const { data } = await http.post<WebhookClientCreated>(
-    `/triggers/${triggerId}/clients`,
-    body
-  );
-  return data;
-};
-
-export const listTriggerClients = async (
-  triggerId: string
-): Promise<WebhookClient[]> => {
-  const { data } = await http.get<WebhookClient[]>(`/triggers/${triggerId}/clients`);
-  return data;
-};
-
-export const setClientEnabled = async (
-  triggerId: string,
-  clientId: string,
-  enabled: boolean
-): Promise<WebhookClient> => {
-  const { data } = await http.patch<WebhookClient>(
-    `/triggers/${triggerId}/clients/${clientId}`,
-    { enabled }
-  );
-  return data;
-};
-
-export const deleteTriggerClient = async (
-  triggerId: string,
-  clientId: string
-): Promise<void> => {
-  await http.delete(`/triggers/${triggerId}/clients/${clientId}`);
-};
 
 // ---------------------------------------------------------------------------
 // Applications (Decision 30) — a team-owned, reusable webhook-sending identity.
