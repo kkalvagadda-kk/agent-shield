@@ -1392,6 +1392,142 @@ export const deleteTriggerClient = async (
 };
 
 // ---------------------------------------------------------------------------
+// Applications (Decision 30) — a team-owned, reusable webhook-sending identity.
+// Successor to per-trigger webhook_clients: created once per team, then granted
+// the `invoker` role on specific agents/workflows (see ArtifactRoleGrant below).
+// Reveal-once secret: only the create + rotate responses ever carry `secret`;
+// ApplicationResponse has no secret field, so a lost secret is unrecoverable
+// (rotate to mint a new one). Backend router: routers/applications.py, prefix
+// /api/v1/teams/{team}/applications.
+// ---------------------------------------------------------------------------
+export interface Application {
+  id: string;
+  team_name: string;
+  name: string;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: string;
+  rotated_at: string | null;
+}
+
+// The ONLY shapes that carry `secret` — shown once, never re-fetchable.
+export interface ApplicationCreated {
+  id: string;
+  name: string;
+  secret: string;
+  created_at: string;
+}
+
+export interface ApplicationRotateSecretResponse {
+  id: string;
+  secret: string;
+  rotated_at: string;
+}
+
+export const createApplication = async (
+  team: string,
+  body: { name: string }
+): Promise<ApplicationCreated> => {
+  const { data } = await http.post<ApplicationCreated>(
+    `/teams/${team}/applications/`,
+    body
+  );
+  return data;
+};
+
+export const listApplications = async (
+  team: string
+): Promise<Application[]> => {
+  const { data } = await http.get<Application[]>(`/teams/${team}/applications/`);
+  return data;
+};
+
+export const rotateApplicationSecret = async (
+  team: string,
+  applicationId: string
+): Promise<ApplicationRotateSecretResponse> => {
+  const { data } = await http.post<ApplicationRotateSecretResponse>(
+    `/teams/${team}/applications/${applicationId}/rotate-secret`
+  );
+  return data;
+};
+
+export const setApplicationEnabled = async (
+  team: string,
+  applicationId: string,
+  enabled: boolean
+): Promise<Application> => {
+  const { data } = await http.patch<Application>(
+    `/teams/${team}/applications/${applicationId}`,
+    { enabled }
+  );
+  return data;
+};
+
+export const deleteApplication = async (
+  team: string,
+  applicationId: string
+): Promise<void> => {
+  await http.delete(`/teams/${team}/applications/${applicationId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Artifact role grants (Decision 25/30) — delegate agent-admin / approver /
+// invoker to a user, team, or application, scoped to one agent or workflow.
+// NAME NOTE: distinct from the admin AssetGrant API (createGrant/listGrants
+// against /admin/grants) — that is a different, team-level asset-access grant.
+// These are artifact-scoped RBAC grants. Backend: routers/artifact_grants.py,
+// prefix /api/v1/artifacts/{artifact_type}/{artifact_id}/grants.
+// ---------------------------------------------------------------------------
+export type ArtifactType = "agent" | "workflow";
+export type ArtifactGrantRole = "agent-admin" | "approver" | "invoker";
+export type GranteeType = "user" | "team" | "application";
+
+export interface ArtifactRoleGrant {
+  id: string;
+  artifact_type: ArtifactType;
+  artifact_id: string;
+  role: ArtifactGrantRole;
+  grantee_type: GranteeType;
+  grantee_id: string;
+  granted_by: string;
+  granted_at: string;
+  revoked_at: string | null;
+  // Human label for application grantees (the application's name); null otherwise.
+  grantee_label: string | null;
+}
+
+export const createArtifactGrant = async (
+  artifactType: ArtifactType,
+  artifactId: string,
+  body: { grantee_type: GranteeType; grantee_id: string; role: ArtifactGrantRole }
+): Promise<ArtifactRoleGrant> => {
+  const { data } = await http.post<ArtifactRoleGrant>(
+    `/artifacts/${artifactType}/${artifactId}/grants`,
+    body
+  );
+  return data;
+};
+
+export const listArtifactGrants = async (
+  artifactType: ArtifactType,
+  artifactId: string
+): Promise<ArtifactRoleGrant[]> => {
+  const { data } = await http.get<ArtifactRoleGrant[]>(
+    `/artifacts/${artifactType}/${artifactId}/grants`
+  );
+  return data;
+};
+
+export const revokeArtifactGrant = async (
+  artifactType: ArtifactType,
+  artifactId: string,
+  grantId: string
+): Promise<void> => {
+  await http.delete(`/artifacts/${artifactType}/${artifactId}/grants/${grantId}`);
+};
+
+// ---------------------------------------------------------------------------
 // Webhook token rotation + event log (Phase 9 — event gateway)
 // ---------------------------------------------------------------------------
 export interface RotateTokenResponse {

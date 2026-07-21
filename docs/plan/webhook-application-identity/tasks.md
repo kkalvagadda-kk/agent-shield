@@ -172,13 +172,13 @@ _What you prove: a real signed webhook resolves through `applications`+`artifact
 
 ## Phase 6 — Studio API Client Layer
 
-- [ ] [T014] [P] `Application`/`ApplicationCreated`/rotate-secret types + client functions — `studio/src/api/registryApi.ts`
+- [X] [T014] [P] `Application`/`ApplicationCreated`/rotate-secret types + client functions — `studio/src/api/registryApi.ts`
   - **Do:** insert immediately after the existing `WebhookClient`/webhook-client functions section (WebhookClient interfaces at ~L1341–1410 today). Exact shapes from plan.md "Key Interfaces": `interface Application { id, team_name, name, enabled, created_by, created_at, rotated_at: string | null }`, `interface ApplicationCreated { id, name, secret, created_at }`, `interface ApplicationRotateSecretResponse { id, secret, rotated_at }`; `createApplication(team, {name})`, `listApplications(team)`, `rotateApplicationSecret(team, id)`, `setApplicationEnabled(team, id, enabled)`, `deleteApplication(team, id)` — path/body/response shapes cross-checked line-for-line against `contracts/applications.md`.
   - **Acceptance:** `cd studio && npm run typecheck` passes; every function's request/response shape matches T007's router exactly.
   - **Deps:** T005 (schema shapes locked) — file-disjoint from all backend tasks.
   - **Verify:** `cd studio && npm run typecheck`
 
-- [ ] [T015] `ArtifactRoleGrant` types + client functions — `studio/src/api/registryApi.ts`
+- [X] [T015] `ArtifactRoleGrant` types + client functions — `studio/src/api/registryApi.ts`
   - **Do:** insert immediately after T014's block. `interface ArtifactRoleGrant { id, artifact_type: 'agent'|'workflow', artifact_id, role: 'agent-admin'|'approver'|'invoker', grantee_type: 'user'|'team'|'application', grantee_id, granted_by, granted_at, revoked_at: string|null, grantee_label: string|null }`; `createGrant(artifactType, artifactId, {grantee_type, grantee_id, role})`, `listGrants(artifactType, artifactId)`, `revokeGrant(artifactType, artifactId, grantId)` — cross-checked against `contracts/artifact-grants.md`.
   - **Acceptance:** `cd studio && npm run typecheck` passes; shapes match T006's router exactly.
   - **Deps:** T005, T014 (same file — sequential, not `[P]` with it).
@@ -188,19 +188,19 @@ _What you prove: a real signed webhook resolves through `applications`+`artifact
 
 ## Phase 7 — Shared Grant/Invoke Components (Agent Surface)
 
-- [ ] [T016] [P] `InvokeAccessPanel.tsx` (new) — application invoker grant-picker, artifact-type-agnostic from the start — `studio/src/components/shared/InvokeAccessPanel.tsx`
+- [X] [T016] [P] `InvokeAccessPanel.tsx` (new) — application invoker grant-picker, artifact-type-agnostic from the start — `studio/src/components/shared/InvokeAccessPanel.tsx`
   - **Do:** `InvokeAccessPanelProps { artifactType: 'agent'|'workflow'; artifactId: string; artifactTeam: string }`. Fetches `listApplications(artifactTeam)` for picker options and `listGrants(artifactType, artifactId)` filtered to `role === 'invoker'`. "Grant access" button → picker (application dropdown) → confirm shows the exact design-doc §9.4 step 3 unattended-execution acknowledgment text ("… will be able to trigger runs on … without a human present. Approval-gated steps … may stall if nobody is watching.") → `createGrant(artifactType, artifactId, {grantee_type:'application', grantee_id, role:'invoker'})`. Empty state (zero team applications) shows the exact design-doc §9.8 copy: "No applications registered for your team yet." + link to `/applications`. Each granted row shows an "application disabled" badge when `Application.enabled === false` (cross-referenced from the same `listApplications` fetch — no second lookup). Revoke button → `revokeGrant`. Built here **once**, generic — Task T019 only *consumes* it for the workflow surface, never re-creates it (closes the "two parallel paths" pattern this codebase has already been burned by).
   - **Acceptance:** empty-state copy exact; granting an application flips the trigger card's existing `auth_mode` badge (`token`→`client_signed`) on the next `listTriggers` refetch — no new badge code needed, the badge already reads `trigger.auth_mode`.
   - **Deps:** T014, T015.
   - **Verify:** `cd studio && npm run typecheck`
 
-- [ ] [T017] [P] `ArtifactGrantsList.tsx` (new) — full grants list (all 3 roles, all 3 grantee types), artifact-type-agnostic — `studio/src/components/shared/ArtifactGrantsList.tsx`
+- [X] [T017] [P] `ArtifactGrantsList.tsx` (new) — full grants list (all 3 roles, all 3 grantee types), artifact-type-agnostic — `studio/src/components/shared/ArtifactGrantsList.tsx`
   - **Do:** `ArtifactGrantsListProps { artifactType: 'agent'|'workflow'; artifactId: string }`. Lists ALL active grants via `listGrants(artifactType, artifactId)` — `agent-admin`/`approver`/`invoker` mixed, each row showing `role`, `grantee_type`, `grantee_label ?? grantee_id`, a revoke button (`revokeGrant`). This is also where a human `agent-admin`/`approver` grant is now managed (design doc §9.2) — not `invoker`-only.
   - **Acceptance:** renders mixed-role rows correctly; revoke removes a row on the next refetch.
   - **Deps:** T014, T015 (file-disjoint from T016 — parallel-safe with it).
   - **Verify:** `cd studio && npm run typecheck`
 
-- [ ] [T018] Wire `InvokeAccessPanel`/`ArtifactGrantsList` into `SettingsTab.tsx`; delete `ClientPanel` — `studio/src/components/agent-detail/SettingsTab.tsx`
+- [X] [T018] Wire `InvokeAccessPanel`/`ArtifactGrantsList` into `SettingsTab.tsx`; delete `ClientPanel` — `studio/src/components/agent-detail/SettingsTab.tsx`
   - **Do:** `SettingsTab` gains two new required props `agentId: string`, `agentTeam: string` (alongside existing `agentName`/`memoryEnabled`). **Delete** the `ClientPanel` function (confirmed today: starts at line 339) and its call site inside `WebhookRow`; render `<InvokeAccessPanel artifactType="agent" artifactId={agentId} artifactTeam={agentTeam} />` in `ClientPanel`'s old slot inside `WebhookRow`, and `<ArtifactGrantsList artifactType="agent" artifactId={agentId} />` once near the top of `SettingsTab`'s return, above the Webhook Triggers card (design doc §9.2 placement).
   - **Acceptance:** empty-applications state renders correctly; granting flips the existing `auth_mode` badge; `cd studio && npm run typecheck` passes.
   - **Deps:** T016, T017.
@@ -210,25 +210,25 @@ _What you prove: a real signed webhook resolves through `applications`+`artifact
 
 ## Phase 8 — Workflow Parity + Applications Page + Nav
 
-- [ ] [T019] Wire the shared components into `WorkflowTriggersPanel.tsx` (closes the agent-only parity gap) — `studio/src/components/workflow/WorkflowTriggersPanel.tsx`
+- [X] [T019] Wire the shared components into `WorkflowTriggersPanel.tsx` (closes the agent-only parity gap) — `studio/src/components/workflow/WorkflowTriggersPanel.tsx`
   - **Do:** `WorkflowTriggersPanel` gains a new required prop `workflowTeam: string` (alongside existing `workflowId`/`workflowName`/`onClose`). Import `InvokeAccessPanel`/`ArtifactGrantsList` from `studio/src/components/shared/` — this task only **consumes** them, creates nothing new under `shared/`. Render `<ArtifactGrantsList artifactType="workflow" artifactId={workflowId} />` near the top of the modal body, `<InvokeAccessPanel artifactType="workflow" artifactId={workflowId} artifactTeam={workflowTeam} />` inside each `WebhookRow`'s slot (mirrors `SettingsTab`'s T018 placement).
   - **Acceptance:** identical to T018's acceptance, scoped to the workflow surface — this is the exact parity gap design doc §9.2 calls out ("today this panel has no client/application UI at all").
   - **Deps:** T016, T017, **T018** (imports the shared components T018 first wires up the pattern for — not parallel-safe with T018, despite disjoint files).
   - **Verify:** `cd studio && npm run typecheck`
 
-- [ ] [T020] [P] `ApplicationsPage.tsx` (new) — team-scoped applications CRUD page — `studio/src/pages/ApplicationsPage.tsx`
+- [X] [T020] [P] `ApplicationsPage.tsx` (new) — team-scoped applications CRUD page — `studio/src/pages/ApplicationsPage.tsx`
   - **Do:** modeled directly on `studio/src/pages/CredentialsPage.tsx` (`research.md` §11 — the correct contributor-writable, team-scoped, reveal-once-secret precedent; NOT the platform-admin-only `AdminAccessPage.tsx`). Team-scoped list defaulting to `useAuth().team`, create form (name only), reveal-once secret box on create/rotate (same copy-and-warn pattern as `CredentialsPage`/former `ClientPanel`), enable/disable toggle, delete with confirmation.
   - **Acceptance:** creating shows the secret exactly once; navigating away and back never re-shows it (design doc §9.3 step 3); lists only the current user's own team by default.
   - **Deps:** T014.
   - **Verify:** `cd studio && npm run typecheck`
 
-- [ ] [T021] Sidebar entry + `/applications` route — `studio/src/components/Sidebar.tsx`, `studio/src/App.tsx`
+- [X] [T021] Sidebar entry + `/applications` route — `studio/src/components/Sidebar.tsx`, `studio/src/App.tsx`
   - **Do:** **Sidebar** — add `{ label: "Applications", to: "/applications", icon: Boxes }` (or another `lucide-react` icon distinct from the existing `KeyRound` "Credentials" entry) to the same Settings-section array that already holds `Models`/`Credentials`. **App** — add `<Route path="/applications" element={<ApplicationsPage />} />` alongside the existing `/credentials` route, with **no** `RequireRole` wrapper (matches `/credentials`'s own unwrapped route — the real gate is server-side `can_create_application`, not a client-side hide, per this repo's established pattern).
   - **Acceptance:** `Applications` appears in the Settings nav section; `/applications` renders `ApplicationsPage`; `cd studio && npm run typecheck` passes.
   - **Deps:** T020.
   - **Verify:** `grep -n '"/applications"' studio/src/App.tsx; grep -n "Applications" studio/src/components/Sidebar.tsx`
 
-- [ ] [T022] Wire new required props into `AgentDetailPage.tsx` / `WorkflowBuilderPage.tsx` call sites — `studio/src/pages/AgentDetailPage.tsx`, `studio/src/pages/WorkflowBuilderPage.tsx`
+- [X] [T022] Wire new required props into `AgentDetailPage.tsx` / `WorkflowBuilderPage.tsx` call sites — `studio/src/pages/AgentDetailPage.tsx`, `studio/src/pages/WorkflowBuilderPage.tsx`
   - **Do:** `AgentDetailPage` — the `<SettingsTab agentName={agent.name} memoryEnabled={agent.memory_enabled} />` call site gains `agentId={agent.id} agentTeam={agent.team}` (both already present on the in-scope `Agent` object — no new fetch). `WorkflowBuilderPage` — the `<WorkflowTriggersPanel workflowId={compositeWorkflowId} workflowName={compositeWorkflowName ?? 'workflow'} onClose={...} />` call site (confirmed today at line 912) gains `workflowTeam={currentTeam || authTeam || ''}` (both variables already in scope, used identically a few lines above for `AddAgentModal`'s own `team` prop).
   - **Acceptance:** `cd studio && npm run typecheck` passes — a missing required prop is a compile error, the concrete proof this wiring isn't orphaned.
   - **Deps:** T018, T019.
@@ -256,7 +256,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
 
 ## Phase 9 — Vitest Coverage
 
-- [ ] [T023] [P] Vitest — `InvokeAccessPanel`/`ArtifactGrantsList` states on the agent surface — `studio/src/components/agent-detail/SettingsTab.test.tsx`
+- [X] [T023] [P] Vitest — `InvokeAccessPanel`/`ArtifactGrantsList` states on the agent surface — `studio/src/components/agent-detail/SettingsTab.test.tsx`
   - **Do:** mock `registryApi` per `vi.mock('../api/registryApi')`, render via `renderWithProviders`. Cover: `InvokeAccessPanel` empty state, grant-and-list, revoke, "application disabled" badge; `ArtifactGrantsList` render with mixed roles (`agent-admin`/`approver`/`invoker` together).
   - **Acceptance:** `cd studio && npm run test -- SettingsTab` green.
   - **Deps:** T018.
@@ -268,7 +268,7 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
   - **Deps:** T020.
   - **Verify:** `cd studio && npm run test -- ApplicationsPage`
 
-- [ ] [T025] [P] Vitest — `WorkflowTriggersPanel` parity (same states as T023, proving the SHARED component works under `workflow` too) — `studio/src/components/workflow/WorkflowTriggersPanel.test.tsx`
+- [X] [T025] [P] Vitest — `WorkflowTriggersPanel` parity (same states as T023, proving the SHARED component works under `workflow` too) — `studio/src/components/workflow/WorkflowTriggersPanel.test.tsx`
   - **Do:** cover the same `InvokeAccessPanel`/`ArtifactGrantsList` states as T023, mounted with `artifactType="workflow"` — this is what makes T019's parity claim testable, not just visually plausible.
   - **Acceptance:** `cd studio && npm run test -- WorkflowTriggersPanel` green.
   - **Deps:** T019.

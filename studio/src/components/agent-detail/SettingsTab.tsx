@@ -4,11 +4,14 @@ import { toast } from "sonner";
 import { KeyRound, Copy, Check, Plus, Trash2 } from "lucide-react";
 import {
   listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
-  createTriggerClient, listTriggerClients, setClientEnabled, deleteTriggerClient,
 } from "../../api/registryApi";
+import InvokeAccessPanel from "../shared/InvokeAccessPanel";
+import ArtifactGrantsList from "../shared/ArtifactGrantsList";
 
 interface Props {
   agentName: string;
+  agentId: string;
+  agentTeam: string;
   memoryEnabled?: boolean;
 }
 
@@ -20,7 +23,7 @@ const FILTER_OPS = ["eq", "neq", "contains", "gt", "gte", "lt", "lte", "exists",
 const APPROVER_ROLES = ["agent:reviewer", "team:reviewer", "platform_admin"];
 interface FilterRow { field: string; op: string; value: string; }
 
-export default function SettingsTab({ agentName, memoryEnabled }: Props) {
+export default function SettingsTab({ agentName, agentId, agentTeam, memoryEnabled }: Props) {
   const qc = useQueryClient();
   const { data: triggers = [] } = useQuery({
     queryKey: ["triggers", agentName],
@@ -84,6 +87,13 @@ export default function SettingsTab({ agentName, memoryEnabled }: Props) {
         )}
       </div>
 
+      {/* Access grants (Decision 25/30) — all roles/grantee-types for this agent,
+          above the trigger cards per design doc §9.2. */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">Access</h3>
+        <ArtifactGrantsList artifactType="agent" artifactId={agentId} />
+      </div>
+
       <div className="card p-5">
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-slate-700">Webhook Triggers</h3>
@@ -102,7 +112,7 @@ export default function SettingsTab({ agentName, memoryEnabled }: Props) {
         ) : (
           <div className="space-y-4">
             {webhooks.map((t) => (
-              <WebhookRow key={t.id} agentName={agentName} trigger={t} />
+              <WebhookRow key={t.id} agentName={agentName} agentId={agentId} agentTeam={agentTeam} trigger={t} />
             ))}
           </div>
         )}
@@ -247,9 +257,13 @@ function NewWebhookForm({ agentName, onDone }: { agentName: string; onDone: () =
 
 function WebhookRow({
   agentName,
+  agentId,
+  agentTeam,
   trigger,
 }: {
   agentName: string;
+  agentId: string;
+  agentTeam: string;
   trigger: {
     id: string;
     enabled: boolean;
@@ -328,164 +342,7 @@ function WebhookRow({
         </div>
       )}
 
-      <ClientPanel triggerId={trigger.id} />
-    </div>
-  );
-}
-
-// WS-4 — the per-application allowlist for one webhook trigger. Each registered
-// client signs with its own secret, so a compromised sender is revoked on its own
-// rather than by rotating the token every other sender shares.
-function ClientPanel({ triggerId }: { triggerId: string }) {
-  const qc = useQueryClient();
-  const [adding, setAdding] = useState(false);
-  const [clientId, setClientId] = useState("");
-  const [secret, setSecret] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const { data: clients = [], isLoading, isError } = useQuery({
-    queryKey: ["trigger-clients", triggerId],
-    queryFn: () => listTriggerClients(triggerId),
-  });
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["trigger-clients", triggerId] });
-
-  const register = useMutation({
-    mutationFn: () => createTriggerClient(triggerId, { client_id: clientId.trim() }),
-    onSuccess: (res) => {
-      // The only moment this value will ever exist in the UI — the read model has
-      // no secret field, so a refetch cannot bring it back.
-      setSecret(res.secret);
-      setError(null);
-      setClientId("");
-      toast.success("Client registered — copy the secret now.");
-      invalidate();
-    },
-    onError: (e) => {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(detail ?? "Failed to register client");
-      toast.error(detail ?? "Failed to register client");
-    },
-  });
-
-  const toggle = useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      setClientEnabled(triggerId, id, enabled),
-    onSuccess: (_r, v) => { toast.success(v.enabled ? "Client enabled" : "Client disabled"); invalidate(); },
-    onError: () => toast.error("Failed to update client"),
-  });
-
-  const remove = useMutation({
-    mutationFn: (id: string) => deleteTriggerClient(triggerId, id),
-    onSuccess: () => { toast.success("Client revoked"); invalidate(); },
-    onError: () => toast.error("Failed to revoke client"),
-  });
-
-  const closeAdd = () => { setAdding(false); setSecret(null); setError(null); setClientId(""); };
-
-  return (
-    <div className="border-t border-slate-100 pt-3 space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-slate-500 uppercase">Signing clients</span>
-        {!adding && (
-          <button onClick={() => setAdding(true)} className="btn-secondary text-xs py-1">
-            <Plus size={12} /> Add client
-          </button>
-        )}
-      </div>
-
-      {adding && (secret ? (
-        <div className="border border-emerald-200 bg-emerald-50 rounded-lg p-4 space-y-2">
-          <p className="text-sm font-medium text-emerald-800">
-            Copy this signing secret now — it won&apos;t be shown again.
-          </p>
-          <div className="flex items-center gap-2">
-            <code data-testid="client-secret" className="flex-1 text-xs bg-white border border-emerald-200 rounded px-2 py-1.5 break-all">
-              {secret}
-            </code>
-            <button
-              onClick={() => { navigator.clipboard.writeText(secret); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
-              className="btn-secondary text-xs py-1.5"
-              aria-label="Copy secret"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-            </button>
-          </div>
-          <p className="text-xs text-emerald-700">
-            It is stored encrypted for the gateway and is never retrievable. If you lose it, revoke this client and register a new one.
-          </p>
-          <div className="flex justify-end">
-            <button onClick={closeAdd} className="btn-primary text-xs py-1.5">Done</button>
-          </div>
-        </div>
-      ) : (
-        <div className="border border-slate-200 rounded-lg p-4 space-y-2 bg-slate-50/50">
-          <label className="block">
-            <span className="text-xs text-slate-500 uppercase">Client ID — names the sending application</span>
-            <input
-              value={clientId}
-              onChange={(e) => { setClientId(e.target.value); setError(null); }}
-              placeholder="billing-service"
-              className="mt-1 w-full font-mono text-sm border border-slate-300 rounded px-2 py-1.5"
-            />
-          </label>
-          {error && <p className="text-xs text-red-600">{error}</p>}
-          <div className="flex justify-end gap-2">
-            <button onClick={closeAdd} className="btn-secondary text-xs py-1.5">Cancel</button>
-            <button
-              onClick={() => register.mutate()}
-              disabled={register.isPending || !clientId.trim()}
-              className="btn-primary text-xs py-1.5 disabled:opacity-50"
-            >
-              {register.isPending ? "Registering…" : "Register"}
-            </button>
-          </div>
-        </div>
-      ))}
-
-      {isLoading ? (
-        <p className="text-xs text-slate-400">Loading clients…</p>
-      ) : isError ? (
-        <p className="text-xs text-red-600">Failed to load clients.</p>
-      ) : clients.length === 0 ? (
-        <p className="text-xs text-slate-400">
-          No clients registered. Senders must present a registered client-id and signature.
-        </p>
-      ) : (
-        <div className="space-y-2">
-          {clients.map((c) => (
-            <div key={c.client_id} data-testid={`client-row-${c.client_id}`} className="flex items-center justify-between gap-3 border border-slate-200 rounded px-3 py-2">
-              <div className="min-w-0">
-                <code className="text-xs text-slate-700">{c.client_id}</code>
-                <p className="text-xs text-slate-400">
-                  Registered by <span className="font-mono text-slate-500">{c.created_by ?? "unknown"}</span> on {new Date(c.created_at).toLocaleString()}
-                </p>
-              </div>
-              <div className="flex items-center gap-3 shrink-0">
-                <label className="inline-flex items-center gap-1.5 text-xs text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={c.enabled}
-                    disabled={toggle.isPending}
-                    onChange={(e) => toggle.mutate({ id: c.client_id, enabled: e.target.checked })}
-                    className="rounded"
-                    aria-label={`Enabled ${c.client_id}`}
-                  />
-                  Enabled
-                </label>
-                <button
-                  onClick={() => remove.mutate(c.client_id)}
-                  disabled={remove.isPending}
-                  className="text-slate-400 hover:text-red-500"
-                  aria-label={`Revoke ${c.client_id}`}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <InvokeAccessPanel artifactType="agent" artifactId={agentId} artifactTeam={agentTeam} />
     </div>
   );
 }

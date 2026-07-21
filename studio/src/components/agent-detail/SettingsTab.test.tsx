@@ -3,27 +3,40 @@ import { screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../../test/utils";
 import SettingsTab from "./SettingsTab";
-import type { AgentTrigger } from "../../api/registryApi";
+import type { AgentTrigger, ArtifactRoleGrant, Application } from "../../api/registryApi";
 
+// SettingsTab now composes the shared ArtifactGrantsList + InvokeAccessPanel
+// (Decision 30). The retired per-trigger ClientPanel (createTriggerClient etc.)
+// is gone — its coverage is replaced by the invoke-access block below, which
+// drives the new applications + artifact_role_grants surfaces the component
+// actually renders now.
 vi.mock("../../api/registryApi", () => ({
   listTriggers: vi.fn(),
   updateTrigger: vi.fn(),
   rotateToken: vi.fn(),
   createTrigger: vi.fn(),
   updateAgent: vi.fn(),
-  createTriggerClient: vi.fn(),
-  listTriggerClients: vi.fn(),
-  setClientEnabled: vi.fn(),
-  deleteTriggerClient: vi.fn(),
+  listApplications: vi.fn(),
+  listArtifactGrants: vi.fn(),
+  createArtifactGrant: vi.fn(),
+  revokeArtifactGrant: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import {
   listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
-  createTriggerClient, listTriggerClients, setClientEnabled, deleteTriggerClient,
+  listApplications, listArtifactGrants, createArtifactGrant, revokeArtifactGrant,
 } from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
+const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
+
+// Every render needs the two new required props (agentId/agentTeam); a helper
+// keeps that in one place so a prop change is one edit, not thirty.
+const renderTab = (props: Partial<{ agentName: string; memoryEnabled: boolean }> = {}) =>
+  renderWithProviders(
+    <SettingsTab agentName="my-agent" agentId="ag1" agentTeam="platform" {...props} />
+  );
 
 const scheduleTrigger: AgentTrigger = {
   id: "t1",
@@ -54,74 +67,75 @@ const webhookTrigger: AgentTrigger = {
   updated_at: NOW,
 };
 
-const registeredClient = {
-  client_id: "billing-service",
+const billingApp: Application = {
+  id: "app1",
+  team_name: "platform",
+  name: "billing-service",
   enabled: true,
   created_by: "75c7c8b3-admin-sub",
   created_at: NOW,
+  rotated_at: null,
+};
+
+const invokerGrant: ArtifactRoleGrant = {
+  id: "g-inv",
+  artifact_type: "agent",
+  artifact_id: "ag1",
+  role: "invoker",
+  grantee_type: "application",
+  grantee_id: "app1",
+  granted_by: "75c7c8b3-admin-sub",
+  granted_at: NOW,
+  revoked_at: null,
+  grantee_label: "billing-service",
 };
 
 describe("SettingsTab", () => {
   beforeEach(() => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (updateTrigger as ReturnType<typeof vi.fn>).mockResolvedValue(scheduleTrigger);
-    (rotateToken as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mock(listTriggers).mockResolvedValue([]);
+    mock(updateTrigger).mockResolvedValue(scheduleTrigger);
+    mock(rotateToken).mockResolvedValue({
       trigger_id: "t2",
       token: "tok123",
       webhook_url: "https://example.com/hooks/my-agent/tok123",
     });
-    (createTrigger as ReturnType<typeof vi.fn>).mockResolvedValue({
+    mock(createTrigger).mockResolvedValue({
       ...webhookTrigger,
       token: "newtok",
       webhook_url: "https://example.com/hooks/my-agent/newtok",
     });
-    (updateAgent as ReturnType<typeof vi.fn>).mockResolvedValue({});
-    (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (createTriggerClient as ReturnType<typeof vi.fn>).mockResolvedValue({
-      client_id: "billing-service",
-      secret: "whsec_abc123secret",
-      created_at: NOW,
-    });
-    (setClientEnabled as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ...registeredClient,
-      enabled: false,
-    });
-    (deleteTriggerClient as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    mock(updateAgent).mockResolvedValue({});
+    mock(listApplications).mockResolvedValue([]);
+    mock(listArtifactGrants).mockResolvedValue([]);
+    mock(createArtifactGrant).mockResolvedValue(invokerGrant);
+    mock(revokeArtifactGrant).mockResolvedValue(undefined);
   });
 
   it("shows empty-state copy when there are no triggers", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     await waitFor(() => {
-      expect(
-        screen.getByText(/no schedule triggers configured/i)
-      ).toBeInTheDocument();
-      expect(
-        screen.getByText(/no webhook triggers configured/i)
-      ).toBeInTheDocument();
+      expect(screen.getByText(/no schedule triggers configured/i)).toBeInTheDocument();
+      expect(screen.getByText(/no webhook triggers configured/i)).toBeInTheDocument();
     });
   });
 
   it("renders a schedule trigger row with cron expression and timezone", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([scheduleTrigger]);
+    renderTab();
 
-    // Cron input pre-filled
     const cronInput = await screen.findByPlaceholderText("* * * * *");
     expect((cronInput as HTMLInputElement).value).toBe("0 9 * * *");
 
-    // Timezone select pre-set (first combobox in the row; the second is the
-    // WS-2 approver-role select).
     const tzSelect = screen.getAllByRole("combobox")[0];
     expect((tzSelect as HTMLSelectElement).value).toBe("UTC");
 
-    // Enabled checkbox
     const enabledCheckbox = screen.getByRole("checkbox", { name: /enabled/i });
     expect((enabledCheckbox as HTMLInputElement).checked).toBe(true);
   });
 
   it("calls updateTrigger when Save is clicked", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([scheduleTrigger]);
+    renderTab();
 
     await screen.findByPlaceholderText("* * * * *");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
@@ -136,8 +150,8 @@ describe("SettingsTab", () => {
   });
 
   it("sends approver_role when updating a schedule trigger (WS-2 T014)", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([scheduleTrigger]);
+    renderTab();
 
     await screen.findByPlaceholderText("* * * * *");
     await userEvent.click(screen.getByRole("button", { name: /save/i }));
@@ -152,16 +166,16 @@ describe("SettingsTab", () => {
   });
 
   it("shows the authorizing human (armed_by) on an armed trigger (WS-2 T014)", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
+    mock(listTriggers).mockResolvedValue([
       { ...scheduleTrigger, armed_by: "75c7c8b3-armed-sub", approver_role: "team:reviewer" },
     ]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
 
     expect(await screen.findByText(/75c7c8b3-armed-sub/)).toBeInTheDocument();
   });
 
   it("sends approver_role when creating a schedule trigger (WS-2 T014)", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     await userEvent.click(await screen.findByRole("button", { name: /new schedule trigger/i }));
     await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
     await waitFor(() =>
@@ -173,32 +187,27 @@ describe("SettingsTab", () => {
   });
 
   it("renders a webhook trigger row with Rotate Token button", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([webhookTrigger]);
+    renderTab();
 
     expect(await screen.findByRole("button", { name: /rotate token/i })).toBeInTheDocument();
   });
 
   it("reveals webhook URL after Rotate Token is clicked", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([webhookTrigger]);
+    renderTab();
 
     await userEvent.click(await screen.findByRole("button", { name: /rotate token/i }));
 
-    await waitFor(() =>
-      expect(rotateToken).toHaveBeenCalledWith("my-agent", "t2")
-    );
+    await waitFor(() => expect(rotateToken).toHaveBeenCalledWith("my-agent", "t2"));
     expect(
       await screen.findByText("https://example.com/hooks/my-agent/tok123")
     ).toBeInTheDocument();
   });
 
   it("renders both sections (Schedule + Webhook) when both trigger types exist", async () => {
-    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
-      scheduleTrigger,
-      webhookTrigger,
-    ]);
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    mock(listTriggers).mockResolvedValue([scheduleTrigger, webhookTrigger]);
+    renderTab();
 
     expect(await screen.findByText(/schedule triggers/i)).toBeInTheDocument();
     expect(screen.getByText(/webhook triggers/i)).toBeInTheDocument();
@@ -207,15 +216,14 @@ describe("SettingsTab", () => {
   });
 
   it("has New schedule/webhook trigger buttons", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     expect(await screen.findByRole("button", { name: /new schedule trigger/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /new webhook trigger/i })).toBeInTheDocument();
   });
 
   it("creates a schedule trigger from the new-trigger form", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     await userEvent.click(await screen.findByRole("button", { name: /new schedule trigger/i }));
-    // form appears with a Create button
     await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
     await waitFor(() =>
       expect(createTrigger).toHaveBeenCalledWith(
@@ -226,7 +234,7 @@ describe("SettingsTab", () => {
   });
 
   it("new-schedule form sends input_payload when provided", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     await userEvent.click(await screen.findByRole("button", { name: /new schedule trigger/i }));
     fireEvent.change(screen.getByPlaceholderText(/weekly-report/), {
       target: { value: '{"task":"nightly"}' },
@@ -241,7 +249,7 @@ describe("SettingsTab", () => {
   });
 
   it("creates a webhook trigger and shows the one-time URL", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" />);
+    renderTab();
     await userEvent.click(await screen.findByRole("button", { name: /new webhook trigger/i }));
     await userEvent.click(screen.getByRole("button", { name: /^create$/i }));
     await waitFor(() =>
@@ -256,7 +264,7 @@ describe("SettingsTab", () => {
   });
 
   it("toggles memory via updateAgent", async () => {
-    renderWithProviders(<SettingsTab agentName="my-agent" memoryEnabled={false} />);
+    renderTab({ memoryEnabled: false });
     const memoryToggle = await screen.findByRole("checkbox", { name: /enable memory/i });
     await userEvent.click(memoryToggle);
     await waitFor(() =>
@@ -265,130 +273,89 @@ describe("SettingsTab", () => {
   });
 
   // -------------------------------------------------------------------------
-  // WS-4 — webhook signing-client panel
+  // Decision 30 — auth_mode display (WebhookRow) + invoke-access via
+  // applications + artifact_role_grants (InvokeAccessPanel / ArtifactGrantsList)
   // -------------------------------------------------------------------------
-  describe("signing clients (WS-4)", () => {
-    const openAddForm = async () => {
-      await userEvent.click(await screen.findByRole("button", { name: /add client/i }));
-      await userEvent.type(screen.getByPlaceholderText("billing-service"), "billing-service");
-    };
-
+  describe("auth mode + invoke access (Decision 30)", () => {
     it("shows the trigger's auth_mode so an operator can see which door is open", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
+      mock(listTriggers).mockResolvedValue([webhookTrigger]);
+      renderTab();
       expect(await screen.findByText("client_signed")).toBeInTheDocument();
     });
 
-    it("falls back to token mode display for a pre-WS-4 trigger", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([
-        { ...webhookTrigger, auth_mode: undefined },
-      ]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
+    it("falls back to token mode display for a pre-cutover trigger", async () => {
+      mock(listTriggers).mockResolvedValue([{ ...webhookTrigger, auth_mode: undefined }]);
+      renderTab();
       expect(await screen.findByText("token")).toBeInTheDocument();
     });
 
-    it("renders the registered client list with its audit fields", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-
-      expect(await screen.findByText("billing-service")).toBeInTheDocument();
-      expect(screen.getByText(/75c7c8b3-admin-sub/)).toBeInTheDocument();
-      await waitFor(() => expect(listTriggerClients).toHaveBeenCalledWith("t2"));
+    it("InvokeAccessPanel shows the empty state when the team has no applications", async () => {
+      mock(listTriggers).mockResolvedValue([webhookTrigger]);
+      renderTab();
+      expect(await screen.findByTestId("invoke-empty-state")).toHaveTextContent(
+        /no applications registered for your team yet/i
+      );
     });
 
-    it("shows the loading state while clients are in flight", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}));
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-      expect(await screen.findByText(/loading clients/i)).toBeInTheDocument();
+    it("lists an application's invoker grant and its disabled badge", async () => {
+      mock(listTriggers).mockResolvedValue([webhookTrigger]);
+      mock(listApplications).mockResolvedValue([{ ...billingApp, enabled: false }]);
+      mock(listArtifactGrants).mockResolvedValue([invokerGrant]);
+      renderTab();
+
+      expect(await screen.findByTestId("invoker-grant-app1")).toHaveTextContent("billing-service");
+      // The disabled badge depends on the applications query, which may resolve
+      // after the grant row — wait for it rather than reading synchronously.
+      expect(await screen.findByText(/application disabled/i)).toBeInTheDocument();
+      await waitFor(() => expect(listArtifactGrants).toHaveBeenCalledWith("agent", "ag1"));
     });
 
-    it("shows the empty state when no clients are registered", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-      expect(await screen.findByText(/no clients registered/i)).toBeInTheDocument();
-    });
+    it("grants invoke access to a picked application", async () => {
+      mock(listTriggers).mockResolvedValue([webhookTrigger]);
+      mock(listApplications).mockResolvedValue([billingApp]);
+      renderTab();
 
-    it("shows an error state when the client list fails to load", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-      expect(await screen.findByText(/failed to load clients/i)).toBeInTheDocument();
-    });
-
-    it("registers a client and reveals the secret exactly once", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-
-      await openAddForm();
-      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
+      await userEvent.click(await screen.findByRole("button", { name: /grant access/i }));
+      await userEvent.selectOptions(
+        screen.getByLabelText(/application to grant invoke access/i),
+        "app1"
+      );
+      // The unattended-execution acknowledgment appears before confirming.
+      expect(screen.getByTestId("invoke-ack")).toHaveTextContent(/without a human present/i);
+      await userEvent.click(screen.getByRole("button", { name: /^grant access$/i }));
 
       await waitFor(() =>
-        expect(createTriggerClient).toHaveBeenCalledWith("t2", { client_id: "billing-service" })
+        expect(createArtifactGrant).toHaveBeenCalledWith("agent", "ag1", {
+          grantee_type: "application",
+          grantee_id: "app1",
+          role: "invoker",
+        })
       );
-      expect(await screen.findByTestId("client-secret")).toHaveTextContent("whsec_abc123secret");
-      expect(screen.getByText(/won't be shown again/i)).toBeInTheDocument();
     });
 
-    it("does not show the secret again once the reveal is dismissed", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      // The refetch after registering returns the read model — which structurally
-      // has no secret field, so there is nothing for the panel to re-render.
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
+    it("ArtifactGrantsList renders mixed roles (agent-admin / approver / invoker)", async () => {
+      mock(listArtifactGrants).mockResolvedValue([
+        { ...invokerGrant, id: "g1", role: "agent-admin", grantee_type: "user", grantee_id: "alice", grantee_label: null },
+        { ...invokerGrant, id: "g2", role: "approver", grantee_type: "team", grantee_id: "sec", grantee_label: null },
+        invokerGrant,
+      ]);
+      renderTab();
 
-      await openAddForm();
-      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
-      await screen.findByTestId("client-secret");
-
-      await userEvent.click(screen.getByRole("button", { name: /^done$/i }));
-
-      await waitFor(() => expect(screen.queryByTestId("client-secret")).not.toBeInTheDocument());
-      expect(screen.queryByText("whsec_abc123secret")).not.toBeInTheDocument();
-      // The client itself survives — only the secret is gone.
-      expect(await screen.findByText("billing-service")).toBeInTheDocument();
+      expect(await screen.findByText("agent-admin")).toBeInTheDocument();
+      expect(screen.getByText("approver")).toBeInTheDocument();
+      // "invoker" appears in the grants list (ArtifactGrantsList).
+      expect(screen.getAllByText("invoker").length).toBeGreaterThan(0);
     });
 
-    it("surfaces the 409 duplicate-client-id error inline", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (createTriggerClient as ReturnType<typeof vi.fn>).mockRejectedValue({
-        response: {
-          status: 409,
-          data: { detail: "Client 'billing-service' is already registered on this trigger" },
-        },
-      });
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-
-      await openAddForm();
-      await userEvent.click(screen.getByRole("button", { name: /^register$/i }));
-
-      expect(await screen.findByText(/already registered on this trigger/i)).toBeInTheDocument();
-      // No secret is invented on a failed registration.
-      expect(screen.queryByTestId("client-secret")).not.toBeInTheDocument();
-    });
-
-    it("disables a client via setClientEnabled(false)", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
+    it("revokes a grant via revokeArtifactGrant", async () => {
+      mock(listArtifactGrants).mockResolvedValue([invokerGrant]);
+      renderTab();
 
       await userEvent.click(
-        await screen.findByRole("checkbox", { name: /enabled billing-service/i })
+        await screen.findByRole("button", { name: /revoke invoker for billing-service/i })
       );
       await waitFor(() =>
-        expect(setClientEnabled).toHaveBeenCalledWith("t2", "billing-service", false)
-      );
-    });
-
-    it("revokes a client via deleteTriggerClient", async () => {
-      (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([webhookTrigger]);
-      (listTriggerClients as ReturnType<typeof vi.fn>).mockResolvedValue([registeredClient]);
-      renderWithProviders(<SettingsTab agentName="my-agent" />);
-
-      await userEvent.click(await screen.findByRole("button", { name: /revoke billing-service/i }));
-      await waitFor(() =>
-        expect(deleteTriggerClient).toHaveBeenCalledWith("t2", "billing-service")
+        expect(revokeArtifactGrant).toHaveBeenCalledWith("agent", "ag1", "g-inv")
       );
     });
   });

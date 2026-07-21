@@ -39,6 +39,7 @@ import ObservabilityDashboardPage from "./pages/ObservabilityDashboardPage";
 import ObservabilityComparePage from "./pages/ObservabilityComparePage";
 import CostConsolePage from "./pages/CostConsolePage";
 import CredentialsPage from "./pages/CredentialsPage";
+import ApplicationsPage from "./pages/ApplicationsPage";
 import { DEMO } from "./demo/demo";
 import DemoHomePage from "./pages/preview/DemoHomePage";
 import KnowledgeBasesPage from "./pages/KnowledgeBasesPage";
@@ -80,6 +81,7 @@ export default function App() {
               <Route path="/agents/:name" element={<AgentDetailPage />} />
               <Route path="/providers" element={<ProvidersPage />} />
               <Route path="/credentials" element={<CredentialsPage />} />
+              <Route path="/applications" element={<ApplicationsPage />} />
               <Route path="/agent-graphs" element={<AgentGraphsPage />} />
               <Route path="/agent-graphs/new" element={<CanvasPage />} />
               <Route path="/agent-graphs/:id" element={<CanvasPage />} />

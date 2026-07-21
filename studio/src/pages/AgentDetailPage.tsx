@@ -200,7 +200,7 @@ export default function AgentDetailPage() {
       {activeTab === "settings" && (
         <div className="space-y-4">
           <SettingsContent agent={agent} />
-          <SettingsTab agentName={agent.name} memoryEnabled={agent.memory_enabled} />
+          <SettingsTab agentName={agent.name} agentId={agent.id} agentTeam={agent.team} memoryEnabled={agent.memory_enabled} />
         </div>
       )}
 

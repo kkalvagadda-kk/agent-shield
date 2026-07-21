@@ -912,6 +912,7 @@ export default function WorkflowBuilderPage() {
         <WorkflowTriggersPanel
           workflowId={compositeWorkflowId}
           workflowName={compositeWorkflowName ?? 'workflow'}
+          workflowTeam={currentTeam || authTeam || ''}
           onClose={() => setShowTriggers(false)}
         />
       )}

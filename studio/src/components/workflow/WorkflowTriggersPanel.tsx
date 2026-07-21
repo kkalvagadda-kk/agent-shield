@@ -10,6 +10,8 @@ import {
   rotateWorkflowToken,
   type AgentTrigger,
 } from '../../api/registryApi';
+import InvokeAccessPanel from '../shared/InvokeAccessPanel';
+import ArtifactGrantsList from '../shared/ArtifactGrantsList';
 
 const COMMON_TZ = [
   'UTC',
@@ -29,10 +31,11 @@ interface FilterRow {
 interface Props {
   workflowId: string;
   workflowName: string;
+  workflowTeam: string;
   onClose: () => void;
 }
 
-export default function WorkflowTriggersPanel({ workflowId, workflowName, onClose }: Props) {
+export default function WorkflowTriggersPanel({ workflowId, workflowName, workflowTeam, onClose }: Props) {
   const qc = useQueryClient();
   const { data: triggers = [], isLoading } = useQuery({
     queryKey: ['workflow-triggers', workflowId],
@@ -64,6 +67,12 @@ export default function WorkflowTriggersPanel({ workflowId, workflowName, onClos
         </p>
 
         <div className="overflow-y-auto flex-1 -mx-1 px-1 space-y-6">
+          {/* Access grants (Decision 25/30) — all roles/grantee-types for this workflow,
+              at the top of the modal body per design doc §9.2. */}
+          <section>
+            <ArtifactGrantsList artifactType="workflow" artifactId={workflowId} />
+          </section>
+
           {/* Schedules */}
           <section>
             <div className="flex items-center justify-between mb-2">
@@ -136,6 +145,7 @@ export default function WorkflowTriggersPanel({ workflowId, workflowName, onClos
                 <WebhookRow
                   key={t.id}
                   workflowId={workflowId}
+                  workflowTeam={workflowTeam}
                   trigger={t}
                   onChanged={invalidate}
                 />
@@ -427,10 +437,12 @@ function ScheduleRow({
 
 function WebhookRow({
   workflowId,
+  workflowTeam,
   trigger,
   onChanged,
 }: {
   workflowId: string;
+  workflowTeam: string;
   trigger: AgentTrigger;
   onChanged: () => void;
 }) {
@@ -502,6 +514,7 @@ function WebhookRow({
           {JSON.stringify(trigger.filter_conditions, null, 2)}
         </pre>
       )}
+      <InvokeAccessPanel artifactType="workflow" artifactId={workflowId} artifactTeam={workflowTeam} />
     </div>
   );
 }
