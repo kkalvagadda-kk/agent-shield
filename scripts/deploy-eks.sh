@@ -65,7 +65,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
 REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002). 0.2.221: Decision 30 — matches values.yaml
-DEPLOY_CONTROLLER_TAG="0.1.39"   # 0.1.39: per-provider env map (base_url→OLLAMA_BASE_URL); >=0.1.38 imagePullSecrets on agent pods (note 7)
+DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) so sandbox HITL approvals are playground-context (inline + resumable), not routed to the reviewer console. 0.1.39: per-provider env map; >=0.1.38 imagePullSecrets on agent pods (note 7)
 DECLARATIVE_RUNNER_TAG="0.1.59"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
 STUDIO_TAG="0.1.158"   # 0.1.158: matches values.yaml (branch made no studio source change — CP3/frontend rebuilds this again after Phases 6-8)
 SCHEDULER_TAG="0.1.1"

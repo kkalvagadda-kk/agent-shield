@@ -740,7 +740,12 @@ deploy-controller:
     # AGENTSHIELD_DEPLOYMENT_ID into agent pods.
     # 0.1.38: sets imagePullSecrets on agent pods (private-registry pulls).
     # 0.1.39: per-provider LLM env map (base_url→OLLAMA_BASE_URL for ollama).
-    tag: "0.1.39"
+    # 0.1.40: sandbox agent pods get AGENTSHIELD_PLAYGROUND=true + AGENTSHIELD_SANDBOX=true
+    #   (both were HARDCODED "false" in manifest_builder.py). A sandbox pod was creating
+    #   production-context HITL approvals → OPA parked low-risk tools + the inline sandbox
+    #   approve/resume never worked (chat hung after approval). Now derived from the
+    #   deployment's `environment`. See docs/bugs/sandbox-hitl-playground-context.md.
+    tag: "0.1.40"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)

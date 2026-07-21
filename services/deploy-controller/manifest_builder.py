@@ -177,9 +177,23 @@ def build_deployment(
             name="AGENTSHIELD_SA_TOKEN_PATH",
             value="/var/run/secrets/sa-token/token",
         ),
-        # Playground context — false for production deployments
-        k8s_client.V1EnvVar(name="AGENTSHIELD_PLAYGROUND", value="false"),
-        k8s_client.V1EnvVar(name="AGENTSHIELD_SANDBOX", value="false"),
+        # HITL approval context is decided by these at the pod (SDK hitl.require_approval
+        # reads AGENTSHIELD_PLAYGROUND: "true" -> context="playground" -> the approval is
+        # inline in the sandbox chat and the chat auto-resumes on approve; "false" ->
+        # context="production" -> routes to the reviewer console). These were HARDCODED
+        # "false" for EVERY pod, so a SANDBOX agent created production-context approvals:
+        # OPA was stricter (parked low-risk tools) AND the inline sandbox approve/resume
+        # never worked — the chat hung after approval. Derive from the deployment's own
+        # `environment` (already resolved above) so sandbox ⇒ playground/inline, production
+        # ⇒ reviewer console. Explicit, not hardcoded — the No-Bandaid fix for the drift.
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_PLAYGROUND",
+            value="true" if environment != "production" else "false",
+        ),
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_SANDBOX",
+            value="true" if environment == "sandbox" else "false",
+        ),
     ]
 
     # --- LLM provider env vars ---

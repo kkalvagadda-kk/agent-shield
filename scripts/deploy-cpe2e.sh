@@ -376,7 +376,7 @@ MINIO_CP1_TAG="0.1.0"
 # 0.1.38: agent pods now carry imagePullSecrets (AGENT_IMAGE_PULL_SECRETS) —
 # they run under a per-agent SA, so a secret on the default SA never reached
 # them and any private-registry pull failed with "no basic auth credentials".
-DEPLOY_CONTROLLER_TAG="0.1.39"
+DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) — fixes sandbox HITL approval context (inline + resumable)
 # 0.1.142: POC-2 attributed bubbles + eval transcript + share-context toggle; workflow poll waits for members to populate (race fix)
 # 0.1.146: POC-4 Knowledge Base pages (list/detail/upload/test-retrieval/attach) + runtime citation chips
 # 0.1.147: POC-5 Conversations — ConversationSidebar + standalone page + docked History (Agent/Catalog chat) + deployment Conversations tab + nav promotion (this image contains BOTH POC-4 + POC-5 frontends)
