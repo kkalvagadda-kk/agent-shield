@@ -1,116 +1,131 @@
 # Contract — MCP Proxy internal endpoints
 
-New service: `services/mcp-proxy`. Internal-only (no public ingress; reached from `registry-api` and from agent pods' SDK/declarative-runner over the in-cluster Service `agentshield-mcp-proxy.agentshield-platform.svc.cluster.local:8000`). No end-user auth on these endpoints — trust boundary is NetworkPolicy, matching every other internal platform service (`python-executor`, `embedding-sidecar`).
+New service: `services/mcp-proxy`, in-cluster Service `agentshield-mcp-proxy.agentshield-platform.svc.cluster.local:8080`. Reached from **agent pods** (SDK `McpToolExecutor` / declarative-runner `McpToolNodeExecutor` → `/internal/tools/call`) and from **registry-api** (`/internal/discover`).
 
-Implemented in `services/mcp-proxy/main.py`, request/response models in `services/mcp-proxy/schemas.py`.
-
----
-
-## `GET /health`
-
-Liveness/readiness probe target (mirrors `python-executor`'s `/health` exactly). `200 {"status": "ok"}` unconditionally once the FastAPI app is up — does not depend on any MCP server being reachable (a downstream server outage must not crash-loop the proxy pod).
+Implemented in `services/mcp-proxy/main.py`; request/response models in `services/mcp-proxy/schemas.py`. Wire shapes are the design doc §3c contract; auth is the design doc §3b contract. The proxy is a **pure MCP wire client** — it does **not** scan output (that runs in `governed_tool` after return) and does **not** de-anonymize (args arrive already de-anonymized).
 
 ---
 
-## `POST /internal/discover`
+## Authentication (design §3b) — applies to `/internal/*` only
 
-Called by `registry-api` on server register and on `/sync`.
+Unlike the ungoverned in-cluster baseline (python-executor/embedding take zero auth), the proxy is the credential custodian for every registered server, so a forged `/internal/tools/call` is a credential confused-deputy. Every `/internal/*` request MUST carry `Authorization: Bearer <token>` where `<token>` is a **projected K8s ServiceAccount token with audience `agentshield-mcp-proxy`**.
 
-### Request
-```json
-{ "server_id": "b3e5b6b0-...-uuid" }
+- **Verification:** the proxy calls K8s `TokenReview` (`AuthenticationV1Api.create_token_review`, `spec.audiences=["agentshield-mcp-proxy"]`). It requires `status.authenticated == true` **and** `agentshield-mcp-proxy ∈ status.audiences`, then extracts `status.user.username` = `system:serviceaccount:<ns>:<sa>` as `caller_sa_subject`. Positive reviews are cached keyed by `sha256(token)` until the token's `exp` (parsed from the JWT payload) — no K8s hit per call.
+- **Proxy SA privileges:** `system:auth-delegator` (TokenReview) + `get` on `secrets` in namespace `agentshield-mcp` (credential Secrets). Nothing else. Never the DB, never `AGENTSHIELD_ENCRYPTION_KEY`.
+- **Failure mapping:** missing / malformed / unauthenticated / wrong-audience token → `401 Unauthorized`. A well-authenticated caller that fails the authz floor (below) → `403 Forbidden`.
+
+`X-AgentShield-Trace-ID` is accepted and echoed (safety-orchestrator convention).
+
+`GET /health` and `GET /ready` are **unauthenticated** (probe targets) — they never touch a server or a credential.
+
+---
+
+## `GET /health` · `GET /ready`
+
+Liveness/readiness (mirror python-executor). `200 {"status": "ok"}` unconditionally once the app is up — never depends on a downstream MCP server being reachable (a server outage must not crash-loop the proxy). `/ready` may additionally report whether the in-cluster K8s client initialized.
+
+---
+
+## `POST /internal/discover`  — admin plane
+
+Caller = **registry-api only**. On register and on `/sync`, registry-api first materializes the per-server credential Secret (data-model.md), then calls this endpoint presenting a Bearer token whose subject is registry-api's SA. The proxy verifies the token (above) **and** that `caller_sa_subject` equals registry-api's SA subject; any other authenticated subject → `403` (this is admin-plane, not agent-facing). No per-tool grant check applies to discover.
+
+### Request — `McpDiscoverRequest`
+```python
+class McpDiscoverRequest(BaseModel):
+    server_id: UUID
 ```
-That's the whole request — per the architecture doc §3's Data Flow ("registry-api... calls MCP Proxy `POST /internal/discover {server_id}`") and research.md B3, MCP Proxy resolves everything else (`server_url`, `transport`, `auth_config_id`, credentials) itself by calling back into `registry-api`.
+That is the whole request. The proxy resolves everything else (`server_url`, `transport`, `transport_config`, `is_external`, `owner_team`, `auth_headers`) by reading the per-server K8s Secret `agentshield-mcp-server-{server_id}` in `agentshield-mcp` (research.md B3) — no DB, no callback.
 
 ### Server-side flow
-1. `GET {REGISTRY_API_URL}/api/v1/mcp-servers/{server_id}` → `server_url`, `transport`, `transport_config`, `auth_config_id`, `is_external`. `404` from registry-api here is an unexpected-state error (registry-api just inserted this row) — treated as a discover failure, not retried.
-2. If `auth_config_id` is set: resolve credentials (see `credentials.py`, research.md B3) → a headers dict (e.g. `{"Authorization": "Bearer <token>"}` or `{"X-API-Key": "<key>"}`, shape driven by the `AuthConfig.type`).
-3. Open a `streamable_http` client session (`mcp_client.py`) against `server_url` with those headers, run `initialize()`.
-4. Run `list_tools()`.
-5. Cache the live session in `session_cache.py` keyed by `server_id` (subsequent `/tools-call`s for the same server on this replica reuse it).
-6. Return the discovered tool list + capability flags.
+1. `credentials.read_server_secret(server_id)` → `ServerConnection`. Secret missing → this is an error result (below), not an exception to the caller.
+2. Open a `streamable_http` client + `mcp.ClientSession` against `server_url` with `auth_headers`, run `initialize()` (capture the negotiated `protocolVersion` and whether `tools.listChanged` capability was advertised → `list_changed_supported`).
+3. Run `list_tools()`.
+4. Cache the live session in `session_cache.py` keyed by `server_id`.
+5. Return the discovered tools + capability flags.
 
-### Response — success
-```json
-{
-  "status": "connected",
-  "tools": [
-    {
-      "mcp_tool_name": "search_issues",
-      "description": "Search issues in a GitHub repository",
-      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
-    }
-  ],
-  "list_changed_supported": false,
-  "health_detail": {"last_error": null, "consecutive_failures": 0}
-}
+### Response — `McpDiscoverResponse`  (always HTTP `200`)
+```python
+class McpDiscoveredTool(BaseModel):
+    name: str                       # RAW upstream tool name → registry-api namespaces it to Tool.name
+    description: str | None = None
+    input_schema: dict              # JSON Schema → Tool.input_schema
+
+class McpDiscoverResponse(BaseModel):
+    ok: bool                        # true iff connect+initialize+list_tools all succeeded
+    status: str                     # 'connected' | 'error'  → MCPServer.status
+    health_detail: str | None = None    # failure reason (string) → registry-api folds into health_detail.last_error
+    protocol_version: str | None = None
+    list_changed_supported: bool = False
+    tools: list[McpDiscoveredTool] = []
 ```
 
-### Response — failure (still HTTP `200` — see note below)
+Success example:
 ```json
-{
-  "status": "error",
-  "tools": [],
+{ "ok": true, "status": "connected", "health_detail": null, "protocol_version": "2025-06-18",
   "list_changed_supported": false,
-  "health_detail": {"last_error": "connection refused to https://...: [Errno 111]", "consecutive_failures": 1}
-}
+  "tools": [ {"name": "search_issues", "description": "Search issues", "input_schema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}} ] }
+```
+Failure example (connection refused / bad creds / timeout / secret missing) — still HTTP `200`:
+```json
+{ "ok": false, "status": "error", "health_detail": "connection refused to http://...: [Errno 111]",
+  "protocol_version": null, "list_changed_supported": false, "tools": [] }
 ```
 
-**Note on status codes:** `/internal/discover` returns HTTP `200` for both outcomes — the *distinction* is carried in the `status` field, not the HTTP status line. This mirrors how `registry-api`'s own `POST /mcp-servers` treats a failed connect as a successful *API call* about an unhealthy server (data-model.md / the registry-api contract). Reserve HTTP-level errors (`4xx`/`5xx`) for genuinely malformed requests (e.g. `server_id` missing from the body → `422`) or the registry-api lookup itself failing unexpectedly (`502`, since that's an internal-plumbing failure, not "the target MCP server is down").
+**Ownership split:** the **proxy** connects + lists; **registry-api** owns every DB write — the `{server_name}__{mcp_tool_name}` namespacing, `Tool` upserts, and `discovered_tool_count`/`last_synced_at`/`status`/`health_detail`. Namespacing never happens in the proxy.
 
-### Errors
-- `422` — request body fails schema validation (missing `server_id`, not a valid UUID).
-- `502 Bad Gateway` — the callback to `registry-api` (`GET /api/v1/mcp-servers/{server_id}`) itself failed (registry-api unreachable, or returned a non-404 5xx) — distinct from "the *target MCP server* is unreachable," which is a `200` + `status: "error"` as above.
+### Errors (real HTTP status)
+- `401` — missing/invalid/wrong-audience token.
+- `403` — authenticated, but `caller_sa_subject` is not registry-api's SA (discover is admin-plane).
+- `422` — body fails schema validation (missing/invalid `server_id`).
+- A connect/`initialize` failure or a missing Secret is **not** an HTTP error — it is `200` + `status:"error"` + a `health_detail` reason (mirrors registry-api treating a failed connect as a successful API call about an unhealthy server).
 
 ---
 
-## `POST /internal/tools-call`
+## `POST /internal/tools/call`  — data plane
 
-Called by the SDK's `McpToolExecutor` and the declarative-runner's `McpToolNodeExecutor` — **after** `governed_tool`'s OPA-authorize + HITL-approve + de-anonymize-args steps have already run (Decision 27's gate ordering: authorize → approve → de-anonymize → **execute** → scan). This endpoint is the "execute" step only; it has no governance logic of its own.
+Caller = **agent pod** (SDK `McpToolExecutor` / runner `McpToolNodeExecutor`), **after** `governed_tool`'s OPA-authorize + HITL-approve + de-anonymize steps have run. This endpoint is the "execute" step only; it has no governance logic of its own beyond the §3b coarse floor.
 
-### Request
-```json
-{
-  "server_id": "b3e5b6b0-...-uuid",
-  "mcp_tool_name": "search_issues",
-  "args": {"query": "is:open label:bug"}
-}
+Headers: `Authorization: Bearer <SA token>` (audience `agentshield-mcp-proxy`, **required**); `X-AgentShield-Trace-ID` (optional); `x-user-sub` (optional, Phase 2 on-behalf-of — **ignored for any credential/authz decision in Phase 1**).
+
+### Request — `McpToolCallRequest`
+```python
+class McpToolCallRequest(BaseModel):
+    server_id: UUID          # route target (Tool.mcp_server_id)
+    mcp_tool_name: str       # RAW upstream name (Tool.mcp_tool_name), NOT the namespaced Tool.name
+    arguments: dict          # already OPA-authorized + de-anonymized by governed_tool
+    session_id: str          # == thread_id == run_id; trace correlation only (best-effort)
+    agent_name: str          # audit / trace only (best-effort)
 ```
-`args` is whatever `governed_tool` is about to pass the tool — already de-anonymized if `allow_deanonymize` was true and a substitution occurred. `mcp_tool_name` is the raw upstream name (`Tool.mcp_tool_name`), **not** the namespaced `Tool.name` — the caller (SDK/runner) is responsible for using the right one; the proxy does not un-namespace anything.
+The caller uses `Tool.mcp_tool_name` (raw), never the namespaced `Tool.name` — the proxy does not un-namespace. `session_id`/`agent_name` are trace metadata and drive **no** credential or authz decision in Phase 1 (the SA token is the identity of record).
 
 ### Server-side flow
-1. Look up (or lazily create, on cache miss) the live session for `server_id` from `session_cache.py` — same resolve-server-then-resolve-credentials-then-connect flow as `/internal/discover`, but skipped entirely on a cache hit.
-2. `call_tool(mcp_tool_name, args)` via `mcp_client.py`.
-3. On a transport/auth error (connection dropped, 401 from the server), evict the cached session and retry **once** with a fresh connection (covers the common case of a stale HTTP session on the remote server) before giving up.
+1. **AuthN:** verify the Bearer token (§3b) → `caller_sa_subject`. Fail → `401`.
+2. **AuthZ floor (design §3b):** `caller_team = authz.team_from_sa_subject(caller_sa_subject)` (parse the `agents-{team}` namespace; a non-`agents-` namespace → `403`). Read the per-server Secret's `connection.owner_team`. **Fast path:** `caller_team == owner_team` → allow. **Cross-team:** call registry-api `POST /api/v1/internal/mcp/authorize-tool-call {caller_sa_subject, server_id, mcp_tool_name}` → `{allowed}`; `allowed == false` → `403`. Cache the cross-team decision per `(caller_sa_subject, server_id, mcp_tool_name)` (short TTL).
+3. Look up (or lazily create, on cache miss) the live session for `server_id` from `session_cache.py` (same read-secret-then-connect flow as discover, skipped on a cache hit).
+4. `call_tool(mcp_tool_name, arguments)` via `mcp_client.py`.
+5. On a transport/auth error (dropped connection, upstream 401), evict the cached session and retry **once** with a fresh connection before giving up.
 
-### Response — success
-```json
-{
-  "is_error": false,
-  "result": "{\"issues\": [{\"number\": 42, \"title\": \"...\"}]}",
-  "latency_ms": 340
-}
+### Response — `McpToolCallResponse`  (always HTTP `200` for tool/transport outcomes)
+```python
+class McpToolCallResponse(BaseModel):
+    result: str | None = None                # MCP content flattened to a string (like http/python tools)
+    is_error: bool = False                   # from MCP tools/call `isError`
+    error: str | None = None                 # transport / protocol / tool error text (fail-closed body)
+    structured_content: dict | None = None   # optional MCP structured result passthrough
 ```
-`result` is a **string** (mirrors the existing contract every other tool executor already returns to `governed_tool` — `HttpToolExecutor`/`PythonToolExecutor` both return `str`, and `governed_tool`'s output-scan step operates on `text: str`). If the MCP tool's `CallToolResult.content` contains multiple content blocks, concatenate their text (mirrors `_join_message_text`'s existing pattern in `graph_builder.py` for LLM message content) — non-text content blocks (e.g. embedded images) are stringified as a placeholder (`"[non-text content: image]"`) in Phase 1; a richer multimodal tool-result path is out of scope.
+`result` is a **string** — the same contract every other executor returns to `governed_tool` (whose output-scan step operates on `str`). If `CallToolResult.content` has multiple text blocks, concatenate them; non-text blocks are stringified as a placeholder (`"[non-text content: image]"`) in Phase 1 (richer multimodal is out of scope). A tool that ran but reported an error sets `is_error=true` with the message in `result`/`error` — still HTTP `200` (FR-MCP-14: a structured tool error to the agent, not a crash). A **transport/credential failure that could not complete the call** (server unreachable after the one retry, secret missing, upstream auth failed) is **also** `200` with `is_error=true` + a populated `error` — design §3c fail-closed body — so the caller hands the error back to the LLM. There is **no** 5xx for a downstream MCP problem; only real auth failures use non-200.
 
-### Response — tool-level error (the target tool ran but reported an error — MCP's own `isError` flag)
-```json
-{
-  "is_error": true,
-  "result": "Tool error: repository not found",
-  "latency_ms": 210
-}
-```
-Still HTTP `200` — an `isError` result is a normal, structured outcome the calling `McpToolExecutor` returns to the LLM as tool output (FR-MCP-14: "returns a structured tool error to the agent, not a crash"), not an HTTP-level failure.
-
-### Errors
+### Errors (real HTTP status)
+- `401` — missing/invalid/wrong-audience token.
+- `403` — authenticated but fails the §3b team floor (bad namespace, or cross-team with no grant).
 - `422` — malformed request body.
-- `404` — `mcp_tool_name` not found on the target server's current tool list (only detectable after connecting — if the session is cached from a discovery that's since gone stale, this surfaces as a tool-level error from the server itself instead, which is fine — same FR-MCP-14 outcome either way, just via a different response shape upstream).
-- `502` — could not establish/re-establish a session with the target server at all (connection refused, timeout, TLS failure) after the one retry in step 3. The caller (`McpToolExecutor`) turns this into the same "structured tool error, not a crash" string `governed_tool` returns to the LLM — the 502 never propagates as an unhandled exception up to the agent runtime.
-- `502` — credential resolution itself failed (the registry-api `secret-ref` call errored, or the K8s Secret read failed) — same handling as above from the caller's perspective.
+- (No `404`/`502` for a missing tool or an unreachable server — those become `200` + `is_error=true`, so the SDK/runner never raise; FR-MCP-14.)
 
 ---
 
-## Auth / trust boundary
-
-Neither endpoint validates a caller identity beyond "reachable over the cluster network" — this mirrors `python-executor`'s `/execute` and `embedding-sidecar`'s `/embed`, both internal-only services with no per-caller auth today. MCP Proxy's own outbound calls (to `registry-api` and to target MCP servers) carry whatever credentials research.md B3 describes; nothing about *inbound* calls to MCP Proxy is authenticated in Phase 1. This is consistent with the existing platform posture for internal services (NetworkPolicy is the trust boundary, not a service JWT) and is not a new gap this design introduces.
+## What the proxy does NOT do
+- **No output scanning** — Decision 27's `scan_output` runs in `governed_tool` after this returns (design §3 step 6). The proxy returns the raw upstream result.
+- **No de-anonymization** — `arguments` arrive already de-anonymized (design §3 step 4).
+- **No DB access** and **no `AGENTSHIELD_ENCRYPTION_KEY`** — server connection + credentials come only from the per-server K8s Secret (research.md B3/B13).
+- **No namespacing / no `Tool` writes** — registry-api owns all DB writes.
