@@ -338,19 +338,19 @@ _What you prove: the Studio build compiles clean with every new prop/type/compon
 
 ## Phase 11 — Playwright Specs
 
-- [ ] [T030] [P] Playwright — `artifact-grants.spec.ts` (human-grantee delegation UI) — `studio/e2e/artifact-grants.spec.ts`
+- [X] [T030] [P] Playwright — `artifact-grants.spec.ts` (human-grantee delegation UI) — `studio/e2e/artifact-grants.spec.ts`
   - **Do:** real Keycloak login via `global-setup.ts` (not a raw `pwRequest` bypass — this exercises the hard-enforced new endpoint). Flow: open an agent's Settings → use `ArtifactGrantsList`'s grant UI (T017) to grant `agent-admin` or `approver` to a user or team → assert the grant appears via `page.waitForResponse` on `POST .../grants` → **reload the page** → assert the grant survived (save→reload→assert, DoD rule #2). First-ever Playwright coverage of delegation at all.
   - **Acceptance:** fails against pre-T018 code (no `ArtifactGrantsList` UI to click), passes once T018 ships.
   - **Deps:** T018, T020 (test-user fixtures may reuse `/applications`), T008 (endpoint live).
   - **Verify:** `cd studio && npx playwright test artifact-grants.spec.ts`
 
-- [ ] [T031] [P] Playwright — `webhook-applications.spec.ts` (agent flow + workflow parity flow) — `studio/e2e/webhook-applications.spec.ts`
+- [X] [T031] [P] Playwright — `webhook-applications.spec.ts` (agent flow + workflow parity flow) — `studio/e2e/webhook-applications.spec.ts`
   - **Do:** real Keycloak session, two `test()` cases sharing the same fixture-creation setup: (1) **Agent flow** — `/applications` → create → assert secret shown once → agent Settings → grant `invoker` via `InvokeAccessPanel` (T016) → assert it appears in the trigger card's Invoke Access list → **reload** → assert the grant survived and the secret is NOT re-displayed anywhere (structural guarantee — `ApplicationResponse` has no `secret` field). (2) **Workflow flow (parity)** — same/second application → workflow builder → Workflow Triggers → grant `invoker` via the same shared `InvokeAccessPanel` now mounted in `WorkflowTriggersPanel.tsx` (T019) → assert it appears → **reload** the builder page → assert survived.
   - **Acceptance:** save→reload→assert on application creation AND on each of the two grants independently (DoD rule #2 applied per write surface).
   - **Deps:** T018, T019, T020.
   - **Verify:** `cd studio && npx playwright test webhook-applications.spec.ts`
 
-- [ ] [T032] Retire `webhook-clients.spec.ts` — `studio/e2e/webhook-clients.spec.ts` (delete)
+- [X] [T032] Retire `webhook-clients.spec.ts` — `studio/e2e/webhook-clients.spec.ts` (delete)
   - **Do:** `git rm studio/e2e/webhook-clients.spec.ts` — the UI it drove (`ClientPanel`, deleted in T018) no longer exists; its assertions would fail on a missing element, not a real regression. `webhook-applications.spec.ts` (T031) is its full replacement. Confirm `webhook-public-url.spec.ts` is **unaffected** and left in place (tests trigger-URL correctness + the token-mode gateway path only — `research.md` §5).
   - **Acceptance:** `git status studio/e2e/webhook-clients.spec.ts` shows deleted; `grep -c "ClientPanel" studio/src/components/agent-detail/SettingsTab.tsx` returns `0`.
   - **Deps:** T018, T031 (the replacement must exist before the original is removed — never a zero-coverage window even transiently in the same commit).
