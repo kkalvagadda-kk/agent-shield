@@ -69,9 +69,16 @@ redis:
   metrics:
     enabled: false
 
-# --- Langfuse OFF for first bring-up (EKS-hostile hardcodes) ---
+# --- Langfuse ON — served on its own nip.io subdomain off the internal NLB
+#     (langfuse.<NLB-IP>.nip.io, computed + injected by scripts/deploy-eks.sh phase 2,
+#     since the NLB IP isn't known until the gateway provisions). Root-served, prebuilt
+#     image (subdomain, not a base-path — avoids a custom NEXT_PUBLIC_BASE_PATH build).
+#     deploy-eks.sh phase 2 --sets envoy-gateway.gateway.langfuseHostname, global.langfuseUrl
+#     and langfuse.langfuse.nextauth.url to the computed host, adds the host to the gateway-tls
+#     SAN, and runs reconcile-langfuse-hostalias.sh to patch AUTH_KEYCLOAK_ISSUER (the ELB
+#     Keycloak issuer) + the OIDC-back-channel hostAlias. ---
 langfuse:
-  enabled: false
+  enabled: true
 
 # --- fragile bitnami/kubectl:latest post-hook off ---
 pvRetainHook:

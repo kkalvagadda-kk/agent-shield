@@ -205,6 +205,36 @@ spec:
                 echo "    Client 'agentshield-studio' already exists — skipping."
               fi
 
+              # ── Client: langfuse ──────────────────────────────────────────
+              # Confidential client for Langfuse SSO (one Keycloak login covers Studio
+              # + Langfuse trace links). Wildcard redirect/origins for dev — the exact
+              # langfuse host differs per environment (langfuse.127.0.0.1.nip.io on
+              # docker-desktop, langfuse.<NLB-IP>.nip.io on EKS). Secret MUST match
+              # AUTH_KEYCLOAK_CLIENT_SECRET in values.yaml (langfuse.langfuse.additionalEnv).
+              # Chart-managed here so BOTH environments get it (deploy-cpe2e also creates
+              # it, idempotently — the first to run wins, the other skips).
+              echo "==> Creating client 'langfuse' ..."
+              CLIENT_EXISTS=$(/opt/keycloak/bin/kcadm.sh get clients \
+                -r "${REALM}" --fields clientId --format csv 2>/dev/null \
+                | grep -c "^\"langfuse\"" || true)
+
+              if [ "${CLIENT_EXISTS}" -eq 0 ]; then
+                /opt/keycloak/bin/kcadm.sh create clients \
+                  -r "${REALM}" \
+                  -s clientId=langfuse \
+                  -s enabled=true \
+                  -s protocol=openid-connect \
+                  -s publicClient=false \
+                  -s secret=langfuse-client-secret-2024 \
+                  -s standardFlowEnabled=true \
+                  -s directAccessGrantsEnabled=true \
+                  -s 'redirectUris=["*"]' \
+                  -s 'webOrigins=["*"]'
+                echo "    Client 'langfuse' created."
+              else
+                echo "    Client 'langfuse' already exists — skipping."
+              fi
+
               # ── User: platform-admin ───────────────────────────────────────
               # Full-access administrative user for the AgentShield Studio and
               # Registry API. Password from the keycloak-user-passwords secret.

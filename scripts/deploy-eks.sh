@@ -208,7 +208,13 @@ kubectl apply -f infra/opa-bundle-server/service.yaml >/dev/null
 kubectl apply -f infra/opa-bundle-server/deployment.yaml >/dev/null
 kubectl apply -f infra/opa-bundle-server/configmap-opa-config.yaml >/dev/null
 kubectl apply -f infra/rbac/playground-runner-clusterrole.yaml >/dev/null
-echo "  opa-bundle-server + opa-sidecar-config + playground-runner applied"
+# Langfuse alias Services (load-bearing when langfuse.enabled=true): the Bitnami
+# clickhouse/minio sub-charts name their Services agentshield-clickhouse / agentshield-s3,
+# but langfuse derives agentshield-langfuse-clickhouse / agentshield-langfuse-s3 — without
+# these aliases langfuse-web CrashLoopBackOffs ("lookup agentshield-langfuse-clickhouse ...
+# no such host" on the clickhouse migration). Harmless if langfuse is disabled (unused svcs).
+kubectl apply -f infra/langfuse/clickhouse-alias-svc.yaml >/dev/null
+echo "  opa-bundle-server + opa-sidecar-config + playground-runner + langfuse-aliases applied"
 
 # ── Step 4: platform secrets ─────────────────────────────────────────────────
 echo ""
@@ -344,14 +350,95 @@ done
 [ -z "$ELB" ] && { echo "FATAL: Gateway never got an address (check aws-load-balancer-controller)"; exit 1; }
 echo "    ELB: ${ELB}"
 
+# ── Langfuse (option B): served at ROOT on its own nip.io subdomain off the internal NLB ──
+# The NLB has one DNS name (the ELB) that Studio + every path route already own, so langfuse
+# needs a DISTINCT Host. We resolve the NLB IP the ELB points at and use a nip.io host that
+# self-resolves to it (public DNS, nothing to provision) — langfuse then runs root + prebuilt
+# on that host (no NEXT_PUBLIC_BASE_PATH custom image). Routed via
+# envoy-gateway.gateway.langfuseHostname; SSO issuer stays the ELB (patched by the reconcile
+# helper below, which also fixes the OIDC back-channel hostAlias).
+NLB_IP="$(nslookup "$ELB" 2>/dev/null | awk '/^Address: /{print $2}' | grep -E '^[0-9]+\.' | tail -1)"
+LF_SETS=()
+if [ -n "$NLB_IP" ]; then
+  LF_HOST="langfuse.${NLB_IP}.nip.io"
+  echo "    langfuse: https://${LF_HOST}  (nip.io -> NLB ${NLB_IP})"
+  LF_SETS+=(--set-string "global.langfuseUrl=https://${LF_HOST}")
+  LF_SETS+=(--set-string "envoy-gateway.gateway.langfuseHostname=${LF_HOST}")
+  LF_SETS+=(--set-string "langfuse.langfuse.nextauth.url=https://${LF_HOST}")
+  # Add LF_HOST to the gateway-tls SAN — the base cert only covers *.elb.<region>.amazonaws.com,
+  # so a browser hitting the langfuse subdomain would otherwise get CERT_COMMON_NAME_INVALID.
+  TLSDIR2="$(mktemp -d)"
+  if openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+      -keyout "$TLSDIR2/tls.key" -out "$TLSDIR2/tls.crt" \
+      -subj "/CN=AgentShield Gateway/O=AgentShield" \
+      -addext "subjectAltName=DNS:*.elb.${REGION}.amazonaws.com,DNS:${ELB},DNS:${LF_HOST}" \
+      -addext "basicConstraints=critical,CA:FALSE" \
+      -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+      -addext "extendedKeyUsage=serverAuth" 2>/dev/null; then
+    kubectl create secret tls gateway-tls --cert="$TLSDIR2/tls.crt" --key="$TLSDIR2/tls.key" \
+      -n "$NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    echo "    gateway-tls SAN now covers ${LF_HOST}"
+  else
+    echo "    WARN: cert regen for ${LF_HOST} failed — langfuse SSO may hit a cert warning"
+  fi
+  rm -rf "$TLSDIR2"
+else
+  echo "    WARN: could not resolve NLB IP for ${ELB} — langfuse subdomain routing skipped"
+fi
+
 # Phase 2: now that the hostname exists, bake it into publicUrl so server-side
 # URL generation (registry-api EVENT_GATEWAY_PUBLIC_URL, webhook URLs shown in
 # Studio, Keycloak issuer) matches what the browser actually uses.
 echo "    re-applying with publicUrl=https://${ELB} ..."
 helm upgrade --install "$RELEASE" "$CHART" -f "$VALUES" -n "$NS" \
   --set-string "global.publicUrl=https://${ELB}" \
-  --set-string "global.langfuseUrl=https://${ELB}/langfuse" \
+  ${LF_SETS[@]+"${LF_SETS[@]}"} \
   --timeout 15m
+
+# Langfuse SSO issuer must be the EKS Keycloak issuer (the ELB) — NOT the nip.io value baked
+# into values.yaml (that's the docker-desktop host). langfuse's OIDC discovery + browser
+# redirect target this issuer; a wrong host makes "Sign In" fail. Patched post-helm because
+# it's a subchart list env (langfuse.langfuse.additionalEnv) that `--set` can't cleanly
+# target and helm re-applies the base value on every upgrade. No hostAlias needed on EKS:
+# langfuse-web reaches https://<ELB>/realms in-cluster via NLB hairpin (verified at deploy).
+if [ -n "${LF_HOST:-}" ] && kubectl get deploy "${RELEASE}-langfuse-web" -n "$NS" >/dev/null 2>&1; then
+  echo "    patching langfuse-web AUTH_KEYCLOAK_ISSUER -> https://${ELB}/realms/agentshield"
+  kubectl set env deploy/"${RELEASE}-langfuse-web" -n "$NS" \
+    "AUTH_KEYCLOAK_ISSUER=https://${ELB}/realms/agentshield" >/dev/null 2>&1 || true
+fi
+
+# Ensure the langfuse S3 event bucket exists. langfuse writes every ingestion event to
+# S3 (bucket `langfuse-media`) BEFORE the worker reads it into ClickHouse; a missing
+# bucket makes every event fail with "The specified bucket does not exist" and traces
+# silently never appear ("Trace not found" at the View-Trace link — no error surfaced in
+# Studio). values.yaml now aligns langfuse.s3.defaultBuckets to the bucket so a fresh PV
+# provisions it at boot, but an EXISTING s3 PV was provisioned with the old default
+# ("langfuse") and won't re-run that path — so create it here too (idempotent).
+# See docs/bugs/langfuse-missing-s3-event-bucket.md
+if kubectl get deploy "${RELEASE}-langfuse-web" -n "$NS" >/dev/null 2>&1; then
+  S3POD="$(kubectl get pods -n "$NS" -o name | grep -E "${RELEASE}-s3-" | head -1)"
+  if [ -n "${S3POD}" ]; then
+    echo "    ensuring langfuse S3 bucket 'langfuse-media' exists"
+    kubectl exec "${S3POD}" -n "$NS" -- sh -c '
+      MC=/opt/bitnami/minio-client/bin/mc
+      "$MC" alias set _lf http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1
+      "$MC" mb --ignore-existing _lf/langfuse-media >/dev/null 2>&1
+    ' >/dev/null 2>&1 && echo "    ok  bucket langfuse-media present" \
+      || echo "    WARN could not ensure langfuse-media bucket (traces may not ingest)"
+  fi
+fi
+
+# Scope the main HTTPRoute (agentshield-routes: Studio + registry + keycloak + minio +
+# event-gateway) to the ELB host. With the EKS wildcard listener (gateway.hostname=""),
+# agentshield-routes renders with NO hostname, so it attaches to EVERY listener — including
+# the langfuse-https listener — and its `/` -> Studio rule then wins the langfuse subdomain,
+# serving Studio instead of Langfuse at the trace link. Pinning the route to the ELB host
+# keeps it off the langfuse listener while the listener itself stays wildcard.
+if kubectl get httproute agentshield-routes -n "$NS" >/dev/null 2>&1; then
+  echo "    scoping agentshield-routes -> ${ELB} (so langfuse subdomain isn't shadowed)"
+  kubectl patch httproute agentshield-routes -n "$NS" --type=merge \
+    -p "{\"spec\":{\"hostnames\":[\"${ELB}\"]}}" >/dev/null 2>&1 || true
+fi
 
 # ── Step 7: verify ───────────────────────────────────────────────────────────
 echo ""

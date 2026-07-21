@@ -581,6 +581,14 @@ langfuse:
   s3:
     deploy: true
     bucket: "langfuse-media"
+    # MUST equal `bucket` above. The langfuse-k8s chart defaults defaultBuckets
+    # to "langfuse" while all three upload types (event/batch/media) write to
+    # `bucket`. If they diverge, the bundled MinIO auto-creates the wrong bucket
+    # and every ingestion event fails with "The specified bucket does not exist"
+    # → traces silently never reach ClickHouse ("Trace not found" in the UI).
+    # Bitnami minio re-runs `mc mb --ignore-existing` on each boot, so this
+    # self-heals on the next deploy/restart. See docs/bugs/langfuse-missing-s3-event-bucket.md
+    defaultBuckets: "langfuse-media"
     region: "auto"
     forcePathStyle: true
     accessKeyId:
