@@ -119,3 +119,31 @@ docs/decisions.md            — Architecture decision records
 - **Team resolution**: `user_team_assignments` table maps JWT `sub` → team. Use `GET /api/v1/me` for current user's team.
 - **Tool governance**: All tools are platform-managed (HTTP or Python type). SDK resolves tool names from registry at startup. Governance (OPA + HITL) wraps every tool call.
 - **Agent types**: `sdk` (custom container) vs `declarative` (platform-managed runner + workflow JSON). This is an infra routing flag, not user-facing.
+
+## Pushing to GitHub (read before `git push`)
+
+Remote: `origin` = `git@github.com:kkalvagadda-kk/agent-shield.git` (**SSH**, not HTTPS). Default branch: `main`.
+
+**Why a push may fail with `Permission denied (publickey)` even though it "worked before":** commands run through the assistant's Bash tool (and the `!` prefix) execute in a shell whose `ssh-agent` starts **empty** — it does NOT share the key you loaded in your own terminal. `gh` CLI is not installed here either. So the agent has no identity to offer GitHub and the push is denied.
+
+**Fix — load the key from the macOS keychain into this shell's agent (non-interactive, no passphrase prompt):**
+```bash
+ssh-add --apple-use-keychain ~/.ssh/id_ed25519    # the GitHub key (comment: kkalvagadda@gmail.com)
+ssh -T git@github.com                             # expect: "Hi kkalvagadda-kk! ..."
+```
+`id_ed25519` is the GitHub-registered key; `id_rsa` is an older machine key (fallback only). There is no `github.com` Host block in `~/.ssh/config`, so the default key applies.
+
+**Then push.** Note the assistant's auto-mode classifier may BLOCK `git push` as an outward action even after the key loads — if so, the user runs it themselves (`! git push origin main`, or from their own terminal).
+
+**Branch → main flow used here:** feature work lands on a branch (e.g. `webhook-improvements`) in a git **worktree**; `main` is checked out in the primary worktree (`/Users/kkalyan/repo/agent-platform`). Merge is a clean fast-forward when `main` is a strict ancestor:
+```bash
+cd /Users/kkalyan/repo/agent-platform      # the worktree where main is checked out
+git merge --ff-only <feature-branch>        # NOT from the feature worktree (that's a no-op)
+git push origin main
+```
+Running `git merge --ff-only <branch>` from inside the feature branch's own worktree is a no-op ("Already up to date") — always fast-forward `main` from the worktree that has `main` checked out.
+
+**Verify (read-only, never blocked):**
+```bash
+git fetch origin && git log --oneline origin/main..main | wc -l   # 0 == fully pushed
+```
