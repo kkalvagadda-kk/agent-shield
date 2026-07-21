@@ -967,6 +967,21 @@ class MCPServer(Base):
         ),
     )
 
+    # ── Lifecycle invariants (MCP-as-tool-source; docs/design/mcp-tool-source-architecture.md §3c/§8) ──
+    # Decided 2026-07-21. Enforced by the (not-yet-built) mcp-servers router; recorded
+    # here because this model is the durable anchor a Phase-1 implementer will open.
+    #   1. `name` is IMMUTABLE after creation. Each discovered child tool derives its
+    #      unique key as Tool.name = f"{MCPServer.name}__{mcp_tool_name}" (§7 Q3), so a
+    #      rename would orphan every bound Tool — agents bind by Tool.id, but `name` is
+    #      the collision key AND what the tool picker shows, so it must not drift. The
+    #      router MUST reject any PATCH that changes `name`. TO SUPPORT rename later:
+    #      re-derive + migrate all child Tool.name in one txn and confirm nothing
+    #      resolves a tool by name across the rename.
+    #   2. DELETE is BLOCKED while any agent is bound to one of this server's discovered
+    #      tools — the router MUST 409 if an AgentTool references a Tool with this
+    #      mcp_server_id (no cascade in Phase 1). TO SUPPORT cascade-delete later:
+    #      unbind (or block + report) every dependent AgentVersion, revoke the
+    #      auto-granted AssetGrants, then delete the child Tool rows.
     id: Mapped[uuid.UUID] = mapped_column(
         _UUID, primary_key=True, server_default=_GEN_UUID
     )
@@ -1071,7 +1086,13 @@ class Tool(Base):
     http_timeout_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Python tool fields
     python_code: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # MCP tool fields
+    # MCP tool fields. `type='mcp_tool'` rows are NOT independently deletable — their
+    # lifecycle is owned entirely by MCPServer discovery/sync: created on /discover,
+    # marked status='inactive' when they disappear upstream on /sync (never row-deleted),
+    # and only removed when the server itself is deleted (which is blocked while bound —
+    # see MCPServer lifecycle invariants above). The tools router MUST reject DELETE on a
+    # type='mcp_tool' row (decided 2026-07-21; docs/design/mcp-tool-source-architecture.md
+    # §8). TO SUPPORT direct delete later: also unbind agents + revoke AssetGrants.
     mcp_server_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID,
         ForeignKey("mcp_servers.id"),

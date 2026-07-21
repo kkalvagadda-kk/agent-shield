@@ -22,7 +22,7 @@ This is the **inbound** direction only (platform as MCP client). Platform-as-MCP
 |---|---|---|
 | D1 | Where the MCP client runs | Centralized **MCP Proxy** service (`services/mcp-proxy`) |
 | D2 | Transports | `streamable_http` (Phase 1) and `stdio` (Phase 3) |
-| D3 | External-server auth | Static credentials via `AuthConfig` → K8s Secret. OAuth 2.1 deferred. |
+| D3 | External-server auth | Static credentials via `AuthConfig`. OAuth 2.1 deferred. **Storage mechanism corrected 2026-07-21** — the durable credential is a Fernet blob in Postgres, *not* a K8s Secret for server-level auth_configs; see §3 "Credential resolution" for the resolution decision. |
 | D4 | Governance of discovered tools | Normal `Tool` rows, default `risk=low`, no MCP-special-casing |
 
 **Locked during this design round:**
@@ -119,7 +119,7 @@ Checking the box and saving the agent hits the same `POST /agents/{name}/tools` 
 3. If `require_approval` → HITL pause/resume (unchanged mechanism).
 4. **New:** if `allow_deanonymize` and args contain a PII placeholder → structured de-anonymize primitive (args dict + session_id → args dict with real values). Distinct from the existing free-text de-anonymize, which is untouched.
 5. Dispatch by type: `native`/`http`/`python` unchanged; `mcp_tool` → MCP Proxy `/tools-call`.
-6. **New:** result → Safety Orchestrator `scan_output` (with the `clean_text`/`deanonymized_message` field bug fixed) before returning to the LLM. External-server results (`is_external=true`) cannot skip this; internal-server results can be exempted per-server (`scan_results` flag).
+6. **New:** result → Safety Orchestrator `scan_output` (with the `clean_text`/`deanonymized_message` field bug fixed) before returning to the LLM. External-server results (`is_external=true`) cannot skip this; internal-server results can be exempted per-server (`scan_results` flag). **Phase 1 = STUB (decided 2026-07-21):** the scan verdict is computed + logged, but the block/redact **action** on a flagged tool result is NOT enforced — deferred to the safety-orchestration build. Breadcrumb in `orchestrator.py` `scan_output`; see §8. Must not be reported done until the action is real.
 7. Langfuse span: automatic via existing OpenInference auto-instrumentation — no new wiring for the outer span (an inner span specifically for the proxy call itself is still an open item, see §6).
 
 ### Team-Scoping / Multi-Tenancy — Resolved via Existing Mechanisms, No New Ones
@@ -130,9 +130,72 @@ MCP servers and their discovered tools use the platform's existing publish/grant
 - **Only precondition (unchanged):** at discovery time, registry-api must set the new `Tool.owner_team = MCPServer.owner_team` (and apply whatever `publish_status` default any newly-created tool gets today). With that one field populated correctly, both the visibility mechanism **and** the deploy-time tool-access auto-grant apply to MCP tools automatically — an MCP tool bound to an agent is auto-granted to the agent's team on deploy exactly like a native/http/python tool, no MCP-specific grant code.
 
 ### Key Decisions Proposed This Round
-- **Credential resolution**: MCP Proxy reads `AuthConfig` secrets directly via its own K8s ServiceAccount/RBAC (read-only, scoped to Secrets in `agentshield-platform`) — no copy-to-namespace step, since the proxy already lives where the secret is written (unlike agent pods).
+- **Credential resolution (corrected 2026-07-21):** D3's "AuthConfig → K8s Secret" mis-states the storage model. `AuthConfig` holds the durable credential as a **Fernet-encrypted blob in Postgres** (`credentials_encrypted`, `models.py:915-922`); the `k8s_secret_ref` Secret is only a *derived* materialization, written **solely** by `deploy-controller/tool_secrets.py` for **agent-bound** tools into **per-agent** namespaces. A **server-level** MCP `auth_config` is bound to no agent at register time, so **no K8s Secret is ever written for it** (grounding #5) — the proxy cannot "just read a Secret." Two viable paths:
+  - **(a) Decrypt the Fernet blob directly** in the proxy via the proven `crypto.decrypt_json` + `AGENTSHIELD_ENCRYPTION_KEY` (as `judge.py:858` already does for LLM creds). Simplest, reuses a proven path. **Cost:** the proxy holds the global encryption key, which decrypts *every* credential in the DB — a large blast radius on proxy compromise, cutting against the least-privilege posture §3b leans on.
+  - **(b) [recommended] Materialize a scoped per-server K8s Secret** at registration time (extend registry-api/deploy-controller to write the MCP server's `auth_config` into a Secret in `agentshield-platform`), read by the proxy with narrow read-only RBAC scoped to those Secrets. Keeps the proxy **off** the global key; matches §3b's least-privilege model. **Cost:** a materialization step on register/sync + secret lifecycle tied to server delete.
+  - **Decision: (b).** The proxy is already the highest-value credential target in the mesh (§3b); handing it the master decryption key (a) widens blast radius exactly where we least want it. Exact secret naming + lifecycle-on-delete resolved during `/plan`. **This is the one open item that blocks writing the proxy's discover/call code** — it is the credential path itself.
 - **HTTP session management (Phase 1 scope only)**: plain K8s `Deployment`, N replicas, no sticky routing. Each replica keeps its own in-memory session cache; a cache miss just re-runs `initialize` (cheap for HTTP).
 - **Gate ordering**: authorize → approve → de-anonymize → execute → scan, always in that order, for every tool type.
+
+### 3b. MCP Proxy Authentication & Authorization (resolves gap #1, 2026-07-21)
+
+Fills a hole the original lock left open: the proxy's `/internal/*` endpoints had no specified caller auth, yet the proxy is the credential custodian for **every** registered server. Matching the ungoverned in-cluster baseline (python-executor and safety-orchestrator take zero auth) is **rejected** here — a forged `/tools-call` is a credential confused-deputy (drive an external server with stored creds), a strictly worse blast radius than python-executor's sandboxed exec.
+
+Grounding (verified in code, 2026-07-21): there is **no** cryptographic service-to-service auth in the platform today — internal trust is NetworkPolicy + forgeable plaintext (`x-user-sub`, `X-User-Sub: eval-runner`, `run_by` in the body). The RCT/HMAC internal token in `identity-propagation-architecture.md` is Proposed, not built. The one real minted credential that exists is the **K8s projected ServiceAccount token** — deploy-controller already mints an audience-scoped one per pod for OPA (`manifest_builder.py:384-392`). This design **reuses that primitive** rather than inventing a scheme.
+
+**Two orthogonal identities per call:**
+- *Machine / caller* (which pod) — the SA token; gates credential access. Unforgeable.
+- *End-user* (`user_sub`, on whose behalf) — for on-behalf-of (FR-MCP-21). Phase 1 carries it as the existing plaintext `x-user-sub`, but it drives **no credential decision** until on-behalf-of lands on the RCT dependency (§7a). Phase 1 credential access is gated on the machine identity **only**.
+
+**AuthN.** deploy-controller projects a *second* SA token into agent pods (same projected volume as the OPA token), audience `agentshield-mcp-proxy`, path `mcp-proxy-token`. SDK `McpToolExecutor` / runner `McpToolNodeExecutor` send it as `Authorization: Bearer …`. registry-api mounts its own audience-`agentshield-mcp-proxy` token (chart) for `/discover`. The proxy verifies each token via K8s `TokenReview`, extracts `system:serviceaccount:<ns>:<sa>`, and caches positive reviews by token hash until `exp` (no K8s API hit per call — same trust root OPA uses). Proxy SA gets `system:auth-delegator` (TokenReview) and nothing broader. Missing / invalid / wrong-audience → `401`.
+
+**AuthZ (coarse team-scope floor).** Defense-in-depth, **not** an OPA re-implementation — OPA already ran the fine-grained per-call `allow`/`require_approval` inside `governed_tool` *before* the proxy is reached (§3 step 2); this floor only stops a pod that **bypassed** `governed_tool`. Steps: SA subject → `agents-{team}` namespace → caller team (via `agent_identities.sa_subject → team`, `models.py:192-242`); load `MCPServer` by `server_id` → `owner_team`; allow iff caller team == `owner_team` **or** an active `AssetGrant(asset_type='tool')` exists for the bound tool, else `403`. The grant check MUST reuse the deploy gate's resolver — extract a shared `team_may_use_tool(team, tool_id)`, do **not** fork the logic (§8 tracks the cross-service code-sharing detail). `/discover` is admin-plane: caller subject must be registry-api's SA, else `403`.
+
+**Network / egress (L4 floor only, not the primary control).** Add the proxy to `infra/network-policies/` (ingress from `role: agent` pods + registry-api; agent-namespace egress to the proxy) — closing the same omission python-executor has today (no NetworkPolicy at all). The load-bearing rule: the proxy is the **only** component with egress to external MCP server URLs; agent pods must not reach those hosts directly, or the central-credential model is void. This pulls SR-04 (egress centralization) forward for the proxy specifically. NetworkPolicy is L3/L4 (can't see identity or HTTP path) and unenforced on Docker Desktop — so it is a floor, never the auth of record; the SA token is.
+
+### 3c. MCP Proxy Call Contract (resolves gap #2, 2026-07-21)
+
+Conventions mirror the existing internal services: tool/transport failures return **`200` with an error body** (like python-executor `ExecuteResponse` and the safety-orchestrator's fail-closed 200) so the caller can hand the error back to the LLM; auth/authz failures return real **`401`/`403`**. `X-AgentShield-Trace-ID` accepted + echoed (safety-orchestrator convention).
+
+The proxy is a **pure MCP wire client** — it does **not** scan output (Decision 27's `scan_output` runs in `governed_tool` after return, §3 step 6) and does **not** de-anonymize (args arrive already de-anonymized, §3 step 4). Keeping governance out of the proxy preserves the single gate-ordering path for all four tool types.
+
+**`POST /internal/tools/call`** — data plane, caller = agent pod. Headers: `Authorization: Bearer <SA token>` (required), `X-AgentShield-Trace-ID` (optional), `x-user-sub` (optional, Phase 2 on-behalf-of; ignored for credential decisions in P1).
+```python
+class McpToolCallRequest(BaseModel):
+    server_id: UUID          # route target (Tool.mcp_server_id)
+    mcp_tool_name: str       # RAW upstream name (Tool.mcp_tool_name), NOT the namespaced Tool.name
+    arguments: dict          # already OPA-authorized + de-anonymized by governed_tool
+    session_id: str          # == thread_id == run_id; trace correlation only
+    agent_name: str          # audit / trace
+
+class McpToolCallResponse(BaseModel):        # 200 even on tool error (fail-closed body)
+    result: str | None = None                # MCP content flattened to string (like http/python tools)
+    is_error: bool = False                   # from MCP tools/call `isError`
+    error: str | None = None                 # transport / protocol / tool error text
+    structured_content: dict | None = None   # optional MCP structured result passthrough
+```
+*Session note:* the request `session_id` is agent-run correlation; the proxy's MCP connection cache keys on `server_id` (Phase 1 static creds = one pooled connection per server). On-behalf-of (Phase 2) needs per-`(server_id, user_sub)` sessions since the upstream token becomes user-scoped — the contract already carries `x-user-sub`, so it is forward-compatible; the pooling change is Phase 2 work (§8).
+
+**`POST /internal/discover`** — admin plane, caller = registry-api only.
+```python
+class McpDiscoverRequest(BaseModel):
+    server_id: UUID
+
+class McpDiscoveredTool(BaseModel):
+    name: str                      # raw upstream name
+    description: str | None = None
+    input_schema: dict             # JSON Schema → Tool.input_schema
+
+class McpDiscoverResponse(BaseModel):        # 200; connection failure = status='error', not HTTP 5xx
+    ok: bool
+    status: str                    # 'connected' | 'error' → MCPServer.status
+    health_detail: str | None = None   # failure reason → new health_detail column (P1 migration)
+    protocol_version: str | None = None
+    tools: list[McpDiscoveredTool] = []
+```
+Ownership split: the **proxy** resolves `server_id` → url / transport / credential (own read-only DB read of `mcp_servers`/`auth_configs` + credential resolution per §3 "Credential resolution" — path (b): a per-server K8s Secret materialized at registration) and runs `initialize` + `tools/list`; **registry-api** owns every DB write — the `{server_name}__{mcp_tool_name}` namespacing, `Tool` upserts, and `discovered_tool_count`/`last_synced_at`/`status`. Namespacing never happens in the proxy.
+
+**`GET /health` · `GET /ready`** — unauthenticated liveness/readiness, matching every other service.
 
 ---
 
@@ -173,7 +236,7 @@ The requirements doc's original §11 phasing predates Decision 27 (the generic g
 | MCP Proxy | New service skeleton: `streamable_http` client, `initialize` + `tools/list`, own K8s Secret read (own SA/RBAC, no copy-to-namespace), `/tools-call` execution endpoint |
 | SDK | New `McpToolExecutor` in `tool_resolver.py`/`tool_executor.py` |
 | declarative-runner | New `McpToolNodeExecutor` in `workflow_executor.py`/`node_executors.py` — **agent-owned tool path only**, not the legacy ungoverned standalone-node path |
-| Decision 27 (generic gate) | OPA `allow_deanonymize` field + Rego update (`bundle_generator.py` + static `opa_policy/agentshield.rego` — the live enforcement path; `policy_generator.py` gets the field too, audit-trail parity only, not enforcement); new structured de-anonymize primitive; per-tool-call output-scan wired into `governed_tool` for **all four** tool types; fix the `clean_text`/`deanonymized_message` field bug in `safety_client.py` |
+| Decision 27 (generic gate) | OPA `allow_deanonymize` field + Rego update (`bundle_generator.py` + static `opa_policy/agentshield.rego` — the live enforcement path; `policy_generator.py` gets the field too, audit-trail parity only, not enforcement); new structured de-anonymize primitive; per-tool-call output-scan wired into `governed_tool` for **all four** tool types (Phase 1: scan wired + verdict logged, but the block/redact **action is STUBBED** — deferred to the safety-orchestration build, §8); fix the `clean_text`/`deanonymized_message` field bug in `safety_client.py` |
 | Safety | External-server results (`is_external=true`) always scanned; internal servers scanned by default with per-server `scan_results` opt-out |
 | Observability | Langfuse spans on the outer Tool call — automatic, no new work. Inner proxy-call span — not yet decided (see Q2/ops note in §5) |
 | Studio | New "MCP Servers" screen (register/list/sync/delete) under Settings; discovery-result shown inline on register; Tool Picker tags MCP tools by source server; `ToolsPage` shows `mcp_tool` rows **read-only** (not creatable there) |
@@ -272,6 +335,8 @@ Registering a stdio server provisions its own K8s Pod (new reconciler, or an ext
 
 Per CLAUDE.md's Definition of Done — anything deferred or knowingly incomplete, tagged **deferred (intentional)** vs **not-yet-wired (debt)**.
 
+**Post-lock gap review (2026-07-21):** §3b/§3c resolve the two *blocking* gaps the original lock left open (proxy auth; call contract). The same review surfaced the additional open items below — none block *starting* Phase 1's vertical slice, but the Phase-1-tagged ones must be decided before their surface ships (`/sync`, server delete, Decision 27's scan action).
+
 | Gap | Tag | Note |
 |---|---|---|
 | `tools/list` pagination | deferred (intentional) | Phase 1 assumes a server's full tool list fits in one response, no cursor handling. Revisit if a real target server needs it. |
@@ -284,3 +349,15 @@ Per CLAUDE.md's Definition of Done — anything deferred or knowingly incomplete
 | FR-MCP-21 (on-behalf-of internal identity) | not-yet-wired (debt), blocked externally | Hard dependency on `docs/design/identity-propagation-architecture.md` Phase 0–2 landing first (§7a). Not something this design's Phase 2 can build standalone. |
 | `sdk`-type agents' MCP tool calls inherit the pre-existing identity gap | not a gap introduced by this design — inherited, logged for visibility | Per `docs/design/sdk-agent-gaps.md` Gap 1, any `sdk`-type, `user_delegated`-class agent gets every governed tool call hard-denied (`missing_user_identity`) today, regardless of tool type. MCP tools are not specially broken here — they fail exactly like native/http/python tools already do for this agent class until that gap is fixed (tracked separately, not by this design). |
 | Impersonation Keycloak client's grant scope (which users/realm) | open implementation detail, not blocking | Phase 2, once `identity-propagation-architecture.md` lands. Default: scope to whatever team boundary already gates agent/server access. |
+| Server `name` **immutable** post-create | resolved (decided 2026-07-21) | Renaming is disallowed — the mcp-servers router MUST reject any PATCH changing `name`, because `Tool.name = {name}__{mcp_tool_name}` (§7 Q3) would orphan child tools. Invariant commented in `models.py` `MCPServer`. To support rename later: re-derive + migrate every child `Tool.name` in one txn. |
+| `MCPServer` delete — **blocked while bound** | resolved (decided 2026-07-21) | No cascade in Phase 1. The router MUST `409` if any `AgentTool` references a Tool with this `mcp_server_id`. Invariant commented in `models.py` `MCPServer`. To support cascade later: unbind/report dependents, revoke auto-granted `AssetGrant`s, then delete child Tools. |
+| Individual `mcp_tool` **deletion disabled** | resolved (decided 2026-07-21) | The tools router MUST reject `DELETE` on a `type='mcp_tool'` row — lifecycle is owned solely by server discovery/sync. Invariant commented on the `Tool` mcp fields in `models.py`. To support later: also unbind agents + revoke grants. |
+| Discovered-tool **removal** on re-sync | resolved (decided 2026-07-21) | `/sync` MUST NOT row-delete tools (deletion is disabled, above). A tool that disappeared upstream is marked `Tool.status='inactive'` (existing enum), never deleted, so bound agents never hit a dangling FK. *Confirm inactive vs. deprecated at build.* |
+| Positive output-scan **action** (Decision 27) | resolved (decided 2026-07-21) — **STUB** | Phase 1 computes + logs the scan verdict but does NOT enforce the block/redact action on a flagged tool result — deferred to the safety-orchestration build. Breadcrumb in `orchestrator.py` `scan_output` + §3 step 6 / §6a. **Must not be reported done** until the action is real. |
+| De-anonymize reverse-map keying | resolved (clarified 2026-07-21) | Not a new store: the existing map is keyed by `session_id` + `agent_name` (`orchestrator.py:161-166,299`); Decision 27's structured de-anon reuses that key. Logged so it doesn't re-surface as a question. |
+| `notifications/tools/list_changed` fan-out across N replicas | deferred (intentional) | Phase 2 subscribes to list_changed, but each replica holds its own session (§3 HTTP session mgmt) — which replica receives the notify and how it reaches registry-api to re-sync is unspecified. Phase 2. |
+| Decision 27 work has no FR numbers | doc hygiene | The design references FR-MCP-50/51/52 (latency budget) but those FRs are never defined; L181 flags "assign FR-MCP-5x when this moves to a final spec." Assign before `/plan` finalization. |
+| Proxy caller-auth `x-user-sub` forgeable in Phase 1 | not-yet-wired (debt), blocked externally | §3b: Phase 1 gates credentials on the SA token (unforgeable); `x-user-sub` drives nothing until on-behalf-of lands on the RCT dependency (§7a). Overlaps the FR-MCP-21 row above. |
+| Shared `team_may_use_tool` across registry-api + proxy | open implementation detail | §3b's authz floor must reuse the deploy gate's grant resolver, not fork it — confirm the repo's cross-service code-sharing convention (shared lib vs. an authenticated `GET /api/v1/internal/authz/mcp`). Recommend the shared helper (no per-call hop). |
+| §3b authz-floor descope risk | decision needed | If the coarse team-scope floor (§3b) is dropped for Phase 1, the residual risk is a `governed_tool`-bypassing pod reaching an arbitrary server's credentials. Named per the honest-ledger rule; do not drop it silently. |
+| D3 credential-resolution mechanism | resolved (decided 2026-07-21) — **path (b)** | D3's "AuthConfig → K8s Secret" was wrong: durable creds are a Fernet blob in Postgres, and no K8s Secret is written for server-level auth_configs (only agent-bound tools get materialized, into per-agent namespaces). Decided: materialize a scoped per-server K8s Secret at registration, proxy reads with narrow RBAC — keeps the proxy off the global `AGENTSHIELD_ENCRYPTION_KEY`. See §3 "Credential resolution". Was the one item blocking proxy discover/call code. |

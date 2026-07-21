@@ -307,6 +307,17 @@ class SafetyOrchestrator:
                 except Exception as exc:
                     logger.warning("De-anonymization failed (non-fatal): %s", exc)
 
+        # ── DEFERRED STUB — MCP per-tool-call output-scan action (Decision 27) ──
+        # docs/design/mcp-tool-source-architecture.md §3c/§8 (decided 2026-07-21).
+        # Today only the agent's FINAL response is scanned here. Decision 27 additionally
+        # scans EACH TOOL RESULT before it re-enters the LLM, wired in governed_tool
+        # (sdk/agentshield_sdk/graph_builder.py + declarative node_executors.py). For MCP
+        # Phase 1 the per-tool-call ACTION on a flagged tool result (block / redact /
+        # pass-through) is intentionally a STUB — verdict computed + logged, NOT enforced.
+        # WHEN SAFETY ORCHESTRATION IS BUILT OUT: define + wire that action at the
+        # governed_tool call site, and fix the clean_text/deanonymized_message field bug
+        # in sdk/agentshield_sdk/safety_client.py. Do NOT report MCP output-scan "done"
+        # until this is real.
         return ScanOutputResponse(
             allowed=True,
             blocked=False,
