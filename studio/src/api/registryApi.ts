@@ -1475,6 +1475,24 @@ export const revokeArtifactGrant = async (
   await http.delete(`/artifacts/${artifactType}/${artifactId}/grants/${grantId}`);
 };
 
+// Directory user (Keycloak-backed) — the picker source for human-grantee grants.
+// `kc_id` is the Keycloak sub, i.e. the value artifact_role_grants stores as
+// grantee_id for a `user` grantee. Backend: routers/admin_users.py GET /admin/users.
+export interface AdminUser {
+  kc_id: string;
+  username: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  team?: string | null;
+  role?: string | null;
+}
+
+export const listUsers = async (): Promise<AdminUser[]> => {
+  const { data } = await http.get<AdminUser[]>("/admin/users");
+  return data;
+};
+
 // ---------------------------------------------------------------------------
 // Webhook token rotation + event log (Phase 9 — event gateway)
 // ---------------------------------------------------------------------------

@@ -18,6 +18,8 @@ vi.mock("../../api/registryApi", () => ({
   listArtifactGrants: vi.fn(),
   createArtifactGrant: vi.fn(),
   revokeArtifactGrant: vi.fn(),
+  listUsers: vi.fn(),
+  listTeams: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -28,6 +30,8 @@ import {
   listArtifactGrants,
   createArtifactGrant,
   revokeArtifactGrant,
+  listUsers,
+  listTeams,
 } from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
@@ -108,6 +112,8 @@ describe("WorkflowTriggersPanel", () => {
     mock(listArtifactGrants).mockResolvedValue([]);
     mock(createArtifactGrant).mockResolvedValue(invokerGrant);
     mock(revokeArtifactGrant).mockResolvedValue(undefined);
+    mock(listUsers).mockResolvedValue([]);
+    mock(listTeams).mockResolvedValue({ items: [] });
   });
 
   it("calls listWorkflowTriggers with workflowId and renders existing trigger", async () => {
