@@ -384,6 +384,10 @@ echo "[7b/7] Seeding platform-admin role (live Keycloak sub)..."
 bash scripts/seed-platform-admin-role.sh \
   || echo "  WARN seed-platform-admin-role failed — re-run: bash scripts/seed-platform-admin-role.sh"
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed —
+# EKS sets langfuse.enabled=false, so this is a no-op there but stays correct if it's enabled).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NS"
+
 echo ""
 echo "=== Done ==="
 echo ""

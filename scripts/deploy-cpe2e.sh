@@ -699,49 +699,11 @@ kubectl rollout status deployment/agentshield-scheduler -n "$NAMESPACE" --timeou
 kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=5m || echo "  (Langfuse web may need DB migrations — check logs if still pending)"
 kubectl rollout status deployment/agentshield-langfuse-worker -n "$NAMESPACE" --timeout=3m || echo "  (Langfuse worker starting)"
 
-# ── Reconcile Langfuse SSO hostAlias -> live gateway-port-8443 ClusterIP ───────
-# langfuse-web reaches Keycloak's OIDC endpoints at the PUBLIC issuer host
-# (agentshield.127.0.0.1.nip.io:8443) from INSIDE the cluster, where that name
-# resolves to 127.0.0.1 (loopback). A hostAlias redirects it to the in-cluster
-# gateway-port-8443 Service. That Service's ClusterIP is assigned dynamically by
-# Kubernetes and is DIFFERENT on every fresh cluster, so any IP baked into
-# values.yaml goes stale the moment you redeploy on a new cluster — and langfuse-web
-# then silently fails the SSO back-channel: trace links show "You do not have access
-# to this trace / Sign In" even with a valid Studio login. Never hardcode it: fetch
-# the live ClusterIP and reconcile the hostAlias to match. Idempotent — patches (and
-# rolls) only when the IP has actually drifted.
-# See docs/bugs/langfuse-hostalias-stale-clusterip.md.
-echo "  Reconciling Langfuse SSO hostAlias -> live gateway-port-8443 ClusterIP..."
-GW_IP=""
-for _ in $(seq 1 30); do
-  GW_IP=$(kubectl get svc gateway-port-8443 -n envoy-gateway-system -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)
-  [ -n "$GW_IP" ] && [ "$GW_IP" != "None" ] && break
-  sleep 2
-done
-if [ -z "$GW_IP" ]; then
-  echo "  WARNING: gateway-port-8443 Service not found in envoy-gateway-system —"
-  echo "           Langfuse trace-link SSO will fail until reconciled. Skipping."
-else
-  CUR_IP=$(kubectl get deploy agentshield-langfuse-web -n "$NAMESPACE" \
-    -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
-  if [ "$CUR_IP" = "$GW_IP" ]; then
-    echo "  hostAlias already current ($GW_IP) — no change."
-  else
-    echo "  hostAlias ${CUR_IP:-<none>} -> $GW_IP (patching + rolling langfuse-web)"
-    kubectl patch deploy agentshield-langfuse-web -n "$NAMESPACE" --type=merge \
-      -p "{\"spec\":{\"template\":{\"spec\":{\"hostAliases\":[{\"ip\":\"$GW_IP\",\"hostnames\":[\"agentshield.127.0.0.1.nip.io\"]}]}}}}"
-    kubectl rollout status deployment/agentshield-langfuse-web -n "$NAMESPACE" --timeout=3m || true
-  fi
-  # Self-verify the OIDC back-channel from inside the (re)rolled pod.
-  LF_POD=$(kubectl get pod -n "$NAMESPACE" --no-headers 2>/dev/null | grep langfuse-web | grep Running | awk '{print $1}' | head -1)
-  if [ -n "$LF_POD" ] && kubectl exec -n "$NAMESPACE" "$LF_POD" -c langfuse-web -- \
-       wget -qO- --no-check-certificate --timeout=8 \
-       "https://agentshield.127.0.0.1.nip.io:8443/realms/agentshield/.well-known/openid-configuration" >/dev/null 2>&1; then
-    echo "  Verified: langfuse-web reaches Keycloak OIDC discovery (SSO back-channel OK)."
-  else
-    echo "  WARNING: langfuse-web still cannot reach Keycloak OIDC discovery — trace-link SSO may fail."
-  fi
-fi
+# Reconcile the Langfuse SSO hostAlias to the LIVE gateway-port-8443 ClusterIP (dynamic per
+# cluster — a value baked into values.yaml goes stale on a cluster move and silently breaks
+# trace-link SSO). Self-skips if langfuse is not deployed. See the helper header +
+# docs/bugs/langfuse-hostalias-stale-clusterip.md.
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
 
 # Create Keycloak client for Langfuse SSO (idempotent — skips if exists)
 echo "  Creating Keycloak client 'langfuse' for SSO..."

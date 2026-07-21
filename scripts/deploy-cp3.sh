@@ -88,6 +88,9 @@ kubectl rollout status deployment/agentshield-llm-guard -n "$NAMESPACE" --timeou
 kubectl rollout status deployment/agentshield-presidio -n "$NAMESPACE" --timeout=5m || \
   echo "  WARNING: presidio rollout not ready (image may still be pulling)"
 
+# Keep Langfuse trace-link SSO working after any deploy (self-skips if langfuse not deployed).
+bash "$(dirname "$0")/reconcile-langfuse-hostalias.sh" "$NAMESPACE"
+
 echo ""
 echo "================================================================"
 echo "  AgentShield CP3 Deploy — COMPLETE"
