@@ -64,10 +64,11 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002). 0.2.221: Decision 30 — matches values.yaml
+REGISTRY_API_TAG="0.2.225"   # 0.2.225: MCP-as-tool-source — mcp_servers router + migration 0072 + mcp-proxy client (matches values.yaml). 0.2.224: HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id). 0.2.221: Decision 30 — matches values.yaml
+MCP_PROXY_TAG="0.1.0"   # 0.1.0: NEW centralized MCP wire client (tool discovery + governed tool calls). Dockerfile COPYs scripts/e2e/fixtures/stub_mcp_server.py → REPO-ROOT build context.
 DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) so sandbox HITL approvals are playground-context (inline + resumable), not routed to the reviewer console. 0.1.39: per-provider env map; >=0.1.38 imagePullSecrets on agent pods (note 7)
 DECLARATIVE_RUNNER_TAG="0.1.59"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
-STUDIO_TAG="0.1.160"   # 0.1.160: human-grantee grant creation (Decision 30) + T024
+STUDIO_TAG="0.1.161"   # 0.1.161: MCP-as-tool-source Studio UI (Phases 12-14). 0.1.160: human-grantee grant creation (Decision 30) + T024
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"
@@ -121,11 +122,11 @@ echo ""
 echo "[1/7] ECR login + repos..."
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR" >/dev/null
 for r in registry-api deploy-controller declarative-runner studio scheduler event-gateway \
-         python-executor eval-runner minio-cp1 postgresql-pgvector; do
+         python-executor eval-runner minio-cp1 postgresql-pgvector mcp-proxy; do
   aws ecr describe-repositories --repository-names "agentshield/$r" --region "$REGION" >/dev/null 2>&1 \
     || aws ecr create-repository --repository-name "agentshield/$r" --region "$REGION" >/dev/null
 done
-echo "  10 repos ready"
+echo "  11 repos ready"
 
 # ── Step 2: build + push (linux/amd64!) ──────────────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then
@@ -156,6 +157,9 @@ else
     echo "FATAL: $svc:$tag failed to build/push after 4 attempts (VPN/DNS?)"; return 1
   }
   b registry-api        "$REGISTRY_API_TAG"       services/registry-api/
+  # mcp-proxy: REPO-ROOT context (.) + explicit Dockerfile — its Dockerfile COPYs
+  # scripts/e2e/fixtures/stub_mcp_server.py, which lives outside services/mcp-proxy/.
+  b mcp-proxy           "$MCP_PROXY_TAG"          .  services/mcp-proxy/Dockerfile
   b deploy-controller   "$DEPLOY_CONTROLLER_TAG"  services/deploy-controller/
   b declarative-runner  "$DECLARATIVE_RUNNER_TAG" .  services/declarative-runner/Dockerfile
   b studio              "$STUDIO_TAG"             studio/
@@ -472,7 +476,7 @@ else
   echo "  kubectl -n ${NS} logs \$(kubectl -n ${NS} get pods -l app.kubernetes.io/name=registry-api --field-selector=status.phase=Pending -o name | head -1) -c alembic-migrate" >&2
   exit 1
 fi
-for d in studio deploy-controller scheduler event-gateway python-executor; do
+for d in studio deploy-controller scheduler event-gateway python-executor mcp-proxy; do
   kubectl rollout status "deploy/${RELEASE}-${d}" -n "$NS" --timeout=240s >/dev/null 2>&1 \
     && echo "  ok  ${d}" || echo "  WARN ${d} not ready"
 done

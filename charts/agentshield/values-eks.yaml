@@ -34,6 +34,11 @@ studio:
 python-executor:
   image:
     repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/python-executor"
+# mcp-proxy (MCP-as-tool-source): Group-A verbatim image.repository (mirrors
+# python-executor) -> ECR. Tag carried from values.yaml (mcp-proxy.image.tag=0.1.0).
+mcp-proxy:
+  image:
+    repository: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/mcp-proxy"
 
 # embedding-sidecar (POC-4 RAG): parent-chart template image -> ECR. Tag is
 # carried from values.yaml (embeddingSidecar.image.tag) unless bumped there.
