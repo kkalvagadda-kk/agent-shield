@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Code, Loader2, Pencil, Plus, Trash2, Wrench, X } from 'lucide-react';
+import { Code, ExternalLink, Loader2, Pencil, Plus, Server, Trash2, Wrench, X } from 'lucide-react';
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { toast } from 'sonner';
 import { z } from 'zod';
@@ -29,6 +30,8 @@ const baseSchema = z.object({
   tool_type: z.enum(['http', 'python']),
   risk_level: z.enum(['low', 'medium', 'high']),
   owner_team: z.string().optional(),
+  // Decision 27 / FR-MCP-51 — per-tool de-anonymize permission (every tool type).
+  pii_deanonymize_allowed: z.boolean().optional(),
   http_method: z.enum(['GET', 'POST', 'PUT', 'DELETE']).optional(),
   http_url: z.string().optional(),
   python_code: z.string().optional(),
@@ -193,6 +196,8 @@ export default function ToolsPage() {
                         <div className="flex items-center gap-1.5">
                           {tool.type === 'python' ? (
                             <Code size={13} className="text-purple-500 shrink-0" />
+                          ) : tool.type === 'mcp_tool' ? (
+                            <Server size={13} className="text-indigo-500 shrink-0" />
                           ) : (
                             <Wrench size={13} className="text-slate-400 shrink-0" />
                           )}
@@ -207,8 +212,15 @@ export default function ToolsPage() {
                         )}
                       </td>
                       <td className="px-4 py-3">
-                        <span className={cn('badge', tool.type === 'python' ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-600')}>
-                          {tool.type}
+                        <span
+                          className={cn(
+                            'badge',
+                            tool.type === 'python' && 'bg-purple-100 text-purple-700',
+                            tool.type === 'mcp_tool' && 'bg-indigo-100 text-indigo-700',
+                            tool.type !== 'python' && tool.type !== 'mcp_tool' && 'bg-slate-100 text-slate-600',
+                          )}
+                        >
+                          {tool.type === 'mcp_tool' ? 'MCP' : tool.type}
                         </span>
                       </td>
                       <td className="px-4 py-3">
@@ -223,35 +235,48 @@ export default function ToolsPage() {
                         {tool.status ?? '—'}
                       </td>
                       <td className="px-4 py-3 text-right">
-                        <div className="flex items-center justify-end gap-3">
-                          <button
-                            onClick={() => openEdit(tool)}
-                            className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 transition-colors"
+                        {/* MCP tools are server-owned: their lifecycle lives on the
+                            MCP Servers screen, so no Edit/Delete here — only a link
+                            back to the source server. */}
+                        {tool.type === 'mcp_tool' ? (
+                          <Link
+                            to={`/mcp-servers/${tool.mcp_server_id ?? ''}`}
+                            className="inline-flex items-center gap-1 text-xs text-indigo-600 hover:text-indigo-800 transition-colors"
                           >
-                            <Pencil size={12} />
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => {
-                              if (confirm(`Delete tool "${tool.display_name ?? tool.name}"?`)) {
-                                deleteMutation.mutate(tool.id);
+                            <ExternalLink size={12} />
+                            View source server
+                          </Link>
+                        ) : (
+                          <div className="flex items-center justify-end gap-3">
+                            <button
+                              onClick={() => openEdit(tool)}
+                              className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 transition-colors"
+                            >
+                              <Pencil size={12} />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm(`Delete tool "${tool.display_name ?? tool.name}"?`)) {
+                                  deleteMutation.mutate(tool.id);
+                                }
+                              }}
+                              disabled={
+                                deleteMutation.isPending &&
+                                deleteMutation.variables === tool.id
                               }
-                            }}
-                            disabled={
-                              deleteMutation.isPending &&
-                              deleteMutation.variables === tool.id
-                            }
-                            className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-800 disabled:opacity-50 transition-colors"
-                          >
-                            {deleteMutation.isPending &&
-                            deleteMutation.variables === tool.id ? (
-                              <Loader2 size={12} className="animate-spin" />
-                            ) : (
-                              <Trash2 size={12} />
-                            )}
-                            Delete
-                          </button>
-                        </div>
+                              className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-800 disabled:opacity-50 transition-colors"
+                            >
+                              {deleteMutation.isPending &&
+                              deleteMutation.variables === tool.id ? (
+                                <Loader2 size={12} className="animate-spin" />
+                              ) : (
+                                <Trash2 size={12} />
+                              )}
+                              Delete
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -301,6 +326,7 @@ function ToolForm({
           tool_type: (tool.type === 'python' ? 'python' : 'http') as 'http' | 'python',
           risk_level: (tool.risk_level ?? 'low') as 'low' | 'medium' | 'high',
           owner_team: tool.owner_team ?? '',
+          pii_deanonymize_allowed: tool.pii_deanonymize_allowed ?? false,
           http_method: (tool.http_method ?? 'GET') as 'GET' | 'POST' | 'PUT' | 'DELETE',
           http_url: tool.http_url ?? '',
           python_code: tool.python_code ?? PYTHON_STARTER,
@@ -309,6 +335,7 @@ function ToolForm({
           tool_type: 'http',
           http_method: 'GET',
           risk_level: 'low',
+          pii_deanonymize_allowed: false,
           python_code: PYTHON_STARTER,
         },
   });
@@ -324,6 +351,7 @@ function ToolForm({
           risk_level: values.risk_level,
           owner_team: values.owner_team,
           auth_config_id: authConfigId || null,
+          pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
           ...(values.tool_type === 'http'
             ? { http_method: values.http_method ?? 'GET', http_url: values.http_url }
             : { python_code: values.python_code }),
@@ -335,6 +363,7 @@ function ToolForm({
         type: values.tool_type,
         risk_level: values.risk_level,
         auth_config_id: authConfigId || null,
+        pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
         ...(values.display_name ? { display_name: values.display_name } : {}),
         ...(values.description ? { description: values.description } : {}),
         ...(values.owner_team ? { owner_team: values.owner_team } : {}),
@@ -468,6 +497,23 @@ function ToolForm({
           <p className="text-xs text-slate-400 mt-0.5">
             Link a credential for tools that need API keys or tokens
           </p>
+        </Field>
+
+        {/* Decision 27 / FR-MCP-51 — de-anonymize permission (every tool type). */}
+        <Field label="PII handling">
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              {...register('pii_deanonymize_allowed')}
+              className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+            />
+            <span className="text-sm text-slate-700">
+              Allow this tool to receive real PII values
+              <span className="block text-xs text-slate-400">
+                When off, governed calls pass anonymized placeholders instead of the real value.
+              </span>
+            </span>
+          </label>
         </Field>
 
         {/* HTTP-specific fields */}

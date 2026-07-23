@@ -12,6 +12,16 @@
 
 ---
 
+## MCP as a Tool Source (Phase 1) — Studio UI shipped, runtime dispatch NOT yet wired — 2026-07-23
+
+Studio UI for MCP-as-a-tool-source (Phases 12-14, T060-T072 + CP5 + Playwright T075) is code-complete on branch `mcp-tool-source` at **studio 0.1.161**. Register/list/detail/sync/delete screens, the Sidebar "MCP Servers" entry + `/mcp-servers[/:id]` routes, the read-only `mcp_tool` rows + PII de-anon checkbox on ToolsPage, and the ToolsPicker source-server badge are wired and green under Vitest (18 new tests across 4 suites; full studio suite 440/440; `tsc --noEmit` clean).
+
+- **not-yet-wired (debt) — the headline gap:** the **runtime dispatch** for a discovered MCP tool is NOT built. Phases **P7 (SDK `McpToolExecutor`)**, **P8 (declarative-runner `McpToolNodeExecutor`)**, and **P9-11 (Decision-27 governed de-anon gate)** are still `[ ]` in `docs/plan/mcp-tool-source-phase1/tasks.md`. **Consequence:** a user can register a server, discover its tools, and bind one to an agent entirely through the UI — but at agent run time that `mcp_tool` does **not** yet resolve to a real call. The UI is complete; the execution path behind it is the remaining backend work. Do NOT report the feature as end-to-end usable until P7-P11 land.
+- **deferred (intentional) — not cluster-proven this run:** CP5 checkpoint scripts (`scripts/deploy-cp5.sh`, `scripts/smoke-cp5-infra.sh`, `scripts/smoke-cp5-behaviour.sh`) and the Playwright journey (`studio/e2e/mcp-servers.spec.ts`) are **written but NOT executed** — no live cluster this pass. The whole register→discover backend slice (P1-6) is statically verified, not cluster-run (carried over from CP2). Deploy studio 0.1.161, then run CP5a→CP5b→CP5c + `bash scripts/studio-e2e.sh e2e/mcp-servers.spec.ts`.
+- **deferred (intentional) — infra-gated Playwright steps:** in `mcp-servers.spec.ts` the register → redirect-to-detail → save→reload→assert (GET `/mcp-servers/{id}`) proofs run **unconditionally**; the discovered-tools-table + Tools-Picker source-server-badge + bind steps **skip** when discovery returned 0 tools (no `mcp-proxy` / unreachable upstream) — the same "few warm pods" boundary the bash suites accept. The badge + read-only-row rendering is covered **unconditionally** by Vitest (`ToolsPicker.test.tsx`, `ToolsPage.test.tsx`).
+
+---
+
 ## Webhook Application Identity (Decision 30) — trigger-CRUD `require_user` breaks ~16 legacy e2e suites — 2026-07-19
 
 **not-yet-wired (debt), real gap, explicitly deferred by user decision.** T012/T013 (`docs/plan/webhook-application-identity/tasks.md`, Phase 5) add `claims: dict = Depends(require_user)` to all 8 trigger-CRUD endpoints (`create/update/delete/rotate-token`, both `routers/triggers.py` and `routers/composite_workflows.py`) — a request with **no bearer token at all** now gets `401` unconditionally, independent of the new `rbac.ENFORCE_TRIGGER_MGMT` soft-enforcement flag (which only gates the 403 authorization decision, not the 401 authentication requirement). This was a deliberate part of the plan's design (`docs/plan/webhook-application-identity/research.md` §5), reviewed and approved earlier in the same session that implemented it.

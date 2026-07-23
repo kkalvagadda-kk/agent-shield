@@ -1054,7 +1054,10 @@ studio:
     #   ClientPanel retired.
     # 0.1.160: human-grantee grant creation in ArtifactGrantsList (agent-admin/approver to
     #   user/team) + ApplicationsPage Vitest (T024). Official ship of the Studio feature.
-    tag: "0.1.160"
+    # 0.1.161: MCP-as-a-tool-source Studio UI (Phases 12-14) — MCP Servers list+register
+    #   +detail pages, Sidebar "MCP Servers" (Settings) + routes, ToolsPage read-only
+    #   mcp_tool rows + PII de-anon checkbox, ToolsPicker source-server badge.
+    tag: "0.1.161"
     pullPolicy: IfNotPresent
 
   service:

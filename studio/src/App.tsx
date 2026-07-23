@@ -44,6 +44,8 @@ import { DEMO } from "./demo/demo";
 import DemoHomePage from "./pages/preview/DemoHomePage";
 import KnowledgeBasesPage from "./pages/KnowledgeBasesPage";
 import KnowledgeBaseDetailPage from "./pages/KnowledgeBaseDetailPage";
+import McpServersPage from "./pages/McpServersPage";
+import McpServerDetailPage from "./pages/McpServerDetailPage";
 import PreferencesPage from "./pages/preview/PreferencesPage";
 import MultiAgentChatPage from "./pages/preview/MultiAgentChatPage";
 import PreviewConversationsPage from "./pages/preview/ConversationsPage";
@@ -68,6 +70,8 @@ export default function App() {
               {/* UX-preview routes (context storage / Knowledge Base) */}
               <Route path="/knowledge" element={<KnowledgeBasesPage />} />
               <Route path="/knowledge/:id" element={<KnowledgeBaseDetailPage />} />
+              <Route path="/mcp-servers" element={<McpServersPage />} />
+              <Route path="/mcp-servers/:id" element={<McpServerDetailPage />} />
               <Route path="/preferences" element={<PreferencesPage />} />
               <Route path="/preview/chat" element={<MultiAgentChatPage />} />
               <Route path="/preview/conversations" element={<PreviewConversationsPage />} />

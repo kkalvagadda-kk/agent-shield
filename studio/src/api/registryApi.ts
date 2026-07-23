@@ -155,6 +155,18 @@ export interface RegistryTool {
   // Python tool fields
   python_code?: string;
   config: Record<string, unknown>;
+  // MCP-tool fields (type === "mcp_tool"). `mcp_server_*` are denormalized from
+  // the owning MCPServer by routers/tools.py::_to_tool_response (None for non-mcp
+  // rows) — they let the ToolsPicker badge the source server and ToolsPage render
+  // an mcp_tool row read-only with a link back to its server. Server-owned
+  // lifecycle: these rows are never created/edited/deleted from ToolsPage.
+  mcp_server_id?: string | null;
+  mcp_tool_name?: string | null;
+  mcp_server_name?: string | null;
+  mcp_server_is_external?: boolean | null;
+  mcp_server_scan_results?: boolean | null;
+  // Decision 27 / FR-MCP-51 — per-tool de-anonymize permission (every tool type).
+  pii_deanonymize_allowed?: boolean;
 }
 
 /**
@@ -991,6 +1003,8 @@ export interface CreateToolPayload {
   risk_level: 'low' | 'medium' | 'high';
   owner_team?: string;
   auth_config_id?: string | null;
+  // Decision 27 / FR-MCP-51 — per-tool de-anonymize permission (every tool type).
+  pii_deanonymize_allowed?: boolean;
   // HTTP-specific
   http_method?: string;
   http_url?: string;

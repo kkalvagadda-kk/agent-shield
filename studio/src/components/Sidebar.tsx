@@ -15,6 +15,7 @@ import {
   ListChecks,
   LogOut,
   Rocket,
+  Server,
   ShoppingBag,
   Sparkles,
   Store,
@@ -87,6 +88,7 @@ const SETTINGS_ITEMS: NavItem[] = [
   { label: "Models", to: "/providers", icon: Cpu },
   { label: "Credentials", to: "/credentials", icon: KeyRound },
   { label: "Applications", to: "/applications", icon: Boxes },
+  { label: "MCP Servers", to: "/mcp-servers", icon: Server },
 ];
 
 const ADMIN_ITEMS: NavItem[] = [
@@ -119,7 +121,7 @@ function detectSections(pathname: string): SectionKey[] {
     pathname.startsWith("/deployments")
   ) active.push("catalog");
   if (pathname.startsWith("/observability")) active.push("observe");
-  if (pathname.startsWith("/providers") || pathname.startsWith("/credentials") || pathname.startsWith("/applications")) active.push("settings");
+  if (pathname.startsWith("/providers") || pathname.startsWith("/credentials") || pathname.startsWith("/applications") || pathname.startsWith("/mcp-servers")) active.push("settings");
   if (pathname.startsWith("/admin") || pathname.startsWith("/hitl")) active.push("admin");
   return active;
 }

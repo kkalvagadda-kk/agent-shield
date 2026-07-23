@@ -51,6 +51,13 @@ export default function ToolsPicker({
               <span className="text-xs text-slate-400 ml-2 truncate">{tool.description}</span>
             )}
           </div>
+          {/* Source-server badge — an mcp_tool carries its origin server so a
+              picker never lists a discovered tool as if it were a native one. */}
+          {tool.mcp_server_name && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
+              {tool.mcp_server_name}
+            </span>
+          )}
           {tool.risk_level && (
             <span
               className={cn(
