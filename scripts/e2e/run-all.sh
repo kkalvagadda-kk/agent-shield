@@ -138,6 +138,7 @@ run_suite "Suite 80: Eval v2 E-6 regression gate + per-run threshold (no-fakes)"
 run_suite "Suite 81: Deploy-time tool-access auto-grant" "suite-81-deploy-tool-autograt.sh"
 run_suite "Suite 82: Artifact Delegation Foundation (grants API)" "suite-82-artifact-grants.sh"
 run_suite "Suite 83: Webhook Applications (invoker grants + signed invoke)" "suite-83-webhook-applications.sh"
+run_suite "Suite 84: Tool description (multi-line) + picker tile metadata"  "suite-84-tool-description-metadata.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)

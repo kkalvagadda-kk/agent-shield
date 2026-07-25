@@ -12,6 +12,54 @@
 
 ---
 
+## Browser-plugin verification script — tools UX (multi-line description + tile pickers) — 2026-07-25
+
+**Ready to run; not yet run.** Drive this with the Claude-in-Chrome browser plugin (or by hand) once the cluster serves `studio 0.1.163`. It covers the same two changes the Vitest/Playwright/bash layers cover, but through a real browser session against the deployed app — the layer that catches "the screen is broken" when every other suite is green.
+
+Preconditions: Studio reachable (port-forward or gateway URL), logged in as `platform-admin`, cluster on `studio ≥ 0.1.163` and `registry-api ≥ 0.2.225`.
+
+**B-1 — Description is genuinely multi-line (create)**
+1. Go to `/tools` → **New Tool**.
+2. Confirm the Description control is a **textarea** (drag its resize handle; it should grow) with helper text explaining the LLM reads it.
+3. Name `browser_check_tool`, Display Name `Browser Check Tool`, URL `https://example.invalid/x`.
+4. In Description press Enter to type **4 separate lines**, including one blank line.
+5. **Expected:** all 4 lines stay visible and separate — no collapse into one line.
+6. **Create Tool** → the tool appears in the list.
+
+**B-2 — Description survives a reload (round-trip)**
+1. Hard-reload the page (⌘R), then click **Edit** on `Browser Check Tool`.
+2. **Expected:** the textarea is rehydrated with all 4 lines exactly as typed. *This is the regression that shipped before:* the old single-line `<input>` showed one flattened line here.
+3. Append a 5th line → **Save Changes** → hard-reload → Edit again → 5 lines still present.
+
+**B-3 — Tools picker is a browse-and-select drawer**
+1. Go to `/agents/new` → **No-code**.
+2. **Expected:** no tool list inline. You see "No tools selected." and an **Add from catalog** button.
+3. Click **Add from catalog** → a drawer opens from the right with a search box, a tile grid, and a "N selected" count.
+4. **Expected on each tile:** name, description clamped to 2 lines, a **risk** chip and a **type** chip.
+5. **Expected absent:** any Edit, Delete, or "New tool" control anywhere in the drawer. Tools are shared team resources — a destructive control here would let a mis-click during agent assembly delete a tool other agents depend on.
+6. Type a word from one tool's description → only matching tiles remain. Type gibberish → the empty state names where tools are managed.
+7. Confirm `knowledge_search` is **not** listed (it is attached server-side when a KB is bound).
+8. Select a tool → **Done** → it appears as a removable chip on the builder.
+
+**B-4 — Knowledge picker behaves identically**
+1. Same page, Knowledge Bases section → **Add from catalog**.
+2. **Expected:** same drawer; tiles show `ready/source` counts and **no risk badge** (KBs have no risk level).
+3. Select a KB → **Done** → chip appears.
+
+**B-5 — Selection persists (the round-trip that matters)**
+1. Name the agent, **Create Agent**.
+2. Navigate to the new agent → **Settings**.
+3. **Expected:** the tool and KB chips are still there, read back from the backend.
+4. Open each drawer → the corresponding tiles are checked.
+5. Remove the tool via its chip **×** → **Save Changes** → hard-reload → Settings.
+6. **Expected:** "No tools selected." — the removal persisted, not just the local state.
+
+**B-6 — Escape hatch / no lost draft**
+1. On `/agents/new`, fill the agent name, open the tools drawer, then press **Esc**.
+2. **Expected:** the drawer closes and the agent name is still filled — the drawer is an overlay, not a route, precisely so a half-filled form is never discarded.
+
+Record any deviation as a bug doc under `docs/bugs/` per the repo rule, with the failing step number.
+
 ## Tools + Knowledge pickers → browse-and-select tile drawers — cluster verification pending — 2026-07-25
 
 **deferred (intentional) — code + tests complete, Playwright unrun.** `studio 0.1.163`. The inline checkbox lists in `ToolsPicker` and `KnowledgeBasePicker` are replaced by a shared browse-and-select tile drawer (`components/shared/PickerTile` + `TilePickerDrawer`). Selected entities render as removable chips on the builder surface; the catalog lives in the drawer behind "Add from catalog". Both pickers kept their previous prop signatures, so none of the three consumer pages (`CreateAgentPage`, `AgentListPage`, `AgentDetailPage`) needed edits.
@@ -30,6 +78,20 @@ Deliberate design constraints, each pinned by a test:
 - Both need a deployed Studio at `0.1.163`; the EKS cluster is still serving `0.1.160`.
 
 **Accepted UX dead-end (deferred, intentional):** with no create-new affordance in the drawer, someone who needs a tool or KB that does not exist yet still has to abandon their draft to go author it. The drawer's no-results state names where the entity is managed rather than linking away mid-draft. Revisit if it bites in practice.
+
+**Full coverage matrix for the two tools-UX changes** (all four layers written; none of the cluster-dependent ones executed yet):
+
+| Layer | Artifact | Covers | Status |
+|---|---|---|---|
+| Component (Vitest) | `ToolsPage.test.tsx` (5) | textarea shape, newline preservation, payload, edit rehydrate | **green locally** |
+| Component (Vitest) | `ToolsPicker.test.tsx` (12), `KnowledgeBasePicker.test.tsx` (10) | chips vs drawer, tiles + risk/type, `knowledge_search` exclusion, no edit/delete/create, search, empty states | **green locally** |
+| API (bash) | `scripts/e2e/suite-84-tool-description-metadata.sh` (T-S84-001…008) | newlines survive POST→GET→list→edit, ~4KB/60-line description not truncated, list carries `risk_level`+`type` for the tiles, no-description path does not 500 | **not run** (needs pod) |
+| Browser (Playwright) | `tool-description-multiline.spec.ts` | real form: textarea, 4 lines typed, POST body, reload→rehydrate, edit→reload→persisted | **not run** (needs 0.1.163) |
+| Browser (Playwright) | `tools-picker-drawer.spec.ts` | drawer tiles + risk/type, no edit/delete/create, search, select→chip, create persists, remove→save→reload | **not run** (needs 0.1.163) |
+| Browser (Playwright) | `agent-knowledge-config.spec.ts` (updated) | KB drawer bind/unbind round-trip; `knowledge_search` hidden asserted against the real catalog | **not run** (needs 0.1.163) |
+| Browser (plugin) | "Browser-plugin verification script" section above (B-1…B-6) | the same journeys driven interactively against the deployed app | **not run** |
+
+Note on why the bash suite exists at all for a frontend change: a `<textarea>` is worthless if the API or column collapses the newlines on the way through — the field would look multi-line while storing one line. Vitest proves only the React value; suite-84 proves the bytes survive the backend.
 
 ## Global role `viewer` → `consumer` rename — cluster verification pending — 2026-07-25
 
