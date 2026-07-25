@@ -50,6 +50,10 @@ const SERVER_URL = "http://mcp-e2e-fixture.agentshield-mcp.svc.cluster.local:999
 test.describe("MCP servers — register → discover → bind (Studio UI)", () => {
   let api: APIRequestContext;
   let serverId = "";
+  // Number of tools discovery returned for the registered server — captured by
+  // the persistence test, read by the infra-gated tool-table test.
+  let discoveredToolCount = 0;
+  let firstToolName = "";
 
   test.beforeAll(async () => {
     api = await pwRequest.newContext({
@@ -66,6 +70,10 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     }
   });
 
+  // The DoD-critical journey. ALWAYS runs and must pass — no infra gate, no
+  // skip. Proves the real UI path (register modal → POST → redirect) AND the
+  // persistence round-trip (reload the detail route + list, read back from the
+  // backend). Independent of whether the upstream MCP server was reachable.
   test("register an MCP server → redirect to detail → persists on reload", async ({ page }) => {
     test.setTimeout(120_000);
 
@@ -126,21 +134,28 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await listResp;
     await expect(page.getByText(SERVER_NAME)).toBeVisible({ timeout: 15_000 });
 
-    // -----------------------------------------------------------------------
-    // 5. INFRA-GATED: discovered-tools table + builder picker badge + bind.
-    //    Only when the upstream was actually reachable and returned tools.
-    // -----------------------------------------------------------------------
-    const toolCount = (detail.tools?.length ?? 0) as number;
+    // Hand the discovery result to the infra-gated test below.
+    discoveredToolCount = (detail.tools?.length ?? 0) as number;
+    firstToolName = discoveredToolCount > 0 ? detail.tools[0].mcp_tool_name : "";
+  });
+
+  // INFRA-GATED enrichment: the discovered-tools table (FR-MCP-41) only renders
+  // when the upstream MCP server was reachable and returned tools. When 0 tools
+  // were discovered (no proxy / placeholder URL unreachable → status="error"),
+  // this SKIPS — the same "few warm pods" boundary the bash suites accept. The
+  // badge + read-only-row rendering is covered unconditionally by Vitest
+  // (ToolsPicker.test.tsx, ToolsPage.test.tsx). Reported separately so the
+  // persistence journey above always shows a clear pass, never a skip.
+  test("discovered-tools table lists a tool row (infra-gated)", async ({ page }) => {
     test.skip(
-      toolCount === 0,
-      "no tools discovered (no mcp-proxy / unreachable upstream) — tool-table + picker-badge + bind steps are infra-gated; badge/read-only rendering is covered by Vitest"
+      discoveredToolCount === 0,
+      "no tools discovered (no mcp-proxy / unreachable upstream) — tool-table step is infra-gated; badge/read-only rendering is covered by Vitest"
     );
+    expect(serverId).toBeTruthy();
 
     await page.goto(`/mcp-servers/${serverId}`);
     await page.waitForLoadState("networkidle");
-    // The discovered-tools table (FR-MCP-41) lists at least one tool row.
-    const firstTool = detail.tools[0];
-    await expect(page.getByText(firstTool.mcp_tool_name, { exact: false }).first()).toBeVisible({
+    await expect(page.getByText(firstToolName, { exact: false }).first()).toBeVisible({
       timeout: 15_000,
     });
   });

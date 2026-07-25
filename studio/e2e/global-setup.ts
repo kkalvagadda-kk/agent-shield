@@ -15,7 +15,12 @@ export default async function globalSetup(config: FullConfig) {
   fs.mkdirSync(authDir, { recursive: true });
   const statePath = path.join(authDir, "state.json");
 
-  const browser = await chromium.launch();
+  // Mirror playwright.config's host-resolver tunnel so the one-time login
+  // navigation resolves the same (possibly non-local) gateway Host.
+  const resolverRules = process.env.PLAYWRIGHT_HOST_RESOLVER_RULES;
+  const browser = await chromium.launch(
+    resolverRules ? { args: [`--host-resolver-rules=${resolverRules}`] } : {},
+  );
   // The gateway serves a self-signed cert; accept it so login can proceed.
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();

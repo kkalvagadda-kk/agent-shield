@@ -5,6 +5,18 @@ import { defineConfig, devices } from "@playwright/test";
 // saves the session; specs reuse it via storageState.
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
+// When the deployed gateway routes only on a specific Host (e.g. the internal
+// EKS ELB DNS) and that host isn't locally resolvable, tunnel it to a local
+// gateway port-forward via Chromium's host-resolver-rules. Set e.g.
+//   PLAYWRIGHT_HOST_RESOLVER_RULES="MAP my-elb.elb.amazonaws.com 127.0.0.1:8443"
+// so PLAYWRIGHT_BASE_URL can be the REAL portless origin (redirect_uri +
+// TLS SAN match) while connections land on the port-forward. Env-gated: no
+// effect for the default local (kind) http port-forward flow.
+const HOST_RESOLVER_RULES = process.env.PLAYWRIGHT_HOST_RESOLVER_RULES;
+const launchOptions = HOST_RESOLVER_RULES
+  ? { args: [`--host-resolver-rules=${HOST_RESOLVER_RULES}`] }
+  : {};
+
 export default defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.ts",
@@ -27,6 +39,6 @@ export default defineConfig({
     ignoreHTTPSErrors: true,
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "chromium", use: { ...devices["Desktop Chrome"], launchOptions } },
   ],
 });
