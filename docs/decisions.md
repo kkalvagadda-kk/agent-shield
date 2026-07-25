@@ -757,6 +757,35 @@ Create/rotate/disable/delete gated on global role ≥ `contributor` **within the
 
 ---
 
+## Decision 31: Pluggable Credential Provider — External Secret Store Backend (Phase-4 Prerequisite)
+
+**Date:** 2026-07-25
+
+**Design doc:** `docs/design/credential-provider-architecture.md` (the `CredentialProvider` Protocol, the four backends, the MCP threading, the proxy-containment argument, the migration and phasing).
+
+**Context:** Durable credential material lives in three places today, each an MVP compromise (Decision 12). (1) **Postgres Fernet blobs — the source of truth:** `AuthConfig.credentials_encrypted` (`models.py:922`), and identically `LLMProvider.credentials_encrypted` (`models.py:1215`) and `applications.secret_encrypted` (Decision 30), all encrypted/decrypted by `crypto.py`'s one `_fernet()` (crypto.py:24-31) keyed on a **single** `AGENTSHIELD_ENCRYPTION_KEY`. (2) **Per-server K8s Secret — a materialized copy:** `mcp_secrets.materialize_server_secret` (mcp_secrets.py:104-151) decrypts the Fernet blob once and writes `agentshield-mcp-server-{id}`; the MCP Proxy reads exactly that Secret (`credentials.read_server_secret`, credentials.py:51-105) with no DB and no master key (§3 path (b)). (3) **Keycloak client secret — a file mount** the proxy reads fresh per mint (`keycloak_client._read_client_secret`, keycloak_client.py:64-77).
+
+Their weaknesses: **one master key decrypts everything** — anything holding `AGENTSHIELD_ENCRYPTION_KEY` reads every `AuthConfig`/`LLMProvider`/application secret; rotation is manual (Decision 12's own admission); the Postgres row is a single high-value target; and K8s Secrets are base64-in-etcd (app-layer-unencrypted, cluster-dependent at-rest encryption).
+
+**The new pressure:** Phase-4 MCP OAuth 2.1 (`mcp-tool-source-architecture.md` Phase 4 / OQ-01) and Decision 29's on-behalf-of impersonation exchange introduce a credential class the current stores were never shaped for: per-`(server, user)` **refresh tokens** (long-lived, must be durably stored, rotated, scoped, audited) and impersonation-grant minting material. A per-`(server,user)` refresh token in a single-master-key Fernet blob is precisely the anti-pattern; the proxy's `_token_cache` (keycloak_client.py:40) is in-memory and per-audience, not a durable per-user store. There is no good durable home today.
+
+**The nuance (explicit):** persist the **minting material + refresh tokens**, NOT short-lived minted **access** tokens. Service-account access tokens stay in-memory and are re-minted on expiry (`mint_service_account_token`, keycloak_client.py:80-149); OBO access tokens are minted per call, never cached (identity.py §2). The provider stores what *seeds* a mint, never the mint output.
+
+**Decision:** introduce a `CredentialProvider` interface (`put`/`get`/`rotate`/`delete` over a `CredentialRef` pointer, `<scheme>://<path>`). Only the **pointer** lives in Postgres — the value moves to the provider backend. Backends: **`FernetPgProvider`** (dev/default — *is* today's behaviour behind the seam, so local dev needs no external store), **`K8sSecretProvider`**, **`VaultProvider`**, **`AwsSecretsManagerProvider`**. The two MCP call sites (`mcp_secrets.materialize_server_secret`, proxy `credentials.read_server_secret`) resolve the ref through the provider, backend-agnostic. For external backends the proxy's containment improves: a scoped Vault token / IRSA role reading exactly its per-server path replaces the current **namespace-wide** `secrets: get` (`charts/agentshield/charts/mcp-proxy/templates/rbac.yaml`), and the per-server K8s Secret materialization can be dropped for those backends. The proxy-holds-no-master-key invariant is preserved in every backend.
+
+**Consequences / trade-offs:**
+- **Migration:** Fernet→external is a per-credential-class dual-read cutover — resolve by ref scheme (`pg-fernet://` old, `aws-sm://`/`vault://` new), backfill + **rotate** (retire any value that sat under the single master key), then drop `credentials_encrypted` (guarded migration). Detailed in the design doc §6.
+- **Key rotation:** external backends give per-secret keys + native rotation (ASM Lambda / Vault lease) in place of one manually-rotated master key.
+- **Operational cost:** VaultProvider means running/patching/sealing another stateful service (the very thing Decision 12 rejected for MVP); AwsSecretsManagerProvider means IRSA + IAM policy plumbing but no new stateful service on EKS.
+- **Dev unaffected:** `FernetPgProvider` stays the default — one env var, no Vault/AWS locally.
+- **Blast-radius reduction:** no single master key that decrypts the whole store; per-path/per-ARN scoping + a per-read audit trail keyed to a caller identity.
+
+**Recommended first backend: AWS Secrets Manager via IRSA** — the platform already runs on EKS (ECR `us-west-2`, IRSA available), so ASM is a managed dependency reached with an IAM role the pod can already assume, no new stateful service to operate. `VaultProvider` stays first-class for on-prem/non-AWS. See design doc §8 OQ-1.
+
+**Status:** **Accepted** (decision recorded). Implementation **deferred to Phase 4** (MCP OAuth 2.1), for which this is a hard prerequisite — the seam (`CredentialProvider` + `FernetPgProvider`, byte-identical to today) lands first, then the OAuth refresh-token store + first external backend ship on top of it.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -791,3 +820,4 @@ Create/rotate/disable/delete gated on global role ≥ `contributor` **within the
 | 28 | stdio MCP server sandboxing (Phase 3) | Dedicated K8s pod per registered stdio server (Option B/C), MCP Proxy as router — not subprocesses inside the shared proxy process. Mirrors Agent-per-Pod (Decision 2). No impact on Phase 1's `/tools-call` contract. |
 | 29 | On-behalf-of identity for internal MCP servers (FR-MCP-21) | Impersonation-based Keycloak token exchange, not Classic exchange (no re-presentable access token ever propagates internally, even under `identity-propagation-architecture.md`) and not JWT-forward (raw JWT confirmed dead past `auth_middleware.py`). Hard dependency on `identity-propagation-architecture.md` Phase 0–2 landing first. |
 | 30 | Webhook application identity & invoker grants | Webhook-sending applications become team-owned, reusable RBAC principals (one secret, many artifacts) instead of per-trigger `webhook_clients` secrets. `artifact_role_grants` extended with `grantee_type='application'` + role `invoker`, scoped per agent/workflow (not per trigger). First real implementation of Decision 25's undelivered delegation endpoint, generalized to all grantee types. `webhook_clients` deprecated and migrated. Deferred: cross-team application reuse, split manage-user vs. manage-application RBAC capability, bounded unattended-approval fallback policy (required before production reliance on `invoker` grants). |
+| 31 | Pluggable credential provider (external secret store) | Evolve credential storage from single-master-key Postgres-Fernet + K8s Secrets to a `CredentialProvider` interface (put/get/rotate/delete over a `CredentialRef` pointer); only the pointer lives in Postgres, the value moves to the backend. Backends: `FernetPgProvider` (dev/default = today), `K8sSecretProvider`, `VaultProvider`, `AwsSecretsManagerProvider`. Phase-4 (MCP OAuth 2.1) prerequisite — durably stores per-`(server,user)` refresh tokens + Decision 29 impersonation minting material (NOT short-lived minted access tokens, which stay ephemeral). Proxy containment improves: scoped IRSA/Vault path read replaces namespace-wide `secrets: get`. Recommended first external backend: AWS Secrets Manager via IRSA (platform already on EKS). Accepted; implementation deferred to Phase 4. Design: `docs/design/credential-provider-architecture.md`. |
