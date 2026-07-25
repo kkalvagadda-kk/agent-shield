@@ -1,195 +1,30 @@
 #!/usr/bin/env bash
-# AgentShield E2E Master Runner
+# AgentShield E2E Master Runner — API layer (bash suites).
 #
-# Runs all 13 test suites in order and aggregates suite-level pass/fail.
-# Suites 5-12 are stubs — they print a clear "NOT YET IMPLEMENTED" message
-# and exit 0 so the runner continues (they don't fail the suite).
-# Suite 13 (Observability) is a CRITICAL gate — failure means the platform is dark.
+# This is now a thin wrapper over scripts/run-tests.sh. The suite registry that
+# used to live inline here moved to scripts/test-manifest.txt, which is the single
+# source of truth for BOTH layers (bash suites + Playwright specs) and carries the
+# functional group each test belongs to. Two copies of the registry would drift the
+# moment someone added a suite to one and not the other.
+#
+# Behaviour is unchanged: no args runs every API suite, in manifest order, and
+# aggregates suite-level pass/fail. Extra args (e.g. --auto-pf) still pass through
+# to the individual suites.
 #
 # Usage:
 #   bash scripts/e2e/run-all.sh
 #   NAMESPACE=my-ns bash scripts/e2e/run-all.sh
-#   bash scripts/e2e/run-all.sh --auto-pf   # passed through to suites that accept it
+#   bash scripts/e2e/run-all.sh --auto-pf
+#
+# To run a SUBSET instead of all ~89 suites — which is what you want after a
+# scoped change — use the group selector directly:
+#   bash scripts/run-tests.sh --groups                  # what groups exist
+#   bash scripts/run-tests.sh --layer api --group tools # just the tools suites
+#
+# Browser (Playwright) tests are a SEPARATE gate and are NOT part of this run:
+#   bash scripts/studio-e2e.sh                          # all specs
+#   bash scripts/run-tests.sh --layer browser --group tools
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NAMESPACE="${NAMESPACE:-agentshield-platform}"
-TOTAL_PASS=0
-TOTAL_FAIL=0
-FAILED_SUITES=()
-
-# Pass --auto-pf through to suites that support it
-EXTRA_ARGS=()
-for arg in "$@"; do
-  [[ "$arg" == "--auto-pf" ]] && EXTRA_ARGS+=("--auto-pf")
-done
-
-run_suite() {
-  local name="$1" script="$2"
-  local script_path="${SCRIPT_DIR}/${script}"
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  $name"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  if [ ! -f "$script_path" ]; then
-    echo "  SKIP: $script not found — suite not yet implemented"
-    return 0  # Don't count missing future suites as failures
-  fi
-  if NAMESPACE="$NAMESPACE" bash "$script_path" "${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"; then
-    TOTAL_PASS=$((TOTAL_PASS + 1))
-  else
-    TOTAL_FAIL=$((TOTAL_FAIL + 1))
-    FAILED_SUITES+=("$name")
-  fi
-}
-
-echo "AgentShield E2E Test Suite"
-echo "Namespace: $NAMESPACE"
-echo "Date:      $(date)"
-
-run_suite "Suite 1:  Platform Health"           "suite-1-health.sh"
-run_suite "Suite 2:  Agent Lifecycle"           "suite-2-lifecycle.sh"
-run_suite "Suite 3:  Safety Scanning"           "suite-3-safety.sh"
-run_suite "Suite 4:  HITL Approval Flow"        "suite-4-hitl.sh"
-run_suite "Suite 5:  HITL Authority Scoping"    "suite-5-hitl-authority.sh"
-run_suite "Suite 6:  Asset Lifecycle"           "suite-6-asset-lifecycle.sh"
-run_suite "Suite 7:  Machine Identity"          "suite-7-machine-identity.sh"
-run_suite "Suite 8:  Playground"                "suite-8-playground.sh"
-run_suite "Suite 9:  Eval Runner"               "suite-9-eval.sh"
-run_suite "Suite 10: Multi-Agent Handoff"       "suite-10-multi-agent.sh"
-run_suite "Suite 11: Resilience"                "suite-11-resilience.sh"
-run_suite "Suite 12: Quarantine"                "suite-12-quarantine.sh"
-run_suite "Suite 13: Observability (CRITICAL)"  "suite-13-observability.sh"
-run_suite "Suite 14: Consumer Chat"             "suite-14-consumer-chat.sh"
-run_suite "Suite 15: Artifact Isolation"        "suite-15-artifact-isolation.sh"
-run_suite "Suite 16: Create Agent Flow"         "suite-16-create-agent.sh"
-run_suite "Suite 17: Eval Gate (Decision 20)"   "suite-17-eval-gate.sh"
-run_suite "Suite 18: OPA Governance"            "suite-18-opa-governance.sh"
-run_suite "Suite 19: Execution Shape & Triggers" "suite-19-execution-shape.sh"
-run_suite "Suite 20: Durable Playground"          "suite-20-durable-playground.sh"
-run_suite "Suite 21: Scheduled Playground"        "suite-21-scheduled-playground.sh"
-run_suite "Suite 22: Event-Driven Playground"     "suite-22-event-playground.sh"
-run_suite "Suite 23: Production Runs"             "suite-23-production-runs.sh"
-run_suite "Suite 24: Durable Production"          "suite-24-durable-production.sh"
-run_suite "Suite 25: Agent Memory"                "suite-25-memory.sh"
-run_suite "Suite 26: Scheduler Service"           "suite-26-scheduler.sh"
-run_suite "Suite 27: Alerting + Observability"    "suite-27-alerting.sh"
-run_suite "Suite 28: Event Gateway"               "suite-28-event-gateway.sh"
-run_suite "Suite 29: Composite Workflow"          "suite-29-workflow-composite.sh"
-run_suite "Suite 30: Orchestration Modes"         "suite-30-orchestration-modes.sh"
-run_suite "Suite 31: Wizard Triggers + Memory"    "suite-31-wizard-triggers.sh"
-run_suite "Suite 32: Per-schedule Input Payload"  "suite-32-schedule-payload.sh"
-run_suite "Suite 33: Composable Agent Filter"     "suite-33-composable-agents.sh"
-run_suite "Suite 34: Workflow Triggers"           "suite-34-workflow-triggers.sh"
-run_suite "Suite 35: Approval Resume"             "suite-35-approval-resume.sh"
-run_suite "Suite 36: Workflow HITL Pause-Resume"  "suite-36-workflow-hitl-pause-resume.sh"
-run_suite "Suite 37: Workflow HITL OPA (gated)"   "suite-37-workflow-hitl-opa.sh"
-run_suite "Suite 38: Deployment Overview"          "suite-38-deployment-overview.sh"
-run_suite "Suite 39: Deployment Lifecycle"         "suite-39-deployment-lifecycle.sh"
-run_suite "Suite 40: Workflow Deploy"              "suite-40-workflow-deploy.sh"
-run_suite "Suite 41: Version Delete Cascade"       "suite-41-version-delete.sh"
-run_suite "Suite 42: RBAC Foundations"              "suite-42-rbac.sh"
-run_suite "Suite 43: Memory Isolation + TTL"        "suite-43-memory-isolation-ttl.sh"
-run_suite "Suite 44: Version Management"              "suite-44-version-management.sh"
-run_suite "Suite 45: HITL E2E (sandbox+prod)"       "suite-45-hitl-e2e.sh"
-run_suite "Suite 46: Chat Deployment Pinning"       "suite-46-chat-deployment-pinning.sh"
-run_suite "Suite 47: Deployment Chat Tracing"       "suite-47-deployment-chat-tracing.sh"
-run_suite "Suite 48: Feedback Dashboard Panel"      "suite-48-feedback-dashboard.sh"
-run_suite "Suite 49: Judge Score -> AgentRun"       "suite-49-judge-agentrun-score.sh"
-run_suite "Suite 50: Version Dedup on Deploy"       "suite-50-version-dedup.sh"
-run_suite "Suite 51: Credential Validation"         "suite-51-credential-validation.sh"
-run_suite "Suite 52: Reconcile Drift Recovery"      "suite-52-reconcile-drift.sh"
-run_suite "Suite 53: Cost Tracking"                 "suite-53-cost-tracking.sh"
-run_suite "Suite 54: agent_class + shape dispatch"  "suite-54-agent-class-shape-dispatch.sh"
-run_suite "Suite 55: Durable engine (park/resume)"   "suite-55-durable-engine.sh"
-run_suite "Suite 56: Workflow durable modes (D3)"    "suite-56-workflow-durable-modes.sh"
-run_suite "Suite 57: Multi-start-node warning"      "suite-57-workflow-start-node-warning.sh"
-run_suite "Suite 58: REAL durable-workflow run"     "suite-58-workflow-live-run.sh"
-run_suite "Suite 59: All orchestrations + HITL"     "suite-59-workflow-orchestrations-live.sh"
-run_suite "Suite 60: Single-agent durable HITL"     "suite-60-single-agent-durable-hitl.sh"
-run_suite "Suite 61: Eval v2 E-0 reactive parity"   "suite-61-eval-mode-plumbing.sh"
-run_suite "Suite 62: Tool Schema Build"             "suite-62-tool-schema-build.sh"
-run_suite "Suite 63: /echo endpoint (httpbin repl)" "suite-63-echo-endpoint.sh"
-run_suite "Suite 64: PROD workflow golden path"     "suite-64-production-workflow-golden-path.sh"
-run_suite "Suite 65: PROD reviewer-console HITL"    "suite-65-production-hitl-console.sh"
-run_suite "Suite 66: PROD triggers (webhook+sched)" "suite-66-production-triggers.sh"
-run_suite "Suite 67: Deploy GC + drift reconcile"    "suite-67-deployment-gc-and-drift.sh"
-run_suite "Suite 68: Daemon run, no user input"      "suite-68-daemon-no-input.sh"
-run_suite "Suite 69: Workflow cost rollup"           "suite-69-workflow-cost-rollup.sh"
-run_suite "Suite 70: Daemon identity (WS-2 CP2)"     "suite-70-daemon-identity.sh"
-run_suite "Suite 71: Scheduled e2e (WS-3)"           "suite-71-scheduled-e2e.sh"
-run_suite "Suite 72: Eval v2 E-1 durable (no-fakes)" "suite-72-eval-v2-durable.sh"
-run_suite "Suite 73: Eval v2 E-5 workflow run-tree (no-fakes)" "suite-73-eval-v2-workflow.sh"
-run_suite "Suite 74: Eval v2 E-2 side-effect record/mock (no-fakes)" "suite-74-eval-v2-side-effects.sh"
-# NOTE (merge): my POC suites and main's eval/webhook suites both claimed numbers 75-80
-# with DISTINCT filenames, so all are registered here. Labels duplicate a few numbers
-# (cosmetic) — a follow-up can renumber my POC suites to 81+; the files themselves run fine.
-run_suite "Suite 75: Context Storage (POC-0/1)" "suite-75-context-storage.sh"
-run_suite "Suite 75: Eval v2 E-3 scheduled job_spec eval (no-fakes)" "suite-75-eval-v2-scheduled.sh"
-run_suite "Suite 76: User Response Preferences (POC-3)" "suite-76-preferences.sh"
-run_suite "Suite 76: WS-4 webhook client-id + allowlist + HMAC signing (no-fakes)" "suite-76-webhook-client-signing.sh"
-run_suite "Suite 77: Team Knowledge Base / RAG (POC-4)" "suite-77-knowledge-rag.sh"
-run_suite "Suite 77: Eval v2 E-4 webhook filter+action+injection (no-fakes)" "suite-77-eval-v2-webhook.sh"
-run_suite "Suite 78: Conversations (POC-5 list)" "suite-78-conversations.sh"
-run_suite "Suite 79: Reactive-Workflow inline HITL" "suite-79-workflow-hitl.sh"
-run_suite "Suite 79: WS-6 operate parity — one Overview dispatcher + served-bundle proof" "suite-79-operate-parity.sh"
-run_suite "Suite 80: Multi-KB agent bindings + derived knowledge_search" "suite-80-agent-knowledge-binding.sh"
-run_suite "Suite 80: Eval v2 E-6 regression gate + per-run threshold (no-fakes)" "suite-80-eval-v2-regression.sh"
-run_suite "Suite 81: Deploy-time tool-access auto-grant" "suite-81-deploy-tool-autograt.sh"
-run_suite "Suite 82: Artifact Delegation Foundation (grants API)" "suite-82-artifact-grants.sh"
-run_suite "Suite 83: Webhook Applications (invoker grants + signed invoke)" "suite-83-webhook-applications.sh"
-run_suite "Suite 84: Tool description (multi-line) + picker tile metadata"  "suite-84-tool-description-metadata.sh"
-
-# ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
-# Catches leaked test artifacts from crashed suites (best-effort, never fails run)
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Post-Run Cleanup (safety net)"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-if [ -n "$API_POD" ]; then
-  kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
-import urllib.request, json
-
-base = 'http://localhost:8000/api/v1'
-
-# Delete datasets owned by test users
-test_users = ['dev', 'smoke-user', 'eval-runner', 'e2e-suite9-user', 's9',
-              's13-user', 's13-fb-user', 's13-test', 'test-user-s16', 'mallory-not-owner']
-for user in test_users:
-    try:
-        req = urllib.request.Request(base + '/playground/datasets',
-            headers={'X-User-Sub': user})
-        r = urllib.request.urlopen(req, timeout=5)
-        datasets = json.loads(r.read())
-        for ds in datasets:
-            try:
-                dreq = urllib.request.Request(
-                    base + '/playground/datasets/' + str(ds['id']),
-                    headers={'X-User-Sub': user}, method='DELETE')
-                urllib.request.urlopen(dreq, timeout=5)
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-print('  cleanup: test datasets purged')
-" 2>/dev/null || true
-  echo "  done"
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  FINAL RESULTS"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Suites passed: $TOTAL_PASS"
-echo "  Suites failed: $TOTAL_FAIL"
-if [ ${#FAILED_SUITES[@]} -gt 0 ]; then
-  echo "  Failed suites:"
-  for s in "${FAILED_SUITES[@]}"; do echo "    - $s"; done
-fi
-[ "$TOTAL_FAIL" -eq 0 ] && echo "  STATUS: ALL PASS" && exit 0
-echo "  STATUS: FAILURES DETECTED" && exit 1
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+exec bash "${REPO_ROOT}/scripts/run-tests.sh" --layer api "$@"

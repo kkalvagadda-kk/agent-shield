@@ -13,6 +13,13 @@
 #   bash scripts/studio-e2e.sh                 # all specs
 #   bash scripts/studio-e2e.sh e2e/workflows.spec.ts   # one spec
 #   STUDIO_E2E_PASSWORD=... bash scripts/studio-e2e.sh
+#
+# To run only the specs covering a functional area (the usual case after a scoped
+# change), select by group instead of naming files — scripts/test-manifest.txt maps
+# every spec to its groups, and run-tests.sh resolves them and calls this script:
+#   bash scripts/run-tests.sh --groups                       # what groups exist
+#   bash scripts/run-tests.sh --layer browser --group tools
+#   bash scripts/run-tests.sh --list --layer browser --group hitl   # preview only
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
