@@ -305,3 +305,58 @@ test_identity_floor_leaves_require_approval_unchanged if {
 		with data.agents as base_agents
 		with data.grants as base_grants
 }
+
+# ─── Decision 27: allow_deanonymize gate ─────────────────────────────────────
+# A flagged tool on an ALLOWED call permits de-anonymization; an unflagged tool
+# or a DENIED call (even if flagged) must not. daemon class so the WS-2 identity
+# floor holds without a live user.
+deanon_agents := {"system:serviceaccount:agents-platform:agent-refunds-sa": {
+	"tools": [
+		{"name": "safe_lookup", "risk": "low", "pii_deanonymize_allowed": true},
+		{"name": "plain_lookup", "risk": "low", "pii_deanonymize_allowed": false},
+		{"name": "danger_deanon", "risk": "critical", "pii_deanonymize_allowed": true},
+	],
+	"team": "platform",
+	"agent_class": "daemon",
+	"expected_sa_subject": "system:serviceaccount:agents-platform:agent-refunds-sa",
+	"sa_namespace": "agents-platform",
+}}
+
+deanon_input(tool) := {
+	"sa_subject": subject,
+	"tool_name": tool,
+	"args": {},
+	"agent_class": "daemon",
+	"playground": false,
+	"sandbox": false,
+	"user_id": "",
+	"user_team": "",
+}
+
+test_allow_deanonymize_true_when_flagged_and_allowed if {
+	allow with input as deanon_input("safe_lookup")
+		with data.agents as deanon_agents
+		with data.grants as {}
+	allow_deanonymize with input as deanon_input("safe_lookup")
+		with data.agents as deanon_agents
+		with data.grants as {}
+}
+
+test_allow_deanonymize_false_when_not_flagged if {
+	allow with input as deanon_input("plain_lookup")
+		with data.agents as deanon_agents
+		with data.grants as {}
+	not allow_deanonymize with input as deanon_input("plain_lookup")
+		with data.agents as deanon_agents
+		with data.grants as {}
+}
+
+test_allow_deanonymize_false_when_denied if {
+	# Flagged for de-anon, but critical risk → not allowed → de-anon must be false.
+	not allow with input as deanon_input("danger_deanon")
+		with data.agents as deanon_agents
+		with data.grants as {}
+	not allow_deanonymize with input as deanon_input("danger_deanon")
+		with data.agents as deanon_agents
+		with data.grants as {}
+}

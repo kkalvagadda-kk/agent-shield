@@ -36,6 +36,18 @@ AGENTSHIELD_STUDIO_URL: str = os.getenv(
     "AGENTSHIELD_STUDIO_URL", "http://studio.agentshield-platform:3001"
 )
 
+# --- MCP Proxy (MCP-as-tool-source) ---
+# The single egress hop for agent -> external MCP server tool calls. An mcp_tool
+# resolves to a call against MCP_PROXY_URL + '/internal/tools/call', authenticated
+# with the projected SA token (audience agentshield-mcp-proxy) that the deploy
+# controller mounts at MCP_PROXY_SA_TOKEN_PATH.
+AGENTSHIELD_MCP_PROXY_URL: str = os.getenv(
+    "AGENTSHIELD_MCP_PROXY_URL", "http://agentshield-mcp-proxy.agentshield-platform:8080"
+)
+AGENTSHIELD_MCP_PROXY_SA_TOKEN_PATH: str = os.getenv(
+    "AGENTSHIELD_MCP_PROXY_SA_TOKEN_PATH", "/var/run/secrets/mcp-proxy-token/token"
+)
+
 # --- Portkey / OpenAI proxy (reserved, not used in Phase 6) ---
 OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 

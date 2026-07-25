@@ -59,6 +59,13 @@ REGISTRY_API_URL: str = os.environ.get("REGISTRY_API_URL", "http://agentshield-r
 # Used by PythonToolNodeExecutor to run sandboxed user-supplied Python code.
 PYTHON_EXECUTOR_URL: str = os.environ.get("PYTHON_EXECUTOR_URL", "http://python-executor.agentshield-platform:8080")
 
+# --- MCP Proxy (MCP-as-tool-source) ---
+# Used by McpToolNodeExecutor — the single egress hop for a declarative/workflow
+# agent's mcp_tool call. Authenticated with the projected SA token (audience
+# agentshield-mcp-proxy) the deploy controller mounts at MCP_PROXY_SA_TOKEN_PATH.
+MCP_PROXY_URL: str = os.environ.get("MCP_PROXY_URL", "http://agentshield-mcp-proxy.agentshield-platform:8080")
+MCP_PROXY_SA_TOKEN_PATH: str = os.environ.get("MCP_PROXY_SA_TOKEN_PATH", "/var/run/secrets/mcp-proxy-token/token")
+
 # --- Dev mode ---
 # True when OPA URL is the default localhost value and not explicitly configured.
 _OPA_URL_EXPLICITLY_SET: bool = bool(os.getenv("AGENTSHIELD_OPA_URL"))

@@ -50,9 +50,15 @@ def _render_rego(agent_name: str, tools: list[dict[str, Any]]) -> str:
         name = tool.get("name", "")
         risk = tool.get("risk", "low")
         action = _RISK_ACTION.get(risk, "deny")
+        # Decision 27 — AUDIT PARITY ONLY. This generator is inert at runtime
+        # (research.md #8): OPA sidecars enforce the static agentshield.rego, not
+        # this per-agent Rego. The pii_deanonymize_allowed flag is emitted here
+        # purely so the audit artifact mirrors the enforced bundle; it does NOT
+        # gate de-anonymization — agentshield.rego's allow_deanonymize does.
+        deanon = bool(tool.get("pii_deanonymize_allowed", False))
         safe_name = name.replace("-", "_")
         lines += [
-            f"# {name} (risk={risk})",
+            f"# {name} (risk={risk}, pii_deanonymize_allowed={deanon})  # audit-only, not enforced here",
             f'allow if {{ input.tool_name == "{name}"; action == "allow" }}',
             f'action = "{action}" if {{ input.tool_name == "{name}" }}',
             "",

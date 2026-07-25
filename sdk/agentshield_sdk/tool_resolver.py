@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from . import config
-from .tool_executor import HttpToolExecutor, PythonToolExecutor
+from .tool_executor import HttpToolExecutor, McpToolExecutor, PythonToolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,25 @@ def _build_executor(tool_def: dict) -> Any:
             timeout_ms=tool_def.get("timeout_ms", 10_000),
             input_schema=tool_def.get("input_schema"),
             side_effecting=side_effecting,
+        )
+    elif tool_type == "mcp_tool":
+        # An external server ALWAYS output-scans (its content is untrusted); an
+        # internal server follows its own scan_results flag. This is the single
+        # place the two are reconciled — external overrides the flag to True.
+        is_external = bool(tool_def.get("mcp_server_is_external"))
+        scan_results = True if is_external else bool(tool_def.get("mcp_server_scan_results"))
+        executor = McpToolExecutor(
+            name=name,
+            risk=risk,
+            server_id=str(tool_def.get("mcp_server_id") or ""),
+            # RAW upstream name the proxy calls tools/call with — NOT the
+            # namespaced Tool.name the model sees.
+            mcp_tool_name=tool_def.get("mcp_tool_name") or name,
+            description=tool_def.get("description"),
+            input_schema=tool_def.get("input_schema"),
+            timeout_ms=tool_def.get("timeout_ms", 30_000),
+            side_effecting=side_effecting,
+            scan_results=scan_results,
         )
     else:
         executor = HttpToolExecutor(

@@ -62,6 +62,10 @@ class OPADecision:
     require_approval: bool
     reason: str
     deny_reason: str = ""
+    # Decision 27 — OPA says this (agent, tool) pair is permitted to receive
+    # DE-ANONYMIZED arguments (the tool is flagged pii_deanonymize_allowed and the
+    # grant allows it). Fail-closed default: never de-anonymize unless OPA said so.
+    allow_deanonymize: bool = False
 
 
 def _read_sa_token() -> str:
@@ -170,4 +174,47 @@ async def check_tool(
         require_approval=bool(result.get("require_approval", False)),
         reason=str(result.get("reason", "policy_decision")),
         deny_reason=deny_reason,
+        allow_deanonymize=bool(result.get("allow_deanonymize", False)),
     )
+
+
+async def record_decision(
+    agent_name: str,
+    tool_name: str,
+    decision: OPADecision,
+    args: dict,
+    thread_id: str = "",
+) -> None:
+    """Append an OPA evaluation to the registry audit log — BEST-EFFORT.
+
+    Called by ``graph_builder.governed_tool`` after every OPA evaluation so that
+    native http/python tool calls (not just MCP) produce an ``opa_decisions``
+    row. Never raises: an audit-write failure must not break a tool call, so all
+    exceptions are swallowed with a warning.
+    """
+    if decision.allow:
+        outcome = "require_approval" if decision.require_approval else "allow"
+    else:
+        outcome = "deny"
+    body = {
+        "agent_name": agent_name,
+        "tool_name": tool_name,
+        "decision": outcome,
+        "policy_version": "runtime",
+        "input_snapshot": args if isinstance(args, dict) else {},
+        "deny_reason": decision.deny_reason or None,
+        "thread_id": thread_id or None,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            await client.post(
+                f"{config.AGENTSHIELD_REGISTRY_URL}/api/v1/opa-decisions/",
+                json=body,
+            )
+    except Exception as exc:  # audit is best-effort — never break the tool call
+        logger.warning(
+            "Failed to record OPA decision for agent '%s' tool '%s': %s",
+            agent_name,
+            tool_name,
+            exc,
+        )

@@ -14,11 +14,60 @@ import json
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# JSON-Schema primitive types -> Python annotations, for deriving a discovered
+# MCP tool's model-facing parameters from its ``input_schema``.
+_JSON_TYPE_TO_PY: dict[str, Any] = {
+    "string": str,
+    "number": float,
+    "integer": int,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+}
+
+
+def _read_sa_token(path: str) -> str:
+    """Read a projected SA token from disk (fresh each call — tokens rotate)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _mcp_params_from_schema(input_schema: Any) -> list[inspect.Parameter]:
+    """Named keyword-only params from a discovered MCP tool's ``input_schema``.
+
+    Falls back to a single annotated ``**kwargs`` param (so LangChain schema
+    introspection never raises ``KeyError``) when no object schema is present.
+    """
+    props = input_schema.get("properties") if isinstance(input_schema, dict) else None
+    if not isinstance(props, dict) or not props:
+        return [inspect.Parameter("kwargs", inspect.Parameter.VAR_KEYWORD, annotation=str)]
+    required = set(input_schema.get("required") or [])
+    params: list[inspect.Parameter] = []
+    for pname, defn in props.items():
+        pytype = _JSON_TYPE_TO_PY.get((defn or {}).get("type"), str)
+        if pname in required:
+            params.append(
+                inspect.Parameter(pname, inspect.Parameter.KEYWORD_ONLY, annotation=pytype)
+            )
+        else:
+            params.append(
+                inspect.Parameter(
+                    pname,
+                    inspect.Parameter.KEYWORD_ONLY,
+                    default=None,
+                    annotation=Optional[pytype],
+                )
+            )
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +344,108 @@ class PythonToolNodeExecutor:
         python_tool_fn.__annotations__ = {}
 
         return python_tool_fn
+
+
+# ---------------------------------------------------------------------------
+# McpToolNodeExecutor
+# ---------------------------------------------------------------------------
+
+
+class McpToolNodeExecutor:
+    """Calls the platform MCP proxy to invoke a tool on an upstream MCP server.
+
+    A SEPARATE implementation from the SDK's ``McpToolExecutor`` (the declarative
+    runner and SDK agents are distinct runtimes) that speaks the SAME proxy wire
+    contract and carries the SAME projected SA token. The proxy is the only
+    egress hop — the runner never talks to the upstream MCP server directly. OPA
+    authorization + Decision-27 de-anonymization are applied by the governance
+    seam before this callable runs.
+    """
+
+    def __init__(self, node_config: dict, proxy_url: str, token_path: str) -> None:
+        self.node_config = node_config
+        self.name: str = node_config.get("name", "mcp_tool")
+        self.description: str | None = node_config.get("description")
+        self.risk: str = node_config.get("risk", "low")
+        # Eval v2 E-2 — see HttpToolNodeExecutor: absent ⇒ None ⇒ fail-closed.
+        self.side_effecting: bool | None = node_config.get("side_effecting")
+        self.server_id: str = str(node_config.get("mcp_server_id") or "")
+        # RAW upstream name the proxy calls tools/call with — NOT the namespaced
+        # Tool.name the model sees.
+        self.mcp_tool_name: str = node_config.get("mcp_tool_name") or self.name
+        # Decision 27 — whether the governance seam output-scans the result.
+        self.scan_results: bool = bool(node_config.get("scan_results", True))
+        self.input_schema = node_config.get("input_schema")
+        self.timeout_ms: int = node_config.get("timeout_ms", 30_000)
+        self.proxy_url = proxy_url
+        self.token_path = token_path
+
+    def as_tool_callable(self) -> Any:
+        """Return an agentshield @tool-compatible callable that calls the MCP proxy."""
+        executor = self
+
+        async def mcp_tool_fn(**kwargs: Any) -> str:
+            """Call an upstream MCP tool through the platform MCP proxy."""
+            token = _read_sa_token(executor.token_path)
+            payload = {
+                "server_id": executor.server_id,
+                "mcp_tool_name": executor.mcp_tool_name,
+                "arguments": kwargs,
+                # session_id/agent_name are best-effort trace correlation only.
+                "session_id": "",
+                "agent_name": os.getenv("AGENT_NAME", "declarative-agent"),
+            }
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            timeout = executor.timeout_ms / 1000.0 + 5
+            # FR-MCP-14: never raise out of a tool call — surface every failure as
+            # a string. The proxy returns 200 + is_error for tool/transport
+            # outcomes; 401/403/422 are real auth/body failures.
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{executor.proxy_url}/internal/tools/call",
+                        json=payload,
+                        headers=headers,
+                    )
+                if resp.status_code != 200:
+                    return (
+                        f"MCP tool '{executor.mcp_tool_name}' error: proxy returned "
+                        f"HTTP {resp.status_code}: {resp.text[:500]}"
+                    )
+                data = resp.json()
+            except Exception as exc:  # network / timeout / JSON decode
+                return f"MCP tool '{executor.mcp_tool_name}' error: {exc}"
+
+            if data.get("is_error") or data.get("error"):
+                return (
+                    data.get("error")
+                    or data.get("result")
+                    or f"MCP tool '{executor.mcp_tool_name}' returned an error"
+                )
+            return data.get("result") or ""
+
+        mcp_tool_fn.__name__ = self.name
+        mcp_tool_fn.__doc__ = self.description or (
+            f"Call the MCP tool '{self.mcp_tool_name}'. "
+            "Pass required arguments as keyword args."
+        )
+        mcp_tool_fn.risk = self.risk
+        mcp_tool_fn.tool_name = self.name
+        mcp_tool_fn.side_effecting = self.side_effecting
+        mcp_tool_fn.invocation_target = f"mcp-proxy:{self.server_id}/{self.mcp_tool_name}"
+        # Decision 27 — read by the governance seam's output-scan gate.
+        mcp_tool_fn.scan_results = self.scan_results
+
+        params = _mcp_params_from_schema(self.input_schema)
+        mcp_tool_fn.__signature__ = inspect.Signature(params, return_annotation=str)
+        mcp_tool_fn.__annotations__ = {
+            p.name: p.annotation
+            for p in params
+            if p.annotation is not inspect.Parameter.empty
+        }
+        mcp_tool_fn.__annotations__["return"] = str
+
+        return mcp_tool_fn
 
 
 # ---------------------------------------------------------------------------

@@ -24,3 +24,11 @@ async def scan_output(text: str, **kwargs) -> dict:
         dict with ``blocked=False`` and ``clean_text`` equal to *text*.
     """
     return {"blocked": False, "clean_text": text, "scores": {}}
+
+
+async def deanonymize_args(args: dict, agent_name: str, session_id: str) -> dict:
+    """Mock de-anonymization — pass-through (no PiiStore in local dev).
+
+    Returns the args unchanged, mirroring the real client's fail-open contract.
+    """
+    return args

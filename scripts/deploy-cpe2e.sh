@@ -366,8 +366,8 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.225"   # 0.2.225: MCP-as-tool-source Phase 1 — migration 0072 (6 mcp_servers cols + tools.pii_deanonymize_allowed), MCPServer/Tool schema, mcp_servers CRUD+/sync router, shared team_may_use_tool + deploy-gate refactor, per-server secret materializer, internal authorize-tool-call endpoint. 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
-SAFETY_ORCHESTRATOR_TAG="0.1.3"
+REGISTRY_API_TAG="0.2.226"   # 0.2.226: MCP Decision-27 (P9) — bundle_generator + versions/deployments tool-snapshots carry pii_deanonymize_allowed (fail-closed); agentshield.rego allow_deanonymize rule + tests (22/22); policy_generator audit-parity annotation. 0.2.225: MCP-as-tool-source Phase 1 — migration 0072 (6 mcp_servers cols + tools.pii_deanonymize_allowed), MCPServer/Tool schema, mcp_servers CRUD+/sync router, shared team_may_use_tool + deploy-gate refactor, per-server secret materializer, internal authorize-tool-call endpoint. 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
+SAFETY_ORCHESTRATOR_TAG="0.1.4"   # 0.1.4: MCP Decision-27 (P10) — deanonymize/args endpoint + orchestrator.deanonymize_args (recursive PII substitution from PiiStore mappings). 0.1.3: prior.
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
 # minio-cp1 = official minio + mc client; deploy-cpe2e never built it before (agentshield-minio
@@ -407,7 +407,7 @@ DEPLOY_CONTROLLER_TAG="0.1.41"   # 0.1.41: project 2nd SA token (audience agents
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
 STUDIO_TAG="0.1.161"   # 0.1.161: MCP-as-a-tool-source Studio UI (Phases 12-14) — MCP Servers list/register/detail + Sidebar+routes + ToolsPage read-only mcp_tool + PII checkbox + ToolsPicker source-server badge
 EVAL_RUNNER_TAG="0.1.14"
-DECLARATIVE_RUNNER_TAG="0.1.59"
+DECLARATIVE_RUNNER_TAG="0.1.60"   # 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"

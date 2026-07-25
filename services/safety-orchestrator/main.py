@@ -10,6 +10,8 @@ from orchestrator import SafetyOrchestrator
 from pii_store import PiiStore
 from scanner_clients import LLMGuardClient, NeMoClient, PresidioClient
 from schemas import (
+    DeanonymizeArgsRequest,
+    DeanonymizeArgsResponse,
     ReadinessResponse,
     ScanInputRequest,
     ScanInputResponse,
@@ -96,3 +98,12 @@ async def scan_output(
     if out_trace_id:
         response.headers["X-AgentShield-Trace-ID"] = out_trace_id
     return result
+
+
+@app.post("/api/v1/deanonymize/args", response_model=DeanonymizeArgsResponse)
+async def deanonymize_args(req: DeanonymizeArgsRequest) -> DeanonymizeArgsResponse:
+    """Decision 27 — de-anonymize a flagged tool's arguments (governed_tool calls
+    this only when OPA returned allow_deanonymize). Returns args unchanged when the
+    session has no stored PII mappings."""
+    assert _orchestrator
+    return await _orchestrator.deanonymize_args(req)

@@ -29,6 +29,7 @@ from .agent import Agent
 from .hitl import require_approval
 from .llm import get_llm
 from . import opa_client
+from . import safety_client
 from .tool_resolver import resolve_tools
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,16 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
         # before the real tool runs so the platform tool never receives it.
         graph_state = kwargs.pop("graph_state", None)
 
+        # thread_id (== session_id == run_id) — hoisted above OPA so it's available
+        # to record_decision, Decision-27 de-anonymization, and the output scan
+        # below. Works in subgraphs via LangGraph config; falls back to the
+        # ContextVar for custom-container SDK agents.
+        try:
+            from langgraph.config import get_config as _get_config
+            thread_id = _get_config().get("configurable", {}).get("thread_id", "")
+        except (RuntimeError, ImportError):
+            thread_id = _current_thread_id.get("")
+
         # 1. OPA decision.
         uc = _current_user_context.get({})
         user_ctx = opa_client.UserContext(
@@ -275,6 +286,14 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
             user_team=uc.get("user_team", ""),
         ) if uc else None
         decision = await opa_client.check_tool(agent_name, fn.tool_name, kwargs, user_context=user_ctx)
+
+        # 1b. Audit — record EVERY decision (allow / deny / require_approval)
+        # best-effort, so native http/python tool calls also land an opa_decisions
+        # row (not just MCP). Never raises. Placed before the deny return so a
+        # denied call is audited too.
+        await opa_client.record_decision(
+            agent_name, fn.tool_name, decision, kwargs, thread_id=thread_id
+        )
 
         # OPA fail-closed: a denied tool call never executes. (A temporary POC
         # fail-open bypass previously lived here to demo autonomous context-storage
@@ -305,13 +324,7 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
                 fn.tool_name, agent_name, caller_id,
             )
         if needs_approval and not auto_approve:
-            # Read thread_id from LangGraph's config (works in subgraphs).
-            # Falls back to the ContextVar for custom-container SDK agents.
-            try:
-                from langgraph.config import get_config as _get_config
-                thread_id = _get_config().get("configurable", {}).get("thread_id", "")
-            except (RuntimeError, ImportError):
-                thread_id = _current_thread_id.get("")
+            # thread_id was hoisted above the OPA call — reuse it here.
             approval_result = await require_approval(
                 agent_name=agent_name,
                 tool_name=fn.tool_name,
@@ -343,10 +356,58 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
             # mock is serialized the same way rather than changing the tool's shape.
             return json.dumps(entry["mocked_response"])
 
-        # Execute the tool (HTTP call to platform endpoint or python-executor).
+        # 4. Decision 27 — de-anonymize args ONLY when OPA allowed it, and ONLY on
+        #    the real-delivery path (strictly AFTER the eval-record short-circuit, so
+        #    a recorded run keeps its args anonymized — research.md B11). Fail-open:
+        #    safety_client.deanonymize_args returns kwargs unchanged on any failure.
+        if decision.allow_deanonymize:
+            kwargs = await safety_client.deanonymize_args(
+                kwargs, agent_name=agent_name, session_id=thread_id
+            )
+
+        # 5. Dispatch — the tool's real call (HTTP endpoint, python-executor, or the
+        #    MCP proxy for an mcp_tool).
         if asyncio.iscoroutinefunction(fn):
-            return await fn(**kwargs)
-        return fn(**kwargs)
+            result = await fn(**kwargs)
+        else:
+            result = fn(**kwargs)
+
+        # 6. Decision 27 output-scan — STUB ACTION. Scan each tool result before it
+        #    re-enters the LLM when the tool opts in (fn.scan_results; external MCP
+        #    servers always scan, internal servers follow their flag, native tools
+        #    default True). The verdict/scores are LOGGED but NOT enforced — block /
+        #    redact is deferred to a future safety-orchestration build (see
+        #    docs/design/mcp-tool-source-architecture.md §3/§8 + the gap ledger, and
+        #    the matching STUB in services/safety-orchestrator/orchestrator.py). The
+        #    result is returned UNCHANGED. Fail-open: a scan outage never breaks the
+        #    tool call.
+        if getattr(fn, "scan_results", True):
+            try:
+                scan = await safety_client.scan_output(
+                    str(result),
+                    agent_name=agent_name,
+                    session_id=thread_id,
+                    trace_id=thread_id,
+                )
+                logger.info(
+                    "output-scan (STUB, not enforced) tool=%s agent=%s scores=%s",
+                    fn.tool_name, agent_name, scan.scores,
+                )
+            except safety_client.SafetyBlockedError as exc:
+                # STUB: even a blocked verdict is NOT enforced in Phase 1 — log and
+                # pass the result through unchanged (this includes scanner-unreachable,
+                # which fails closed as a block; the STUB downgrades it to a log).
+                logger.info(
+                    "output-scan (STUB) verdict=blocked tool=%s agent=%s reason=%s — NOT enforced",
+                    fn.tool_name, agent_name, exc.reason,
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-open
+                logger.warning(
+                    "output-scan failed (non-fatal) tool=%s: %s", fn.tool_name, exc
+                )
+
+        # 7. Return the (unmodified) result.
+        return result
 
     # Copy metadata for LangChain introspection.
     governed_tool.__name__ = fn.__name__

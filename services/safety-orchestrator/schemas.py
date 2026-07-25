@@ -32,6 +32,16 @@ class ScanOutputResponse(BaseModel):
     scores: dict[str, float] = {}
 
 
+class DeanonymizeArgsRequest(BaseModel):
+    session_id: str
+    agent_name: str
+    args: dict
+
+
+class DeanonymizeArgsResponse(BaseModel):
+    args: dict
+
+
 class ReadinessResponse(BaseModel):
     ready: bool
     scanners: dict[str, bool] = {}

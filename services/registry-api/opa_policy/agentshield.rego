@@ -20,6 +20,7 @@ default require_approval := false
 default reason := "default_deny"
 default deny_reason := ""
 default user_identity_ok := false
+default allow_deanonymize := false
 
 # ─── Agent entry lookup ──────────────────────────────────────────────────────
 # Undefined when the SA subject is not registered in the bundle.
@@ -121,6 +122,33 @@ require_approval if {
 	identity_matches
 	tool_in_set
 	resolved_risk == "high"
+}
+
+# ─── Decision 27: de-anonymization gate ──────────────────────────────────────
+# A tool entry (own or granted) may carry pii_deanonymize_allowed. When the call
+# is ALLOWED and the matched tool is flagged, OPA permits governed_tool to pass
+# DE-ANONYMIZED arguments to the tool. Fail-closed: a bare string, a missing
+# flag, or a non-boolean value yields false (no de-anonymization).
+_deanon_of(entry) := entry.pii_deanonymize_allowed if {
+	is_object(entry)
+	is_boolean(entry.pii_deanonymize_allowed)
+}
+
+_matching_deanon contains true if {
+	some t in agent.tools
+	_name_of(t) == input.tool_name
+	_deanon_of(t) == true
+}
+
+_matching_deanon contains true if {
+	some t in data.grants[agent.team]
+	_name_of(t) == input.tool_name
+	_deanon_of(t) == true
+}
+
+allow_deanonymize if {
+	allow
+	count(_matching_deanon) > 0
 }
 
 # ─── deny_reason (mutually exclusive; only meaningful when allow=false) ───────

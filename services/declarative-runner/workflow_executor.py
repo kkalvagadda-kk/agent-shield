@@ -57,7 +57,7 @@ from agentshield_sdk.checkpointer import get_checkpointer  # type: ignore[import
 from agentshield_sdk.safety_client import SafetyBlockedError, scan_input, scan_output  # type: ignore[import]
 from agentshield_sdk.streaming import stream_events  # type: ignore[import]
 
-from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecutor, PythonToolNodeExecutor
+from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecutor, McpToolNodeExecutor, PythonToolNodeExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -260,7 +260,7 @@ class WorkflowExecutor:
 
         Returns HttpToolNodeExecutor for type=http and PythonToolNodeExecutor for type=python.
         """
-        from config import PYTHON_EXECUTOR_URL
+        from config import MCP_PROXY_SA_TOKEN_PATH, MCP_PROXY_URL, PYTHON_EXECUTOR_URL
 
         tool_type = tool.get("type", "http")
 
@@ -277,6 +277,27 @@ class WorkflowExecutor:
                 "side_effecting": tool.get("side_effecting"),
             }
             return PythonToolNodeExecutor(config, executor_url=PYTHON_EXECUTOR_URL)
+
+        if tool_type == "mcp_tool":
+            # An external server ALWAYS output-scans (untrusted content); an
+            # internal server follows its own scan_results flag — external
+            # overrides the flag to True. Single place the two are reconciled.
+            is_external = bool(tool.get("mcp_server_is_external"))
+            scan_results = True if is_external else bool(tool.get("mcp_server_scan_results"))
+            config = {
+                "name": tool.get("name", "mcp_tool"),
+                "description": tool.get("description"),
+                "risk": tool.get("risk_level", "low"),
+                "side_effecting": tool.get("side_effecting"),
+                "mcp_server_id": tool.get("mcp_server_id"),
+                "mcp_tool_name": tool.get("mcp_tool_name"),
+                "input_schema": tool.get("input_schema"),
+                "timeout_ms": tool.get("timeout_ms") or 30_000,
+                "scan_results": scan_results,
+            }
+            return McpToolNodeExecutor(
+                config, proxy_url=MCP_PROXY_URL, token_path=MCP_PROXY_SA_TOKEN_PATH
+            )
 
         # Default: HTTP tool
         config = dict(tool.get("config", {}))

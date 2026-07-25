@@ -131,16 +131,28 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
             tool_snapshot = []
 
         # tool_snapshot may be a list of tool names (strings) or dicts carrying
-        # "name" + "risk". Emit {name, risk} objects; a bare string or a missing
-        # risk defaults to "critical" (fail-closed).
-        tools: list[dict[str, str]] = []
+        # "name" + "risk" (+ "pii_deanonymize_allowed"). Emit objects; a bare
+        # string or a missing risk defaults to "critical", and a missing
+        # pii_deanonymize_allowed defaults to False — both fail-closed (Decision 27:
+        # never allow de-anonymization for a snapshot that didn't explicitly flag it).
+        tools: list[dict[str, Any]] = []
         for t in tool_snapshot:
             if isinstance(t, str):
-                tools.append({"name": t, "risk": "critical"})
+                tools.append(
+                    {"name": t, "risk": "critical", "pii_deanonymize_allowed": False}
+                )
             elif isinstance(t, dict):
                 name = t.get("name") or t.get("tool_name")
                 if name:
-                    tools.append({"name": name, "risk": _normalize_risk(t.get("risk"))})
+                    tools.append(
+                        {
+                            "name": name,
+                            "risk": _normalize_risk(t.get("risk")),
+                            "pii_deanonymize_allowed": bool(
+                                t.get("pii_deanonymize_allowed", False)
+                            ),
+                        }
+                    )
 
         agents[sa_subject] = {
             "tools": tools,
@@ -160,9 +172,10 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
     # name — the old `asset_id AS tool_name` alias never matched a tool name).
     grant_rows = await db.execute(
         text("""
-            SELECT g.grantee_team          AS grantee_team,
-                   t.name                  AS tool_name,
-                   t.risk_level            AS risk
+            SELECT g.grantee_team              AS grantee_team,
+                   t.name                      AS tool_name,
+                   t.risk_level                AS risk,
+                   t.pii_deanonymize_allowed   AS pii_deanonymize_allowed
             FROM asset_grants g
             JOIN tools t ON t.id = g.asset_id
             WHERE g.asset_type = 'tool'
@@ -171,8 +184,10 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
         """)
     )
 
-    # team -> {tool_name: {"name", "risk"}} (dedup by tool name per team)
-    grants_by_team: dict[str, dict[str, dict[str, str]]] = {}
+    # team -> {tool_name: {"name", "risk", "pii_deanonymize_allowed"}} (dedup by
+    # tool name per team). Decision 27: the de-anon flag rides on the grant so a
+    # cross-team grantee is subject to the SAME de-anon policy as the owner.
+    grants_by_team: dict[str, dict[str, dict[str, Any]]] = {}
     for row in grant_rows.mappings():
         team = row["grantee_team"]
         name = row["tool_name"]
@@ -181,9 +196,10 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
         grants_by_team.setdefault(team, {})[name] = {
             "name": name,
             "risk": _normalize_risk(row["risk"]),
+            "pii_deanonymize_allowed": bool(row["pii_deanonymize_allowed"]),
         }
 
-    grants: dict[str, list[dict[str, str]]] = {
+    grants: dict[str, list[dict[str, Any]]] = {
         team: list(tools.values()) for team, tools in grants_by_team.items()
     }
 

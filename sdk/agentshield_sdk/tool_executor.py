@@ -15,11 +15,22 @@ from typing import Any, Optional
 
 import httpx
 
+from . import config
+
 logger = logging.getLogger(__name__)
 
 PYTHON_EXECUTOR_URL: str = os.getenv(
     "AGENTSHIELD_PYTHON_EXECUTOR_URL", "http://python-executor:8080"
 )
+
+
+def _read_sa_token(path: str) -> str:
+    """Read a projected SA token from disk (fresh each call — tokens rotate)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
 
 # JSON-Schema primitive types -> Python annotations, for deriving a tool's
 # model-facing parameters from its registered ``input_schema``.
@@ -276,3 +287,125 @@ class PythonToolExecutor:
         python_tool_fn.__annotations__ = {**annotations, "return": str}
 
         return python_tool_fn
+
+
+class McpToolExecutor:
+    """Executes an MCP tool by calling the platform MCP proxy.
+
+    The proxy is the ONLY egress hop to an upstream MCP server — the agent pod
+    never speaks to the external server directly. Governance (OPA authorization +
+    Decision-27 de-anonymization) is applied by ``graph_builder.governed_tool``
+    BEFORE this callable runs, so ``arguments`` here are already authorized and
+    de-anonymized. Mirrors ``HttpToolExecutor``/``PythonToolExecutor`` so the
+    governance seam treats all three identically.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        risk: str,
+        server_id: str,
+        mcp_tool_name: str,
+        description: str | None = None,
+        input_schema: dict | None = None,
+        timeout_ms: int = 30_000,
+        side_effecting: bool | None = None,
+        scan_results: bool = True,
+    ) -> None:
+        self.name = name                    # namespaced Tool.name ({server}__{tool})
+        self.risk = risk
+        self.server_id = server_id          # Tool.mcp_server_id — the proxy route target
+        self.mcp_tool_name = mcp_tool_name  # RAW upstream name (Tool.mcp_tool_name)
+        self.description = description
+        self.input_schema = input_schema
+        self.timeout_ms = timeout_ms
+        self.side_effecting = side_effecting
+        # Whether governed_tool should output-scan this tool's result (Decision 27).
+        # True for every external server; for internal servers it follows the
+        # server's scan_results flag. Computed by the resolver, read at the gate.
+        self.scan_results = scan_results
+
+    def as_tool_callable(self) -> Any:
+        """Return an async callable compatible with Agent/graph_builder."""
+        executor = self
+
+        async def mcp_tool_fn(**kwargs: Any) -> str:
+            """Call an upstream MCP tool through the platform MCP proxy."""
+            # DEV_MODE: no proxy/token in local dev — return a deterministic mock
+            # so agent graphs run without cluster infra (mirrors mock_opa/mock_safety).
+            if config.DEV_MODE:
+                return (
+                    f"[dev-mode mock] mcp_tool {executor.mcp_tool_name} "
+                    f"(server {executor.server_id}) called with {kwargs}"
+                )
+
+            token = _read_sa_token(config.AGENTSHIELD_MCP_PROXY_SA_TOKEN_PATH)
+            payload = {
+                "server_id": executor.server_id,
+                "mcp_tool_name": executor.mcp_tool_name,
+                "arguments": kwargs,
+                # session_id/agent_name are best-effort trace correlation only.
+                "session_id": config.AGENT_ID or "",
+                "agent_name": config.AGENT_NAME,
+            }
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            timeout = executor.timeout_ms / 1000.0 + 5
+            # FR-MCP-14: a tool call must NEVER raise out of the executor — every
+            # failure (auth, transport, protocol, upstream tool error) is surfaced
+            # as a string the agent can read, exactly like a tool that returned an
+            # error message. The proxy already returns 200 + is_error for tool /
+            # transport outcomes; 401/403/422 are real auth/body failures.
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{config.AGENTSHIELD_MCP_PROXY_URL}/internal/tools/call",
+                        json=payload,
+                        headers=headers,
+                    )
+                if resp.status_code != 200:
+                    return (
+                        f"MCP tool '{executor.mcp_tool_name}' error: proxy returned "
+                        f"HTTP {resp.status_code}: {resp.text[:500]}"
+                    )
+                data = resp.json()
+            except Exception as exc:  # network / timeout / JSON decode
+                return f"MCP tool '{executor.mcp_tool_name}' error: {exc}"
+
+            if data.get("is_error") or data.get("error"):
+                return (
+                    data.get("error")
+                    or data.get("result")
+                    or f"MCP tool '{executor.mcp_tool_name}' returned an error"
+                )
+            return data.get("result") or ""
+
+        mcp_tool_fn.__name__ = self.name
+        mcp_tool_fn.__doc__ = self.description or (
+            f"Call the MCP tool '{self.mcp_tool_name}'. "
+            "Pass required arguments as keyword arguments."
+        )
+        mcp_tool_fn.risk = self.risk
+        mcp_tool_fn.tool_name = self.name
+        # Eval v2 E-2 — read by `graph_builder.governed_tool` at the delivery edge.
+        mcp_tool_fn.side_effecting = self.side_effecting
+        mcp_tool_fn.invocation_target = f"mcp-proxy:{self.server_id}/{self.mcp_tool_name}"
+        # Decision 27 — read by governed_tool's output-scan gate (P11).
+        mcp_tool_fn.scan_results = self.scan_results
+
+        # Prefer named params derived from the tool's registered input_schema (the
+        # discovered MCP tool schema), else a permissive **kwargs signature. The
+        # annotation on `kwargs` is what keeps LangChain introspection from raising
+        # KeyError('kwargs').
+        derived = _params_from_input_schema(self.input_schema)
+        if derived is not None:
+            params, annotations = derived
+        else:
+            params = [
+                inspect.Parameter("kwargs", inspect.Parameter.VAR_KEYWORD, annotation=str)
+            ]
+            annotations = _annotations_from_params(params)
+
+        mcp_tool_fn.__signature__ = inspect.Signature(params, return_annotation=str)
+        mcp_tool_fn.__annotations__ = {**annotations, "return": str}
+
+        return mcp_tool_fn

@@ -700,7 +700,7 @@ registry-api:
     #   (not run_id), so a production chat parked on a high-risk tool auto-resumes after a
     #   reviewer approves instead of hanging. Cherry-picked from fix/reactive-hitl-approval-
     #   poll (922c04b); see docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md.
-    tag: "0.2.225"
+    tag: "0.2.226"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -783,7 +783,7 @@ deploy-controller:
   # Context Storage POC-0/1: fail-loud AsyncPostgresSaver + runner memory
   # load/save + shared workflow transcript are all baked into this image.
   # 0.1.57: SDK ChatOllama (langchain-ollama) — LLM_PROVIDER=ollama + OLLAMA_BASE_URL.
-  declarativeRunnerTag: "0.1.59"
+  declarativeRunnerTag: "0.1.60"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -825,7 +825,7 @@ safety-orchestrator:
     # touched in de6c46b and never followed). It went unnoticed only because the
     # component ships `enabled: false` — the moment it is enabled, helm would serve the
     # OLD image while every check stayed green. Found by scripts/check-tag-content-coupling.sh.
-    tag: "0.1.3"
+    tag: "0.1.4"
     pullPolicy: IfNotPresent
 
   service:

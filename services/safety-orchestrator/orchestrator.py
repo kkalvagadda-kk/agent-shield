@@ -26,6 +26,8 @@ from config import settings
 from pii_store import PiiStore
 from scanner_clients import LLMGuardClient, NeMoClient, PresidioClient
 from schemas import (
+    DeanonymizeArgsRequest,
+    DeanonymizeArgsResponse,
     ScanInputRequest,
     ScanInputResponse,
     ScanOutputRequest,
@@ -315,12 +317,44 @@ class SafetyOrchestrator:
         # Phase 1 the per-tool-call ACTION on a flagged tool result (block / redact /
         # pass-through) is intentionally a STUB — verdict computed + logged, NOT enforced.
         # WHEN SAFETY ORCHESTRATION IS BUILT OUT: define + wire that action at the
-        # governed_tool call site, and fix the clean_text/deanonymized_message field bug
-        # in sdk/agentshield_sdk/safety_client.py. Do NOT report MCP output-scan "done"
-        # until this is real.
+        # governed_tool call site. (The clean_text/deanonymized_message field bug in
+        # sdk/agentshield_sdk/safety_client.py was fixed in P10 — see
+        # docs/bugs/safety-client-scan-field-mismatch.md.) Do NOT report MCP
+        # output-scan "done" until the per-tool-call action is real.
         return ScanOutputResponse(
             allowed=True,
             blocked=False,
             deanonymized_message=deanonymized,
             scores=scores,
         )
+
+    async def deanonymize_args(
+        self, req: DeanonymizeArgsRequest
+    ) -> DeanonymizeArgsResponse:
+        """De-anonymize tool arguments for a Decision-27 allow_deanonymize call.
+
+        Substitutes every stored ``anonymized_text`` back to its ``original_text``
+        in every string leaf of ``args`` (recursing dicts/lists; non-strings pass
+        through). No stored mappings for the session ⇒ ``args`` returned unchanged.
+        """
+        mappings = await self._pii_store.get_mappings(req.session_id, req.agent_name)
+        replacements = {
+            m.anonymized_text: m.original_text for m in mappings if m.anonymized_text
+        }
+        if not replacements:
+            return DeanonymizeArgsResponse(args=req.args)
+
+        def _sub(value: Any) -> Any:
+            if isinstance(value, str):
+                out = value
+                for anon, orig in replacements.items():
+                    if anon in out:
+                        out = out.replace(anon, orig)
+                return out
+            if isinstance(value, dict):
+                return {k: _sub(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_sub(v) for v in value]
+            return value
+
+        return DeanonymizeArgsResponse(args=_sub(req.args))

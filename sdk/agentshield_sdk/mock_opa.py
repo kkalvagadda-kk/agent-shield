@@ -12,6 +12,13 @@ async def check_tool(agent_name: str, tool_name: str, args: dict) -> dict:
     """Mock OPA decision — always allows, never requires approval.
 
     Returns:
-        dict with ``allow=True``, ``require_approval=False``, ``reason="mock"``.
+        dict with ``allow=True``, ``require_approval=False``, ``reason="mock"``,
+        ``allow_deanonymize=True`` (dev-mode parity for Decision 27 — local runs
+        exercise the de-anon path without a real OPA sidecar).
     """
-    return {"allow": True, "require_approval": False, "reason": "mock"}
+    return {
+        "allow": True,
+        "require_approval": False,
+        "reason": "mock",
+        "allow_deanonymize": True,
+    }

@@ -10,11 +10,14 @@ Behaviour:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import httpx
 
 from . import config, mock_safety
+
+logger = logging.getLogger(__name__)
 
 
 class SafetyBlockedError(Exception):
@@ -55,11 +58,14 @@ async def scan_input(
             sanitized_text=result["sanitized_text"], scores=result["scores"]
         )
 
+    # Wire contract = services/safety-orchestrator/schemas.py ScanInputRequest:
+    # `message` + `thread_id` (NOT `text`/`trace_id`). `session_id` is required
+    # (non-optional) server-side, so default it to "" rather than send null.
     payload = {
-        "text": text,
+        "session_id": session_id or "",
         "agent_name": agent_name,
-        "session_id": session_id,
-        "trace_id": trace_id,
+        "message": text,
+        "thread_id": trace_id,
     }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -80,8 +86,11 @@ async def scan_input(
             scores=data.get("scores", {}),
         )
 
+    # ScanInputResponse returns `anonymized_message` (fall back to the original
+    # text when the scanner didn't anonymize). SDK-side dataclass keeps its own
+    # field name (`sanitized_text`) — only the wire read changes.
     return ScanInputResult(
-        sanitized_text=data.get("sanitized_text", text),
+        sanitized_text=data.get("anonymized_message") or text,
         scores=data.get("scores", {}),
     )
 
@@ -103,11 +112,12 @@ async def scan_output(
             clean_text=result["clean_text"], scores=result["scores"]
         )
 
+    # Wire contract = ScanOutputRequest: `message` + `thread_id` (see scan_input).
     payload = {
-        "text": text,
+        "session_id": session_id or "",
         "agent_name": agent_name,
-        "session_id": session_id,
-        "trace_id": trace_id,
+        "message": text,
+        "thread_id": trace_id,
     }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -128,7 +138,52 @@ async def scan_output(
             scores=data.get("scores", {}),
         )
 
+    # ScanOutputResponse returns `deanonymized_message` (fall back to the original
+    # text). SDK-side dataclass keeps `clean_text`.
     return ScanOutputResult(
-        clean_text=data.get("clean_text", text),
+        clean_text=data.get("deanonymized_message") or text,
         scores=data.get("scores", {}),
     )
+
+
+async def deanonymize_args(
+    args: dict,
+    agent_name: str,
+    session_id: str,
+) -> dict:
+    """De-anonymize a tool's arguments before an ALLOWED de-anon tool call.
+
+    Decision 27: when OPA returns allow_deanonymize, governed_tool calls this to
+    substitute anonymized placeholders in the tool arguments back to the original
+    PII (using the per-session PiiStore mappings the orchestrator holds).
+
+    FAIL-OPEN: any failure returns ``args`` UNCHANGED (still anonymized) and never
+    raises — a de-anon outage must degrade to "the tool sees the placeholder", not
+    break the tool call. (Contrast scan_input/scan_output, which fail CLOSED: a
+    scanner outage there blocks. De-anon is an enrichment, not a safety gate.)
+    """
+    if not config.AGENTSHIELD_SAFETY_URL:
+        return await mock_safety.deanonymize_args(args, agent_name, session_id)
+
+    payload = {
+        "session_id": session_id or "",
+        "agent_name": agent_name,
+        "args": args,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                f"{config.AGENTSHIELD_SAFETY_URL}/api/v1/deanonymize/args", json=payload
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        deanon = data.get("args")
+        return deanon if isinstance(deanon, dict) else args
+    except Exception as exc:  # fail-open — de-anon is best-effort enrichment
+        logger.warning(
+            "deanonymize_args failed for agent '%s' (session '%s'): %s — passing args through unchanged",
+            agent_name,
+            session_id,
+            exc,
+        )
+        return args

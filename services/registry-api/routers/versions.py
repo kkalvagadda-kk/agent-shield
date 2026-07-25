@@ -90,7 +90,13 @@ async def create_version(
     )
     bound_tools = bound_tools_result.scalars().all()
     tools_snapshot = [
-        {"name": t.name, "risk": t.risk_level or "low"}
+        # Decision 27: carry pii_deanonymize_allowed into the snapshot so the OPA
+        # bundle can gate de-anonymization off the published version, not live rows.
+        {
+            "name": t.name,
+            "risk": t.risk_level or "low",
+            "pii_deanonymize_allowed": bool(t.pii_deanonymize_allowed),
+        }
         for t in bound_tools
     ]
     # Merge with any explicitly provided tools from request body
