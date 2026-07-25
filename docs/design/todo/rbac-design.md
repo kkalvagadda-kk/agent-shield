@@ -19,7 +19,7 @@ The platform has authentication (Keycloak OIDC + JWT) but no authorization. Ever
 - See and decide on every HITL approval in every team's queue
 - Use the playground without restriction
 
-Three Keycloak realm roles exist (`admin`, `operator`, `viewer`) and are stored in `user_team_assignments.role`, but nothing in the backend or frontend reads them to gate access. The `hasRole()` function in Studio's `AuthContext` is defined but never called.
+Three Keycloak realm roles exist (`admin`, `operator`, `Consumer`) and are stored in `user_team_assignments.role`, but nothing in the backend or frontend reads them to gate access. The `hasRole()` function in Studio's `AuthContext` is defined but never called.
 
 This spec introduces **two-tier RBAC**: global roles for platform-wide capabilities and artifact-scoped roles for per-agent/workflow authority.
 
@@ -39,9 +39,9 @@ Stored in `user_team_assignments.role`. Mutually exclusive per user — each use
 |------|---------------|----------------|
 | **platform-admin** | Full platform access: manage users/teams, approve publish requests, configure approval authority, deploy to any environment, assign any artifact-scoped role on any artifact, use playground, see all HITL queues | Nothing |
 | **contributor** | Create agents/workflows/tools/skills, develop in sandbox (playground, test runs), submit for publish, deploy to sandbox. Can deploy to production only if also `agent-admin` on the artifact. | Cannot manage users/teams, cannot access `/admin/*` routes, cannot deploy to production without `agent-admin` |
-| **viewer** | Browse the catalog, view run history, view deployment status | Cannot create/modify/delete anything, cannot use the playground, cannot approve HITL, cannot deploy |
+| **Consumer** | Browse the catalog, view run history, view deployment status | Cannot create/modify/delete anything, cannot use the playground, cannot approve HITL, cannot deploy |
 
-**Migration from current values**: `admin` → `platform-admin`, `operator` → `contributor`. The `viewer` value stays unchanged.
+**Migration from current values**: `admin` → `platform-admin`, `operator` → `contributor`. The `Consumer` value stays unchanged.
 
 ### 2.2 Artifact-Scoped Roles
 
@@ -78,7 +78,7 @@ When a contributor creates an agent or workflow, the platform automatically inse
 | **platform-admin** | Any scoped role (`agent-admin`, `approver`) on any artifact, to any user or team |
 | **agent-admin** (on artifact X) | `agent-admin` or `approver` on artifact X only, to any user or team |
 | **contributor** (no scoped role on X) | Nothing on artifact X |
-| **viewer** | Nothing |
+| **Consumer** | Nothing |
 
 ### 3.4 Revocation
 
@@ -272,7 +272,7 @@ Returns a FastAPI dependency that:
 
 ### 6.7 Read-Only Routes (any authenticated user)
 
-All GET endpoints not listed above are accessible to any authenticated user (viewer+):
+All GET endpoints not listed above are accessible to any authenticated user (Consumer+):
 - `GET /api/v1/agents/`, `GET /api/v1/agents/{name}`
 - `GET /api/v1/tools/`, `GET /api/v1/skills/`
 - `GET /api/v1/workflows/`, `GET /api/v1/workflows/{id}`
@@ -334,12 +334,12 @@ The `approvals` table currently stores `agent_name` (string) but `artifact_role_
 ```typescript
 interface AuthContextValue {
   // ... existing fields ...
-  role: string | null;         // normalized: 'platform-admin' | 'contributor' | 'viewer'
-  isAtLeast: (minRole: 'viewer' | 'contributor' | 'platform-admin') => boolean;
+  role: string | null;         // normalized: 'platform-admin' | 'contributor' | 'Consumer'
+  isAtLeast: (minRole: 'Consumer' | 'contributor' | 'platform-admin') => boolean;
 }
 ```
 
-`isAtLeast` uses a hierarchy: `viewer (0) < contributor (1) < platform-admin (2)`.
+`isAtLeast` uses a hierarchy: `Consumer (0) < contributor (1) < platform-admin (2)`.
 
 ### 8.2 Route Guards
 
@@ -362,7 +362,7 @@ interface AuthContextValue {
 
 ### 8.4 Role Dropdown Update
 
-`studio/src/pages/AdminAccessPage.tsx` — change the role options from `["admin", "operator", "viewer"]` to `["platform-admin", "contributor", "viewer"]` with updated display labels and color chips.
+`studio/src/pages/AdminAccessPage.tsx` — change the role options from `["admin", "operator", "Consumer"]` to `["platform-admin", "contributor", "Consumer"]` with updated display labels and color chips.
 
 ### 8.5 `/me` Endpoint Enrichment
 
@@ -388,11 +388,11 @@ interface AuthContextValue {
 
 ### 9.1 New Realm Roles
 
-The `realm-init-job.yaml` needs to create three realm roles: `platform-admin`, `contributor`, `viewer`. The old roles (`admin`, `operator`) are kept as aliases during transition.
+The `realm-init-job.yaml` needs to create three realm roles: `platform-admin`, `contributor`, `Consumer`. The old roles (`admin`, `operator`) are kept as aliases during transition.
 
 ### 9.2 Keycloak Client Update
 
-`keycloak_client.py` `set_user_realm_role()` must recognize both old and new role names. The platform roles set expands: `{"admin", "operator", "viewer", "platform-admin", "contributor"}`. When assigning, map old names to new.
+`keycloak_client.py` `set_user_realm_role()` must recognize both old and new role names. The platform roles set expands: `{"admin", "operator", "Consumer", "platform-admin", "contributor"}`. When assigning, map old names to new.
 
 ---
 
@@ -453,10 +453,10 @@ The `rbac.py` permission service maps old role names transparently (`admin` → 
 8. Alice suspends the production deployment
    → agent-admin can suspend: ✓
 
-9. Eve (viewer) browses the catalog, sees fraud-detector
-   → viewer can read: ✓
-   → Eve tries playground: ✗ (403, viewer cannot use playground)
-   → Eve tries deploy: ✗ (403, viewer cannot deploy)
+9. Eve (Consumer) browses the catalog, sees fraud-detector
+   → Consumer can read: ✓
+   → Eve tries playground: ✗ (403, Consumer cannot use playground)
+   → Eve tries deploy: ✗ (403, Consumer cannot deploy)
 ```
 
 ### 11.2 Cross-Team Delegation
@@ -466,8 +466,8 @@ The `rbac.py` permission service maps old role names transparently (`admin` → 
 2. All operations team members can now manage fraud-detector in production
 3. Frank (operations) grants "approver" on fraud-detector to "compliance" team
    → Frank can delegate because he's agent-admin (via team grant)
-4. Grace (compliance, viewer) sees HITL for fraud-detector
-   → But Grace cannot use playground (viewer globally)
+4. Grace (compliance, Consumer) sees HITL for fraud-detector
+   → But Grace cannot use playground (Consumer globally)
    → She can only approve/reject HITL items
 ```
 
@@ -484,7 +484,7 @@ New suite: `scripts/e2e/suite-32-rbac.sh`
 | T-S32-003 | Creator deploys to production → 200 | agent-admin can deploy to production |
 | T-S32-004 | Random contributor deploys to production → 403 | Non-admin blocked from production deploy |
 | T-S32-005 | Contributor deploys to sandbox → 200 | Sandbox deploy unguarded for contributors |
-| T-S32-006 | Viewer tries `POST /playground/runs` → 403 | Playground blocked for viewer |
+| T-S32-006 | Consumer tries `POST /playground/runs` → 403 | Playground blocked for Consumer |
 | T-S32-007 | Contributor tries `POST /playground/runs` → 200 | Playground open for contributor |
 | T-S32-008 | Grant approver to user, that user sees HITL items | Scoped HITL visibility |
 | T-S32-009 | User without approver tries `PATCH /approvals/{id}` → 403 | HITL decide blocked |
@@ -507,7 +507,7 @@ New suite: `scripts/e2e/suite-32-rbac.sh`
 | **Migration 0044** (§4.2, §10.1) | `artifact_role_grants` table, all indexes, unique partial constraint, role value normalization (`admin→platform-admin`, `operator→contributor`) | Spec said 0030 — landed as 0044 (later sequence). Schema matches spec exactly. |
 | **Creator auto-grant** (§3.2) | `grant_creator_admin` called in `routers/agents.py` (agent create) and `routers/composite_workflows.py` (workflow create) | `granted_by = 'system:auto-grant'`, ON CONFLICT DO NOTHING for idempotency |
 | **`/me` enrichment** (§8.5) | Returns `role` (normalized) + `artifact_roles` array | In `routers/me.py`; imports `get_user_artifact_roles`, `_normalize_role` from `rbac.py` |
-| **Frontend `isAtLeast`** (§8.1) | `AuthContext.tsx`: `ROLE_LEVEL` map + `isAtLeast(minRole)` method | Hierarchy: viewer(0) < contributor(1) < platform-admin(2) |
+| **Frontend `isAtLeast`** (§8.1) | `AuthContext.tsx`: `ROLE_LEVEL` map + `isAtLeast(minRole)` method | Hierarchy: Consumer(0) < contributor(1) < platform-admin(2) |
 | **`RequireRole` guard** (§8.2) | `components/RequireRole.tsx` wraps admin routes in `App.tsx` | Redirects to `/` if below threshold |
 | **Sidebar admin filter** (§8.3) | Admin section gated by `isAtLeast("platform-admin")` | `Sidebar.tsx` |
 | **E2E suite-42** (§12) | 6 tests: table exists, agent auto-grant, workflow auto-grant, /me auth guard, normalization, idempotency | Maps to spec's T-S32-001 through T-S32-006 equivalents |
@@ -520,7 +520,7 @@ New suite: `scripts/e2e/suite-32-rbac.sh`
 | §6.1–6.5 endpoint matrix | Wire `require_global_role("platform-admin")` into actual admin routers; wire `can_create_agent` into agent/workflow POST; wire `can_deploy_to_production` into production deploy path | HIGH |
 | §6.6 artifact-roles CRUD | New router: `POST/GET/DELETE /api/v1/artifact-roles` | MEDIUM — admin can grant via DB until this ships |
 | §7 HITL routing rewrite | Replace `approval_authority`-based routing with `artifact_role_grants` query; filter production approvals by `approver` scoped role | MEDIUM |
-| §8.4 role dropdown | `AdminAccessPage.tsx` — change `["admin","operator","viewer"]` → `["platform-admin","contributor","viewer"]` | LOW (cosmetic, normalization handles old values) |
+| §8.4 role dropdown | `AdminAccessPage.tsx` — change `["admin","operator","Consumer"]` → `["platform-admin","contributor","Consumer"]` | LOW (cosmetic, normalization handles old values) |
 | §9 Keycloak realm roles | `realm-init-job.yaml` create new roles; `keycloak_client.py` map old→new | LOW (backend normalization makes this non-blocking) |
 | §10.2 approval authority deprecation | Deprecation banner + gradual migration | DEFERRED |
 
