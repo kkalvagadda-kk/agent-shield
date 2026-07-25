@@ -40,6 +40,12 @@ class ServerConnection:
     is_external: bool = False
     owner_team: str | None = None
     auth_headers: dict[str, str] = field(default_factory=dict)
+    # WS-C identity selector (Phase 2). Default "none" makes a pre-WS-C Secret (whose
+    # connection JSON has neither key) behave EXACTLY as Phase 1 — identity.resolve_headers
+    # returns the static auth_headers unchanged. identity_audience is the optional Keycloak
+    # token audience for service_identity / on_behalf_of.
+    identity_mode: str = "none"
+    identity_audience: str | None = None
 
 
 async def read_server_secret(server_id: str) -> ServerConnection:
@@ -82,6 +88,11 @@ async def read_server_secret(server_id: str) -> ServerConnection:
     if not server_url:
         raise ServerSecretNotFound(f"Secret {name} 'connection' has no server_url")
 
+    # Default identity_mode to "none" when the key is absent → a Secret materialized
+    # before WS-C parses to Phase-1 behaviour exactly (data-model.md §3b).
+    identity_mode = connection.get("identity_mode") or "none"
+    identity_audience = connection.get("identity_audience")
+
     return ServerConnection(
         server_url=server_url,
         transport=connection.get("transport", "http"),
@@ -89,4 +100,6 @@ async def read_server_secret(server_id: str) -> ServerConnection:
         is_external=bool(connection.get("is_external", False)),
         owner_team=connection.get("owner_team"),
         auth_headers=auth_headers if isinstance(auth_headers, dict) else {},
+        identity_mode=identity_mode,
+        identity_audience=identity_audience,
     )

@@ -56,6 +56,14 @@ AGENT_NAME: str = os.getenv("AGENT_NAME", "unknown-agent")
 AGENT_ID: str = os.getenv("AGENTSHIELD_AGENT_ID", "")
 AGENT_TEAM: str = os.getenv("AGENTSHIELD_AGENT_TEAM", "platform")
 
+# --- End-user identity (WS-C / FR-MCP-21 on-behalf-of) ---
+# The `sub` of the human on whose behalf this agent is acting, if any. Best-effort
+# source for the `x-user-sub` header the MCP proxy reads to route on_behalf_of
+# servers. Empty for daemon agents (no user) — in which case the executor sends NO
+# such header, so a Phase-1 request stays byte-identical. Populated only once
+# identity-propagation lands (see docs/design/identity-propagation-architecture.md).
+USER_SUB: str = os.getenv("AGENTSHIELD_USER_SUB", "")
+
 # --- LLM provider ---
 LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "anthropic")
 LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-6")

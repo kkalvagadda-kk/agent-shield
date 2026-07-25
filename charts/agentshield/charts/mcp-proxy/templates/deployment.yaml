@@ -47,6 +47,30 @@ spec:
             # /internal/discover is admin-plane: caller subject must equal this.
             - name: REGISTRY_API_SA_SUBJECT
               value: {{ .Values.registryApiSaSubject | quote }}
+            # WS-C identity (FR-MCP-21): the proxy mints its OWN service-account
+            # token for internal `service_identity` servers via a NARROW,
+            # file-mounted Keycloak client secret (never the master key / DB).
+            - name: KEYCLOAK_TOKEN_URL
+              value: {{ .Values.keycloak.tokenUrl | quote }}
+            - name: MCP_PROXY_KEYCLOAK_CLIENT_ID
+              value: {{ .Values.keycloak.clientId | quote }}
+            - name: MCP_PROXY_KEYCLOAK_CLIENT_SECRET_PATH
+              value: "/var/run/secrets/mcp-proxy-keycloak/client-secret"
+            # WS-B list_changed subscription knobs (FR-MCP-07).
+            - name: MCP_LIST_CHANGED_ENABLED
+              value: {{ .Values.listChanged.enabled | quote }}
+            - name: MCP_LIST_CHANGED_DEBOUNCE_SECONDS
+              value: {{ .Values.listChanged.debounceSeconds | quote }}
+            - name: MCP_LIST_CHANGED_RECONNECT_BACKOFF_SECONDS
+              value: {{ .Values.listChanged.reconnectBackoffSeconds | quote }}
+            - name: MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS
+              value: {{ .Values.listChanged.maxReconnectAttempts | quote }}
+          volumeMounts:
+            # Read-only mount of the Keycloak client secret (WS-C). The proxy reads
+            # it from disk on each mint — NOT via the k8s get-secrets API (§3b).
+            - name: mcp-proxy-keycloak
+              mountPath: /var/run/secrets/mcp-proxy-keycloak
+              readOnly: true
           livenessProbe:
             httpGet:
               path: /health
@@ -61,3 +85,10 @@ spec:
             periodSeconds: 5
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        # The Keycloak client secret: the operator-supplied Secret when
+        # .Values.keycloak.existingSecret is set, else the chart-managed
+        # {{ .Release.Name }}-mcp-proxy-keycloak (templates/secret.yaml).
+        - name: mcp-proxy-keycloak
+          secret:
+            secretName: {{ .Values.keycloak.existingSecret | default (printf "%s-mcp-proxy-keycloak" .Release.Name) }}

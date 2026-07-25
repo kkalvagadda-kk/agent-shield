@@ -108,12 +108,25 @@ async def materialize_server_secret(db: AsyncSession, server: MCPServer) -> None
     relationship in the async session), decrypts its credentials once, and composes
     the two Secret keys. Idempotent via ``k8s.upsert_secret``.
     """
+    # WS-C (data-model.md §2c): the per-server Secret is the ONLY server-metadata
+    # channel the proxy has (no DB). Carry the identity selector + optional audience
+    # so the proxy's identity.resolve_headers can pick the credential branch. A Secret
+    # that predates WS-C simply lacks these keys → the proxy defaults identity_mode to
+    # "none" (Phase-1 behaviour, safe). auth_headers composition is UNCHANGED.
+    transport_config = server.transport_config
+    identity_audience = (
+        transport_config.get("identity_audience")
+        if isinstance(transport_config, dict)
+        else None
+    )
     connection = {
         "server_url": server.server_url,
         "transport": server.transport,
-        "transport_config": server.transport_config,
+        "transport_config": transport_config,
         "is_external": server.is_external,
         "owner_team": server.owner_team,
+        "identity_mode": server.identity_mode,
+        "identity_audience": identity_audience,
     }
 
     auth_headers: dict[str, str] = {}

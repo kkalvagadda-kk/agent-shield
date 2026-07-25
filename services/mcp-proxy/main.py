@@ -29,6 +29,8 @@ import authn
 import authz
 import config
 import credentials
+import identity
+import keycloak_client
 import mcp_client
 import session_cache
 import subscription_manager
@@ -149,9 +151,20 @@ async def discover(
     except ServerSecretNotFound as exc:
         return McpDiscoverResponse(ok=False, status="error", health_detail=str(exc))
 
+    # WS-C: resolve the upstream credential for the server's identity_mode (admin plane →
+    # none=static, service_identity/on_behalf_of=platform service token). A mint failure is a
+    # reachability outcome (200 error body), never a 5xx. (OBO admin plane uses the service
+    # token — discovery lists the server AS the platform; it never impersonates a user, so
+    # no OnBehalfOf* exception can arise here with is_data_plane=False / user_sub=None.)
+    try:
+        headers = await identity.resolve_headers(connection, user_sub=None, is_data_plane=False)
+    except Exception as exc:  # noqa: BLE001 — identity/mint failure
+        logger.warning("mcp-proxy discover: identity resolution failed for %s: %s", server_id, exc)
+        return McpDiscoverResponse(ok=False, status="error", health_detail=f"identity: {exc}")
+
     try:
         session = await mcp_client.connect_and_initialize(
-            connection.server_url, connection.auth_headers
+            connection.server_url, headers
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("mcp-proxy discover: connect failed for %s: %s", server_id, exc)
@@ -219,9 +232,9 @@ async def health_check(
     never a 5xx. Only a missing/wrong-audience token (401) or a non-registry-api
     subject (403) is a real HTTP error.
 
-    NOTE (Task 2): the pooled session is opened with connection.auth_headers (via
-    session_cache's internal _open). Task 9 rewires header resolution here to
-    identity.resolve_headers(connection, user_sub=None, is_data_plane=False).
+    WS-C (Task 9): the pooled session is opened with identity.resolve_headers on the ADMIN
+    plane (user_sub=None, is_data_plane=False) — none=static, service_identity/on_behalf_of=
+    the platform service token. A mint failure is a 200 ok=false body, never a 5xx.
     """
     _echo_trace(response, x_agentshield_trace_id)
 
@@ -241,10 +254,18 @@ async def health_check(
     except ServerSecretNotFound as exc:
         return McpHealthResponse(ok=False, status="error", health_detail=str(exc))
 
-    # 2. Reuse the pooled session, or open one on a miss (via connection.auth_headers).
+    # 2. Resolve the admin-plane upstream credential. A service-identity mint failure is a
+    #    reachability outcome (200 ok=false), never a 5xx. (No OnBehalfOf* here: admin plane.)
+    try:
+        headers = await identity.resolve_headers(connection, user_sub=None, is_data_plane=False)
+    except Exception as exc:  # noqa: BLE001 — identity/mint failure
+        logger.warning("mcp-proxy health: identity resolution failed for %s: %s", server_id, exc)
+        return McpHealthResponse(ok=False, status="error", health_detail=f"identity: {exc}")
+
+    # 3. Reuse the pooled session, or open one on a miss (with the resolved headers).
     #    Any connect failure → evict + 200 ok=false (never 5xx).
     try:
-        cached = await session_cache.get_or_create(server_id)
+        cached = await session_cache.get_or_create(server_id, user_sub=None, headers=headers)
     except ServerSecretNotFound as exc:
         # A race (Secret deleted between the read above and here) — still a 200 body.
         return McpHealthResponse(ok=False, status="error", health_detail=str(exc))
@@ -257,7 +278,7 @@ async def health_check(
             health_detail=f"connect failed to {connection.server_url}: {exc}",
         )
 
-    # 3. tools/list is the liveness probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS).
+    # 4. tools/list is the liveness probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS).
     #    On failure evict so the next cycle reconnects. No Tool-row write happens here.
     try:
         tools = await cached.session.list_tools()
@@ -272,7 +293,7 @@ async def health_check(
             list_changed_supported=cached.session.list_changed_supported,
         )
 
-    # 4. Success. WS-B: a periodic health probe is also a place the capability is
+    # 5. Success. WS-B: a periodic health probe is also a place the capability is
     #    (re)observed — ensure the subscriber exists if supported (idempotent; a re-probe
     #    of an already-subscribed server is a no-op).
     await _maybe_subscribe_list_changed(server_id, cached.session.list_changed_supported)
@@ -297,7 +318,7 @@ async def tools_call(
     response: Response,
     authorization: str | None = Header(default=None),
     x_agentshield_trace_id: str | None = Header(default=None),
-    x_user_sub: str | None = Header(default=None),  # Phase 2 on-behalf-of — ignored in P1
+    x_user_sub: str | None = Header(default=None),  # end-user subject — drives on_behalf_of
 ) -> McpToolCallResponse:
     _echo_trace(response, x_agentshield_trace_id)
 
@@ -306,10 +327,12 @@ async def tools_call(
 
     server_id = str(req.server_id)
 
-    # 2. AuthZ floor (§3b). Resolve owner_team from an already-open session (zero
-    #    reads) or, on a miss, from a single Secret read (which we reuse to open
-    #    the session below — no double read). A missing Secret is a 200 error body.
-    cached = session_cache.peek(server_id)
+    # 2. Resolve connection metadata (owner_team + identity_mode). From an already-open
+    #    session (zero reads) or a single Secret read (reused to open the session below —
+    #    no double read). Keyed on the composite (server_id, x_user_sub); for a
+    #    none/service_identity server the user_sub is ignored and this is the shared
+    #    session, so metadata is user-independent. A missing Secret is a 200 error body.
+    cached = session_cache.peek(server_id, x_user_sub)
     if cached is not None:
         connection = cached.connection
     else:
@@ -318,40 +341,81 @@ async def tools_call(
         except ServerSecretNotFound as exc:
             return McpToolCallResponse(is_error=True, error=str(exc))
 
+    # 3. AuthZ floor (§3b).
     allowed = await authz.authorize_tool_call(
         sa_subject, server_id, req.mcp_tool_name, connection.owner_team
     )
     if not allowed:
         raise HTTPException(status_code=403, detail="team-scope floor: not authorized for this server/tool")
 
-    # 3. Get (or lazily create) the live session — reusing the connection already
-    #    read on a miss so the Secret is read exactly once.
+    # 4. WS-C: resolve the upstream credential for the server's identity_mode (data plane).
+    #    An on_behalf_of outcome is a per-call tool error the LLM should see — a 200 is_error
+    #    body, NOT a 5xx/403. This runs even on a cache hit so an on_behalf_of server ALWAYS
+    #    fails closed here before any pooled session (incl. an admin-plane one) is ever used.
+    try:
+        headers = await identity.resolve_headers(
+            connection, user_sub=x_user_sub, is_data_plane=True
+        )
+    except identity.OnBehalfOfIdentityRequired:
+        return McpToolCallResponse(
+            is_error=True,
+            error="this MCP server requires a user identity (on_behalf_of) but none was provided",
+        )
+    except identity.OnBehalfOfNotAvailable:
+        return McpToolCallResponse(
+            is_error=True,
+            error="on-behalf-of token exchange is not yet available (blocked on Decision 29)",
+        )
+    except Exception as exc:  # noqa: BLE001 — service-identity mint failure → 200 error body
+        logger.warning("mcp-proxy tools/call: identity resolution failed for %s: %s", server_id, exc)
+        return McpToolCallResponse(is_error=True, error=f"identity: {exc}")
+
+    # 5. Get (or lazily create) the live session — reusing the connection + resolved headers
+    #    read on a miss so the Secret is read exactly once. Keyed on the composite key.
     if cached is None:
         try:
-            session = await mcp_client.connect_and_initialize(
-                connection.server_url, connection.auth_headers
-            )
+            session = await mcp_client.connect_and_initialize(connection.server_url, headers)
         except Exception as exc:  # noqa: BLE001
             logger.warning("mcp-proxy tools/call: connect failed for %s: %s", server_id, exc)
             return McpToolCallResponse(
                 is_error=True, error=f"connect failed to {connection.server_url}: {exc}"
             )
         cached = CachedSession(session=session, connection=connection)
-        await session_cache.set_session(server_id, cached)
+        await session_cache.set_session(server_id, cached, user_sub=x_user_sub)
 
-    # 4/5. Execute, with ONE evict-and-retry on a transport/protocol failure (a
-    #      raised exception — a tool that *ran* but reported an error returns
-    #      is_error=True without raising, and is NOT retried).
+    # 6. Execute, with ONE evict-and-retry on a transport/protocol failure (a raised
+    #    exception — a tool that *ran* but reported an error returns is_error=True without
+    #    raising, and is NOT retried). For a service_identity server the failure may be a
+    #    rotated/expired minted token, so we invalidate the token cache before the retry —
+    #    the retry then mints fresh, self-healing a mid-life token rotation. (We do NOT sniff
+    #    the exception for a "401": that string-match is fragile; a service-identity transport
+    #    failure is rare and always re-minting on retry is strictly safe.)
     try:
         call_result = await cached.session.call_tool(req.mcp_tool_name, req.arguments)
     except Exception as exc:  # noqa: BLE001 — transport/protocol/upstream-auth error
         logger.warning(
             "mcp-proxy tools/call: %s failed (%s) — evict + retry once", req.mcp_tool_name, exc
         )
-        await session_cache.evict(server_id)
+        if connection.identity_mode == "service_identity":
+            keycloak_client.invalidate(connection.identity_audience)
+        await session_cache.evict(server_id, x_user_sub)
         try:
-            cached = await session_cache.get_or_create(server_id)  # fresh Secret + reconnect
+            # Re-read the Secret (picks up a rotated static credential) + re-resolve identity
+            # (fresh minted token if invalidated) + reconnect.
+            fresh = await credentials.read_server_secret(server_id)
+            retry_headers = await identity.resolve_headers(
+                fresh, user_sub=x_user_sub, is_data_plane=True
+            )
+            session = await mcp_client.connect_and_initialize(fresh.server_url, retry_headers)
+            cached = CachedSession(session=session, connection=fresh)
+            await session_cache.set_session(server_id, cached, user_sub=x_user_sub)
             call_result = await cached.session.call_tool(req.mcp_tool_name, req.arguments)
+        except (identity.OnBehalfOfIdentityRequired, identity.OnBehalfOfNotAvailable) as exc2:
+            # Defensive: the same identity_mode already yielded a 200 is_error above, so this
+            # is normally unreachable — but keep an on_behalf_of server on the 200-error path.
+            return McpToolCallResponse(
+                is_error=True, error=str(exc2) or "on_behalf_of identity not available"
+            )
         except ServerSecretNotFound as exc2:
             return McpToolCallResponse(is_error=True, error=str(exc2))
         except Exception as exc2:  # noqa: BLE001

@@ -254,6 +254,39 @@ spec:
           port: 8080
 
 ---
+# 4c. Allow MCP Proxy egress to the in-cluster Keycloak Service (WS-C / FR-MCP-21)
+#     For internal `service_identity` servers the proxy mints its OWN Keycloak
+#     service-account token (client-credentials grant) and must POST the realm's
+#     OIDC token endpoint (http://agentshield-keycloak/realms/agentshield/
+#     protocol/openid-connect/token). Both the Service port (80) and the Bitnami
+#     Keycloak container port (8080) are allowed so the rule holds whether the CNI
+#     evaluates egress ports pre- or post-DNAT. DNS egress is already covered by
+#     rule 8 (allow-platform-egress-dns, podSelector: {}).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-mcp-proxy-egress-keycloak
+  namespace: agentshield-platform
+  labels:
+    app.kubernetes.io/managed-by: agentshield
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-proxy
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: keycloak
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+
+---
 # 5. Allow Postgres/PgBouncer ingress from all platform services on port 5432
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

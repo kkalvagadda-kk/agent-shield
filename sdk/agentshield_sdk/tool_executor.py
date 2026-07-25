@@ -349,6 +349,11 @@ class McpToolExecutor:
                 "agent_name": config.AGENT_NAME,
             }
             headers = {"Authorization": f"Bearer {token}"} if token else {}
+            # WS-C (FR-MCP-21): forward the acting user's identity so the proxy can
+            # route on_behalf_of servers. Sent ONLY when non-empty — a daemon agent
+            # (no AGENTSHIELD_USER_SUB) emits a byte-identical Phase-1 request.
+            if config.USER_SUB:
+                headers["x-user-sub"] = config.USER_SUB
             timeout = executor.timeout_ms / 1000.0 + 5
             # FR-MCP-14: a tool call must NEVER raise out of the executor — every
             # failure (auth, transport, protocol, upstream tool error) is surfaced

@@ -407,11 +407,11 @@ DEPLOY_CONTROLLER_TAG="0.1.41"   # 0.1.41: project 2nd SA token (audience agents
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
 STUDIO_TAG="0.1.162"   # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill, last_success_at, consecutive_failures, last_error, last_synced_at, list_changed_supported, identity note) + 15s refetch
 EVAL_RUNNER_TAG="0.1.14"
-DECLARATIVE_RUNNER_TAG="0.1.60"   # 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
+DECLARATIVE_RUNNER_TAG="0.1.61"   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4 (McpToolExecutor x-user-sub). 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"
-MCP_PROXY_TAG="0.1.1"   # 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS); covers later P2 proxy changes. 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
+MCP_PROXY_TAG="0.1.2"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (file-mounted client secret + env) + list_changed subscription knobs. 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS). 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

@@ -119,6 +119,40 @@ MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS: int = int(
 )
 
 
+# ---------------------------------------------------------------------------
+# WS-C identity — Keycloak client-credentials mint (contracts/mcp-proxy-internal-phase2.md §4)
+# ---------------------------------------------------------------------------
+#
+# The proxy mints its OWN service-account token to present the platform's identity to
+# internal `service_identity` servers. It uses a NARROW, FILE-MOUNTED Keycloak client
+# secret — NEVER the master AGENTSHIELD_ENCRYPTION_KEY and NEVER a k8s get-secrets API
+# read for this credential (design §3b least-privilege). If a change wants to read this
+# credential via the k8s API, stop — that widens the proxy's blast radius.
+
+# The platform Keycloak OpenID token endpoint the client-credentials grant POSTs to
+# (…/realms/{realm}/protocol/openid-connect/token). Empty by default — it MUST be set
+# for any service_identity server to mint a token; keycloak_client raises if it is unset.
+KEYCLOAK_TOKEN_URL: str = os.getenv("KEYCLOAK_TOKEN_URL", "")
+
+# The confidential Keycloak client the proxy authenticates AS (client-credentials grant).
+MCP_PROXY_KEYCLOAK_CLIENT_ID: str = os.getenv(
+    "MCP_PROXY_KEYCLOAK_CLIENT_ID", "agentshield-mcp-proxy"
+)
+
+# Path to the file-mounted client secret for MCP_PROXY_KEYCLOAK_CLIENT_ID. Read fresh on
+# every actual mint (never cached to disk logic, never via the k8s API). A read-only
+# volume mount (charts wire {release}-mcp-proxy-keycloak → this path).
+MCP_PROXY_KEYCLOAK_CLIENT_SECRET_PATH: str = os.getenv(
+    "MCP_PROXY_KEYCLOAK_CLIENT_SECRET_PATH", "/var/run/secrets/mcp-proxy-keycloak/client-secret"
+)
+
+# Re-mint a cached service token this many seconds BEFORE its JWT `exp` — a safety skew
+# so a token never expires mid-flight to an upstream server.
+KEYCLOAK_TOKEN_CACHE_SKEW_SECONDS: int = int(
+    os.getenv("KEYCLOAK_TOKEN_CACHE_SKEW_SECONDS", "30")
+)
+
+
 def server_secret_name(server_id: str) -> str:
     """The K8s Secret name registry-api materialized for a given server_id."""
     return f"{SERVER_SECRET_PREFIX}{server_id}"

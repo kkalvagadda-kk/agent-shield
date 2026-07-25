@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: registry.internal/agentshield/mcp-proxy
-  tag: "0.1.1"   # 0.1.1: Phase 2 — POST /internal/health reachability probe
+  tag: "0.1.2"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
   pullPolicy: IfNotPresent
 
 service:
@@ -24,6 +24,38 @@ registryApiUrl: "http://agentshield-registry-api:8000"
 
 # Audience the proxy requires on inbound SA tokens (TokenReview must list it).
 proxyAudience: "agentshield-mcp-proxy"
+
+# WS-C identity (FR-MCP-21): the proxy mints its OWN Keycloak service-account
+# token to present the platform's identity to internal `service_identity` servers.
+# It authenticates as a confidential client using a NARROW, file-mounted client
+# secret — never the master AGENTSHIELD_ENCRYPTION_KEY and never a k8s get-secrets
+# API read for this credential (design §3b least-privilege).
+keycloak:
+  # Platform Keycloak OpenID token endpoint the client-credentials grant POSTs to.
+  # Empty here — the parent chart wires it to the in-cluster Keycloak realm; must be
+  # set for any service_identity server to mint a token.
+  tokenUrl: ""
+  # Confidential Keycloak client the proxy authenticates AS (client-credentials grant).
+  clientId: "agentshield-mcp-proxy"
+  # The client secret for clientId. Chart materializes it into the K8s Secret
+  # {release}-mcp-proxy-keycloak (templates/secret.yaml) and mounts it read-only.
+  clientSecret: ""
+  # When set, templates/secret.yaml is skipped and the deployment mounts this
+  # externally-managed Secret instead (must carry a `client-secret` key).
+  existingSecret: ""
+
+# WS-B list_changed subscription (FR-MCP-07): the proxy holds a long-lived session
+# per server that supports notifications/tools/list_changed and POSTs a debounced
+# re-sync callback to registry-api when the upstream tool set changes.
+listChanged:
+  # Master switch — when false the subscription manager is a no-op.
+  enabled: true
+  # Trailing-edge debounce (seconds) — coalesce a burst of notifications into one POST.
+  debounceSeconds: 5
+  # Backoff (seconds) between reconnect attempts after a subscription session drops.
+  reconnectBackoffSeconds: 10
+  # After this many consecutive failed reconnects the subscriber tears itself down.
+  maxReconnectAttempts: 5
 
 resources:
   requests:

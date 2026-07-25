@@ -25,6 +25,14 @@ DIRECT_DATABASE_URL: str = os.getenv("DIRECT_DATABASE_URL", "")
 # --- Identity injected by deploy controller ---
 AGENT_NAME: str = os.getenv("AGENT_NAME", "declarative-agent")
 
+# --- End-user identity (WS-C / FR-MCP-21 on-behalf-of) ---
+# The `sub` of the human this run is acting on behalf of, if any. Best-effort source
+# for the `x-user-sub` header McpToolNodeExecutor forwards to the MCP proxy so it can
+# route on_behalf_of servers. Empty for daemon/scheduled runs (no user) — the executor
+# then sends NO such header, keeping a Phase-1 request byte-identical. A SEPARATE impl
+# from the SDK's config.USER_SUB (runner and SDK are distinct runtimes).
+USER_SUB: str = os.getenv("AGENTSHIELD_USER_SUB", "")
+
 # --- Composite-workflow mode (Decision 22) ---
 # When set by the deploy controller, this pod runs as a workflow
 # orchestrator rather than a single agent.
