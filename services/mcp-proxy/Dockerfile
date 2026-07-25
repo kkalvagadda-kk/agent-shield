@@ -10,9 +10,12 @@ COPY services/mcp-proxy/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Flat module layout — run as `uvicorn main:app` (matches python-executor + quickstart).
-COPY services/mcp-proxy/config.py services/mcp-proxy/schemas.py services/mcp-proxy/k8s_client.py \
-     services/mcp-proxy/authn.py services/mcp-proxy/credentials.py services/mcp-proxy/authz.py \
-     services/mcp-proxy/mcp_client.py services/mcp-proxy/session_cache.py services/mcp-proxy/main.py ./
+# GLOB every module (NOT an explicit per-file list): a hand-maintained list silently
+# drops any NEW module (identity.py / keycloak_client.py / subscription_manager.py were
+# added in Phase 2 and a stale list crash-looped the pod with ModuleNotFoundError —
+# docs/bugs/mcp-proxy-dockerfile-missing-modules.md). The glob resolves against the
+# repo-root build context; services/mcp-proxy/ holds only shippable modules (no tests).
+COPY services/mcp-proxy/*.py ./
 
 # Test-only stub MCP server, started on demand inside the pod via `kubectl exec`
 # (never auto-started — inert unless run explicitly).

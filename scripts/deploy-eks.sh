@@ -64,11 +64,11 @@ VALUES="charts/agentshield/values-eks.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 
 # Image tags (keep in sync with values-eks.yaml / values.yaml)
-REGISTRY_API_TAG="0.2.225"   # 0.2.225: MCP-as-tool-source — mcp_servers router + migration 0072 + mcp-proxy client (matches values.yaml). 0.2.224: HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id). 0.2.221: Decision 30 — matches values.yaml
-MCP_PROXY_TAG="0.1.0"   # 0.1.0: NEW centralized MCP wire client (tool discovery + governed tool calls). Dockerfile COPYs scripts/e2e/fixtures/stub_mcp_server.py → REPO-ROOT build context.
+REGISTRY_API_TAG="0.2.227"   # 0.2.225: MCP-as-tool-source — mcp_servers router + migration 0072 + mcp-proxy client (matches values.yaml). 0.2.224: HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id). 0.2.221: Decision 30 — matches values.yaml
+MCP_PROXY_TAG="0.1.3"   # 0.1.0: NEW centralized MCP wire client (tool discovery + governed tool calls). Dockerfile COPYs scripts/e2e/fixtures/stub_mcp_server.py → REPO-ROOT build context.
 DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROUND/SANDBOX=true (was hardcoded false) so sandbox HITL approvals are playground-context (inline + resumable), not routed to the reviewer console. 0.1.39: per-provider env map; >=0.1.38 imagePullSecrets on agent pods (note 7)
-DECLARATIVE_RUNNER_TAG="0.1.59"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
-STUDIO_TAG="0.1.161"   # 0.1.161: MCP-as-tool-source Studio UI (Phases 12-14). 0.1.160: human-grantee grant creation (Decision 30) + T024
+DECLARATIVE_RUNNER_TAG="0.1.61"   # 0.1.59: matches values.yaml declarativeRunnerTag (0.1.57 SDK ChatOllama; 0.1.56 POC-3 user_directive; carries OPA bypass task #16)
+STUDIO_TAG="0.1.162"   # 0.1.161: MCP-as-tool-source Studio UI (Phases 12-14). 0.1.160: human-grantee grant creation (Decision 30) + T024
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"

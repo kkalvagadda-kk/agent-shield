@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: registry.internal/agentshield/mcp-proxy
-  tag: "0.1.2"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
+  tag: "0.1.3"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
   pullPolicy: IfNotPresent
 
 service:
