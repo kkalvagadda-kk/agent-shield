@@ -16,6 +16,7 @@ import { Link, useParams, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Server, Wrench, Trash2, RotateCw, Loader2, AlertCircle, ExternalLink,
+  Activity, CheckCircle2,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -34,6 +35,28 @@ const RISK_CLS: Record<string, string> = {
   critical: "bg-red-100 text-red-700",
 };
 
+// Duplicated from McpServersPage's list pill (contracts/studio-mcp-servers-phase2
+// §1 permits the tiny map to be duplicated) so the Health panel's status matches
+// the list's visual language exactly.
+function StatusBadge({ status }: { status: string }) {
+  if (status === "connected")
+    return (
+      <span className="badge inline-flex items-center gap-1 bg-green-100 text-green-700">
+        <CheckCircle2 size={12} /> Connected
+      </span>
+    );
+  if (status === "error")
+    return (
+      <span className="badge inline-flex items-center gap-1 bg-red-100 text-red-700">
+        <AlertCircle size={12} /> Error
+      </span>
+    );
+  return <span className="badge bg-slate-100 text-slate-500">Disconnected</span>;
+}
+
+const fmtTs = (ts?: string | null): string =>
+  ts ? new Date(ts).toLocaleString() : "—";
+
 export default function McpServerDetailPage() {
   const { id } = useParams();
   const serverId = id ?? "";
@@ -44,6 +67,9 @@ export default function McpServerDetailPage() {
     queryKey: ["mcp-server", serverId],
     queryFn: () => getMcpServer(serverId),
     enabled: !!serverId,
+    // Poll so the periodic health loop (WS-A) surfaces status/health_detail
+    // changes without a manual reload (FR-MCP-22 "surface in Studio").
+    refetchInterval: 15000,
   });
 
   const syncMutation = useMutation({
@@ -115,6 +141,52 @@ export default function McpServerDetailPage() {
           </button>
         </div>
       )}
+
+      {/* Health — WS-A: live reachability + discovery + identity surface (Phase 2).
+          Reads the already-fetched `server` (polled every 15s); no extra API call. */}
+      <div className="card mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-semibold text-slate-700 inline-flex items-center gap-1.5">
+            <Activity size={14} className="text-slate-400" /> Health
+          </h2>
+          <StatusBadge status={server?.status ?? "disconnected"} />
+        </div>
+        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm">
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-slate-500">Last successful check</dt>
+            <dd className="text-slate-700">{fmtTs(server?.health_detail?.last_success_at)}</dd>
+          </div>
+          {(server?.health_detail?.consecutive_failures ?? 0) > 0 && (
+            <div className="flex items-center justify-between gap-4">
+              <dt className="text-slate-500">Consecutive failures</dt>
+              <dd className="text-red-600 font-medium">{server?.health_detail?.consecutive_failures}</dd>
+            </div>
+          )}
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-slate-500">Last discovery</dt>
+            <dd className="text-slate-700">{fmtTs(server?.last_synced_at)}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-slate-500">Change notifications</dt>
+            <dd className="text-slate-700">{server?.list_changed_supported ? "subscribed" : "not supported"}</dd>
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <dt className="text-slate-500">Identity</dt>
+            <dd className="text-slate-700">
+              {server?.identity_mode}
+              {server?.identity_mode === "on_behalf_of" && (
+                <span className="text-xs text-amber-600 ml-1">(pending — Decision 29)</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+        {/* The health-loop's last failure reason — shown only for an unhealthy server. */}
+        {server?.status === "error" && server?.health_detail?.last_error && (
+          <p className="text-xs text-red-600 font-mono mt-3 pt-2 border-t border-red-100">
+            {server.health_detail.last_error}
+          </p>
+        )}
+      </div>
 
       {/* Tabs */}
       <div className="flex gap-6 border-b border-slate-200 mb-6">

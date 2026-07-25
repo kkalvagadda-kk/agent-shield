@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: registry.internal/agentshield/mcp-proxy
-  tag: "0.1.0"
+  tag: "0.1.1"   # 0.1.1: Phase 2 — POST /internal/health reachability probe
   pullPolicy: IfNotPresent
 
 service:

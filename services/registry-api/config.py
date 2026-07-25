@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     mcp_proxy_sa_token_path: str = "/var/run/secrets/mcp-proxy-token/mcp-proxy-token"
 
     # ------------------------------------------------------------------ #
+    # MCP health-check loop (Phase 2, WS-A / FR-MCP-22)                    #
+    # ------------------------------------------------------------------ #
+    # registry-api owns a background sweep (mcp_health.py) that periodically
+    # probes every registered MCP server via the proxy's POST /internal/health
+    # and folds the verdict into mcp_servers.status / health_detail. Single-
+    # flighted across replicas by a Postgres advisory lock (mirrors the
+    # scheduler's HA primitive); the proxy never writes the DB.
+    mcp_health_check_enabled: bool = True
+    # Seconds between sweeps (the loop's asyncio.sleep interval).
+    mcp_health_check_interval_seconds: int = 60
+    # Consecutive failed probes before a server flips status -> 'error'.
+    mcp_health_failure_threshold: int = 3
+    # Max concurrent per-server probes within one sweep (asyncio.Semaphore).
+    mcp_health_check_concurrency: int = 8
+    # Cap on how many sweeps a hard-down server is skipped (exponential backoff).
+    mcp_health_max_backoff_cycles: int = 10
+
+    # ------------------------------------------------------------------ #
     # Server                                                               #
     # ------------------------------------------------------------------ #
     port: int = 8000

@@ -128,6 +128,15 @@ async def lifespan(app: FastAPI):
     from cost_backfill import cost_backfill_loop
     cost_task = _asyncio.create_task(cost_backfill_loop())
 
+    # Background MCP health sweep (Phase 2, WS-A): periodically probes every
+    # registered MCP server via the proxy's /internal/health and folds the verdict
+    # into mcp_servers.status/health_detail (single-flighted across replicas by a
+    # Postgres advisory lock). Gated so it can be disabled per-environment.
+    mcp_health_task = None
+    if settings.mcp_health_check_enabled:
+        from mcp_health import mcp_health_loop
+        mcp_health_task = _asyncio.create_task(mcp_health_loop())
+
     yield  # application runs here
 
     # --- shutdown ---
@@ -137,6 +146,12 @@ async def lifespan(app: FastAPI):
         await cost_task
     except (_asyncio.CancelledError, Exception):
         pass
+    if mcp_health_task is not None:
+        mcp_health_task.cancel()
+        try:
+            await mcp_health_task
+        except (_asyncio.CancelledError, Exception):
+            pass
     await engine.dispose()
     logger.info("registry-api: shutdown complete")
 

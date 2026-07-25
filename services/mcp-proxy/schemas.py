@@ -43,6 +43,29 @@ class McpDiscoverResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# POST /internal/health  — admin plane (caller = registry-api health loop)
+# ---------------------------------------------------------------------------
+
+class McpHealthRequest(BaseModel):
+    server_id: UUID
+
+
+class McpHealthResponse(BaseModel):
+    # Always returned with HTTP 200 for reachability outcomes — an unreachable
+    # upstream, a missing Secret, or a failed tools/list probe is ok:false /
+    # status:'error', never an HTTP 5xx (mirrors the discover convention). The
+    # proxy reports *reachability* only; registry-api owns the DB write, applying
+    # the failure threshold / backoff to mcp_servers.status + health_detail — so
+    # this `status` is a single-probe advisory, NOT the persisted status.
+    ok: bool                        # true iff the probe (session + tools/list) succeeded
+    status: str                     # 'connected' | 'error'  (advisory; registry-api applies the threshold)
+    health_detail: str | None = None    # failure reason string; None on success
+    protocol_version: str | None = None
+    list_changed_supported: bool = False
+    tool_count: int = 0             # len(tools) from the probe; advisory
+
+
+# ---------------------------------------------------------------------------
 # POST /internal/tools/call  — data plane (caller = agent pod)
 # ---------------------------------------------------------------------------
 

@@ -112,7 +112,7 @@ mcp-proxy:
   enabled: true
   image:
     repository: registry.internal/agentshield/mcp-proxy
-    tag: "0.1.0"
+    tag: "0.1.1"   # 0.1.1: Phase 2 — POST /internal/health reachability probe
 
 scheduler:
   enabled: true
@@ -700,7 +700,10 @@ registry-api:
     #   (not run_id), so a production chat parked on a high-risk tool auto-resumes after a
     #   reviewer approves instead of hanging. Cherry-picked from fix/reactive-hitl-approval-
     #   poll (922c04b); see docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md.
-    tag: "0.2.226"
+    # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop + health_check_server
+    #   client + mcp_health_* settings + lifespan task; advisory-lock single-flight,
+    #   writes mcp_servers.status/health_detail (NOT last_synced_at).
+    tag: "0.2.227"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1057,7 +1060,10 @@ studio:
     # 0.1.161: MCP-as-a-tool-source Studio UI (Phases 12-14) — MCP Servers list+register
     #   +detail pages, Sidebar "MCP Servers" (Settings) + routes, ToolsPage read-only
     #   mcp_tool rows + PII de-anon checkbox, ToolsPicker source-server badge.
-    tag: "0.1.161"
+    # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill,
+    #   last_success_at, consecutive_failures, last_error, last_synced_at,
+    #   list_changed_supported, identity note) + 15s refetchInterval.
+    tag: "0.1.162"
     pullPolicy: IfNotPresent
 
   service:

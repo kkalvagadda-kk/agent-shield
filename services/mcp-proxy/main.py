@@ -36,6 +36,8 @@ from schemas import (
     McpDiscoveredTool,
     McpDiscoverRequest,
     McpDiscoverResponse,
+    McpHealthRequest,
+    McpHealthResponse,
     McpToolCallRequest,
     McpToolCallResponse,
 )
@@ -168,6 +170,92 @@ async def discover(
             )
             for t in tools
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# /internal/health — admin plane (caller = registry-api health loop only)
+# ---------------------------------------------------------------------------
+
+@app.post("/internal/health", response_model=McpHealthResponse)
+async def health_check(
+    req: McpHealthRequest,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    x_agentshield_trace_id: str | None = Header(default=None),
+) -> McpHealthResponse:
+    """Lightweight reachability probe for registry-api's health loop.
+
+    Mirrors /internal/discover's auth + error-to-200 shape: authenticate the SA
+    token, require the registry-api SA subject (admin plane), read the per-server
+    Secret, reuse (or open) the pooled session, and run tools/list as the liveness
+    check. It returns the tool COUNT, never the tool list, and writes NOTHING to any
+    DB (the proxy has no DB — Phase-1 invariant). ANY reachability failure (missing
+    Secret, connect error, tools/list error) is a 200 ok=false body with a reason —
+    never a 5xx. Only a missing/wrong-audience token (401) or a non-registry-api
+    subject (403) is a real HTTP error.
+
+    NOTE (Task 2): the pooled session is opened with connection.auth_headers (via
+    session_cache's internal _open). Task 9 rewires header resolution here to
+    identity.resolve_headers(connection, user_sub=None, is_data_plane=False).
+    """
+    _echo_trace(response, x_agentshield_trace_id)
+
+    sa_subject = await _authenticate(authorization)
+    # Admin plane: only registry-api's health loop may probe. Same restriction as
+    # /internal/discover — any other authenticated subject → 403.
+    if sa_subject != config.REGISTRY_API_SA_SUBJECT:
+        raise HTTPException(status_code=403, detail="health is admin-plane (registry-api only)")
+
+    server_id = str(req.server_id)
+
+    # 1. Read the per-server Secret. A missing/malformed Secret is a reachability
+    #    outcome (ok=false), never a 5xx. (The connection is also used to report the
+    #    server_url on a connect failure below.)
+    try:
+        connection = await credentials.read_server_secret(server_id)
+    except ServerSecretNotFound as exc:
+        return McpHealthResponse(ok=False, status="error", health_detail=str(exc))
+
+    # 2. Reuse the pooled session, or open one on a miss (via connection.auth_headers).
+    #    Any connect failure → evict + 200 ok=false (never 5xx).
+    try:
+        cached = await session_cache.get_or_create(server_id)
+    except ServerSecretNotFound as exc:
+        # A race (Secret deleted between the read above and here) — still a 200 body.
+        return McpHealthResponse(ok=False, status="error", health_detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp-proxy health: connect failed for %s: %s", server_id, exc)
+        await session_cache.evict(server_id)
+        return McpHealthResponse(
+            ok=False,
+            status="error",
+            health_detail=f"connect failed to {connection.server_url}: {exc}",
+        )
+
+    # 3. tools/list is the liveness probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS).
+    #    On failure evict so the next cycle reconnects. No Tool-row write happens here.
+    try:
+        tools = await cached.session.list_tools()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("mcp-proxy health: tools/list failed for %s: %s", server_id, exc)
+        await session_cache.evict(server_id)
+        return McpHealthResponse(
+            ok=False,
+            status="error",
+            health_detail=f"tools/list failed: {exc}",
+            protocol_version=cached.session.protocol_version,
+            list_changed_supported=cached.session.list_changed_supported,
+        )
+
+    # 4. Success. (Task 6 adds ensure_subscription here when list_changed_supported.)
+    return McpHealthResponse(
+        ok=True,
+        status="connected",
+        health_detail=None,
+        protocol_version=cached.session.protocol_version,
+        list_changed_supported=cached.session.list_changed_supported,
+        tool_count=len(tools),
     )
 
 

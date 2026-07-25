@@ -17,13 +17,17 @@ appeared across different 1.x minors.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -72,17 +76,27 @@ class McpSession:
         self.list_changed_supported: bool = False
 
     async def _connect(self, server_url: str, headers: dict[str, str] | None) -> None:
+        # Bound every transport request/response by MCP_CONNECT_TIMEOUT_SECONDS so a
+        # dead upstream fails fast rather than hanging — the health probe and discover
+        # both depend on this (a black-holed URL must surface as a connect error, not
+        # a stuck coroutine). The SDK's `timeout` governs the streamable-HTTP request;
+        # `timedelta` is used because the pinned mcp 1.x accepts it across all minors.
+        timeout = timedelta(seconds=config.MCP_CONNECT_TIMEOUT_SECONDS)
         # Enter both async context managers on the exit stack so the transport
         # + session stay open after this returns, and unwind together on close().
         transport = await self._exit_stack.enter_async_context(
-            streamablehttp_client(url=server_url, headers=headers or {})
+            streamablehttp_client(url=server_url, headers=headers or {}, timeout=timeout)
         )
         # 1.x yields a 3-tuple: (read_stream, write_stream, get_session_id).
         read_stream, write_stream = transport[0], transport[1]
         session = await self._exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)
         )
-        init_result = await session.initialize()
+        # The initialize handshake is an RPC — bound it too, so a server that accepts
+        # the TCP connection but never answers initialize can't hang the probe.
+        init_result = await asyncio.wait_for(
+            session.initialize(), timeout=config.MCP_CONNECT_TIMEOUT_SECONDS
+        )
         self._session = session
 
         self.protocol_version = getattr(init_result, "protocolVersion", None)
@@ -94,7 +108,11 @@ class McpSession:
 
     async def list_tools(self) -> list[DiscoveredTool]:
         assert self._session is not None, "session not connected"
-        result = await self._session.list_tools()
+        # Bounded by MCP_CONNECT_TIMEOUT_SECONDS: list_tools is the health probe's
+        # liveness check (and discover's payload) — a hung upstream must fail fast.
+        result = await asyncio.wait_for(
+            self._session.list_tools(), timeout=config.MCP_CONNECT_TIMEOUT_SECONDS
+        )
         tools: list[DiscoveredTool] = []
         for t in getattr(result, "tools", []) or []:
             tools.append(

@@ -91,3 +91,48 @@ async def discover_server(server_id) -> dict:
         )
 
     return resp.json()
+
+
+async def health_check_server(server_id) -> dict:
+    """Call the MCP Proxy's ``POST /internal/health`` for ``server_id`` (WS-A).
+
+    The health probe reuses the pooled upstream session and issues a lightweight
+    ``tools/list`` — it performs NO discovery and produces NO ``Tool``-row write.
+    Returns the parsed ``McpHealthResponse`` dict (keys: ``ok``, ``status``,
+    ``health_detail``, ``protocol_version``, ``list_changed_supported``,
+    ``tool_count``) for any HTTP ``200`` — including an ``ok:false`` error body
+    (a server that is down is reported as ``200 ok=false``, which is a NORMAL
+    return the health loop folds into ``status='error'`` after the threshold).
+
+    Raises ``RuntimeError`` on a transport failure or any non-``200`` response —
+    the WS-A loop catches it and treats it as a failed probe (ok=false).
+
+    Mirrors ``discover_server`` exactly: same fresh SA-token read (the projected
+    token rotates ~hourly), same URL base, same timeout, same error mapping.
+    """
+    token = _read_proxy_token()
+    url = settings.mcp_proxy_url.rstrip("/") + "/internal/health"
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(
+                url,
+                json={"server_id": str(server_id)},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        # DNS/connect/read failure — the proxy itself was unreachable.
+        raise RuntimeError(
+            f"MCP proxy /internal/health request failed: {exc}"
+        ) from exc
+
+    if resp.status_code != 200:
+        # 401/403 (auth), 422 (malformed body), 5xx — the proxy could NOT produce a
+        # health verdict. Raise so the loop records a failed probe. An upstream
+        # connect/list failure is NOT handled here: the proxy reports that as a 200
+        # with ok:false (returned below), so it is never a RuntimeError.
+        raise RuntimeError(
+            f"MCP proxy /internal/health returned {resp.status_code}: "
+            f"{resp.text[:300]}"
+        )
+
+    return resp.json()

@@ -79,7 +79,8 @@ describe("McpServerDetailPage", () => {
     renderDetail();
 
     expect(await screen.findByText(/This server is unreachable/i)).toBeInTheDocument();
-    expect(screen.getByText("connection refused")).toBeInTheDocument();
+    // Phase 2: last_error now renders in BOTH the banner and the Health panel.
+    expect(screen.getAllByText("connection refused").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
@@ -129,5 +130,38 @@ describe("McpServerDetailPage", () => {
     await user.click(await screen.findByRole("button", { name: /retry/i }));
 
     await waitFor(() => expect(syncMcpServer).toHaveBeenCalledWith("srv-1"));
+  });
+
+  // --- Phase 2 (WS-A) — Health panel -------------------------------------
+  it("renders the Health panel for a status='error' server (pill + failures + last_error)", async () => {
+    mk(getMcpServer).mockResolvedValue({
+      ...DETAIL,
+      status: "error",
+      health_detail: { last_error: "boom", last_success_at: null, consecutive_failures: 3, schema_drift: [] },
+      tools: [],
+    });
+    renderDetail();
+
+    // The Health pill reflects the error status.
+    expect(await screen.findByText("Error")).toBeInTheDocument();
+    // Consecutive failures surface (only shown when > 0).
+    expect(screen.getByText("3")).toBeInTheDocument();
+    // last_error renders in the Health panel too (and the banner) — hence getAllByText.
+    expect(screen.getAllByText("boom").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("shows 'subscribed' + a connected pill when list_changed_supported", async () => {
+    mk(getMcpServer).mockResolvedValue({ ...DETAIL, status: "connected", list_changed_supported: true });
+    renderDetail();
+
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("subscribed")).toBeInTheDocument();
+  });
+
+  it("flags on_behalf_of identity as pending Decision 29", async () => {
+    mk(getMcpServer).mockResolvedValue({ ...DETAIL, identity_mode: "on_behalf_of" });
+    renderDetail();
+
+    expect(await screen.findByText(/pending — Decision 29/)).toBeInTheDocument();
   });
 });
