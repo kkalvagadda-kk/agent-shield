@@ -51,6 +51,19 @@ _SWEEP_LOCK_KEY = (zlib.crc32(b"mcp-health-sweep") & 0x7FFFFFFF) | (1 << 62)
 _backoff_skip: dict[str, int] = {}
 
 
+def reset_backoff(server_id: str) -> None:
+    """Clear a server's exponential probe-skip so the next sweep probes it again.
+
+    Called when an operator explicitly re-checks a server (POST /mcp-servers/{id}/sync
+    = "check this now") or fixes its config: a fixed server must recover promptly, not
+    wait out the accumulated backoff (up to mcp_health_max_backoff_cycles sweeps). No-op
+    if the server has no pending skip. Best-effort, in-memory — mirrors the per-replica
+    caveat of _backoff_skip itself (a sync served by replica A clears A's skip; replica
+    B re-probes on its own schedule).
+    """
+    _backoff_skip.pop(server_id, None)
+
+
 async def _probe_and_apply(session, server) -> bool:
     """Probe one server and fold the verdict into its ``status`` / ``health_detail``.
 

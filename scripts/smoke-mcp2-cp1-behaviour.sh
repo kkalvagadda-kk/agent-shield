@@ -144,11 +144,15 @@ NOW_SYNCED="$(echo "$GOT_ERROR" | jq -r '.last_synced_at')"
   || fail "last_synced_at changed across health writes ($INITIAL_SYNCED → $NOW_SYNCED) — health must not write last_synced_at"
 echo "  OK: last_synced_at unchanged ($NOW_SYNCED)"
 
-# ── 3. Repoint at the live fixture → recovery to connected / 0 ────────────────
-echo "--- repoint at the live fixture and wait for recovery ---"
+# ── 3. Repoint at the live fixture + sync ("re-check now") → recovery to connected/0 ──
+# The proxy probes via the materialized per-server SECRET, not the DB row — so a URL
+# change must be followed by a re-materialize. POST /sync re-materializes the Secret
+# to the live URL, re-discovers, and resets the health-loop backoff (reset_backoff),
+# so a fixed server recovers PROMPTLY instead of waiting out the accumulated backoff.
+echo "--- repoint at the live fixture, POST /sync, expect recovery to connected/0 ---"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SID="$SERVER_ID" python3 - <<'PY' || fail "could not repoint the server url"
-import os, asyncio, uuid
+  env SID="$SERVER_ID" python3 - <<'PY' || fail "recovery repoint+sync failed"
+import os, asyncio, uuid, httpx
 from sqlalchemy import select
 async def main():
     from db import AsyncSessionLocal
@@ -158,27 +162,26 @@ async def main():
             MCPServer.id == uuid.UUID(os.environ["SID"])))).scalar_one()
         srv.server_url = "http://127.0.0.1:9999/mcp"
         await s.commit()
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(f"http://localhost:8000/api/v1/mcp-servers/{os.environ['SID']}/sync")
+        print("SYNC", r.status_code, (r.json().get("server", {}) or {}).get("status"))
 asyncio.run(main())
 PY
-RECOVERED=""
-for i in $(seq 1 "$WAIT_CYCLES"); do
-  sleep "$INTERVAL"
-  ST="$(read_state)"
-  STATUS="$(echo "$ST" | jq -r '.status')"
-  CF="$(echo "$ST" | jq -r '.consecutive_failures // 0')"
-  echo "  cycle $i: status=$STATUS consecutive_failures=$CF"
-  if [ "$STATUS" = "connected" ] && [ "$CF" -eq 0 ]; then RECOVERED=1; break; fi
-done
-[ -n "$RECOVERED" ] || fail "server did not recover to connected / consecutive_failures 0"
-echo "  OK: recovered to connected / 0"
+ST="$(read_state)"
+STATUS="$(echo "$ST" | jq -r '.status')"
+CF="$(echo "$ST" | jq -r '.consecutive_failures // 0')"
+echo "  after sync: status=$STATUS consecutive_failures=$CF"
+{ [ "$STATUS" = "connected" ] && [ "$CF" -eq 0 ]; } \
+  || fail "server did not recover to connected / consecutive_failures 0 after sync"
+echo "  OK: recovered to connected / 0 (sync = re-check now, backoff reset)"
 
 # ── 4. Single-flight under 2 replicas ─────────────────────────────────────────
 # Repoint back to dead, scale to 2, and assert consecutive_failures advances by ~1
 # per interval (advisory-lock single-flight) — NOT 2 per interval.
-echo "--- single-flight: 2 replicas, +1 per interval ---"
+echo "--- single-flight: repoint to dead + sync, scale to 2, +1 per interval ---"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SID="$SERVER_ID" python3 - <<'PY' || fail "could not repoint back to dead"
-import os, asyncio, uuid
+  env SID="$SERVER_ID" python3 - <<'PY' || fail "re-fail repoint+sync failed"
+import os, asyncio, uuid, httpx
 from sqlalchemy import select
 async def main():
     from db import AsyncSessionLocal
@@ -187,9 +190,13 @@ async def main():
         srv = (await s.execute(select(MCPServer).where(
             MCPServer.id == uuid.UUID(os.environ["SID"])))).scalar_one()
         srv.server_url = "http://127.0.0.1:1/mcp"
-        srv.status = "connected"
-        srv.health_detail = {"consecutive_failures": 0}
         await s.commit()
+    # /sync re-materializes the Secret to the DEAD url (so the proxy now probes it) →
+    # status=error, and resets the backoff so the loop probes every interval — the
+    # setup the single-flight cadence check needs.
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(f"http://localhost:8000/api/v1/mcp-servers/{os.environ['SID']}/sync")
+        print("SYNC", r.status_code, (r.json().get("server", {}) or {}).get("status"))
 asyncio.run(main())
 PY
 kubectl scale deployment/agentshield-registry-api -n "$NAMESPACE" --replicas=2 >/dev/null

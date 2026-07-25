@@ -296,6 +296,11 @@ async def sync_mcp_server(
     counters = await _materialize_and_discover(
         db, server, acknowledge_schema_drift=acknowledge
     )
+    # A manual sync is an explicit "re-check this server now" — clear any accumulated
+    # health-loop backoff so a just-fixed server recovers promptly instead of staying
+    # skip-listed for up to mcp_health_max_backoff_cycles sweeps.
+    import mcp_health
+    mcp_health.reset_backoff(str(server_id))
 
     await db.commit()
     await db.refresh(server)
