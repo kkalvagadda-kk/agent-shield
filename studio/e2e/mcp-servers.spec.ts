@@ -42,18 +42,24 @@ const ADMIN = {
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 const SERVER_NAME = `e2e-mcp-${TS}`;
-// A well-formed but (by design) unreachable upstream: registration still returns
-// 201 — status="connected" if a real proxy+upstream happens to be wired, else
-// status="error". Either way the register/redirect/reload proofs stand.
-const SERVER_URL = "http://mcp-e2e-fixture.agentshield-mcp.svc.cluster.local:9999/mcp";
+const AGENT_NAME = `e2e-mcp-agent-${TS}`;
+// Upstream MCP server URL. Defaults to the in-cluster stub fixture started INSIDE
+// the mcp-proxy pod on its localhost (`kubectl exec ... python3 fixtures/stub_mcp_server.py`);
+// the proxy (single replica) reaches it at 127.0.0.1:9999, so discovery returns
+// the stub's `echo`/`add` tools and the discover+bind tests run for real. Override
+// with MCP_E2E_SERVER_URL. When nothing is listening there, registration still
+// returns 201 (status="error") so the register→reload→persist proof stands, and
+// the discover/bind tests SKIP (0 tools) — the accepted infra boundary.
+const SERVER_URL =
+  process.env.MCP_E2E_SERVER_URL || "http://127.0.0.1:9999/mcp";
 
 test.describe("MCP servers — register → discover → bind (Studio UI)", () => {
   let api: APIRequestContext;
   let serverId = "";
-  // Number of tools discovery returned for the registered server — captured by
-  // the persistence test, read by the infra-gated tool-table test.
+  // Discovery results captured by the persistence test, read by the infra-gated
+  // discover + bind tests below.
   let discoveredToolCount = 0;
-  let firstToolName = "";
+  let firstToolName = ""; // RAW upstream name / display_name (e.g. "echo")
 
   test.beforeAll(async () => {
     api = await pwRequest.newContext({
@@ -65,6 +71,8 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
 
   test.afterAll(async () => {
     if (api) {
+      // Delete the agent first (a bound tool would 409-block the server delete).
+      await api.delete(`/api/v1/agents/${AGENT_NAME}`).catch(() => {});
       if (serverId) await api.delete(`/api/v1/mcp-servers/${serverId}`).catch(() => {});
       await api.dispose().catch(() => {});
     }
@@ -134,7 +142,7 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await listResp;
     await expect(page.getByText(SERVER_NAME)).toBeVisible({ timeout: 15_000 });
 
-    // Hand the discovery result to the infra-gated test below.
+    // Hand the discovery result to the infra-gated tests below.
     discoveredToolCount = (detail.tools?.length ?? 0) as number;
     firstToolName = discoveredToolCount > 0 ? detail.tools[0].mcp_tool_name : "";
   });
@@ -156,6 +164,67 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await page.goto(`/mcp-servers/${serverId}`);
     await page.waitForLoadState("networkidle");
     await expect(page.getByText(firstToolName, { exact: false }).first()).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  // INFRA-GATED — the 2nd persistence round trip (FR-MCP-42): bind a discovered
+  // mcp_tool to a NEW agent through the builder's Tools Picker, save, then reload
+  // the agent and confirm the tool is STILL bound. Also asserts the tool carries
+  // its source-server badge in the picker. Skips when discovery returned 0 tools.
+  test("bind a discovered mcp_tool to an agent → save → reload → still bound", async ({ page }) => {
+    test.setTimeout(120_000);
+    test.skip(
+      discoveredToolCount === 0,
+      "no tools discovered (no mcp-proxy / unreachable upstream) — bind round-trip is infra-gated; picker badge is covered by Vitest (ToolsPicker.test.tsx)"
+    );
+    expect(firstToolName).toBeTruthy();
+
+    // ── Create a no-code agent and bind the discovered tool via the Tools Picker.
+    await page.goto("/agents/new");
+    await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: /No-code/i }).click();
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByPlaceholder("my-agent").fill(AGENT_NAME);
+
+    const picker = page.getByTestId("tools-picker");
+    await expect(picker).toBeVisible({ timeout: 15_000 });
+    // The picker labels a tool by its display_name (the RAW upstream name, e.g.
+    // "echo") and renders the source-server badge (mcp_server_name == SERVER_NAME,
+    // FR-MCP-42). Target the row by BOTH so it's unique among this run's tools —
+    // the badge disambiguates from any same-named native tool, the display name
+    // disambiguates from the server's other discovered tool.
+    const toolRow = picker
+      .locator("label")
+      .filter({ hasText: SERVER_NAME })
+      .filter({ hasText: firstToolName });
+    await expect(toolRow).toBeVisible({ timeout: 15_000 });
+    await expect(toolRow).toContainText(SERVER_NAME); // source-server badge
+    // Check the box to bind it.
+    const toolCheckbox = toolRow.locator('input[type="checkbox"]');
+    await toolCheckbox.check();
+    await expect(toolCheckbox).toBeChecked();
+
+    const createResp = page.waitForResponse(
+      (r) =>
+        r.url().includes("/api/v1/agents") &&
+        r.request().method() === "POST" &&
+        !r.url().includes("/runs"),
+      { timeout: 30_000 }
+    );
+    await page.getByRole("button", { name: /^Create Agent$/i }).click();
+    expect((await createResp).status()).toBe(201);
+
+    // ── save → reload → assert survived: the agent's Settings tab pre-selects the
+    //    bound mcp_tool (persistence round-trip through the backend).
+    await page.goto(`/agents/${AGENT_NAME}`);
+    await page.getByRole("button", { name: "settings" }).click();
+    const reloadedRow = page
+      .getByTestId("tools-picker")
+      .locator("label")
+      .filter({ hasText: SERVER_NAME })
+      .filter({ hasText: firstToolName });
+    await expect(reloadedRow.locator('input[type="checkbox"]')).toBeChecked({
       timeout: 15_000,
     });
   });
