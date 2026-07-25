@@ -12,6 +12,24 @@
 
 ---
 
+## Global role `viewer` → `consumer` rename — cluster verification pending — 2026-07-25
+
+**deferred (intentional) — code + tests complete, cluster run blocked on a deploy.** `rbac-design.md` §2.1's read-only global role was renamed `viewer` → `consumer` (lowercase, matching `platform-admin`/`contributor`; all role comparisons are case-sensitive). Shipped in `registry-api 0.2.225` / `studio 0.1.161`:
+
+- Migration `0072` rewrites `user_team_assignments.role` `viewer` → `consumer`; `rbac._LEGACY_MAP` maps it on read so in-flight JWTs and un-migrated rows keep working either way.
+- `rbac.PLATFORM_ROLES` is now the single source for the platform-role name set — `keycloak_client.set_user_realm_role` and `routers/admin_users._kc_to_response` previously each hardcoded their own `{"admin","operator","viewer"}` copy, which is exactly how the two drifted.
+- Studio: `AuthContext` `ROLE_LEVEL`/`GlobalRole`, `RequireRole`, and `AdminAccessPage` (`ROLES` dropdown → canonical names per §8.4, form defaults `operator`→`contributor`, `ROLE_CHIP` retains legacy keys so un-migrated rows still render styled).
+
+**Verified locally (green):** Vitest 429/429 including the new `studio/src/contexts/AuthContext.test.tsx` (7 tests — canonical ordering, legacy-spelling parity, null/unknown → floor). That spec was proven to be a real guard, not a rubber stamp: deleting the legacy `ROLE_LEVEL` keys fails 2 of its tests (the silent-demotion mode, where a legacy `admin` collapses to level 0 and loses the admin section). Also green: `tsc --noEmit`, `bash -n` on suite-42, `ast.parse` on all four touched Python files, and a direct assertion pass over `ROLE_HIERARCHY`/`_LEGACY_MAP`/`PLATFORM_ROLES`.
+
+**Known gap — nothing ran against a cluster (not-yet-wired, deploy-blocked).** The EKS test cluster is still serving `registry-api 0.2.224` / `studio 0.1.160`, so none of the following has executed even once:
+
+- `scripts/e2e/suite-42-rbac.sh` — **T-S42-005** extended (asserts `_normalize_role("viewer") == "consumer"`, `viewer` absent from `ROLE_HIERARCHY`, every legacy spelling resolving to a real hierarchy key, and `PLATFORM_ROLES` covering canonical + legacy) and **T-S42-007** added (asserts migration 0072 left zero `viewer` rows, and that `consumer` is an accepted stored value). Both `kubectl exec` into the registry-api pod and need the new image.
+- `studio/e2e/admin-access-roles.spec.ts` — **new**, and the only browser coverage the role dropdown has ever had. Drives `/admin/access`: asserts the dropdown offers exactly the canonical names with no legacy spelling, then assigns `consumer`, waits on the real `PATCH`, does a **full page reload**, and re-asserts the chip plus the value read back from `GET /api/v1/admin/users`. Expected to FAIL against the deployed 0.1.160 (which still offers `admin`/`operator`/`viewer`) — that failure is the proof it guards the rename.
+- Migration `0072` itself has not been applied anywhere; it runs via the alembic init container on deploy.
+
+Note `studio/tsconfig.json` has `include: ["src"]`, so `npm run typecheck` does **not** cover `e2e/*.spec.ts` — the new spec was typechecked separately and matches the existing specs' baseline (the only diagnostics are `process` references, which every existing spec also produces because `@types/node` is not installed).
+
 ## Webhook Application Identity (Decision 30) — trigger-CRUD `require_user` breaks ~16 legacy e2e suites — 2026-07-19
 
 **not-yet-wired (debt), real gap, explicitly deferred by user decision.** T012/T013 (`docs/plan/webhook-application-identity/tasks.md`, Phase 5) add `claims: dict = Depends(require_user)` to all 8 trigger-CRUD endpoints (`create/update/delete/rotate-token`, both `routers/triggers.py` and `routers/composite_workflows.py`) — a request with **no bearer token at all** now gets `401` unconditionally, independent of the new `rbac.ENFORCE_TRIGGER_MGMT` soft-enforcement flag (which only gates the 403 authorization decision, not the 401 authentication requirement). This was a deliberate part of the plan's design (`docs/plan/webhook-application-identity/research.md` §5), reviewed and approved earlier in the same session that implemented it.

@@ -366,7 +366,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.224"   # 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
+REGISTRY_API_TAG="0.2.225"   # 0.2.225: rename global role viewer->consumer (migration 0072 + rbac._LEGACY_MAP + rbac.PLATFORM_ROLES single source, replacing duplicate hardcoded sets in keycloak_client + admin_users). 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
 SAFETY_ORCHESTRATOR_TAG="0.1.3"
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -405,7 +405,7 @@ DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROU
 # 0.1.158: sync the STUDIO_BUILD marker (studio/src/lib/build.ts) to the deployed tag. The merge
 #   left build.ts at 0.1.147 while STUDIO_TAG advanced to 0.1.157, so suite-79 T-S79-002 (served-tag
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
-STUDIO_TAG="0.1.160"   # 0.1.160: human-grantee grant creation in ArtifactGrantsList + ApplicationsPage vitest
+STUDIO_TAG="0.1.161"   # 0.1.161: role rename viewer->consumer in AuthContext ROLE_LEVEL/GlobalRole + RequireRole + AdminAccessPage ROLES/chips (§8.4); AuthContext.test.tsx role-hierarchy Vitest. 0.1.160: human-grantee grant creation in ArtifactGrantsList + ApplicationsPage vitest
 EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"

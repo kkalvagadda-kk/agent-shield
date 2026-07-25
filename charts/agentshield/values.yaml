@@ -691,7 +691,12 @@ registry-api:
     #   (not run_id), so a production chat parked on a high-risk tool auto-resumes after a
     #   reviewer approves instead of hanging. Cherry-picked from fix/reactive-hitl-approval-
     #   poll (922c04b); see docs/bugs/reactive-hitl-approval-status-session-run-mismatch.md.
-    tag: "0.2.224"
+    # 0.2.225: global role `viewer` renamed to `consumer` (rbac-design.md §2.1) —
+    #   migration 0072 rewrites user_team_assignments rows, rbac._LEGACY_MAP maps
+    #   viewer->consumer on read, and rbac.PLATFORM_ROLES becomes the single source
+    #   for the platform-role name set (keycloak_client + admin_users no longer keep
+    #   their own hardcoded copies).
+    tag: "0.2.225"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1045,7 +1050,12 @@ studio:
     #   ClientPanel retired.
     # 0.1.160: human-grantee grant creation in ArtifactGrantsList (agent-admin/approver to
     #   user/team) + ApplicationsPage Vitest (T024). Official ship of the Studio feature.
-    tag: "0.1.160"
+    # 0.1.161: role rename viewer->consumer across AuthContext (ROLE_LEVEL keys +
+    #   GlobalRole union + isAtLeast default), RequireRole, and AdminAccessPage
+    #   (ROLES dropdown -> canonical names per §8.4, form defaults operator->
+    #   contributor, ROLE_CHIP keeps legacy keys for un-migrated rows). Adds
+    #   AuthContext.test.tsx covering the role hierarchy + legacy-spelling parity.
+    tag: "0.1.161"
     pullPolicy: IfNotPresent
 
   service:

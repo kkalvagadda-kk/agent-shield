@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
+from rbac import PLATFORM_ROLES
 from keycloak_client import (
     create_user as kc_create,
     delete_user as kc_delete,
@@ -106,10 +107,9 @@ async def _upsert_team(
 
 
 def _kc_to_response(kc_user: dict, team_info: dict | None, roles: list[str] | None = None) -> UserResponse:
-    platform_roles = {"admin", "operator", "viewer"}
     role = team_info["role"] if team_info else None
     if roles is not None:
-        platform = [r for r in roles if r in platform_roles]
+        platform = [r for r in roles if r in PLATFORM_ROLES]
         role = platform[0] if platform else role
     return UserResponse(
         kc_id=kc_user["id"],

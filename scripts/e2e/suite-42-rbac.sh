@@ -118,20 +118,70 @@ print("PASS: T-S42-004 (endpoint requires auth, structure verified)")
 '
 
 # --------------------------------------------------------------------------
-# T-S42-005 — Role normalization (legacy admin → platform-admin)
+# T-S42-005 — Role normalization (legacy admin/operator/viewer → canonical)
 # --------------------------------------------------------------------------
 echo "T-S42-005 — Role normalization in rbac module"
 run '
 import sys
 sys.path.insert(0, "/app")
-from rbac import _normalize_role
+from rbac import _normalize_role, ROLE_HIERARCHY, PLATFORM_ROLES
 assert _normalize_role("admin") == "platform-admin"
 assert _normalize_role("operator") == "contributor"
-assert _normalize_role("viewer") == "viewer"
+assert _normalize_role("viewer") == "consumer"
 assert _normalize_role("platform-admin") == "platform-admin"
 assert _normalize_role("contributor") == "contributor"
+assert _normalize_role("consumer") == "consumer"
 assert _normalize_role(None) == "contributor"
+
+# consumer is the floor of the hierarchy; viewer is no longer a canonical key
+assert ROLE_HIERARCHY["consumer"] == 0, ROLE_HIERARCHY
+assert "viewer" not in ROLE_HIERARCHY, ROLE_HIERARCHY
+
+# Every legacy spelling normalizes into a real hierarchy key — guards against a
+# legacy name mapping to a value that silently falls through to level 0.
+for legacy in ("admin", "operator", "viewer"):
+    assert _normalize_role(legacy) in ROLE_HIERARCHY, legacy
+
+# PLATFORM_ROLES must cover canonical + legacy, else set_user_realm_role leaves
+# a stale legacy realm role attached when replacing a users role.
+for name in ("platform-admin", "contributor", "consumer", "admin", "operator", "viewer"):
+    assert name in PLATFORM_ROLES, name
 print("PASS: T-S42-005")
+'
+
+# --------------------------------------------------------------------------
+# T-S42-007 — Migration 0072 left no legacy `viewer` rows behind
+# --------------------------------------------------------------------------
+echo "T-S42-007 — No viewer rows remain after 0072"
+run '
+import asyncio, os, sys
+sys.path.insert(0, "/app")
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+async def main():
+    eng = create_async_engine(os.environ["DATABASE_URL"].replace("postgresql://", "postgresql+asyncpg://"))
+    async with eng.begin() as conn:
+        n = (await conn.execute(
+            text("SELECT count(*) FROM user_team_assignments WHERE role = :r"),
+            {"r": "viewer"},
+        )).scalar_one()
+        assert n == 0, f"{n} rows still hold legacy role viewer — migration 0072 did not run"
+        # consumer must be an accepted stored value (no CHECK constraint blocks it)
+        await conn.execute(text(
+            "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "
+            "VALUES (:s, :t, :r, :b, now()) ON CONFLICT (user_sub) DO UPDATE SET role = EXCLUDED.role"
+        ), {"s": "t-s42-007-probe", "t": "default", "r": "consumer", "b": "suite-42"})
+        got = (await conn.execute(
+            text("SELECT role FROM user_team_assignments WHERE user_sub = :s"),
+            {"s": "t-s42-007-probe"},
+        )).scalar_one()
+        assert got == "consumer", got
+        await conn.execute(text("DELETE FROM user_team_assignments WHERE user_sub = :s"), {"s": "t-s42-007-probe"})
+    await eng.dispose()
+
+asyncio.run(main())
+print("PASS: T-S42-007")
 '
 
 # --------------------------------------------------------------------------

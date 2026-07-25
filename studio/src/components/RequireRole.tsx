@@ -1,7 +1,7 @@
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 
-type GlobalRole = "viewer" | "contributor" | "platform-admin";
+type GlobalRole = "consumer" | "contributor" | "platform-admin";
 
 interface Props {
   minRole: GlobalRole;

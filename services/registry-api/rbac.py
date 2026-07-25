@@ -23,8 +23,18 @@ from db import get_db
 
 logger = logging.getLogger(__name__)
 
-ROLE_HIERARCHY = {"viewer": 0, "contributor": 1, "platform-admin": 2}
-_LEGACY_MAP = {"admin": "platform-admin", "operator": "contributor"}
+ROLE_HIERARCHY = {"consumer": 0, "contributor": 1, "platform-admin": 2}
+_LEGACY_MAP = {
+    "admin": "platform-admin",
+    "operator": "contributor",
+    "viewer": "consumer",
+}
+
+# Every realm-role name that denotes a global platform role, legacy spellings
+# included. Callers that *replace* a user's platform role must remove all of
+# these first, otherwise a stale legacy role stays attached alongside the new
+# one. Single source of truth — do not re-declare this set elsewhere.
+PLATFORM_ROLES = frozenset(ROLE_HIERARCHY) | frozenset(_LEGACY_MAP)
 
 
 def _normalize_role(raw: str | None) -> str:
