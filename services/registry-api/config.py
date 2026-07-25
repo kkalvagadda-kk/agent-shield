@@ -86,6 +86,17 @@ class Settings(BaseSettings):
     mcp_health_max_backoff_cycles: int = 10
 
     # ------------------------------------------------------------------ #
+    # MCP list_changed re-sync (Phase 2, WS-B / FR-MCP-07)                 #
+    # ------------------------------------------------------------------ #
+    # When an upstream server announces notifications/tools/list_changed, the
+    # proxy's subscription manager POSTs /api/v1/internal/mcp/list-changed and
+    # registry-api re-runs discovery. This is the coalesce window: a second
+    # re-sync for the same server within this many seconds is deduped (returns
+    # coalesced=true without re-discovering) — the cross-replica / burst guard
+    # (mcp_discovery._last_resync / _resync_locks).
+    mcp_list_changed_min_resync_interval_seconds: int = 10
+
+    # ------------------------------------------------------------------ #
     # Server                                                               #
     # ------------------------------------------------------------------ #
     port: int = 8000

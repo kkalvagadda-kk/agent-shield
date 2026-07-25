@@ -31,6 +31,7 @@ import config
 import credentials
 import mcp_client
 import session_cache
+import subscription_manager
 from credentials import ServerSecretNotFound
 from schemas import (
     McpDiscoveredTool,
@@ -80,6 +81,25 @@ async def _authenticate(authorization: str | None) -> str:
     if not sa_subject:
         raise HTTPException(status_code=401, detail="invalid or wrong-audience token")
     return sa_subject
+
+
+async def _maybe_subscribe_list_changed(server_id: str, list_changed_supported: bool) -> None:
+    """Fire-and-forget: ensure a list_changed subscriber when the server supports it (WS-B).
+
+    Called after a SUCCESSFUL /internal/discover and /internal/health. Subscription
+    setup MUST NOT break the (already successful) discover/health response, so any
+    failure here is swallowed + logged. ensure_subscription is itself idempotent and
+    non-blocking (it only spawns a task), so re-discovering/re-probing the same server
+    never creates a second subscriber.
+    """
+    if not list_changed_supported:
+        return
+    try:
+        await subscription_manager.ensure_subscription(server_id)
+    except Exception as exc:  # noqa: BLE001 — never fail the discover/health response
+        logger.warning(
+            "mcp-proxy: ensure_subscription failed for %s (ignored): %s", server_id, exc
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +178,10 @@ async def discover(
     await session_cache.set_session(
         server_id, CachedSession(session=session, connection=connection)
     )
+
+    # WS-B: discover is the first place a fresh server's list_changed capability is
+    # known — start the subscriber now if the server supports it (idempotent).
+    await _maybe_subscribe_list_changed(server_id, session.list_changed_supported)
 
     return McpDiscoverResponse(
         ok=True,
@@ -248,7 +272,11 @@ async def health_check(
             list_changed_supported=cached.session.list_changed_supported,
         )
 
-    # 4. Success. (Task 6 adds ensure_subscription here when list_changed_supported.)
+    # 4. Success. WS-B: a periodic health probe is also a place the capability is
+    #    (re)observed — ensure the subscriber exists if supported (idempotent; a re-probe
+    #    of an already-subscribed server is a no-op).
+    await _maybe_subscribe_list_changed(server_id, cached.session.list_changed_supported)
+
     return McpHealthResponse(
         ok=True,
         status="connected",

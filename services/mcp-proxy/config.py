@@ -86,6 +86,38 @@ MCP_CONNECT_TIMEOUT_SECONDS: float = float(
     os.getenv("MCP_CONNECT_TIMEOUT_SECONDS", "30.0")
 )
 
+# ---------------------------------------------------------------------------
+# list_changed subscription (WS-B / FR-MCP-07 — contracts/mcp-proxy-internal-phase2.md §4)
+# ---------------------------------------------------------------------------
+
+# Master switch for the subscription manager. When false, ensure_subscription is a
+# no-op — the proxy never holds a long-lived notifications/tools/list_changed session
+# and never POSTs the re-sync callback. Lets an operator disable the push path entirely
+# (the periodic health loop still keeps status fresh).
+MCP_LIST_CHANGED_ENABLED: bool = os.getenv(
+    "MCP_LIST_CHANGED_ENABLED", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+
+# Per-server trailing-edge debounce: coalesce a burst of notifications/tools/list_changed
+# arriving within this window into a SINGLE POST /internal/mcp/list-changed to registry-api
+# (each notification resets the timer; the callback fires once the burst goes quiet).
+MCP_LIST_CHANGED_DEBOUNCE_SECONDS: float = float(
+    os.getenv("MCP_LIST_CHANGED_DEBOUNCE_SECONDS", "5")
+)
+
+# Backoff between reconnect attempts after a subscription session drops.
+MCP_LIST_CHANGED_RECONNECT_BACKOFF_SECONDS: float = float(
+    os.getenv("MCP_LIST_CHANGED_RECONNECT_BACKOFF_SECONDS", "10")
+)
+
+# After this many CONSECUTIVE failed reconnect attempts the subscriber gives up and
+# tears itself down (the server was almost certainly deleted — its per-server Secret is
+# gone). A successful reconnect resets the counter, so a flapping-but-live server never
+# exhausts the cap. Bounded — never an infinite reconnect loop.
+MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS: int = int(
+    os.getenv("MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS", "5")
+)
+
 
 def server_secret_name(server_id: str) -> str:
     """The K8s Secret name registry-api materialized for a given server_id."""

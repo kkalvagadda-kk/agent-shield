@@ -74,23 +74,23 @@ Observed this session: alembic head `0072` → **no migration**; e2e ceiling `84
 
 ## Phase 5 — WS-B: fixture `list_changed` simulation `[P]`
 
-- [ ] [T014] [P] Extend `stub_mcp_server.py` — advertise `tools.listChanged` (per T002); add `simulate_tool_change(action: str = "add") -> str` that registers/removes a runtime `dynamic_echo` tool and emits `notifications/tools/list_changed`; inert on import; started only via `kubectl exec`. Fallback (documented) if the SDK can't emit at runtime: a `--toolset` restart. (after T002) — `scripts/e2e/fixtures/stub_mcp_server.py`
+- [X] [T014] [P] Extend `stub_mcp_server.py` — advertise `tools.listChanged` (per T002); add `simulate_tool_change(action: str = "add") -> str` that registers/removes a runtime `dynamic_echo` tool and emits `notifications/tools/list_changed`; inert on import; started only via `kubectl exec`. Fallback (documented) if the SDK can't emit at runtime: a `--toolset` restart. (after T002) — `scripts/e2e/fixtures/stub_mcp_server.py`
 
 ## Phase 6 — WS-B: proxy subscription manager
 
 > The proxy still writes **no** DB — the subscriber only POSTs the re-sync trigger to registry-api.
 
-- [ ] [T015] `config.py` — add `MCP_LIST_CHANGED_ENABLED` (true), `MCP_LIST_CHANGED_DEBOUNCE_SECONDS` (5), `MCP_LIST_CHANGED_RECONNECT_BACKOFF_SECONDS` (10), `MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS` (5). — `services/mcp-proxy/config.py`
-- [ ] [T016] `mcp_client.py` — `connect_and_initialize(url, headers, message_handler=None)` + `McpSession._connect(..., message_handler=None)` passing the handler to `ClientSession` (exact hook per T002). — `services/mcp-proxy/mcp_client.py`
-- [ ] [T017] `subscription_manager.py` — `ensure_subscription(server_id)` (idempotent; spawn a task holding a session with a `list_changed` handler that debounces then POSTs `{REGISTRY_API_URL}/api/v1/internal/mcp/list-changed`; capped reconnect; tear down after cap) + `stop_subscription(server_id)` + `SubscriptionState` (data-model.md §3d). Proves T-S85-010/012/013. (after T015,T016) — `services/mcp-proxy/subscription_manager.py`
-- [ ] [T018] `main.py` — call `subscription_manager.ensure_subscription(str(server_id))` after a successful `/internal/discover` and `/internal/health` when `list_changed_supported`. (after T017) — `services/mcp-proxy/main.py`
+- [X] [T015] `config.py` — add `MCP_LIST_CHANGED_ENABLED` (true), `MCP_LIST_CHANGED_DEBOUNCE_SECONDS` (5), `MCP_LIST_CHANGED_RECONNECT_BACKOFF_SECONDS` (10), `MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS` (5). — `services/mcp-proxy/config.py`
+- [X] [T016] `mcp_client.py` — `connect_and_initialize(url, headers, message_handler=None)` + `McpSession._connect(..., message_handler=None)` passing the handler to `ClientSession` (exact hook per T002). — `services/mcp-proxy/mcp_client.py`
+- [X] [T017] `subscription_manager.py` — `ensure_subscription(server_id)` (idempotent; spawn a task holding a session with a `list_changed` handler that debounces then POSTs `{REGISTRY_API_URL}/api/v1/internal/mcp/list-changed`; capped reconnect; tear down after cap) + `stop_subscription(server_id)` + `SubscriptionState` (data-model.md §3d). Proves T-S85-010/012/013. (after T015,T016) — `services/mcp-proxy/subscription_manager.py`
+- [X] [T018] `main.py` — call `subscription_manager.ensure_subscription(str(server_id))` after a successful `/internal/discover` and `/internal/health` when `list_changed_supported`. (after T017) — `services/mcp-proxy/main.py`
 
 ## Phase 7 — WS-B: registry-api re-sync endpoint
 
-- [ ] [T019] `mcp_discovery.py` — **move** `_materialize_and_discover` + `_mark_server_error` verbatim from `routers/mcp_servers.py` (behavior-neutral) + add `_last_resync`/`_resync_locks` + `MIN_RESYNC_INTERVAL_SECONDS` from env. — `services/registry-api/mcp_discovery.py`
-- [ ] [T020] `mcp_servers.py` — import `_materialize_and_discover`/`_mark_server_error` from `mcp_discovery` (remove local defs; all call sites unchanged). Proves T-S85-017 (suite-84 stays green). (after T019) — `services/registry-api/routers/mcp_servers.py`
-- [ ] [T021] `config.py` — add `mcp_list_changed_min_resync_interval_seconds` (10). — `services/registry-api/config.py`
-- [ ] [T022] `internal_mcp.py` — `POST /api/v1/internal/mcp/list-changed` (`ListChangedRequest/Response`; resolve server → unknown → `200 ok=false reason=server_not_found`; coalesce guard under per-server lock → `_materialize_and_discover` → commit → counters; malformed → `422`). (contracts/registry-api-internal-mcp-phase2.md) Proves T-S85-011/014/015/016. (after T019,T021) — `services/registry-api/routers/internal_mcp.py`
+- [X] [T019] `mcp_discovery.py` — **move** `_materialize_and_discover` + `_mark_server_error` verbatim from `routers/mcp_servers.py` (behavior-neutral) + add `_last_resync`/`_resync_locks` + `MIN_RESYNC_INTERVAL_SECONDS` from env. — `services/registry-api/mcp_discovery.py`
+- [X] [T020] `mcp_servers.py` — import `_materialize_and_discover`/`_mark_server_error` from `mcp_discovery` (remove local defs; all call sites unchanged). Proves T-S85-017 (suite-84 stays green). (after T019) — `services/registry-api/routers/mcp_servers.py`
+- [X] [T021] `config.py` — add `mcp_list_changed_min_resync_interval_seconds` (10). — `services/registry-api/config.py`
+- [X] [T022] `internal_mcp.py` — `POST /api/v1/internal/mcp/list-changed` (`ListChangedRequest/Response`; resolve server → unknown → `200 ok=false reason=server_not_found`; coalesce guard under per-server lock → `_materialize_and_discover` → commit → counters; malformed → `422`). (contracts/registry-api-internal-mcp-phase2.md) Proves T-S85-011/014/015/016. (after T019,T021) — `services/registry-api/routers/internal_mcp.py`
 
 ## CP2 — Checkpoint: list_changed auto-resync
 

@@ -75,7 +75,12 @@ class McpSession:
         self.protocol_version: str | None = None
         self.list_changed_supported: bool = False
 
-    async def _connect(self, server_url: str, headers: dict[str, str] | None) -> None:
+    async def _connect(
+        self,
+        server_url: str,
+        headers: dict[str, str] | None,
+        message_handler=None,
+    ) -> None:
         # Bound every transport request/response by MCP_CONNECT_TIMEOUT_SECONDS so a
         # dead upstream fails fast rather than hanging — the health probe and discover
         # both depend on this (a black-holed URL must surface as a connect error, not
@@ -89,8 +94,16 @@ class McpSession:
         )
         # 1.x yields a 3-tuple: (read_stream, write_stream, get_session_id).
         read_stream, write_stream = transport[0], transport[1]
+        # `message_handler` is the mcp 1.x ClientSession hook that receives every
+        # server-initiated message (server→client requests, notifications incl.
+        # `notifications/tools/list_changed`, and terminal exceptions) while the
+        # session's background receive loop runs. Phase-1 callers pass no handler
+        # (None) → the SDK default → behavior byte-identical to before. Only the WS-B
+        # subscription_manager passes one, to react to list_changed on a held-open
+        # session. (Exact kwarg name `message_handler=` pinned against the installed
+        # mcp>=1.2,<2.0 — see connect_and_initialize's docstring.)
         session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
+            ClientSession(read_stream, write_stream, message_handler=message_handler)
         )
         # The initialize handshake is an RPC — bound it too, so a server that accepts
         # the TCP connection but never answers initialize can't hang the probe.
@@ -145,16 +158,31 @@ class McpSession:
 
 
 async def connect_and_initialize(
-    server_url: str, headers: dict[str, str] | None = None
+    server_url: str,
+    headers: dict[str, str] | None = None,
+    message_handler=None,
 ) -> McpSession:
     """Open + initialize a session against server_url. Raises on connect failure.
 
     The caller (session_cache / the endpoints) treats a raised exception as a
     connect error → status='error' / is_error=true 200 body, never a 5xx.
+
+    `message_handler` (optional) is threaded into `mcp.ClientSession(read, write,
+    message_handler=...)` — the mcp 1.x constructor hook that dispatches every
+    server-initiated message to the caller while the session's background receive
+    loop runs. It stays None for every Phase-1 caller (session_cache._open, discover,
+    tools/call), so their behavior is unchanged; only subscription_manager passes a
+    handler to catch `notifications/tools/list_changed` on a long-lived session.
+
+    SDK hook (pinned for CP2 confirmation against the installed mcp>=1.2,<2.0): the
+    kwarg is `message_handler=`; the notification arrives as a `ServerNotification`
+    whose `.root.method == "notifications/tools/list_changed"` (see
+    subscription_manager._LIST_CHANGED_METHOD). If a deployed minor renamed the hook,
+    this is the single line to adjust.
     """
     session = McpSession()
     try:
-        await session._connect(server_url, headers)
+        await session._connect(server_url, headers, message_handler=message_handler)
     except Exception:
         await session.close()
         raise
