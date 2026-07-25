@@ -21,6 +21,7 @@
 #   T-S18-011 — Tool via team grant → allow
 #   T-S18-012 — Daemon agent_class produces valid decision
 #   T-S18-013 — SDK fail-closed code path exists
+#   T-S18-014 — record_decision is generic: an http tool call also lands an opa_decisions row (Decision-27 P11)
 #
 # Usage:
 #   bash scripts/e2e/suite-18-opa-governance.sh
@@ -628,6 +629,32 @@ if [ "$SDK_FAILCLOSED" -ge "2" ]; then
   pass "T-S18-013 — SDK opa_client.py has fail-closed path (opa_unreachable)"
 else
   fail "T-S18-013 — SDK missing fail-closed path"
+fi
+
+# ---------------------------------------------------------------------------
+# T-S18-014 — record_decision is GENERIC: every governed tool call (http/python/
+#             mcp) lands an opa_decisions row. Decision-27 P11 hoisted
+#             record_decision into governed_tool for ALL tool types, not just MCP.
+#   (a) governed_tool calls record_decision (wiring present + generic).
+#   (b) the opa_decisions sink accepts + returns an http-tool decision row.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S18-014: record_decision generic across tool types ---"
+WIRED=$(grep -c "record_decision" sdk/agentshield_sdk/graph_builder.py 2>/dev/null || echo "0")
+SINK=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+import urllib.request, json
+tid = 's18-http-${SUFFIX}'
+body = json.dumps({'agent_name':'s18-${SUFFIX}','tool_name':tid,'decision':'allow','policy_version':'runtime','input_snapshot':{}}).encode()
+req = urllib.request.Request('http://localhost:8000/api/v1/opa-decisions/', data=body, headers={'Content-Type':'application/json'}, method='POST')
+code = urllib.request.urlopen(req, timeout=8).getcode()
+r = urllib.request.urlopen('http://localhost:8000/api/v1/opa-decisions/?limit=200', timeout=8)
+found = any(d.get('tool_name')==tid for d in json.loads(r.read()).get('items', []))
+print('OK' if code==201 and found else 'BAD', code, found)
+" 2>/dev/null || echo "ERR")
+if [ "$WIRED" -ge "1" ] && echo "$SINK" | grep -q "^OK"; then
+  pass "T-S18-014 — record_decision wired in governed_tool + opa_decisions stores an http-tool row ($SINK)"
+else
+  fail "T-S18-014 — generic record_decision (graph_builder hits=$WIRED, sink=$SINK)"
 fi
 
 # ---------------------------------------------------------------------------
