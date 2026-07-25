@@ -430,10 +430,22 @@ function ToolForm({
         </div>
 
         <Field label="Description" error={errors.description?.message}>
-          <input
+          <p className="text-xs text-slate-500 mb-1.5">
+            The agent's LLM reads this to decide when to call the tool — describe what it
+            does, what it needs, and when NOT to use it. Multi-line is fine.
+          </p>
+          <textarea
             {...register('description')}
-            className="input"
-            placeholder="Retrieves the current status of an order"
+            rows={4}
+            className={cn(
+              'input resize-y leading-relaxed',
+              errors.description && 'border-red-400'
+            )}
+            placeholder={
+              'Retrieves the current status of an order.\n' +
+              'Args: order_id (str) — the customer-facing order number.\n' +
+              'Use for status lookups only; does not modify the order.'
+            }
           />
         </Field>
 

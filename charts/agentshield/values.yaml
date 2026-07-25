@@ -1055,7 +1055,12 @@ studio:
     #   (ROLES dropdown -> canonical names per §8.4, form defaults operator->
     #   contributor, ROLE_CHIP keeps legacy keys for un-migrated rows). Adds
     #   AuthContext.test.tsx covering the role hierarchy + legacy-spelling parity.
-    tag: "0.1.161"
+    # 0.1.162: tool Description becomes a multi-line textarea (rows=4, resize-y) in
+    #   ToolsPage's ToolForm, which serves BOTH create and edit — the single-line
+    #   <input> silently collapsed newlines, and that description is what the
+    #   agent's LLM reads to decide whether to call the tool. Adds
+    #   ToolsPage.test.tsx (5 tests), the first coverage that page has had.
+    tag: "0.1.162"
     pullPolicy: IfNotPresent
 
   service:
