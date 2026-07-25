@@ -709,7 +709,7 @@ registry-api:
     # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop + health_check_server
     #   client + mcp_health_* settings + lifespan task; advisory-lock single-flight,
     #   writes mcp_servers.status/health_detail (NOT last_synced_at).
-    tag: "0.2.227"
+    tag: "0.2.228"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
