@@ -228,4 +228,63 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
       timeout: 15_000,
     });
   });
+
+  // T039 (Phase 2 / WS-A) — the Health panel renders on the detail page. It reads ONLY
+  // fields the detail page has fetched since Phase 1 (status, list_changed_supported,
+  // identity_mode), so this runs even before the health LOOP is deployed — it proves the
+  // WS-A surface (FR-MCP-22 "surface in Studio") is wired, not that a probe ran. NOT
+  // infra-gated: registration always returns a persisted server, and every field the
+  // panel reads is present regardless of upstream reachability. Reuses the server the
+  // persistence journey registered above; registers one via REST as a fallback so this
+  // case stands alone if that test did not run.
+  test("detail page renders the WS-A Health panel (status + change-notifications + identity)", async ({ page }) => {
+    test.setTimeout(60_000);
+
+    if (!serverId) {
+      const reg = await api.post("/api/v1/mcp-servers/", {
+        data: {
+          name: `${SERVER_NAME}-health`,
+          description: "e2e health-panel server",
+          server_url: SERVER_URL,
+          transport: "streamable_http",
+          owner_team: "platform",
+          is_external: false,
+          identity_mode: "none",
+          scan_results: true,
+        },
+      });
+      expect(reg.status()).toBe(201);
+      serverId = ((await reg.json()).id as string);
+    }
+    expect(serverId).toBeTruthy();
+
+    // Reload the detail route and wait for the backend GET (the panel is driven by it).
+    const detailResp = page.waitForResponse(
+      (r) =>
+        new RegExp(`/api/v1/mcp-servers/${serverId}$`).test(r.url()) &&
+        r.request().method() === "GET",
+      { timeout: 20_000 }
+    );
+    await page.goto(`/mcp-servers/${serverId}`);
+    await detailResp;
+
+    // The Health card header (WS-A section).
+    await expect(page.getByRole("heading", { name: "Health" })).toBeVisible({ timeout: 15_000 });
+
+    // Scope every assertion to the Health card so the error banner / tabs can't satisfy them.
+    const health = page.locator(".card").filter({ hasText: "Health" });
+
+    // Status pill — StatusBadge renders one of Connected / Error / Disconnected from server.status.
+    await expect(health.getByText(/Connected|Error|Disconnected/).first()).toBeVisible();
+
+    // The list_changed (WS-B capability) row.
+    await expect(health.getByText("Change notifications")).toBeVisible();
+    await expect(health.getByText(/subscribed|not supported/).first()).toBeVisible();
+
+    // The identity (WS-C) line — always one of the three modes.
+    await expect(health.getByText("Identity", { exact: true })).toBeVisible();
+    await expect(
+      health.getByText(/none|service_identity|on_behalf_of/).first()
+    ).toBeVisible();
+  });
 });

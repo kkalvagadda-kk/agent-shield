@@ -198,7 +198,7 @@ PROXY_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=mcp-proxy
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -n "$PROXY_POD" ]; then
   CODE=$(kubectl exec -n "$NAMESPACE" "$PROXY_POD" -- \
-    python3 -c "import httpx; print(httpx.post('http://localhost:8080/internal/discover', json={'server_id':'x'}).status_code)" 2>/dev/null || echo "ERR")
+    python3 -c "import httpx; print(httpx.post('http://localhost:8080/internal/discover', json={'server_id':'00000000-0000-0000-0000-000000000000'}).status_code)" 2>/dev/null || echo "ERR")
   if [ "$CODE" = "401" ]; then
     echo "RESULT T-S84-007 PASS discover-no-token=$CODE"
   else

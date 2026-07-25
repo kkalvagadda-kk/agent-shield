@@ -62,9 +62,9 @@ Observed this session: alembic head `0072` → **no migration**; e2e ceiling `84
 
 **Deferred — scripts WRITTEN this run, NOT executed; the user runs them when ready to deploy.** Deploys mcp-proxy (P2) + registry-api (P3). Strict bash, real curl/kubectl/psql assertions, `echo "PASS"` at the end.
 
-- [ ] [CP1a] Deploy script — `bash scripts/deploy-cpe2e.sh` (mcp-proxy + registry-api) **or** `helm upgrade`; `kubectl rollout status` both. — `scripts/deploy-mcp2-cp1.sh`
-- [ ] [CP1b] Infra smoke — proxy `POST /internal/health` (registry-api SA token) against the in-pod fixture → `200 ok=true`; missing token → `401`; agent-SA token → `403`; registry-api health loop logs present. — `scripts/smoke-mcp2-cp1-infra.sh`
-- [ ] [CP1c] Behaviour smoke — register a server at a dead URL; over ≥3 intervals assert `mcp_servers.status` flips to `error` with `health_detail.consecutive_failures>=3` + `last_error`; point it at the live fixture, assert recovery to `connected`/`0`; assert `last_synced_at` unchanged across a health cycle; `kubectl scale registry-api --replicas=2` and assert `consecutive_failures` advances by 1/interval (single-flight). — `scripts/smoke-mcp2-cp1-behaviour.sh`
+- [X] [CP1a] Deploy script — `bash scripts/deploy-cpe2e.sh` (mcp-proxy + registry-api) **or** `helm upgrade`; `kubectl rollout status` both. — `scripts/deploy-mcp2-cp1.sh`
+- [X] [CP1b] Infra smoke — proxy `POST /internal/health` (registry-api SA token) against the in-pod fixture → `200 ok=true`; missing token → `401`; agent-SA token → `403`; registry-api health loop logs present. — `scripts/smoke-mcp2-cp1-infra.sh`
+- [X] [CP1c] Behaviour smoke — register a server at a dead URL; over ≥3 intervals assert `mcp_servers.status` flips to `error` with `health_detail.consecutive_failures>=3` + `last_error`; point it at the live fixture, assert recovery to `connected`/`0`; assert `last_synced_at` unchanged across a health cycle; `kubectl scale registry-api --replicas=2` and assert `consecutive_failures` advances by 1/interval (single-flight). — `scripts/smoke-mcp2-cp1-behaviour.sh`
 
 ## Phase 4 — WS-A: Studio Health panel
 
@@ -96,9 +96,9 @@ Observed this session: alembic head `0072` → **no migration**; e2e ceiling `84
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Deploys mcp-proxy (P6) + registry-api (P7).
 
-- [ ] [CP2a] Deploy script — `bash scripts/deploy-cpe2e.sh` (mcp-proxy + registry-api) **or** `helm upgrade`; `kubectl rollout status`. — `scripts/deploy-mcp2-cp2.sh`
-- [ ] [CP2b] Infra smoke — `suite-84` still green (extraction behavior-neutral); `POST /internal/mcp/list-changed` unknown server → `200 ok=false reason=server_not_found`; malformed → `422`. — `scripts/smoke-mcp2-cp2-infra.sh`
-- [ ] [CP2c] Behaviour smoke — start the fixture in the proxy pod; register it; `simulate_tool_change("add")` → within the debounce window the proxy POSTs `/list-changed` once → `GET /mcp-servers/{id}` shows `dynamic_echo` (**save→reload→assert**); `simulate_tool_change("remove")` → the tool goes `inactive` (not deleted); a burst of 3 within 5s → one re-sync; a second `/list-changed` within 10s → `coalesced:true`. jq/SQL assertions. — `scripts/smoke-mcp2-cp2-behaviour.sh`
+- [X] [CP2a] Deploy script — `bash scripts/deploy-cpe2e.sh` (mcp-proxy + registry-api) **or** `helm upgrade`; `kubectl rollout status`. — `scripts/deploy-mcp2-cp2.sh`
+- [X] [CP2b] Infra smoke — `suite-84` still green (extraction behavior-neutral); `POST /internal/mcp/list-changed` unknown server → `200 ok=false reason=server_not_found`; malformed → `422`. — `scripts/smoke-mcp2-cp2-infra.sh`
+- [X] [CP2c] Behaviour smoke — start the fixture in the proxy pod; register it; `simulate_tool_change("add")` → within the debounce window the proxy POSTs `/list-changed` once → `GET /mcp-servers/{id}` shows `dynamic_echo` (**save→reload→assert**); `simulate_tool_change("remove")` → the tool goes `inactive` (not deleted); a burst of 3 within 5s → one re-sync; a second `/list-changed` within 10s → `coalesced:true`. jq/SQL assertions. — `scripts/smoke-mcp2-cp2-behaviour.sh`
 
 ## Phase 8 — WS-C: per-server Secret identity plumbing
 
@@ -130,15 +130,15 @@ Observed this session: alembic head `0072` → **no migration**; e2e ceiling `84
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Deploys mcp-proxy (P9/P10) + registry-api (P8, already in P3/P7 image) + declarative-runner + a fixture agent (sdk 0.2.4). Requires the Keycloak confidential client to exist (quickstart.md).
 
-- [ ] [CP3a] Deploy script — `bash scripts/deploy-cpe2e.sh` **or** `helm upgrade`; `kubectl rollout status`. — `scripts/deploy-mcp2-cp3.sh`
-- [ ] [CP3b] Infra smoke — proxy pod mounts `/var/run/secrets/mcp-proxy-keycloak/client-secret`; RBAC unchanged (`can-i get secrets -n agentshield-mcp` → yes, `-n agentshield-platform` → **no**); proxy can reach Keycloak (a `service_identity` register+discover succeeds); a per-server Secret's `connection.identity_mode` matches the row (T-S85-020). — `scripts/smoke-mcp2-cp3-infra.sh`
-- [ ] [CP3c] Behaviour smoke — `none` server `tools/call` byte-identical to Phase-1 (suite-84 slice green); `service_identity` server `tools/call` carries a minted bearer (assert via a capturing upstream / fixture that echoes headers); `on_behalf_of` `tools/call` empty `x-user-sub` → `200 is_error=true` "requires a user identity" (T-S85-023); with `x-user-sub` → `200 is_error=true` "blocked on Decision 29" (T-S85-024); an agent pod with `AGENTSHIELD_USER_SUB` set makes the executor send `x-user-sub` (T-S85-027). jq assertions. — `scripts/smoke-mcp2-cp3-behaviour.sh`
+- [X] [CP3a] Deploy script — `bash scripts/deploy-cpe2e.sh` **or** `helm upgrade`; `kubectl rollout status`. — `scripts/deploy-mcp2-cp3.sh`
+- [X] [CP3b] Infra smoke — proxy pod mounts `/var/run/secrets/mcp-proxy-keycloak/client-secret`; RBAC unchanged (`can-i get secrets -n agentshield-mcp` → yes, `-n agentshield-platform` → **no**); proxy can reach Keycloak (a `service_identity` register+discover succeeds); a per-server Secret's `connection.identity_mode` matches the row (T-S85-020). — `scripts/smoke-mcp2-cp3-infra.sh`
+- [X] [CP3c] Behaviour smoke — `none` server `tools/call` byte-identical to Phase-1 (suite-84 slice green); `service_identity` server `tools/call` carries a minted bearer (assert via a capturing upstream / fixture that echoes headers); `on_behalf_of` `tools/call` empty `x-user-sub` → `200 is_error=true` "requires a user identity" (T-S85-023); with `x-user-sub` → `200 is_error=true` "blocked on Decision 29" (T-S85-024); an agent pod with `AGENTSHIELD_USER_SUB` set makes the executor send `x-user-sub` (T-S85-027). jq assertions. — `scripts/smoke-mcp2-cp3-behaviour.sh`
 
 ## Phase 11 — Testing, Regression & Polish
 
-- [ ] [T038] Backend e2e — `suite-85-mcp-health-notify-identity.sh` compiling every `T-S85-001..028` into real assertions (mirror `suite-84`: `kubectl exec` into registry-api, inline `python3`+`httpx`/ORM, `RESULT <id> PASS/FAIL`, trailing `FAILS`, exit-code keyed), driven against one in-pod fixture instance. Covers: health probe 401/403/200-ok-false, loop threshold/recovery/single-flight, list_changed→re-sync (add/remove/coalesce/unknown), service-identity header, OBO fail-closed + stub, `x-user-sub` emission, `identity_mode` in the Secret. (after all backend tasks) — `scripts/e2e/suite-85-mcp-health-notify-identity.sh`
-- [ ] [T039] Register the suite — add `suite-85` to the runner (re-confirm `85` free; else next number + rename `T-S85-*`). (after T038) — `scripts/e2e/run-all.sh`
-- [ ] [T040] Playwright — add one case to `mcp-servers.spec.ts`: register → detail → Health panel renders status pill + "Last successful check" from a real `GET` (`page.waitForResponse`), infra-gated. Keep existing cases green. (after T011) — `studio/e2e/mcp-servers.spec.ts`
+- [X] [T038] Backend e2e — `suite-85-mcp-health-notify-identity.sh` compiling every `T-S85-001..028` into real assertions (mirror `suite-84`: `kubectl exec` into registry-api, inline `python3`+`httpx`/ORM, `RESULT <id> PASS/FAIL`, trailing `FAILS`, exit-code keyed), driven against one in-pod fixture instance. Covers: health probe 401/403/200-ok-false, loop threshold/recovery/single-flight, list_changed→re-sync (add/remove/coalesce/unknown), service-identity header, OBO fail-closed + stub, `x-user-sub` emission, `identity_mode` in the Secret. (after all backend tasks) — `scripts/e2e/suite-85-mcp-health-notify-identity.sh`
+- [X] [T039] Register the suite — add `suite-85` to the runner (re-confirm `85` free; else next number + rename `T-S85-*`). (after T038) — `scripts/e2e/run-all.sh`
+- [X] [T040] Playwright — add one case to `mcp-servers.spec.ts`: register → detail → Health panel renders status pill + "Last successful check" from a real `GET` (`page.waitForResponse`), infra-gated. Keep existing cases green. (after T011) — `studio/e2e/mcp-servers.spec.ts`
 - [ ] [T041] Gap ledger — record Phase-2 gaps in the canonical Known-gaps header: OBO exchange **STUB** (blocked on Decision 29 — **must not be reported done as "on-behalf-of works"**), multi-replica subscription fan-out (harmless duplicate re-syncs, exactly-once deferred), Keycloak confidential-client provisioning prerequisite, `last_synced_at`-vs-`last_success_at` deviation, no manual health-check button, `oauth2`/`mtls` service-identity uncovered, in-memory health-backoff state. — `docs/testing/manual-ui-e2e-test-plan.md`
 
 ## CP4 — Checkpoint: Full Phase-2 e2e + regression
