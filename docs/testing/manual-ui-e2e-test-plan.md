@@ -12,6 +12,25 @@
 
 ---
 
+## Tools + Knowledge pickers → browse-and-select tile drawers — cluster verification pending — 2026-07-25
+
+**deferred (intentional) — code + tests complete, Playwright unrun.** `studio 0.1.163`. The inline checkbox lists in `ToolsPicker` and `KnowledgeBasePicker` are replaced by a shared browse-and-select tile drawer (`components/shared/PickerTile` + `TilePickerDrawer`). Selected entities render as removable chips on the builder surface; the catalog lives in the drawer behind "Add from catalog". Both pickers kept their previous prop signatures, so none of the three consumer pages (`CreateAgentPage`, `AgentListPage`, `AgentDetailPage`) needed edits.
+
+Deliberate design constraints, each pinned by a test:
+- **Tiles are selection-only — no edit/delete/create.** Tools and KBs are shared, team-scoped resources; a destructive control on the same tile as "attach this to my agent" would let a mis-click during agent assembly destroy something other agents depend on. Managing them stays on `ToolsPage` / `KnowledgeBasesPage`.
+- **A drawer, not a route.** Navigating to a separate browse page mid-agent-creation would discard the half-filled form.
+- **`knowledge_search` stays structurally excluded** — the filter remains in `ToolsPicker` alone rather than being scattered to the three callers.
+- **The tile's meta is a slot, not a `risk` prop** — KBs have no risk level, so they show `ready/source` counts where tools show risk + type. A hardcoded risk badge would render a meaningless "low" on a knowledge base.
+
+**Verified locally (green):** Vitest 60 files / 456 tests, including new `ToolsPicker.test.tsx` (12) and `KnowledgeBasePicker.test.tsx` (10) — neither component had any test before. `tsc --noEmit` clean. The 5 consumer tests that broke (they asserted an inline list) were **updated to open the drawer**, not deleted — and `AgentListPage`'s `knowledge_search` regression test still passes unchanged because its selected tool renders as a chip.
+
+**Known gaps (not-yet-wired, deploy-blocked):**
+- `studio/e2e/tools-picker-drawer.spec.ts` — **new, never executed.** Tool selection had *no* browser coverage before this: `agent-knowledge-config.spec.ts` only asserted `knowledge_search` was absent, never that picking a real tool works or persists. Test A drives the drawer (tiles + risk/type chips, absence of edit/delete/create, search narrowing, select → chip) and asserts `metadata.tools` in the create request; test B is the save→reload→assert round-trip plus a remove-and-persist pass.
+- `studio/e2e/agent-knowledge-config.spec.ts` — **updated for the drawer, never re-executed.** Note one assertion got *stronger*: `expect(tools-picker).not.toContainText("knowledge_search")` would now pass trivially against the collapsed picker (chips only contain what is already selected), so it was replaced with `expectKnowledgeSearchHidden()`, which opens the drawer and asserts against the real catalog. A spec that passes for the wrong reason is worse than one that fails.
+- Both need a deployed Studio at `0.1.163`; the EKS cluster is still serving `0.1.160`.
+
+**Accepted UX dead-end (deferred, intentional):** with no create-new affordance in the drawer, someone who needs a tool or KB that does not exist yet still has to abandon their draft to go author it. The drawer's no-results state names where the entity is managed rather than linking away mid-draft. Revisit if it bites in practice.
+
 ## Global role `viewer` → `consumer` rename — cluster verification pending — 2026-07-25
 
 **deferred (intentional) — code + tests complete, cluster run blocked on a deploy.** `rbac-design.md` §2.1's read-only global role was renamed `viewer` → `consumer` (lowercase, matching `platform-admin`/`contributor`; all role comparisons are case-sensitive). Shipped in `registry-api 0.2.225` / `studio 0.1.161`:

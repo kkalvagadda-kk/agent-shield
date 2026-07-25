@@ -196,15 +196,19 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
   it("hides knowledge_search from the Tools list but shows real tools", async () => {
     await openNoCode();
     const toolsPicker = await screen.findByTestId("tools-picker");
+    // Tools are browsed in a tile drawer now — open it to see the catalog.
+    await userEvent.click(within(toolsPicker).getByRole("button", { name: /add from catalog/i }));
     expect(within(toolsPicker).getByText("web_search")).toBeInTheDocument();
     // knowledge_search must NOT be a pickable tool (it appears only in the KB
-    // picker's hint text, which is outside tools-picker).
+    // picker's hint text, which is outside tools-picker). This is the structural
+    // guard ToolsPicker owns — it has to survive the tile-drawer rewrite.
     expect(within(toolsPicker).queryByText("knowledge_search")).not.toBeInTheDocument();
   });
 
   it("lists team KBs in a dedicated picker", async () => {
     await openNoCode();
     const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     expect(picker).toHaveTextContent("Product Docs");
   });
 
@@ -212,7 +216,9 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "kb-agent");
     const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     await userEvent.click(within(picker).getByRole("checkbox"));
+    await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));

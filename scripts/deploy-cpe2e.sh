@@ -405,7 +405,7 @@ DEPLOY_CONTROLLER_TAG="0.1.40"   # 0.1.40: sandbox pods get AGENTSHIELD_PLAYGROU
 # 0.1.158: sync the STUDIO_BUILD marker (studio/src/lib/build.ts) to the deployed tag. The merge
 #   left build.ts at 0.1.147 while STUDIO_TAG advanced to 0.1.157, so suite-79 T-S79-002 (served-tag
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
-STUDIO_TAG="0.1.162"   # 0.1.162: tool Description is a multi-line textarea (create + edit share one ToolForm) + ToolsPage.test.tsx (first coverage of that page). 0.1.161: role rename viewer->consumer in AuthContext ROLE_LEVEL/GlobalRole + RequireRole + AdminAccessPage ROLES/chips (§8.4); AuthContext.test.tsx role-hierarchy Vitest. 0.1.160: human-grantee grant creation in ArtifactGrantsList + ApplicationsPage vitest
+STUDIO_TAG="0.1.163"   # 0.1.163: tools + knowledge pickers become browse-and-select tile drawers (shared PickerTile + TilePickerDrawer); selected show as removable chips. 0.1.162: tool Description is a multi-line textarea (create + edit share one ToolForm) + ToolsPage.test.tsx (first coverage of that page). 0.1.161: role rename viewer->consumer in AuthContext ROLE_LEVEL/GlobalRole + RequireRole + AdminAccessPage ROLES/chips (§8.4); AuthContext.test.tsx role-hierarchy Vitest. 0.1.160: human-grantee grant creation in ArtifactGrantsList + ApplicationsPage vitest
 EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.59"
 PYTHON_EXECUTOR_TAG="0.1.0"

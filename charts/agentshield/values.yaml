@@ -1060,7 +1060,16 @@ studio:
     #   <input> silently collapsed newlines, and that description is what the
     #   agent's LLM reads to decide whether to call the tool. Adds
     #   ToolsPage.test.tsx (5 tests), the first coverage that page has had.
-    tag: "0.1.162"
+    # 0.1.163: Tools + Knowledge pickers become browse-and-select tile drawers.
+    #   Shared components/shared/PickerTile + TilePickerDrawer; ToolsPicker and
+    #   KnowledgeBasePicker are thin adapters that keep their previous prop
+    #   signatures, so none of the three consumer pages (CreateAgentPage,
+    #   AgentListPage, AgentDetailPage) needed edits. Selected entities render as
+    #   removable chips on the builder; the catalog lives in the drawer. Tiles are
+    #   selection-only — no edit/delete/create — because tools and KBs are shared
+    #   team resources and a destructive control there would let a mis-click during
+    #   agent assembly destroy something other agents depend on.
+    tag: "0.1.163"
     pullPolicy: IfNotPresent
 
   service:
