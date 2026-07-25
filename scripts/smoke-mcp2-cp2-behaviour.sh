@@ -177,14 +177,31 @@ echo "$DYN" | grep -q "DYN present inactive" \
   || fail "dynamic_echo should be present but inactive after remove (FR-MCP-04: never hard-deleted)"
 echo "  OK: dynamic_echo inactive, row preserved"
 
-# ── 4. Coalesce: burst of 3 in a fresh window → one re-sync ───────────────────
-echo "--- coalesce: 3 re-syncs in a burst → 1st runs, 2nd/3rd coalesced ---"
+# ── 4. Coalesce: burst of 3 from ONE process → one re-sync ────────────────────
+# The 3 POSTs MUST fire from a single process (one kubectl exec, one localhost
+# client) so they (a) hit the SAME registry-api replica — _last_resync is in-memory
+# per-replica, a real limitation ledgered under MCP Phase 2 — and (b) land within
+# the min-resync window. A per-exec-per-POST burst is too slow (each exec + discover
+# > the 10s window) and can straddle replicas, so it can't prove the coalesce logic.
+echo "--- coalesce: 3 rapid re-syncs in one process → 1st runs, 2nd/3rd coalesced ---"
 sleep "$WINDOW"  # clear the window so the FIRST of the burst is not coalesced
-R1="$(resync)"; R2="$(resync)"; R3="$(resync)"
-echo "  $R1"; echo "  $R2"; echo "  $R3"
-echo "$R1" | grep -q "COALESCED false" || fail "1st burst re-sync was coalesced (expected to run)"
-echo "$R2" | grep -q "COALESCED true"  || fail "2nd burst re-sync was NOT coalesced (want coalesced within window)"
-echo "$R3" | grep -q "COALESCED true"  || fail "3rd burst re-sync was NOT coalesced (want coalesced within window)"
-echo "  OK: burst of 3 → one re-sync (2nd/3rd coalesced)"
+BURST="$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  env SID="$SERVER_ID" python3 - <<'PY'
+import os, asyncio, httpx
+async def main():
+    async with httpx.AsyncClient(timeout=60) as c:
+        for i in (1, 2, 3):
+            r = await c.post("http://localhost:8000/api/v1/internal/mcp/list-changed",
+                             json={"server_id": os.environ["SID"]})
+            b = r.json() if r.status_code == 200 else {}
+            print(f"RESYNC{i}", r.status_code, "COALESCED", str(b.get("coalesced")).lower())
+asyncio.run(main())
+PY
+)"
+echo "$BURST" | sed 's/^/  /'
+echo "$BURST" | grep -q "RESYNC1 200 COALESCED false" || fail "1st burst re-sync was coalesced (expected to run)"
+echo "$BURST" | grep -q "RESYNC2 200 COALESCED true"  || fail "2nd burst re-sync was NOT coalesced (want coalesced within window)"
+echo "$BURST" | grep -q "RESYNC3 200 COALESCED true"  || fail "3rd burst re-sync was NOT coalesced (want coalesced within window)"
+echo "  OK: burst of 3 in one process → one re-sync (2nd/3rd coalesced)"
 
 echo "PASS"

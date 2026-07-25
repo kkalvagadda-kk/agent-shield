@@ -136,11 +136,29 @@ echo "$HEALTH_OUT" | grep -q "MISSING 401" || fail "missing-token /internal/heal
 echo "$HEALTH_OUT" | grep -q "AGENT 403"   || fail "agent-token /internal/health did not return 403"
 echo "  OK: 200 ok=true (registry-api SA), 401 (no token), 403 (agent SA)"
 
-# ── 5. The health loop is running (log line present) ──────────────────────────
-echo "--- registry-api health sweep loop running ---"
-kubectl logs -n "$NAMESPACE" "$API_POD" -c registry-api --tail=2000 2>/dev/null \
-  | grep -qi "mcp health sweep started" \
-  || fail "no 'mcp health sweep started' log line — the health loop task is not running"
-echo "  OK: health sweep loop started"
+# ── 5. The health loop is running (verify its EFFECT, not a boot-time log line) ─
+# A "sweep started" log is written once at task start and rotates out of the kubelet
+# buffer on a chatty pod, so grepping for it is unreliable. Instead assert the loop's
+# EFFECT: health_detail.last_success_at is populated ONLY by the health loop's
+# successful probe (register/discover never writes it). Wait up to ~2 intervals for
+# the just-registered fixture server (or any server) to be probed.
+echo "--- registry-api health loop is probing (health_detail.last_success_at written) ---"
+_loop_ok=0
+for _i in $(seq 1 14); do
+  N=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+import asyncio
+from db import AsyncSessionLocal
+from sqlalchemy import text as t
+async def m():
+    async with AsyncSessionLocal() as s:
+        n=(await s.execute(t(\"SELECT count(*) FROM mcp_servers WHERE health_detail->>'last_success_at' IS NOT NULL\"))).scalar()
+        print(n)
+asyncio.run(m())
+" 2>/dev/null | tr -d '[:space:]')
+  if [ "${N:-0}" -ge 1 ] 2>/dev/null; then _loop_ok=1; break; fi
+  sleep 10
+done
+[ "$_loop_ok" -eq 1 ] || fail "no mcp_server has health_detail.last_success_at after ~2 intervals — the health loop is not probing"
+echo "  OK: health loop probed a server (last_success_at written)"
 
 echo "PASS"
