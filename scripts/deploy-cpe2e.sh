@@ -366,7 +366,7 @@ ENCRYPTION_KEY="dGVzdGtleS10ZXN0a2V5LXRlc3RrZXktdGVzdGtleTA="
 #   only passed under the reverted fail-open bypass. New _auto_grant_tool_access(db,tools,team) called
 #   from BOTH deploy paths (deployments.py sandbox + catalog.py production), idempotent; high-risk
 #   tools still require_approval/HITL-park. No migration.
-REGISTRY_API_TAG="0.2.228"   # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop (mcp_health.py) + health_check_server client + 5 mcp_health_* settings + lifespan task; advisory-lock single-flight, writes mcp_servers.status/health_detail (NOT last_synced_at). 0.2.226: MCP Decision-27 (P9) — bundle_generator + versions/deployments tool-snapshots carry pii_deanonymize_allowed (fail-closed); agentshield.rego allow_deanonymize rule + tests (22/22); policy_generator audit-parity annotation. 0.2.225: MCP-as-tool-source Phase 1 — migration 0072 (6 mcp_servers cols + tools.pii_deanonymize_allowed), MCPServer/Tool schema, mcp_servers CRUD+/sync router, shared team_may_use_tool + deploy-gate refactor, per-server secret materializer, internal authorize-tool-call endpoint. 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
+REGISTRY_API_TAG="0.2.229"   # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop (mcp_health.py) + health_check_server client + 5 mcp_health_* settings + lifespan task; advisory-lock single-flight, writes mcp_servers.status/health_detail (NOT last_synced_at). 0.2.226: MCP Decision-27 (P9) — bundle_generator + versions/deployments tool-snapshots carry pii_deanonymize_allowed (fail-closed); agentshield.rego allow_deanonymize rule + tests (22/22); policy_generator audit-parity annotation. 0.2.225: MCP-as-tool-source Phase 1 — migration 0072 (6 mcp_servers cols + tools.pii_deanonymize_allowed), MCPServer/Tool schema, mcp_servers CRUD+/sync router, shared team_may_use_tool + deploy-gate refactor, per-server secret materializer, internal authorize-tool-call endpoint. 0.2.224: + HITL reactive-chat approval-status fix (_chat_thread_id keyed by session_id; cherry-picked from fix/reactive-hitl-approval-poll 922c04b). 0.2.223: fix migration 0070 down_revision 0069->0068. 0.2.222: create_grant flips webhook auth_mode->client_signed (T-SYY-002)
 SAFETY_ORCHESTRATOR_TAG="0.1.4"   # 0.1.4: MCP Decision-27 (P10) — deanonymize/args endpoint + orchestrator.deanonymize_args (recursive PII substitution from PiiStore mappings). 0.1.3: prior.
 # NEW POC-4: fastembed bge-small-en-v1.5 embedding sidecar (384-dim).
 EMBEDDING_SIDECAR_TAG="0.1.0"
@@ -405,13 +405,13 @@ DEPLOY_CONTROLLER_TAG="0.1.41"   # 0.1.41: project 2nd SA token (audience agents
 # 0.1.158: sync the STUDIO_BUILD marker (studio/src/lib/build.ts) to the deployed tag. The merge
 #   left build.ts at 0.1.147 while STUDIO_TAG advanced to 0.1.157, so suite-79 T-S79-002 (served-tag
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
-STUDIO_TAG="0.1.162"   # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill, last_success_at, consecutive_failures, last_error, last_synced_at, list_changed_supported, identity note) + 15s refetch
+STUDIO_TAG="0.1.163"   # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill, last_success_at, consecutive_failures, last_error, last_synced_at, list_changed_supported, identity note) + 15s refetch
 EVAL_RUNNER_TAG="0.1.14"
 DECLARATIVE_RUNNER_TAG="0.1.61"   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4 (McpToolExecutor x-user-sub). 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"
-MCP_PROXY_TAG="0.1.3"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (file-mounted client secret + env) + list_changed subscription knobs. 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS). 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
+MCP_PROXY_TAG="0.1.4"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (file-mounted client secret + env) + list_changed subscription knobs. 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS). 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

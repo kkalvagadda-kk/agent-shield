@@ -782,7 +782,7 @@ Their weaknesses: **one master key decrypts everything** — anything holding `A
 
 **Recommended first backend: AWS Secrets Manager via IRSA** — the platform already runs on EKS (ECR `us-west-2`, IRSA available), so ASM is a managed dependency reached with an IAM role the pod can already assume, no new stateful service to operate. `VaultProvider` stays first-class for on-prem/non-AWS. See design doc §8 OQ-1.
 
-**Status:** **Accepted** (decision recorded). Implementation **deferred to Phase 4** (MCP OAuth 2.1), for which this is a hard prerequisite — the seam (`CredentialProvider` + `FernetPgProvider`, byte-identical to today) lands first, then the OAuth refresh-token store + first external backend ship on top of it.
+**Status:** **Implemented (Phase 4).** The seam (`CredentialProvider` + `FernetPgProvider` default, byte-identical to today, + opt-in `AwsSecretsManagerProvider`) landed as Phase-4 WS-1 (migration `0073`, `credential_blobs` KV, dual-read); the OAuth 2.1 refresh-token store rides it in WS-2 (`mcp_oauth_grants.credential_ref` → the provider). `pg-fernet` remains the default so existing deploys are unchanged; `aws-sm`/IRSA is config-selected. Deferred within the seam (ledgered): dropping `auth_configs.credentials_encrypted` after the dual-read cutover; migrating `LLMProvider`/`applications` credentials; `VaultProvider`.
 
 ---
 

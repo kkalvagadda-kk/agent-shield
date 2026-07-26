@@ -249,7 +249,7 @@ New service, so: image tag var `MCP_PROXY_TAG` in `deploy-cpe2e.sh` + `charts/ag
 **Phase 3 — stdio + hardening.**
 Sandboxed stdio transport (SR-01), egress policy, SSRF validation, admin command allowlist (D2, SR-04, SR-05).
 
-**Phase 4 (deferred) — MCP OAuth 2.1** for external servers that require it (OQ-01), and `resources`/`prompts` (OQ-02) if needed.
+**Phase 4 — MCP OAuth 2.1 (IMPLEMENTED)** for external servers that require it (OQ-01 RESOLVED). WS-1 = the pluggable CredentialProvider (Decision 31; FernetPg default + AWS Secrets Manager opt-in). WS-2 = authorization-code + PKCE + DCR + refresh-with-rotation, the OAuth dance in registry-api (not the proxy — browser session + durable refresh-token storage + single-writer rotation), a TokenReview'd `/internal/mcp/oauth/access-token` the proxy pulls a short-lived bearer from, and a Studio Authorize panel. `resources`/`prompts` (OQ-02) are **split out to Phase 5** (a distinct primitive subsystem — see the Phase-4 plan's WS-3 sketch). Plan: `docs/plan/mcp-tool-source-phase4/`.
 
 ---
 

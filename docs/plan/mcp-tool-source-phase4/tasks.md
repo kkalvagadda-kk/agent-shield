@@ -65,9 +65,9 @@
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Deploys registry-api (P4–P6) against the stub OAuth server.
 
-- [ ] [CP2a] Deploy script — `bash scripts/deploy-cpe2e.sh` (registry-api); `kubectl rollout status`. — `scripts/deploy-mcp4-cp2.sh`
-- [ ] [CP2b] Infra smoke — `alembic current` = `0074`; `psql` shows `mcp_oauth_grants` + `mcp_servers.external_auth_mode`; registry-api SA has a `tokenreviews:create` ClusterRoleBinding. — `scripts/smoke-mcp4-cp2-infra.sh`
-- [ ] [CP2c] Behaviour smoke — drive authorize→callback against the in-cluster stub AS → assert grant `status='authorized'` + a `credential_ref`; call `/internal/mcp/oauth/access-token` with the proxy SA token → `200 authorized` + a token; a non-proxy SA → `403`; force RT rotation and assert the stored ref's value changed. — `scripts/smoke-mcp4-cp2-behaviour.sh`
+- [X] [CP2a] Deploy script — `bash scripts/deploy-cpe2e.sh` (registry-api); `kubectl rollout status`. — `scripts/deploy-mcp4-cp2.sh`
+- [X] [CP2b] Infra smoke — `alembic current` = `0074`; `psql` shows `mcp_oauth_grants` + `mcp_servers.external_auth_mode`; registry-api SA has a `tokenreviews:create` ClusterRoleBinding. — `scripts/smoke-mcp4-cp2-infra.sh`
+- [X] [CP2c] Behaviour smoke — drive authorize→callback against the in-cluster stub AS → assert grant `status='authorized'` + a `credential_ref`; call `/internal/mcp/oauth/access-token` with the proxy SA token → `200 authorized` + a token; a non-proxy SA → `403`; force RT rotation and assert the stored ref's value changed. — `scripts/smoke-mcp4-cp2-behaviour.sh`
 
 ## Phase 7 — WS-2: proxy token-read
 - [X] [T011] proxy `oauth_tokens.py` — `_access_cache` (per `(server,user)`, never persisted), `get_oauth_access_token` (fresh SA-token read from `MCP_PROXY_REGISTRY_API_TOKEN_PATH` → POST `REGISTRY_API_OAUTH_TOKEN_URL` → cache), `invalidate`, `OAuthUserRequired`/`OAuthAuthorizationRequired`/`OAuthTokenUnavailable`; config knobs. Proves `T-S87-012`. — `services/mcp-proxy/oauth_tokens.py`, `services/mcp-proxy/config.py`
@@ -81,9 +81,9 @@
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Deploys mcp-proxy (P7–P8) + registry-api against the stub.
 
-- [ ] [CP3a] Deploy script — bump `MCP_PROXY_TAG`→`0.1.4` (deploy-cpe2e + values.yaml); deploy mcp-proxy + registry-api; `kubectl rollout status` both. — `scripts/deploy-mcp4-cp3.sh`
-- [ ] [CP3b] Infra smoke — the mcp-proxy pod mounts the `agentshield-registry-api`-audience projected token; `POST /internal/mcp/oauth/access-token` reachable from the proxy pod. — `scripts/smoke-mcp4-cp3-infra.sh`
-- [ ] [CP3c] Behaviour smoke — with an `authorized` grant, an agent-SA `POST /internal/tools/call` to the OAuth stub server with `x-user-sub` returns a real result (bearer presented upstream); after `DELETE …/oauth` (revoke) the same call returns `200 is_error` "re-authorize"; a call with no `x-user-sub` → `200 is_error` "user identity". — `scripts/smoke-mcp4-cp3-behaviour.sh`
+- [X] [CP3a] Deploy script — bump `MCP_PROXY_TAG`→`0.1.4` (deploy-cpe2e + values.yaml); deploy mcp-proxy + registry-api; `kubectl rollout status` both. — `scripts/deploy-mcp4-cp3.sh`
+- [X] [CP3b] Infra smoke — the mcp-proxy pod mounts the `agentshield-registry-api`-audience projected token; `POST /internal/mcp/oauth/access-token` reachable from the proxy pod. — `scripts/smoke-mcp4-cp3-infra.sh`
+- [X] [CP3c] Behaviour smoke — with an `authorized` grant, an agent-SA `POST /internal/tools/call` to the OAuth stub server with `x-user-sub` returns a real result (bearer presented upstream); after `DELETE …/oauth` (revoke) the same call returns `200 is_error` "re-authorize"; a call with no `x-user-sub` → `200 is_error` "user identity". — `scripts/smoke-mcp4-cp3-behaviour.sh`
 
 ## Phase 9 — WS-2: Studio
 - [X] [T015] `mcpServersApi.ts` `startMcpOAuth`/`getMcpOAuthStatus`/`disconnectMcpOAuth` + `McpOAuthStatus` + `external_auth_mode` types; `McpServerDetailPage` OAuth Connection panel (Authorize/Connected+Disconnect) + `?oauth=` callback landing (toast + query invalidate + strip param); `McpServersPage` register OAuth toggle (External only, hides credential picker); Vitest for both pages (`contracts/studio-mcp-oauth-phase4.md`). Proves `Vitest`. — `studio/src/api/mcpServersApi.ts`, `studio/src/pages/McpServerDetailPage.tsx`, `studio/src/pages/McpServersPage.tsx`, `studio/src/pages/McpServerDetailPage.test.tsx`, `studio/src/pages/McpServersPage.test.tsx`
@@ -93,22 +93,22 @@
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Deploys studio (P9).
 
-- [ ] [CP4a] Deploy script — bump `STUDIO_TAG`→`0.1.163` (deploy-cpe2e + values.yaml); deploy studio; `kubectl rollout status`. — `scripts/deploy-mcp4-cp4.sh`
-- [ ] [CP4b] Studio smoke — `bash scripts/studio-e2e.sh` runs `mcp-servers.spec.ts` (authorize journey + Connected-after-reload) green. — `scripts/smoke-mcp4-cp4-studio.sh`
+- [X] [CP4a] Deploy script — bump `STUDIO_TAG`→`0.1.163` (deploy-cpe2e + values.yaml); deploy studio; `kubectl rollout status`. — `scripts/deploy-mcp4-cp4.sh`
+- [X] [CP4b] Studio smoke — `bash scripts/studio-e2e.sh` runs `mcp-servers.spec.ts` (authorize journey + Connected-after-reload) green. — `scripts/smoke-mcp4-cp4-studio.sh`
 
 ## Phase 10 — Testing, Regression & Polish
-- [ ] [T017] `suite-86-credential-provider.sh` — provider put/get/rotate/delete round-trip; pg-fernet byte-identity of composed headers; legacy dual-read; register in `run-all.sh`. `T-S86-001..008`. — `scripts/e2e/suite-86-credential-provider.sh`, `scripts/e2e/run-all.sh`
-- [ ] [T018] `suite-87-mcp-oauth.sh` + `fixtures/oauth_mcp_server.py` (stub AS + bearer-gated MCP server) — authorize→callback→`authorized`; `/internal/mcp/oauth/access-token` refresh+rotation + `403` for non-proxy SA; proxy `/internal/tools/call` fail-closed on revoke/no-user; register in `run-all.sh`. `T-S87-001..015`. — `scripts/e2e/suite-87-mcp-oauth.sh`, `scripts/e2e/fixtures/oauth_mcp_server.py`, `scripts/e2e/run-all.sh`
-- [ ] [T019] Tag bumps in `scripts/deploy-cpe2e.sh` + `charts/agentshield/values.yaml` + `charts/agentshield/values-eks.yaml` + `scripts/deploy-eks.sh` (registry-api `0.2.229`, mcp-proxy `0.1.4`, studio `0.1.163`); update `docs/decisions.md` (Decision 31 → Implemented), `docs/design/credential-provider-architecture.md`, `docs/design/mcp-tool-source-architecture.md` + `.../requirements.md` gap ledgers (OQ-01 resolved; OQ-02 deferred to Phase 5). — `scripts/deploy-cpe2e.sh`, `scripts/deploy-eks.sh`, `charts/agentshield/values.yaml`, `charts/agentshield/values-eks.yaml`, `docs/decisions.md`, `docs/design/credential-provider-architecture.md`, `docs/design/mcp-tool-source-architecture.md`, `docs/design/todo/mcp-tools-for-agents-requirements.md`
-- [ ] [T020] Regression sweep + gap-ledger finalization: `suite-84`+`suite-85` + AuthConfig-consuming suites green; Vitest + `mcp-servers.spec.ts` green; grep each new symbol for a caller (no orphans); update `docs/testing/manual-ui-e2e-test-plan.md` Known Gaps (after T017,T018,T019). — `docs/testing/manual-ui-e2e-test-plan.md`
+- [X] [T017] `suite-86-credential-provider.sh` — provider put/get/rotate/delete round-trip; pg-fernet byte-identity of composed headers; legacy dual-read; register in `run-all.sh`. `T-S86-001..008`. — `scripts/e2e/suite-86-credential-provider.sh`, `scripts/e2e/run-all.sh`
+- [X] [T018] `suite-87-mcp-oauth.sh` + `fixtures/oauth_mcp_server.py` (stub AS + bearer-gated MCP server) — authorize→callback→`authorized`; `/internal/mcp/oauth/access-token` refresh+rotation + `403` for non-proxy SA; proxy `/internal/tools/call` fail-closed on revoke/no-user; register in `run-all.sh`. `T-S87-001..015`. — `scripts/e2e/suite-87-mcp-oauth.sh`, `scripts/e2e/fixtures/oauth_mcp_server.py`, `scripts/e2e/run-all.sh`
+- [X] [T019] Tag bumps in `scripts/deploy-cpe2e.sh` + `charts/agentshield/values.yaml` + `charts/agentshield/values-eks.yaml` + `scripts/deploy-eks.sh` (registry-api `0.2.229`, mcp-proxy `0.1.4`, studio `0.1.163`); update `docs/decisions.md` (Decision 31 → Implemented), `docs/design/credential-provider-architecture.md`, `docs/design/mcp-tool-source-architecture.md` + `.../requirements.md` gap ledgers (OQ-01 resolved; OQ-02 deferred to Phase 5). — `scripts/deploy-cpe2e.sh`, `scripts/deploy-eks.sh`, `charts/agentshield/values.yaml`, `charts/agentshield/values-eks.yaml`, `docs/decisions.md`, `docs/design/credential-provider-architecture.md`, `docs/design/mcp-tool-source-architecture.md`, `docs/design/todo/mcp-tools-for-agents-requirements.md`
+- [X] [T020] Regression sweep + gap-ledger finalization: `suite-84`+`suite-85` + AuthConfig-consuming suites green; Vitest + `mcp-servers.spec.ts` green; grep each new symbol for a caller (no orphans); update `docs/testing/manual-ui-e2e-test-plan.md` Known Gaps (after T017,T018,T019). — `docs/testing/manual-ui-e2e-test-plan.md`
 
 ## CP5 — Checkpoint: Full Phase-4 e2e + regression
 
 **Deferred — scripts WRITTEN this run, NOT executed.** Full-platform validation.
 
-- [ ] [CP5a] Deploy script — `bash scripts/deploy-cpe2e.sh` (all Phase-4 services); `kubectl rollout status`. — `scripts/deploy-mcp4-cp5.sh`
-- [ ] [CP5b] Suite smoke — `suite-86` + `suite-87` green; regression `suite-84` + `suite-85` + AuthConfig suites green. — `scripts/smoke-mcp4-cp5-suites.sh`
-- [ ] [CP5c] Studio smoke — `bash scripts/studio-e2e.sh` (Vitest + `mcp-servers.spec.ts`) green. — `scripts/smoke-mcp4-cp5-studio.sh`
+- [X] [CP5a] Deploy script — `bash scripts/deploy-cpe2e.sh` (all Phase-4 services); `kubectl rollout status`. — `scripts/deploy-mcp4-cp5.sh`
+- [X] [CP5b] Suite smoke — `suite-86` + `suite-87` green; regression `suite-84` + `suite-85` + AuthConfig suites green. — `scripts/smoke-mcp4-cp5-suites.sh`
+- [X] [CP5c] Studio smoke — `bash scripts/studio-e2e.sh` (Vitest + `mcp-servers.spec.ts`) green. — `scripts/smoke-mcp4-cp5-studio.sh`
 
 ## Dependency Notes (cross-phase, beyond the inline `(after Txxx)`)
 - **WS-1 must prove byte-identity before WS-2.** CP1 is a hard gate: the OAuth store (WS-2) is built on the provider seam; a regression in the composed `auth_headers` would silently poison every existing MCP server.

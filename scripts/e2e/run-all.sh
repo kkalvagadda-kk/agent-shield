@@ -140,6 +140,8 @@ run_suite "Suite 82: Artifact Delegation Foundation (grants API)" "suite-82-arti
 run_suite "Suite 83: Webhook Applications (invoker grants + signed invoke)" "suite-83-webhook-applications.sh"
 run_suite "Suite 84: MCP as a Tool Source (schema, lifecycle guards, authorize, bundle field)" "suite-84-mcp-tools.sh"
 run_suite "Suite 85: MCP Phase 2 (health/list_changed/identity)" "suite-85-mcp-phase2.sh"
+run_suite "Suite 86: Credential Provider (Decision 31)" "suite-86-credential-provider.sh"
+run_suite "Suite 87: MCP external OAuth 2.1 (WS-2)" "suite-87-mcp-oauth.sh"
 
 # ── Global Safety-Net Cleanup ─────────────────────────────────────────────────
 # Catches leaked test artifacts from crashed suites (best-effort, never fails run)
