@@ -56,7 +56,7 @@ def _read_proxy_token() -> str:
     return token
 
 
-async def discover_server(server_id) -> dict:
+async def discover_server(server_id, user_sub: str | None = None) -> dict:
     """Call the MCP Proxy's ``POST /internal/discover`` for ``server_id``.
 
     Returns the parsed ``McpDiscoverResponse`` dict (keys: ``ok``, ``status``,
@@ -64,14 +64,24 @@ async def discover_server(server_id) -> dict:
     for any HTTP ``200`` — including an ``ok:false`` error body.
 
     Raises ``RuntimeError`` on a transport failure or any non-``200`` response.
+
+    ``user_sub`` (Phase 4 WS-2, C9): the authorizing user for an OAuth external server.
+    When set, it is threaded into the request body as ``user_sub`` (matching the proxy's
+    ``McpDiscoverRequest.user_sub``, added in P7/P8) so the proxy fetches THAT user's
+    OAuth access token for the discovery ``tools/list``. Left ``None`` for every existing
+    caller (register / ``/sync`` / ``/list-changed``) → the key is OMITTED and the wire
+    request is byte-identical to Phase 2 (a static server ignores it either way).
     """
     token = _read_proxy_token()
     url = settings.mcp_proxy_url.rstrip("/") + "/internal/discover"
+    body: dict = {"server_id": str(server_id)}
+    if user_sub is not None:
+        body["user_sub"] = user_sub
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
                 url,
-                json={"server_id": str(server_id)},
+                json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.HTTPError as exc:
@@ -93,7 +103,7 @@ async def discover_server(server_id) -> dict:
     return resp.json()
 
 
-async def health_check_server(server_id) -> dict:
+async def health_check_server(server_id, user_sub: str | None = None) -> dict:
     """Call the MCP Proxy's ``POST /internal/health`` for ``server_id`` (WS-A).
 
     The health probe reuses the pooled upstream session and issues a lightweight
@@ -109,14 +119,22 @@ async def health_check_server(server_id) -> dict:
 
     Mirrors ``discover_server`` exactly: same fresh SA-token read (the projected
     token rotates ~hourly), same URL base, same timeout, same error mapping.
+
+    ``user_sub`` (Phase 4 WS-2, C9): for an OAuth external server the health loop passes
+    the most-recently-authorized user's sub (mcp_health.py) so the proxy probes AS that
+    user's token. Omitted (``None``) for every static/internal server → byte-identical
+    Phase-2 wire request.
     """
     token = _read_proxy_token()
     url = settings.mcp_proxy_url.rstrip("/") + "/internal/health"
+    body: dict = {"server_id": str(server_id)}
+    if user_sub is not None:
+        body["user_sub"] = user_sub
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.post(
                 url,
-                json={"server_id": str(server_id)},
+                json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.HTTPError as exc:

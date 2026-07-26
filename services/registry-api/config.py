@@ -110,6 +110,46 @@ class Settings(BaseSettings):
     mcp_list_changed_min_resync_interval_seconds: int = 10
 
     # ------------------------------------------------------------------ #
+    # MCP OAuth 2.1 for external servers (Phase 4 WS-2)                    #
+    # ------------------------------------------------------------------ #
+    # The redirect URI registered with every upstream authorization server and
+    # sent as `redirect_uri` in the authorize + token-exchange requests. This is
+    # the public URL of the callback endpoint
+    # (GET /api/v1/mcp-servers/oauth/callback). Empty → the authorize endpoint
+    # 409s `oauth_not_configured` (OAuth cannot run without a registered redirect).
+    mcp_oauth_callback_url: str = ""
+    # Base URL of Studio (the SPA) the callback 302-redirects the browser back to,
+    # e.g. "https://studio.example.com". The callback lands on
+    # `{studio_base_url}/mcp-servers/{id}?oauth=connected|denied|invalid_state|error`.
+    # NEVER carries the token/code — only the `?oauth=` outcome flag.
+    studio_base_url: str = ""
+    # TTL (seconds) of the Fernet-encrypted `state` that carries {server_id,
+    # user_sub, code_verifier} across the upstream redirect. Kept short — the value
+    # is dead ~60s after the redirect. Passed to mcp_oauth.make_state(..., ttl).
+    mcp_oauth_state_ttl_seconds: int = 600
+    # ── Internal OAuth access-token endpoint auth (Phase 4 WS-2, T010) ──
+    # POST /api/v1/internal/mcp/oauth/access-token is the ONE internal MCP endpoint
+    # that authenticates its caller — it hands out a live OAuth *access token* (a
+    # bearer), so it TokenReviews the proxy's projected SA token and pins the subject.
+    #
+    # `mcp_proxy_sa_audience` — the audience the mcp-proxy's projected SA token carries
+    #   when it calls registry-api (the RECIPIENT identity = registry-api, mirroring how
+    #   registry-api's token to the proxy carries audience `agentshield-mcp-proxy`). The
+    #   endpoint runs TokenReview with spec.audiences=[this] and requires it in
+    #   status.audiences — a token minted for a different audience fails (401). This is
+    #   the value the proxy's projected-token volume (T014) is minted with; the proxy
+    #   verifies the symmetric direction with MCP_PROXY_AUDIENCE=agentshield-mcp-proxy.
+    mcp_proxy_sa_audience: str = "agentshield-registry-api"
+    # `mcp_proxy_sa_subject` — the ONLY caller allowed a bearer from that endpoint. The
+    #   TokenReview'd subject (status.user.username) MUST equal this exact SA subject,
+    #   else 403. Derived as system:serviceaccount:{release-namespace}:{release}-mcp-proxy
+    #   (default release `agentshield` in ns `agentshield-platform`). This is the mirror
+    #   of the proxy's REGISTRY_API_SA_SUBJECT pin.
+    mcp_proxy_sa_subject: str = (
+        "system:serviceaccount:agentshield-platform:agentshield-mcp-proxy"
+    )
+
+    # ------------------------------------------------------------------ #
     # Server                                                               #
     # ------------------------------------------------------------------ #
     port: int = 8000

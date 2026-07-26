@@ -39,10 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from auth_middleware import get_optional_user
+from credential_provider import CredentialRef, get_provider
 from db import get_db
 from mcp_discovery import _materialize_and_discover
 from mcp_secrets import delete_server_secret, materialize_server_secret
-from models import Agent, AgentTool, AuthConfig, MCPServer, Tool
+from models import Agent, AgentTool, AuthConfig, MCPOAuthGrant, MCPServer, Tool
 from schemas import (
     MCPServerCreate,
     MCPServerDetailResponse,
@@ -257,6 +258,22 @@ async def update_mcp_server(
             ),
         )
 
+    # OAuth is external-only (Phase 4 WS-2). Check the MERGED external_auth_mode against
+    # the merged is_external so PATCH-ing one without the other can't produce the illegal
+    # oauth+internal state. oauth ⇒ external ⇒ identity_mode='none' (enforced above), so
+    # no separate identity check is needed here.
+    merged_external_auth = updates.get(
+        "external_auth_mode", server.external_auth_mode
+    )
+    if merged_external_auth == "oauth" and not merged_is_external:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "external_auth_mode='oauth' requires is_external=true "
+                "(OAuth is an external-server upstream-auth concept)"
+            ),
+        )
+
     # Does this edit change anything the credential Secret's `connection` blob carries?
     secret_stale = any(
         field in updates and updates[field] != getattr(server, field)
@@ -352,6 +369,25 @@ async def delete_mcp_server(
             },
         )
 
+    # OAuth cleanup (Phase 4 WS-2): the mcp_oauth_grants rows are dropped by the
+    # ON DELETE CASCADE FK when the server row goes, BUT the refresh tokens + the DCR
+    # client secret behind their CredentialRefs live in the provider store (a different
+    # table / AWS SM) which the FK cannot reach. Collect the refs NOW (while the rows
+    # exist), then provider.delete them after the DB delete commits.
+    oauth_refs: list[str] = [
+        ref
+        for (ref,) in (
+            await db.execute(
+                select(MCPOAuthGrant.credential_ref).where(
+                    MCPOAuthGrant.server_id == server_id,
+                    MCPOAuthGrant.credential_ref.is_not(None),
+                )
+            )
+        ).all()
+    ]
+    if server.oauth_client_ref:
+        oauth_refs.append(server.oauth_client_ref)
+
     # Unbound → delete every child Tool row (Tool.mcp_server_id FK has no cascade, so
     # the children must go BEFORE the server), then the server, then the Secret.
     child_tools = (
@@ -362,7 +398,18 @@ async def delete_mcp_server(
     await db.delete(server)
     await db.commit()
 
-    # External artifact — remove only after the DB delete committed (a rolled-back DB
-    # delete must not leave the Secret gone). 404 on the Secret is a no-op.
+    # External artifacts — remove only after the DB delete committed (a rolled-back DB
+    # delete must not leave them gone). 404 on the Secret is a no-op.
     await delete_server_secret(server_id)
+    # provider.delete is idempotent (absent ref = no-op); a failure here must not fail the
+    # (already committed) server delete — the ref rows are already gone via the cascade.
+    provider = get_provider()
+    for ref in oauth_refs:
+        try:
+            await provider.delete(CredentialRef.parse(ref))
+        except Exception as exc:  # noqa: BLE001 — best-effort external cleanup
+            logger.warning(
+                "mcp_servers: failed to delete OAuth credential ref %s for server %s: %s",
+                ref, server_id, exc,
+            )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

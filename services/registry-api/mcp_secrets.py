@@ -128,6 +128,13 @@ async def materialize_server_secret(db: AsyncSession, server: MCPServer) -> None
         "owner_team": server.owner_team,
         "identity_mode": server.identity_mode,
         "identity_audience": identity_audience,
+        # WS-2 (Phase 4): the proxy reads this to take the OAuth branch in
+        # resolve_headers (fetch a per-user access token) instead of the static
+        # auth_headers. A Secret that predates WS-2 lacks the key → the proxy defaults
+        # external_auth_mode="static" → byte-identical Phase-2 behaviour. Mirrors how
+        # identity_mode is surfaced above (the Secret is the proxy's only server-metadata
+        # channel — it never reads the DB).
+        "external_auth_mode": server.external_auth_mode,
     }
 
     auth_headers: dict[str, str] = {}

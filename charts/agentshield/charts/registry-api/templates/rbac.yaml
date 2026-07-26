@@ -30,3 +30,35 @@ roleRef:
   kind: ClusterRole
   name: {{ include "registry-api.fullname" . }}-secret-manager
   apiGroup: rbac.authorization.k8s.io
+---
+# ClusterRole: TokenReview only (Phase 4 WS-2 / T010). NEW this phase — registry-api
+# never needed TokenReview before. The internal OAuth access-token endpoint
+# (POST /api/v1/internal/mcp/oauth/access-token) hands out a live bearer, so it
+# authenticates the mcp-proxy caller by creating a TokenReview and pinning the subject.
+# Scoped to `tokenreviews: create` ONLY (the TokenReview half of the built-in
+# system:auth-delegator, nothing broader) — mirrors the mcp-proxy's grant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "registry-api.fullname" . }}-tokenreview
+  labels:
+    {{- include "registry-api.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "registry-api.fullname" . }}-tokenreview
+  labels:
+    {{- include "registry-api.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "registry-api.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "registry-api.fullname" . }}-tokenreview
+  apiGroup: rbac.authorization.k8s.io

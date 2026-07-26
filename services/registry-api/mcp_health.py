@@ -71,6 +71,8 @@ async def _probe_and_apply(session, server) -> bool:
     iff ``status`` or ``health_detail`` changed. Never writes ``last_synced_at``.
     """
     from mcp_proxy_client import health_check_server
+    from models import MCPOAuthGrant
+    from sqlalchemy import select
 
     key = str(server.id)
     prev = dict(server.health_detail or {})
@@ -80,12 +82,46 @@ async def _probe_and_apply(session, server) -> bool:
     schema_drift = list(prev.get("schema_drift") or [])
     threshold = settings.mcp_health_failure_threshold
 
+    # Phase 4 WS-2 (C9): an OAuth external server can only be probed AS an authorized
+    # user — the proxy needs a per-user token to reach it. Probe AS the most-recently-
+    # authorized user (updated_at desc). With NO authorized grant, an OAuth server is
+    # simply "not yet connected", NOT an error: reflect a needs_auth-style state WITHOUT
+    # hitting the proxy (an unauthenticated OAuth probe would only fail closed) and
+    # without incrementing failures / triggering backoff. The static/internal path
+    # (external_auth_mode != 'oauth') is unchanged: probe_user_sub stays None.
+    probe_user_sub: str | None = None
+    if server.external_auth_mode == "oauth":
+        probe_user_sub = (
+            await session.execute(
+                select(MCPOAuthGrant.user_sub)
+                .where(
+                    MCPOAuthGrant.server_id == server.id,
+                    MCPOAuthGrant.status == "authorized",
+                )
+                .order_by(MCPOAuthGrant.updated_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if probe_user_sub is None:
+            new_status = "disconnected"
+            new_hd = {
+                "last_error": None,
+                "last_success_at": prev.get("last_success_at"),
+                "consecutive_failures": 0,
+                "schema_drift": schema_drift,
+                "oauth": "needs_auth",
+            }
+            _backoff_skip.pop(key, None)  # not a failure — no backoff to keep
+            server.status = new_status
+            server.health_detail = new_hd
+            return new_status != prev_status or new_hd != prev
+
     # A RuntimeError (transport / non-200 from the proxy) is a failed probe, not an
     # error to surface — treat it identically to a 200 ok=false body.
     ok = False
     reason: str | None = None
     try:
-        resp = await health_check_server(server.id)
+        resp = await health_check_server(server.id, user_sub=probe_user_sub)
         ok = bool(resp.get("ok"))
         if not ok:
             reason = resp.get("health_detail") or "health probe failed (no detail)"

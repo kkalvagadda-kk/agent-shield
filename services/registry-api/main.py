@@ -90,6 +90,7 @@ from routers.memory import router as memory_router
 from routers.internal import router as internal_router
 from routers.internal_mcp import router as internal_mcp_router
 from routers.mcp_servers import router as mcp_servers_router
+from routers.mcp_oauth import router as mcp_oauth_router
 from routers.events import router as events_router
 from routers.observability import router as observability_router
 from routers.knowledge import router as knowledge_router
@@ -259,6 +260,11 @@ def create_app() -> FastAPI:
 
     # --- MCP Servers router (MCP-as-tool-source: register→discover→bind CRUD + /sync) ---
     app.include_router(mcp_servers_router)
+
+    # --- MCP OAuth 2.1 dance (Phase 4 WS-2: authorize/callback/status/disconnect) ---
+    # Shares the /api/v1/mcp-servers prefix; the literal /oauth/callback + /{id}/oauth/*
+    # paths are deeper than mcp_servers' /{server_id}, so there is no route shadowing.
+    app.include_router(mcp_oauth_router)
 
     # --- Agent events router (Phase 9: event gateway webhook log) ---
     app.include_router(events_router)

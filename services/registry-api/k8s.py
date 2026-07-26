@@ -108,6 +108,37 @@ async def delete_secret(name: str, namespace: str) -> None:
     await asyncio.to_thread(_delete_secret_sync, name, namespace)
 
 
+# ---------------------------------------------------------------------------
+# AuthN — TokenReview (Phase 4 WS-2, T010)
+# ---------------------------------------------------------------------------
+# Used ONLY by the internal OAuth access-token endpoint
+# (routers/internal_mcp.py::oauth_access_token), the one internal MCP endpoint that
+# hands out a bearer and therefore must authenticate its caller. Mirrors the
+# mcp-proxy's k8s_client.create_token_review. Requires the registry-api SA to hold a
+# cluster-scoped `tokenreviews: create` grant (charts/.../registry-api/templates/
+# rbac.yaml) — a NEW grant this phase (registry-api never needed TokenReview before).
+def _create_token_review_sync(token: str, audience: str):
+    _init_k8s()
+    api = client.AuthenticationV1Api()
+    review = client.V1TokenReview(
+        spec=client.V1TokenReviewSpec(token=token, audiences=[audience])
+    )
+    # create_token_review is a subresource create → needs `tokenreviews: create`.
+    return api.create_token_review(review)
+
+
+async def create_token_review(token: str, audience: str):
+    """Run an audience-scoped K8s TokenReview for a bearer token.
+
+    Returns the V1TokenReview whose ``.status`` carries ``authenticated`` /
+    ``audiences`` / ``user`` (``user.username`` = ``system:serviceaccount:<ns>:<sa>``).
+    Raises ``kubernetes.client.rest.ApiException`` on a TokenReview *API* error (not an
+    auth verdict — the caller maps that to 401). Runs the blocking k8s client in a
+    thread to keep the event loop free.
+    """
+    return await asyncio.to_thread(_create_token_review_sync, token, audience)
+
+
 def apply_configmap(namespace: str, name: str, data: dict[str, str]) -> None:
     """Create or replace a K8s ConfigMap (synchronous — call from asyncio.to_thread if needed)."""
     _init_k8s()

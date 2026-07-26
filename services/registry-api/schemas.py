@@ -867,6 +867,10 @@ class MCPServerCreate(BaseModel):
     is_external: bool = False
     transport_config: dict[str, Any] | None = None
     scan_results: bool = True
+    # OAuth 2.1 upstream auth (Phase 4 WS-2). ORTHOGONAL to identity_mode: an OAuth
+    # server is always external, and an external server always has identity_mode='none',
+    # so oauth ⇒ external ⇒ identity_mode='none' (no separate identity check needed).
+    external_auth_mode: str = Field("static", pattern="^(static|oauth)$")
 
     @model_validator(mode="after")
     def _check_identity_and_transport(self) -> "MCPServerCreate":
@@ -876,6 +880,11 @@ class MCPServerCreate(BaseModel):
             raise ValueError(
                 "an external server must use identity_mode='none' "
                 "(identity modes are an internal-server concept)"
+            )
+        if self.external_auth_mode == "oauth" and not self.is_external:
+            raise ValueError(
+                "external_auth_mode='oauth' requires is_external=true "
+                "(OAuth is an external-server upstream-auth concept)"
             )
         return self
 
@@ -900,6 +909,7 @@ class MCPServerUpdate(BaseModel):
     is_external: bool | None = None
     transport_config: dict[str, Any] | None = None
     scan_results: bool | None = None
+    external_auth_mode: str | None = Field(None, pattern="^(static|oauth)$")
 
     @model_validator(mode="after")
     def _check_identity_and_transport(self) -> "MCPServerUpdate":
@@ -909,6 +919,15 @@ class MCPServerUpdate(BaseModel):
             raise ValueError(
                 "an external server must use identity_mode='none' "
                 "(identity modes are an internal-server concept)"
+            )
+        # Partial-safe: only reject an obviously-illegal combo sent together in one
+        # payload (oauth + is_external explicitly false). The check on the MERGED
+        # post-update state (oauth against the current row's is_external) is the
+        # router's job — mirrors the is_external/identity_mode split above.
+        if self.external_auth_mode == "oauth" and self.is_external is False:
+            raise ValueError(
+                "external_auth_mode='oauth' requires is_external=true "
+                "(OAuth is an external-server upstream-auth concept)"
             )
         return self
 
@@ -923,6 +942,7 @@ class MCPServerResponse(BaseModel):
     owner_team: str | None
     identity_mode: str
     is_external: bool
+    external_auth_mode: str
     transport_config: dict[str, Any] | None
     health_detail: dict[str, Any]
     list_changed_supported: bool

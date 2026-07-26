@@ -120,6 +120,37 @@ def auth_config_credential_ref(config_id) -> CredentialRef:
     )
 
 
+def mcp_oauth_refresh_ref(server_id, user_sub: str) -> CredentialRef:
+    """Canonical ``CredentialRef`` for a user's stored OAuth refresh token on one
+    external MCP server (Phase 4 WS-2).
+
+    Shape ``pg-fernet://credential-blobs/mcp-oauth-refresh/{server_id}/{user_sub}``
+    (data-model §1a). The pointer string is stored in
+    ``mcp_oauth_grants.credential_ref``; the refresh-token value lives behind the
+    provider, NEVER in a column. ``pg-fernet``-only this phase (WS-2); P3 makes the
+    scheme backend-aware (mirrors :func:`auth_config_credential_ref`).
+    """
+    return CredentialRef(
+        scheme=_SCHEME_PG_FERNET,
+        path=f"{_PG_FERNET_BLOB_PREFIX}mcp-oauth-refresh/{server_id}/{user_sub}",
+    )
+
+
+def mcp_oauth_client_ref(server_id) -> CredentialRef:
+    """Canonical ``CredentialRef`` for a server's DCR-registered OAuth client
+    credentials ``{client_id, client_secret?}`` (Phase 4 WS-2).
+
+    Shape ``pg-fernet://credential-blobs/mcp-oauth-client/{server_id}`` (data-model
+    §1a). The pointer string is stored in ``mcp_servers.oauth_client_ref``; the
+    client secret lives behind the provider. ``pg-fernet``-only this phase; P3 makes
+    the scheme backend-aware.
+    """
+    return CredentialRef(
+        scheme=_SCHEME_PG_FERNET,
+        path=f"{_PG_FERNET_BLOB_PREFIX}mcp-oauth-client/{server_id}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # FernetPgProvider — value → credential_blobs (Fernet, Postgres). Dev/default.
 # ---------------------------------------------------------------------------

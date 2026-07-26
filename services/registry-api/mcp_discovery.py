@@ -60,11 +60,20 @@ def _mark_server_error(server: MCPServer, reason: str) -> None:
 
 
 async def _materialize_and_discover(
-    db: AsyncSession, server: MCPServer, *, acknowledge_schema_drift: bool
+    db: AsyncSession,
+    server: MCPServer,
+    *,
+    acknowledge_schema_drift: bool,
+    user_sub: str | None = None,
 ) -> dict:
     """Shared register / sync core (contract POST steps 3-7 + the /sync vanished-tool
     and schema-drift passes). Mutates `server` and its child `Tool` rows in the session
     (caller commits). Returns the sync counters.
+
+    ``user_sub`` (Phase 4 WS-2, C9): the authorizing user for an OAuth external server,
+    threaded into ``discover_server`` so the proxy lists tools AS that user's OAuth token.
+    The OAuth callback (``routers/mcp_oauth.py``) passes it; register / ``/sync`` /
+    ``/list-changed`` leave it ``None`` → byte-identical Phase-2 discovery.
     """
     counters = {
         "tools_added": 0,
@@ -92,9 +101,10 @@ async def _materialize_and_discover(
         return counters
 
     # (contract step 4) call the proxy. A RuntimeError (transport / 401/403/422/5xx) is
-    # treated identically to an ok:false body → status='error'.
+    # treated identically to an ok:false body → status='error'. ``user_sub`` (when set,
+    # OAuth callback path) tells the proxy which user's OAuth token to list AS (C9).
     try:
-        resp = await discover_server(server.id)
+        resp = await discover_server(server.id, user_sub=user_sub)
     except RuntimeError as exc:
         _mark_server_error(server, str(exc))
         return counters

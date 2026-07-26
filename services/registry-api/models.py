@@ -996,6 +996,10 @@ class MCPServer(Base):
             "status IN ('connected','disconnected','error')",
             name="ck_mcp_servers_status",
         ),
+        CheckConstraint(
+            "external_auth_mode IN ('static','oauth')",
+            name="ck_mcp_servers_external_auth_mode",
+        ),
     )
 
     # ── Lifecycle invariants (MCP-as-tool-source; docs/design/mcp-tool-source-architecture.md §3c/§8) ──
@@ -1065,6 +1069,20 @@ class MCPServer(Base):
     scan_results: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
+    # ── MCP OAuth 2.1 for external servers (migration 0074; Phase 4 WS-2) ──
+    # external_auth_mode: 'static'|'oauth'. ORTHOGONAL to identity_mode (which stays
+    # 'none' for any external server). Only meaningful when is_external=true — the
+    # MCPServerCreate/Update validators + the router reject 'oauth' with is_external=false.
+    # Surfaced to the proxy inside the per-server Secret `connection` JSON (T009) so the
+    # proxy learns "this server is OAuth" without a DB. Default keeps Phase-2 behavior.
+    external_auth_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'static'")
+    )
+    # oauth_client_ref: CredentialRef pointer (e.g.
+    # "pg-fernet://credential-blobs/mcp-oauth-client/{id}") to the DCR-registered client
+    # credentials {client_id, client_secret?}, per server. Null until the first authorize
+    # registers a client (RFC 7591 Dynamic Client Registration).
+    oauth_client_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1078,6 +1096,75 @@ class MCPServer(Base):
     )
     tools: Mapped[list[Tool]] = relationship(
         "Tool", back_populates="mcp_server", foreign_keys="Tool.mcp_server_id"
+    )
+    # Per-(server, user) OAuth grants. FK has ON DELETE CASCADE at the DB level
+    # (migration 0074); the ORM cascade mirrors it so deleting a server cleans up its
+    # grant rows. The refresh tokens behind each grant's credential_ref are deleted by
+    # the router (provider.delete), not the FK — see data-model §5.
+    oauth_grants: Mapped[list["MCPOAuthGrant"]] = relationship(
+        "MCPOAuthGrant",
+        back_populates="server",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# mcp_oauth_grants  (Phase 4 WS-2 — per-(server, user) OAuth grant record)
+# ---------------------------------------------------------------------------
+class MCPOAuthGrant(Base):
+    """A user's OAuth 2.1 authorization for one external MCP server (migration 0074).
+
+    One row per ``(server_id, user_sub)`` (the composite PK). Holds the **pointer** to
+    the refresh token (``credential_ref``, a CredentialRef path
+    ``…/mcp-oauth-refresh/{server_id}/{user_sub}``) — never the refresh token itself,
+    which lives behind the CredentialProvider (WS-1). The proxy never reads this table;
+    it pulls a fresh access token from registry-api's internal endpoint, which is the
+    single writer that refreshes-with-rotation (data-model §4).
+
+    ``status`` state machine: ``needs_auth`` → ``authorized`` (callback stored a refresh
+    token) → ``error`` (a refresh/exchange failed, ``invalid_grant`` = revoked/expired).
+    ``updated_at`` = last successful authorize/refresh, which drives the health-loop
+    "most-recently-authorized user" pick (C9).
+    """
+
+    __tablename__ = "mcp_oauth_grants"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('needs_auth','authorized','error')",
+            name="ck_mcp_oauth_grants_status",
+        ),
+        Index("idx_mcp_oauth_grants_server", "server_id"),
+    )
+
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        _UUID,
+        ForeignKey("mcp_servers.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # The Keycloak subject (jwt.sub) that consented. PK part 2.
+    user_sub: Mapped[str] = mapped_column(String(255), primary_key=True)
+    # CredentialRef pointer to this user's refresh token. Null in needs_auth.
+    credential_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=text("'needs_auth'")
+    )
+    # Space-delimited granted scopes, echoed from the token response.
+    scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Access-token expiry last observed (advisory; the proxy caches by this).
+    token_expires_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
+    # Last refresh/exchange failure reason (surfaces the "re-authorize" state).
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+    # Relationship
+    server: Mapped[MCPServer] = relationship(
+        "MCPServer", back_populates="oauth_grants"
     )
 
 
@@ -2311,6 +2398,7 @@ __all__ = [
     "PiiMapping",
     "AuthConfig",
     "MCPServer",
+    "MCPOAuthGrant",
     "Tool",
     "AgentTool",
     "LLMProvider",
