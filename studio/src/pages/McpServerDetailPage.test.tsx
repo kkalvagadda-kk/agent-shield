@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, useLocation } from "react-router-dom";
 import { renderWithProviders } from "../test/utils";
 import McpServerDetailPage from "./McpServerDetailPage";
 
@@ -10,13 +10,19 @@ vi.mock("../api/mcpServersApi", () => ({
   updateMcpServer: vi.fn(),
   syncMcpServer: vi.fn(),
   deleteMcpServer: vi.fn(),
+  startMcpOAuth: vi.fn(),
+  getMcpOAuthStatus: vi.fn(),
+  disconnectMcpOAuth: vi.fn(),
 }));
 vi.mock("../api/registryApi", () => ({
   listAuthConfigs: vi.fn().mockResolvedValue({ items: [], total: 0 }),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-import { getMcpServer, deleteMcpServer, syncMcpServer } from "../api/mcpServersApi";
+import {
+  getMcpServer, deleteMcpServer, syncMcpServer,
+  startMcpOAuth, getMcpOAuthStatus, disconnectMcpOAuth,
+} from "../api/mcpServersApi";
 import { toast } from "sonner";
 
 const mk = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -32,6 +38,7 @@ const DETAIL = {
   owner_team: "platform",
   identity_mode: "none",
   is_external: true,
+  external_auth_mode: "static",
   transport_config: null,
   health_detail: { last_error: null, last_success_at: NOW, consecutive_failures: 0, schema_drift: [] },
   list_changed_supported: false,
@@ -47,12 +54,22 @@ const DETAIL = {
   ],
 };
 
-function renderDetail() {
+// Prints the live route so the ?oauth= strip test can assert the query param was
+// removed (navigate replace) after the callback landing was handled.
+function LocationProbe() {
+  const loc = useLocation();
+  return <div data-testid="loc">{loc.pathname + loc.search}</div>;
+}
+
+function renderDetail(entries: string[] = ["/mcp-servers/srv-1"]) {
   return renderWithProviders(
-    <Routes>
-      <Route path="/mcp-servers/:id" element={<McpServerDetailPage />} />
-    </Routes>,
-    { routerEntries: ["/mcp-servers/srv-1"] }
+    <>
+      <LocationProbe />
+      <Routes>
+        <Route path="/mcp-servers/:id" element={<McpServerDetailPage />} />
+      </Routes>
+    </>,
+    { routerEntries: entries }
   );
 }
 
@@ -163,5 +180,123 @@ describe("McpServerDetailPage", () => {
     renderDetail();
 
     expect(await screen.findByText(/pending — Decision 29/)).toBeInTheDocument();
+  });
+
+  // --- Phase 4 (WS-2) — OAuth Connection panel ---------------------------
+  const OAUTH_SERVER = { ...DETAIL, external_auth_mode: "oauth", tools: [] };
+  const oauthStatus = (over: Record<string, unknown>) => ({
+    server_id: "srv-1",
+    user_sub: "user-1",
+    status: "needs_auth",
+    scopes: null,
+    token_expires_at: null,
+    last_error: null,
+    external_auth_mode: "oauth",
+    ...over,
+  });
+
+  it("does NOT render the OAuth panel for a static external server", async () => {
+    mk(getMcpServer).mockResolvedValue({ ...DETAIL, external_auth_mode: "static" });
+    renderDetail();
+
+    await screen.findByText("github-mcp__search_issues");
+    expect(screen.queryByText("OAuth Connection")).not.toBeInTheDocument();
+    // The status query is never even issued for a static server.
+    expect(getMcpOAuthStatus).not.toHaveBeenCalled();
+  });
+
+  it("does NOT render the OAuth panel for an internal server", async () => {
+    mk(getMcpServer).mockResolvedValue({ ...DETAIL, is_external: false, external_auth_mode: "static" });
+    renderDetail();
+
+    await screen.findByText("github-mcp__search_issues");
+    expect(screen.queryByText("OAuth Connection")).not.toBeInTheDocument();
+  });
+
+  it("renders an Authorize button when status='needs_auth'", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(oauthStatus({ status: "needs_auth" }));
+    renderDetail();
+
+    expect(await screen.findByText("OAuth Connection")).toBeInTheDocument();
+    expect(await screen.findByText("Needs authorization")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^authorize$/i })).toBeInTheDocument();
+    // No Connected badge / Disconnect while un-authorized.
+    expect(screen.queryByRole("button", { name: /disconnect/i })).not.toBeInTheDocument();
+  });
+
+  it("Authorize → startMcpOAuth → full-page redirect to authorization_url", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(oauthStatus({ status: "needs_auth" }));
+    mk(startMcpOAuth).mockResolvedValue({ authorization_url: "https://as.example.com/authorize?x=1" });
+
+    // Stub window.location so the href assignment is captured, not a real nav.
+    const loc = { href: "" };
+    vi.stubGlobal("location", loc);
+
+    const user = userEvent.setup();
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: /^authorize$/i }));
+
+    await waitFor(() => expect(startMcpOAuth).toHaveBeenCalledWith("srv-1"));
+    await waitFor(() => expect(loc.href).toBe("https://as.example.com/authorize?x=1"));
+    vi.unstubAllGlobals();
+  });
+
+  it("renders Connected + scopes/expiry + Disconnect when status='authorized'", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(
+      oauthStatus({ status: "authorized", scopes: "repo read:user", token_expires_at: NOW })
+    );
+    mk(disconnectMcpOAuth).mockResolvedValue(undefined);
+
+    const user = userEvent.setup();
+    renderDetail();
+
+    // Scopes are unique to the OAuth panel, so findByText waits for its query.
+    expect(await screen.findByText("repo read:user")).toBeInTheDocument();
+    // The Connected badge lives inside the OAuth Connection card (the Health pill
+    // also reads "Connected", so scope the assertion to disambiguate).
+    const oauthCard = screen.getByText("OAuth Connection").closest(".card") as HTMLElement;
+    expect(within(oauthCard).getByText("Connected")).toBeInTheDocument();
+
+    await user.click(within(oauthCard).getByRole("button", { name: /disconnect/i }));
+    await waitFor(() => expect(disconnectMcpOAuth).toHaveBeenCalledWith("srv-1"));
+  });
+
+  it("renders the last_error + a Re-authorize button when status='error'", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(
+      oauthStatus({ status: "error", last_error: "token exchange failed" })
+    );
+    renderDetail();
+
+    expect(await screen.findByText("token exchange failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-authorize/i })).toBeInTheDocument();
+  });
+
+  it("?oauth=connected landing toasts success and strips the param (no re-toast on reload)", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(oauthStatus({ status: "authorized", scopes: "repo" }));
+    renderDetail(["/mcp-servers/srv-1?oauth=connected"]);
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith("Connected."));
+    // The param is stripped so a reload can't re-fire the toast.
+    await waitFor(() =>
+      expect(screen.getByTestId("loc")).toHaveTextContent("/mcp-servers/srv-1")
+    );
+    expect(screen.getByTestId("loc").textContent).not.toContain("oauth=connected");
+    expect(mk(toast.success).mock.calls.length).toBe(1);
+  });
+
+  it("?oauth=denied landing toasts an error and strips the param", async () => {
+    mk(getMcpServer).mockResolvedValue(OAUTH_SERVER);
+    mk(getMcpOAuthStatus).mockResolvedValue(oauthStatus({ status: "needs_auth" }));
+    renderDetail(["/mcp-servers/srv-1?oauth=denied"]);
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/denied/i)));
+    await waitFor(() =>
+      expect(screen.getByTestId("loc").textContent).not.toContain("oauth=denied")
+    );
   });
 });

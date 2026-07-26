@@ -29,6 +29,7 @@ const SERVER = {
   owner_team: "platform",
   identity_mode: "none",
   is_external: true,
+  external_auth_mode: "static",
   transport_config: null,
   health_detail: { last_error: null, last_success_at: NOW, consecutive_failures: 0, schema_drift: [] },
   list_changed_supported: false,
@@ -102,6 +103,81 @@ describe("McpServersPage", () => {
     await user.click(screen.getByRole("button", { name: /^register$/i }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("MCP server name already taken"));
+  });
+
+  // --- Phase 4 (WS-2) — register modal OAuth toggle ----------------------
+  it("hides the credential picker + sends external_auth_mode='oauth' when the OAuth toggle is on", async () => {
+    mk(listMcpServers).mockResolvedValue([]);
+    mk(createMcpServer).mockResolvedValue({ ...SERVER, id: "srv-oauth", external_auth_mode: "oauth", discovered_tool_count: 0 });
+
+    const user = userEvent.setup();
+    renderWithProviders(<McpServersPage />);
+    await screen.findByText(/No MCP servers registered yet/i);
+
+    await user.click(screen.getByRole("button", { name: /register server/i }));
+    await user.type(screen.getByPlaceholderText("github-mcp"), "oauth-mcp");
+    await user.type(screen.getByPlaceholderText("https://mcp.example.com/mcp"), "https://mcp.example.com/mcp");
+
+    // The OAuth toggle appears only after External is picked.
+    expect(screen.queryByLabelText(/OAuth 2.1 authorization/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "External" }));
+    // Credential picker is present for external + static…
+    expect(screen.getByLabelText("Credential")).toBeInTheDocument();
+
+    // Turn OAuth on → credential picker disappears (OAuth replaces the static cred).
+    await user.click(screen.getByLabelText(/OAuth 2.1 authorization/i));
+    expect(screen.queryByLabelText("Credential")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^register$/i }));
+
+    await waitFor(() =>
+      expect(createMcpServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "oauth-mcp",
+          is_external: true,
+          external_auth_mode: "oauth",
+        })
+      )
+    );
+    // No static credential is sent alongside an OAuth server.
+    expect(mk(createMcpServer).mock.calls[0][0]).not.toHaveProperty("auth_config_id");
+  });
+
+  it("sends external_auth_mode='static' + keeps the credential picker for an external non-OAuth server", async () => {
+    mk(listMcpServers).mockResolvedValue([]);
+    mk(createMcpServer).mockResolvedValue({ ...SERVER, id: "srv-ext", external_auth_mode: "static" });
+
+    const user = userEvent.setup();
+    renderWithProviders(<McpServersPage />);
+    await screen.findByText(/No MCP servers registered yet/i);
+
+    await user.click(screen.getByRole("button", { name: /register server/i }));
+    await user.type(screen.getByPlaceholderText("github-mcp"), "ext-mcp");
+    await user.type(screen.getByPlaceholderText("https://mcp.example.com/mcp"), "https://x/mcp");
+    await user.click(screen.getByRole("radio", { name: "External" }));
+
+    // OAuth left OFF → the credential picker stays visible.
+    expect(screen.getByLabelText("Credential")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^register$/i }));
+
+    await waitFor(() =>
+      expect(createMcpServer).toHaveBeenCalledWith(
+        expect.objectContaining({ is_external: true, external_auth_mode: "static" })
+      )
+    );
+  });
+
+  it("never shows the OAuth toggle for an internal server", async () => {
+    mk(listMcpServers).mockResolvedValue([]);
+
+    const user = userEvent.setup();
+    renderWithProviders(<McpServersPage />);
+    await screen.findByText(/No MCP servers registered yet/i);
+
+    await user.click(screen.getByRole("button", { name: /register server/i }));
+    // Default scope is Internal — no OAuth toggle, credential picker present.
+    expect(screen.queryByLabelText(/OAuth 2.1 authorization/i)).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Credential")).toBeInTheDocument();
   });
 
   it("registers, then a fresh list GET re-render shows the server (save → reload)", async () => {

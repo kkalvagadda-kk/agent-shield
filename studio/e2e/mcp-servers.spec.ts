@@ -56,6 +56,7 @@ const SERVER_URL =
 test.describe("MCP servers — register → discover → bind (Studio UI)", () => {
   let api: APIRequestContext;
   let serverId = "";
+  let oauthServerId = ""; // WS-2: the External+OAuth server registered by the OAuth test.
   // Discovery results captured by the persistence test, read by the infra-gated
   // discover + bind tests below.
   let discoveredToolCount = 0;
@@ -74,6 +75,7 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
       // Delete the agent first (a bound tool would 409-block the server delete).
       await api.delete(`/api/v1/agents/${AGENT_NAME}`).catch(() => {});
       if (serverId) await api.delete(`/api/v1/mcp-servers/${serverId}`).catch(() => {});
+      if (oauthServerId) await api.delete(`/api/v1/mcp-servers/${oauthServerId}`).catch(() => {});
       await api.dispose().catch(() => {});
     }
   });
@@ -286,5 +288,104 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await expect(
       health.getByText(/none|service_identity|on_behalf_of/).first()
     ).toBeVisible();
+  });
+
+  // T016 (Phase 4 / WS-2) — the OAuth authorize journey. Registers an External +
+  // OAuth server through the REAL modal (real POST, real persist), then drives the
+  // OAuth panel: Authorize fires POST …/oauth/authorize and the browser ATTEMPTS the
+  // redirect to the returned authorization_url. The upstream AS + token exchange are
+  // out of the harness's control (same boundary the bash suites accept), so the
+  // authorize/status endpoints are stubbed deterministically (the contract sanctions
+  // "stub the status to authorized"). Save→reload→assert: after the ?oauth=connected
+  // callback landing, reload the detail page and assert the Connected badge.
+  test("register External+OAuth → Authorize attempts the redirect → callback lands Connected", async ({ page }) => {
+    test.setTimeout(120_000);
+    const OAUTH_NAME = `e2e-mcp-oauth-${TS}`;
+
+    // ── Deterministic OAuth surface (the AS is unreachable here). status starts
+    //    needs_auth, flips to authorized once the callback is simulated.
+    let authorized = false;
+    const AUTH_URL = "https://as.e2e.invalid/authorize?state=e2e";
+    // Stub the third-party consent page so the real redirect doesn't hit DNS.
+    await page.route("**/as.e2e.invalid/**", (route) =>
+      route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>stub consent</body></html>" })
+    );
+    await page.route("**/api/v1/mcp-servers/*/oauth/authorize", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ authorization_url: AUTH_URL }),
+      })
+    );
+    await page.route("**/api/v1/mcp-servers/*/oauth/status", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          server_id: oauthServerId || "pending",
+          user_sub: "e2e",
+          status: authorized ? "authorized" : "needs_auth",
+          scopes: authorized ? "repo read:user" : null,
+          token_expires_at: null,
+          last_error: null,
+          external_auth_mode: "oauth",
+        }),
+      })
+    );
+
+    // ── 1. Register an External + OAuth server through the modal (real POST).
+    await page.goto("/mcp-servers");
+    await page.waitForLoadState("networkidle");
+    await page.getByRole("button", { name: /Register Server/i }).click();
+    await expect(page.getByRole("heading", { name: "Register MCP Server" })).toBeVisible();
+    await page.locator("#mcp-name").fill(OAUTH_NAME);
+    await page.locator("#mcp-url").fill(SERVER_URL);
+    await page.getByRole("radio", { name: "External" }).check();
+    // The OAuth toggle appears for external servers; checking it hides the cred picker.
+    await page.getByLabel(/OAuth 2.1 authorization/i).check();
+    await expect(page.getByLabel("Credential")).toHaveCount(0);
+
+    const createResp = page.waitForResponse(
+      (r) => /\/api\/v1\/mcp-servers\/$/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 30_000 }
+    );
+    await page.getByRole("button", { name: "Register", exact: true }).click();
+    const created = await createResp;
+    expect(created.status()).toBe(201);
+    const createdBody = await created.json();
+    oauthServerId = createdBody.id as string;
+    expect(oauthServerId).toBeTruthy();
+    expect(createdBody.external_auth_mode).toBe("oauth");
+
+    // ── 2. Land on detail → the OAuth Connection panel shows Authorize (needs_auth).
+    await expect(page).toHaveURL(new RegExp(`/mcp-servers/${oauthServerId}$`), { timeout: 15_000 });
+    const oauthCard = page.locator(".card").filter({ hasText: "OAuth Connection" });
+    await expect(oauthCard).toBeVisible({ timeout: 15_000 });
+    const authorizeBtn = oauthCard.getByRole("button", { name: /^authorize$/i });
+    await expect(authorizeBtn).toBeVisible();
+
+    // ── 3. Authorize → POST …/oauth/authorize returns an authorization_url, and the
+    //       browser ATTEMPTS the redirect (window.location.href = authorization_url).
+    //       We assert the network call fired + the URL; we do NOT follow the consent.
+    const authResp = page.waitForResponse(
+      (r) => /\/oauth\/authorize$/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 20_000 }
+    );
+    await authorizeBtn.click();
+    const auth = await authResp;
+    expect(auth.status()).toBe(200);
+    expect((await auth.json()).authorization_url).toBe(AUTH_URL);
+    // The redirect was attempted — the browser is now on the stubbed consent page.
+    await expect(page).toHaveURL(/as\.e2e\.invalid/, { timeout: 15_000 });
+
+    // ── 4. Simulate the callback landing + save→reload→assert: flip the stub to
+    //       authorized, land on ?oauth=connected, then RELOAD and assert Connected.
+    authorized = true;
+    await page.goto(`/mcp-servers/${oauthServerId}?oauth=connected`);
+    // The param is stripped after handling (no re-toast on reload).
+    await expect(page).toHaveURL(new RegExp(`/mcp-servers/${oauthServerId}$`), { timeout: 15_000 });
+    await page.goto(`/mcp-servers/${oauthServerId}`);
+    const reloadedCard = page.locator(".card").filter({ hasText: "OAuth Connection" });
+    await expect(reloadedCard.getByText("Connected")).toBeVisible({ timeout: 15_000 });
   });
 });

@@ -11,16 +11,17 @@
 // failed register/sync is not an API error, it's an unhealthy server row.
 // ---------------------------------------------------------------------------
 
-import { useMemo, useState } from "react";
-import { Link, useParams, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Server, Wrench, Trash2, RotateCw, Loader2, AlertCircle, ExternalLink,
-  Activity, CheckCircle2,
+  Activity, CheckCircle2, KeyRound, Unlink,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   getMcpServer, updateMcpServer, syncMcpServer, deleteMcpServer,
+  startMcpOAuth, getMcpOAuthStatus, disconnectMcpOAuth,
   type McpServerTool, type McpIdentityMode,
 } from "../api/mcpServersApi";
 import { listAuthConfigs } from "../api/registryApi";
@@ -61,6 +62,8 @@ export default function McpServerDetailPage() {
   const { id } = useParams();
   const serverId = id ?? "";
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<Tab>("tools");
 
   const { data: server, isLoading } = useQuery({
@@ -71,6 +74,29 @@ export default function McpServerDetailPage() {
     // changes without a manual reload (FR-MCP-22 "surface in Studio").
     refetchInterval: 15000,
   });
+
+  // OAuth callback landing (WS-2): the server-side callback 302s back here with
+  // ?oauth=connected|denied|invalid_state|error. Toast the outcome, invalidate the
+  // grant + server queries so the panel reflects the new grant, then STRIP the
+  // param (replace) so a reload doesn't re-toast.
+  const oauthResult = searchParams.get("oauth");
+  useEffect(() => {
+    if (!oauthResult || !serverId) return;
+    if (oauthResult === "connected") {
+      toast.success("Connected.");
+    } else {
+      const messages: Record<string, string> = {
+        denied: "Authorization was denied.",
+        invalid_state:
+          "Authorization could not be verified (expired or tampered request). Please try again.",
+        error: "Authorization failed. Please try again.",
+      };
+      toast.error(messages[oauthResult] ?? "Authorization failed.");
+    }
+    qc.invalidateQueries({ queryKey: ["mcp-oauth-status", serverId] });
+    qc.invalidateQueries({ queryKey: ["mcp-server", serverId] });
+    navigate(`/mcp-servers/${serverId}`, { replace: true });
+  }, [oauthResult, serverId, qc, navigate]);
 
   const syncMutation = useMutation({
     mutationFn: () => syncMcpServer(serverId),
@@ -142,6 +168,14 @@ export default function McpServerDetailPage() {
         </div>
       )}
 
+      {/* OAuth Connection — WS-2 (Phase 4): shown ONLY for an external server whose
+          external_auth_mode is "oauth". A static/internal server's detail page is
+          unchanged. The frontend only sees the consent URL + the status enum — never
+          a token. */}
+      {server?.is_external && server?.external_auth_mode === "oauth" && (
+        <OAuthConnectionPanel serverId={serverId} />
+      )}
+
       {/* Health — WS-A: live reachability + discovery + identity surface (Phase 2).
           Reads the already-fetched `server` (polled every 15s); no extra API call. */}
       <div className="card mb-6">
@@ -205,6 +239,117 @@ export default function McpServerDetailPage() {
         <ToolsTab tools={tools} onSync={() => syncMutation.mutate()} syncing={syncMutation.isPending} />
       )}
       {tab === "settings" && <SettingsTab serverId={serverId} />}
+    </div>
+  );
+}
+
+// OAuth Connection panel (WS-2 / Phase 4). Drives off GET …/oauth/status (its own
+// query, polled like Health). Authorize does a full-page redirect to the upstream
+// consent URL — the frontend NEVER completes the flow or touches a token itself.
+function OAuthConnectionPanel({ serverId }: { serverId: string }) {
+  const qc = useQueryClient();
+
+  const { data: oauth, isLoading } = useQuery({
+    queryKey: ["mcp-oauth-status", serverId],
+    queryFn: () => getMcpOAuthStatus(serverId),
+    enabled: !!serverId,
+    refetchInterval: 15000,
+  });
+
+  const authorizeMutation = useMutation({
+    mutationFn: () => startMcpOAuth(serverId),
+    onSuccess: (data) => {
+      // Full-page redirect to the AS's consent screen. The server-side callback
+      // finishes the exchange and 302s back to ?oauth=connected|error.
+      window.location.href = data.authorization_url;
+    },
+    onError: (err) => toast.error(mcpErrorMessage(err, "Could not start authorization.")),
+  });
+
+  const disconnectMutation = useMutation({
+    mutationFn: () => disconnectMcpOAuth(serverId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mcp-oauth-status", serverId] });
+      qc.invalidateQueries({ queryKey: ["mcp-server", serverId] });
+      toast.success("Disconnected.");
+    },
+    onError: (err) => toast.error(mcpErrorMessage(err, "Disconnect failed.")),
+  });
+
+  const authorized = oauth?.status === "authorized";
+  const errored = oauth?.status === "error";
+
+  return (
+    <div className="card mb-6">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <KeyRound size={14} className="text-slate-400" /> OAuth Connection
+        </h2>
+        {authorized ? (
+          <span className="badge inline-flex items-center gap-1 bg-green-100 text-green-700">
+            <CheckCircle2 size={12} /> Connected
+          </span>
+        ) : (
+          <span className="badge inline-flex items-center gap-1 bg-amber-100 text-amber-700">
+            <AlertCircle size={12} /> Needs authorization
+          </span>
+        )}
+      </div>
+
+      {isLoading ? (
+        <p className="text-sm text-slate-400">
+          <Loader2 size={14} className="inline animate-spin mr-1.5" /> Checking authorization…
+        </p>
+      ) : authorized ? (
+        <div className="space-y-3">
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2 text-sm">
+            <div className="flex items-center justify-between gap-4">
+              <dt className="text-slate-500">Scopes</dt>
+              <dd
+                className="text-slate-700 font-mono text-xs truncate max-w-[16rem]"
+                title={oauth?.scopes ?? undefined}
+              >
+                {oauth?.scopes || "—"}
+              </dd>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <dt className="text-slate-500">Expires</dt>
+              <dd className="text-slate-700">{fmtTs(oauth?.token_expires_at)}</dd>
+            </div>
+          </dl>
+          <div className="pt-3 border-t border-slate-100">
+            <button
+              onClick={() => disconnectMutation.mutate()}
+              disabled={disconnectMutation.isPending}
+              className="inline-flex items-center gap-1 text-sm text-red-600 hover:text-red-800 disabled:opacity-40"
+            >
+              {disconnectMutation.isPending
+                ? <Loader2 size={14} className="animate-spin" />
+                : <><Unlink size={14} /> Disconnect</>}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-500">
+            {errored
+              ? "Authorization failed — reconnect to grant access to this server's tools."
+              : "This server requires OAuth authorization. Connect your account to discover and call its tools."}
+          </p>
+          {errored && oauth?.last_error && (
+            <p className="text-xs text-red-600 font-mono">{oauth.last_error}</p>
+          )}
+          <button
+            onClick={() => authorizeMutation.mutate()}
+            disabled={authorizeMutation.isPending}
+            className="btn-primary"
+          >
+            {authorizeMutation.isPending
+              ? <Loader2 size={14} className="animate-spin" />
+              : <><KeyRound size={14} /> {errored ? "Re-authorize" : "Authorize"}</>}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

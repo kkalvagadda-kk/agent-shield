@@ -23,6 +23,9 @@ import { http, type Paginated } from "./registryApi";
 
 export type McpServerStatus = "connected" | "disconnected" | "error";
 export type McpIdentityMode = "none" | "on_behalf_of" | "service_identity";
+/** How an external server authenticates: `static` = a stored credential
+ *  (auth_config), `oauth` = per-user OAuth 2.1 grant (Phase 4 / WS-2). */
+export type McpExternalAuthMode = "static" | "oauth";
 
 /** `health_detail` JSONB — computed by the discover/sync path, never client-set. */
 export interface McpServerHealthDetail {
@@ -43,6 +46,9 @@ export interface McpServer {
   owner_team: string | null;
   identity_mode: string;
   is_external: boolean;
+  /** `static` (stored credential) or `oauth` (per-user OAuth 2.1 grant, WS-2).
+   *  Only meaningful for external servers; internal servers are always `static`. */
+  external_auth_mode: McpExternalAuthMode;
   transport_config: Record<string, unknown> | null;
   health_detail: McpServerHealthDetail;
   list_changed_supported: boolean;
@@ -84,6 +90,9 @@ export interface CreateMcpServerPayload {
   owner_team?: string;
   identity_mode?: McpIdentityMode;
   is_external?: boolean;
+  /** `oauth` (WS-2) makes the server authenticate via a per-user OAuth 2.1 grant
+   *  instead of a stored credential; requires `is_external`. Defaults to `static`. */
+  external_auth_mode?: McpExternalAuthMode;
   transport_config?: Record<string, unknown> | null;
   scan_results?: boolean;
 }
@@ -160,4 +169,49 @@ export const syncMcpServer = async (
  *  discovered tool is bound to an agent; 204 once unbound. */
 export const deleteMcpServer = async (id: string): Promise<void> => {
   await http.delete(`/mcp-servers/${id}`);
+};
+
+// ---------------------------------------------------------------------------
+// OAuth 2.1 (WS-2, Phase 4) — a per-user grant for `external_auth_mode="oauth"`
+// servers. The frontend only ever sees the upstream consent URL + the status
+// enum: NO token/secret is ever handled client-side. Field names mirror
+// `McpOAuthStatusResponse` in services/registry-api/routers/mcp_oauth.py.
+// ---------------------------------------------------------------------------
+
+export type McpOAuthStatusValue = "needs_auth" | "authorized" | "error";
+
+/** `McpOAuthStatusResponse` — the CALLER'S own grant status (keyed on jwt.sub);
+ *  never another user's, and never the token itself. */
+export interface McpOAuthStatus {
+  server_id: string;
+  user_sub: string;
+  status: McpOAuthStatusValue;
+  scopes: string | null;
+  token_expires_at: string | null;
+  last_error: string | null;
+  external_auth_mode: McpExternalAuthMode;
+}
+
+/** POST /mcp-servers/{id}/oauth/authorize → the upstream consent URL. The caller
+ *  does `window.location.href = authorization_url` to start the redirect; the
+ *  flow finishes at the server-side callback (302 back to `?oauth=…`). */
+export const startMcpOAuth = async (
+  id: string
+): Promise<{ authorization_url: string }> => {
+  const { data } = await http.post<{ authorization_url: string }>(
+    `/mcp-servers/${id}/oauth/authorize`,
+    {}
+  );
+  return data;
+};
+
+/** GET /mcp-servers/{id}/oauth/status → the caller's grant status for the badge. */
+export const getMcpOAuthStatus = async (id: string): Promise<McpOAuthStatus> => {
+  const { data } = await http.get<McpOAuthStatus>(`/mcp-servers/${id}/oauth/status`);
+  return data;
+};
+
+/** DELETE /mcp-servers/{id}/oauth → disconnect (revoke) the caller's grant. 204. */
+export const disconnectMcpOAuth = async (id: string): Promise<void> => {
+  await http.delete(`/mcp-servers/${id}/oauth`);
 };

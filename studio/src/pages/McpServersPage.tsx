@@ -149,6 +149,10 @@ function RegisterServerModal({ onClose }: { onClose: () => void }) {
   const [identityMode, setIdentityMode] = useState<McpIdentityMode>("none");
   const [authConfigId, setAuthConfigId] = useState("");
   const [scanResults, setScanResults] = useState(true);
+  // WS-2 (Phase 4): an external server can authenticate via a per-user OAuth 2.1
+  // grant instead of a stored credential. Only meaningful for external servers.
+  const [requiresOAuth, setRequiresOAuth] = useState(false);
+  const oauthEnabled = isExternal && requiresOAuth;
 
   const { data: authConfigsData } = useQuery({
     queryKey: ["auth-configs"],
@@ -167,15 +171,22 @@ function RegisterServerModal({ onClose }: { onClose: () => void }) {
         // it here so the payload is never a rejected combo.
         identity_mode: isExternal ? "none" : identityMode,
         scan_results: scanResults,
+        // OAuth (WS-2) is an external-only auth mode; it REPLACES the static
+        // credential, so we never send auth_config_id alongside it.
+        ...(isExternal ? { external_auth_mode: oauthEnabled ? "oauth" : "static" } : {}),
         ...(description.trim() ? { description: description.trim() } : {}),
         ...(ownerTeam.trim() ? { owner_team: ownerTeam.trim() } : {}),
-        ...(authConfigId ? { auth_config_id: authConfigId } : {}),
+        ...(authConfigId && !oauthEnabled ? { auth_config_id: authConfigId } : {}),
       };
       return createMcpServer(payload);
     },
     onSuccess: (server) => {
       qc.invalidateQueries({ queryKey: MCP_QUERY_KEY });
-      if (server.status === "error") {
+      if (server.external_auth_mode === "oauth") {
+        // Discovery needs a per-user token, so an OAuth server registers with 0
+        // tools until the user authorizes on the detail page (contract §3 / C9).
+        toast.success("Registered — authorize on the server page to discover its tools.");
+      } else if (server.status === "error") {
         toast.error(
           server.health_detail?.last_error
             ? `Registered, but discovery failed: ${server.health_detail.last_error}`
@@ -301,21 +312,44 @@ function RegisterServerModal({ onClose }: { onClose: () => void }) {
             </p>
           )}
 
-          <div className="space-y-1">
-            <label className="label" htmlFor="mcp-auth">Credential</label>
-            <select
-              id="mcp-auth"
-              className="input"
-              value={authConfigId}
-              onChange={(e) => setAuthConfigId(e.target.value)}
-              aria-label="Credential"
-            >
-              <option value="">None</option>
-              {authConfigs.map((ac) => (
-                <option key={ac.id} value={ac.id}>{ac.name} ({ac.type})</option>
-              ))}
-            </select>
-          </div>
+          {/* WS-2 (Phase 4): OAuth toggle — external only. When on, the server
+              authenticates via a per-user OAuth 2.1 grant, so the static
+              credential picker below is hidden (OAuth replaces it). */}
+          {isExternal && (
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={requiresOAuth}
+                onChange={(e) => setRequiresOAuth(e.target.checked)}
+                className="mt-0.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                aria-label="Server requires OAuth 2.1 authorization"
+              />
+              <span className="text-sm text-slate-700">
+                Server requires OAuth 2.1 authorization
+                <span className="block text-xs text-slate-400">
+                  Each user authorizes on the server page after registering — no shared credential.
+                </span>
+              </span>
+            </label>
+          )}
+
+          {!oauthEnabled && (
+            <div className="space-y-1">
+              <label className="label" htmlFor="mcp-auth">Credential</label>
+              <select
+                id="mcp-auth"
+                className="input"
+                value={authConfigId}
+                onChange={(e) => setAuthConfigId(e.target.value)}
+                aria-label="Credential"
+              >
+                <option value="">None</option>
+                {authConfigs.map((ac) => (
+                  <option key={ac.id} value={ac.id}>{ac.name} ({ac.type})</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           <div className="space-y-1">
             <label className="label" htmlFor="mcp-team">Team</label>
