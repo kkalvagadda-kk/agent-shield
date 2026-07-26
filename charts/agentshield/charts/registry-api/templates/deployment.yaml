@@ -210,6 +210,17 @@ spec:
               value: {{ .Values.mcpProxyUrl | default "http://agentshield-mcp-proxy.agentshield-platform:8080" | quote }}
             - name: MCP_PROXY_SA_TOKEN_PATH
               value: "/var/run/secrets/mcp-proxy-token/mcp-proxy-token"
+            {{- /* Credential provider (Decision 31). Default pg-fernet keeps the
+                   value in Postgres (Fernet). aws-sm is opt-in — the value moves to
+                   AWS Secrets Manager, reached via the IRSA role annotated on the SA
+                   (serviceaccount.yaml, gated on credentialProvider.awsRoleArn).
+                   All three default so pg-fernet stays the behavior for every deploy. */}}
+            - name: CREDENTIAL_PROVIDER_BACKEND
+              value: {{ (.Values.credentialProvider).backend | default "pg-fernet" | quote }}
+            - name: AWS_REGION
+              value: {{ (.Values.credentialProvider).awsRegion | default "" | quote }}
+            - name: AWS_SECRETS_MANAGER_PREFIX
+              value: {{ (.Values.credentialProvider).awsSecretsManagerPrefix | default "" | quote }}
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}

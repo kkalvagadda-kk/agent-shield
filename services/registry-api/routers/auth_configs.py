@@ -20,6 +20,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from credential_provider import (
+    CredentialRef,
+    auth_config_credential_ref,
+    get_provider,
+)
 from crypto import decrypt_json, encrypt_json
 from db import get_db
 from k8s import delete_secret, secret_exists, upsert_secret
@@ -68,9 +73,15 @@ async def create_auth_config(
 
     if body.credentials:
         secret_name = f"auth-config-{config.id}"
-        # Durable source of truth: encrypt into the DB (captured by pg backups).
+        # WS-1 (Decision 31): the credential value now lives behind the provider.
+        ref = auth_config_credential_ref(config.id)
+        await get_provider().put(ref, body.credentials)
+        config.credential_ref = str(ref)
+        # DUAL-WRITE (transition): also keep the legacy Fernet column so a rollback
+        # to the pre-provider code still resolves this credential. A later phase
+        # drops it once every deployment reads through the provider.
         config.credentials_encrypted = encrypt_json(body.credentials)
-        # Runtime materialization: the K8s secret pods mount.
+        # Runtime materialization: the K8s secret pods mount (UNCHANGED).
         await upsert_secret(secret_name, _PLATFORM_NAMESPACE, body.credentials)
         config.k8s_secret_ref = secret_name
 
@@ -169,7 +180,15 @@ async def get_auth_config_secret_ref(
     if await secret_exists(config.k8s_secret_ref, _PLATFORM_NAMESPACE):
         return {"id": str(config.id), "k8s_secret_ref": config.k8s_secret_ref}
 
-    if not config.credentials_encrypted:
+    # Resolve the durable credential copy to heal from. WS-1 (Decision 31): prefer
+    # the CredentialProvider when a credential_ref is set (new + backfilled rows);
+    # a null ref is a legacy pre-provider row whose durable copy is the retained
+    # credentials_encrypted column (dual-read). EXPLICIT branch — no try/except sniff.
+    if config.credential_ref is not None:
+        creds = await get_provider().get(CredentialRef.parse(config.credential_ref))
+    elif config.credentials_encrypted:
+        creds = decrypt_json(config.credentials_encrypted)
+    else:
         logger.error(
             "auth_config %s: k8s secret %s is MISSING and there is no durable copy to "
             "re-materialize from — the credential must be re-entered",
@@ -186,12 +205,10 @@ async def get_auth_config_secret_ref(
         )
 
     logger.warning(
-        "auth_config %s: k8s secret %s was MISSING — re-materializing from the DB",
+        "auth_config %s: k8s secret %s was MISSING — re-materializing from the durable copy",
         config.id, config.k8s_secret_ref,
     )
-    await upsert_secret(
-        config.k8s_secret_ref, _PLATFORM_NAMESPACE, decrypt_json(config.credentials_encrypted)
-    )
+    await upsert_secret(config.k8s_secret_ref, _PLATFORM_NAMESPACE, creds)
     return {
         "id": str(config.id),
         "k8s_secret_ref": config.k8s_secret_ref,
@@ -219,8 +236,13 @@ async def update_auth_config(
 
     if body.credentials:
         secret_name = config.k8s_secret_ref or f"auth-config-{config.id}"
-        # Durable source of truth (backed up) + runtime K8s materialization.
+        # WS-1 (Decision 31): write the value through the provider (rotate-in-place).
+        ref = auth_config_credential_ref(config.id)
+        await get_provider().put(ref, body.credentials)
+        config.credential_ref = str(ref)
+        # DUAL-WRITE (transition): retain the legacy Fernet column for rollback safety.
         config.credentials_encrypted = encrypt_json(body.credentials)
+        # Runtime K8s materialization (UNCHANGED).
         await upsert_secret(secret_name, _PLATFORM_NAMESPACE, body.credentials)
         config.k8s_secret_ref = secret_name
 

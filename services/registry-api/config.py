@@ -57,6 +57,19 @@ class Settings(BaseSettings):
     agentshield_encryption_key: str = ""
 
     # ------------------------------------------------------------------ #
+    # Credential provider (Decision 31 — pluggable credential store)      #
+    # ------------------------------------------------------------------ #
+    # Selects the CredentialProvider backend (credential_provider.get_provider).
+    #   "pg-fernet" (default) — value stays in Postgres, Fernet-encrypted with
+    #                           AGENTSHIELD_ENCRYPTION_KEY (behavior-preserving).
+    #   "aws-sm"              — AWS Secrets Manager via IRSA (opt-in, lands in P3).
+    credential_provider_backend: str = "pg-fernet"
+    # Prefix for AWS Secrets Manager secret ids (only used by the "aws-sm" backend).
+    aws_secrets_manager_prefix: str = ""
+    # AWS region for the "aws-sm" backend (only used by that backend).
+    aws_region: str = ""
+
+    # ------------------------------------------------------------------ #
     # MCP Proxy (MCP-as-tool-source)                                       #
     # ------------------------------------------------------------------ #
     # In-cluster URL of the MCP Proxy service. registry-api calls its

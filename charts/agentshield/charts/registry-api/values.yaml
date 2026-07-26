@@ -23,6 +23,17 @@ smtp:
 
 langfuseProjectId: ""
 
+# Credential provider (Decision 31 — pluggable credential store). Default
+# pg-fernet keeps the value in Postgres (Fernet, behavior-preserving). aws-sm is
+# opt-in: the value moves to AWS Secrets Manager, reached via the IRSA role in
+# awsRoleArn (annotated on the ServiceAccount, off by default). Leaving these at
+# their defaults renders no SA annotation and keeps pg-fernet everywhere.
+credentialProvider:
+  backend: "pg-fernet"
+  awsRegion: ""
+  awsSecretsManagerPrefix: ""
+  awsRoleArn: ""
+
 service:
   type: ClusterIP
   port: 8000

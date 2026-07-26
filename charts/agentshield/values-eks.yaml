@@ -51,6 +51,16 @@ registry-api:
   evalRunnerImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
   env:
     EVAL_RUNNER_IMAGE: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
+  # Credential provider (Decision 31). Default pg-fernet (value stays in Postgres)
+  # even on EKS. To turn on AWS Secrets Manager here, flip backend to "aws-sm" and
+  # set awsRegion (us-west-2) + awsRoleArn to the IRSA role that grants
+  # secretsmanager:GetSecretValue/CreateSecret/PutSecretValue/DeleteSecret on the
+  # awsSecretsManagerPrefix scope. Left off by default — opt-in per deployment.
+  credentialProvider:
+    backend: "pg-fernet"
+    awsRegion: ""
+    awsSecretsManagerPrefix: ""
+    awsRoleArn: ""
 
 # --- Bitnami deps (postgres/redis): repoint to bitnamilegacy (2025 relocation) ---
 # Nodes have egress; images pull from docker.io/bitnamilegacy directly. Metrics

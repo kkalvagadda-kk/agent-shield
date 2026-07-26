@@ -715,6 +715,16 @@ registry-api:
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
+  # Credential provider (Decision 31 — pluggable credential store). Default
+  # pg-fernet keeps the value in Postgres (Fernet). aws-sm is opt-in: set
+  # backend=aws-sm + awsRegion + awsRoleArn (the IRSA role, annotated on the SA)
+  # to move credential values into AWS Secrets Manager. Defaults keep pg-fernet.
+  credentialProvider:
+    backend: "pg-fernet"
+    awsRegion: ""
+    awsSecretsManagerPrefix: ""
+    awsRoleArn: ""
+
   service:
     type: ClusterIP
     port: 8000

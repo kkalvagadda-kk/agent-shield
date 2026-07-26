@@ -28,6 +28,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from credential_provider import CredentialRef, get_provider
 from crypto import decrypt_json
 from k8s import delete_secret, upsert_secret
 from models import AuthConfig, MCPServer
@@ -136,9 +137,21 @@ async def materialize_server_secret(db: AsyncSession, server: MCPServer) -> None
                 select(AuthConfig).where(AuthConfig.id == server.auth_config_id)
             )
         ).scalar_one_or_none()
-        if auth_config is not None and auth_config.credentials_encrypted:
-            creds = decrypt_json(auth_config.credentials_encrypted)
-            auth_headers = _compose_auth_headers(auth_config.type, creds)
+        if auth_config is not None:
+            # WS-1 (Decision 31): resolve the credential value through the provider
+            # when a credential_ref is set (new + backfilled rows), else fall back to
+            # the retained legacy column (a null-ref row that predates the provider).
+            # EXPLICIT legacy branch — no try/except, no getattr sniff. On pg-fernet
+            # both paths decrypt the same Fernet ciphertext with the same master key,
+            # so the composed auth_headers are BYTE-IDENTICAL either way.
+            if auth_config.credential_ref is not None:
+                creds = await get_provider().get(
+                    CredentialRef.parse(auth_config.credential_ref)
+                )
+                auth_headers = _compose_auth_headers(auth_config.type, creds)
+            elif auth_config.credentials_encrypted:
+                creds = decrypt_json(auth_config.credentials_encrypted)
+                auth_headers = _compose_auth_headers(auth_config.type, creds)
 
     data = {
         "connection": json.dumps(connection),

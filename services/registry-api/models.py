@@ -898,6 +898,31 @@ class PiiMapping(Base):
 # ---------------------------------------------------------------------------
 # auth_configs  (referenced by Tool and MCPServer)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# credential_blobs  (Decision 31 — CredentialProvider "pg-fernet" value store)
+# ---------------------------------------------------------------------------
+class CredentialBlob(Base):
+    """Generic KV home for credential *values* on the ``pg-fernet`` backend.
+
+    ``credential_provider.FernetPgProvider`` stores the Fernet-encrypted JSON blob
+    here, keyed by the ``CredentialRef.path`` (e.g. ``auth-configs/{id}``). The value
+    is encrypted with the same ``AGENTSHIELD_ENCRYPTION_KEY`` as before — this table
+    is where the credential relocates to *from* ``auth_configs.credentials_encrypted``,
+    byte-for-byte (migration 0073 copies the ciphertext verbatim, no re-encrypt).
+    """
+
+    __tablename__ = "credential_blobs"
+
+    path: Mapped[str] = mapped_column(String(512), primary_key=True)
+    value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TSTZ, nullable=False, server_default=_NOW
+    )
+
+
 class AuthConfig(Base):
     __tablename__ = "auth_configs"
     __table_args__ = (
@@ -920,6 +945,12 @@ class AuthConfig(Base):
     # Fernet-encrypted credentials dict (AGENTSHIELD_ENCRYPTION_KEY). Nullable for
     # legacy rows created before this column existed. Never echoed in API responses.
     credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CredentialProvider pointer (Decision 31), e.g.
+    # "pg-fernet://credential-blobs/auth-configs/{id}". The value lives behind the
+    # provider; NULL means a legacy pre-provider row whose durable copy is still the
+    # credentials_encrypted column above (dual-read). credentials_encrypted is
+    # RETAINED this phase (dual-write safety net); a later migration drops it.
+    credential_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
     owner_team: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
