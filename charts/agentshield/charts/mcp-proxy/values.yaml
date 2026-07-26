@@ -44,6 +44,21 @@ keycloak:
   # externally-managed Secret instead (must carry a `client-secret` key).
   existingSecret: ""
 
+# WS-2 external OAuth (Phase 4 / FR-MCP OAuth): for an EXTERNAL server registered with
+# external_auth_mode=oauth, the proxy pulls a short-lived upstream ACCESS token from
+# registry-api (which owns the refresh token + the refresh-with-rotation) and presents it
+# upstream. The proxy holds NO refresh token / DB / master key — it authenticates the pull
+# with a projected SA token (audience agentshield-registry-api; see deployment.yaml) and
+# caches the access token in memory only.
+oauth:
+  # registry-api endpoint the proxy POSTs {server_id, user_sub} to for a fresh access
+  # token. Same in-cluster registry-api Service/port as registryApiUrl above (8000). Set
+  # per-env only if registry-api is reached at a different address (it is not on EKS — the
+  # in-cluster Service name/port is identical there). Path is fixed by the API contract.
+  registryApiTokenUrl: "http://agentshield-registry-api:8000/api/v1/internal/mcp/oauth/access-token"
+  # Serve a cached access token until this many seconds before its exp (safety skew).
+  accessTokenCacheSkewSeconds: 30
+
 # WS-B list_changed subscription (FR-MCP-07): the proxy holds a long-lived session
 # per server that supports notifications/tools/list_changed and POSTs a debounced
 # re-sync callback to registry-api when the upstream tool set changes.

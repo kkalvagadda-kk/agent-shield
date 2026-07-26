@@ -23,6 +23,11 @@ from pydantic import BaseModel
 
 class McpDiscoverRequest(BaseModel):
     server_id: UUID
+    # WS-2 (Phase 4): the authorizing user for an OAuth server (external_auth_mode="oauth").
+    # registry-api's discover-as-user passes it so admin-plane discovery/health can pull that
+    # user's upstream access token. None (default) for a static server → the OAuth branch is
+    # never reached and discovery is byte-identical to Phase 2.
+    user_sub: str | None = None
 
 
 class McpDiscoveredTool(BaseModel):

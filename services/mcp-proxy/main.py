@@ -32,6 +32,7 @@ import credentials
 import identity
 import keycloak_client
 import mcp_client
+import oauth_tokens
 import session_cache
 import subscription_manager
 from credentials import ServerSecretNotFound
@@ -156,9 +157,17 @@ async def discover(
     # reachability outcome (200 error body), never a 5xx. (OBO admin plane uses the service
     # token — discovery lists the server AS the platform; it never impersonates a user, so
     # no OnBehalfOf* exception can arise here with is_data_plane=False / user_sub=None.)
+    #
+    # WS-2 (Phase 4): for an OAuth server, registry-api's discover-as-user passes req.user_sub
+    # so admin-plane discovery pulls THAT user's upstream access token (C9). If it is missing/
+    # unavailable, resolve_headers raises an OAuth* exception — caught by the generic handler
+    # below → the existing 200 ok=false "identity: …" body (fail-closed, never a 5xx). For a
+    # static server req.user_sub is ignored and this is byte-identical to Phase 2.
     try:
-        headers = await identity.resolve_headers(connection, user_sub=None, is_data_plane=False)
-    except Exception as exc:  # noqa: BLE001 — identity/mint failure
+        headers = await identity.resolve_headers(
+            connection, user_sub=req.user_sub, is_data_plane=False
+        )
+    except Exception as exc:  # noqa: BLE001 — identity/mint/OAuth failure
         logger.warning("mcp-proxy discover: identity resolution failed for %s: %s", server_id, exc)
         return McpDiscoverResponse(ok=False, status="error", health_detail=f"identity: {exc}")
 
@@ -356,6 +365,22 @@ async def tools_call(
         headers = await identity.resolve_headers(
             connection, user_sub=x_user_sub, is_data_plane=True
         )
+    except identity.OAuthUserRequired:
+        # WS-2 fail-closed: an OAuth server with no end-user identity — never a silent
+        # unauthenticated upstream call. A per-call error the LLM should see (200 is_error).
+        return McpToolCallResponse(
+            is_error=True,
+            error="this MCP server requires OAuth authorization but no user identity was provided",
+        )
+    except identity.OAuthAuthorizationRequired as exc:
+        # registry-api says the grant is needs_auth — the user must (re-)authorize in Studio.
+        return McpToolCallResponse(
+            is_error=True,
+            error=f"this MCP server requires OAuth authorization — authorize it in Studio ({exc})",
+        )
+    except identity.OAuthTokenUnavailable as exc:
+        # Transport/registry-api/refresh failure fetching the access token — fail closed.
+        return McpToolCallResponse(is_error=True, error=f"OAuth token unavailable: {exc}")
     except identity.OnBehalfOfIdentityRequired:
         return McpToolCallResponse(
             is_error=True,
@@ -387,9 +412,12 @@ async def tools_call(
     #    exception — a tool that *ran* but reported an error returns is_error=True without
     #    raising, and is NOT retried). For a service_identity server the failure may be a
     #    rotated/expired minted token, so we invalidate the token cache before the retry —
-    #    the retry then mints fresh, self-healing a mid-life token rotation. (We do NOT sniff
-    #    the exception for a "401": that string-match is fragile; a service-identity transport
-    #    failure is rare and always re-minting on retry is strictly safe.)
+    #    the retry then mints fresh, self-healing a mid-life token rotation. WS-2: symmetric
+    #    for an OAuth server — an upstream 401 from a just-expired cached access token
+    #    self-heals when we invalidate the per-(server,user) cache so the retry re-pulls a
+    #    fresh token from registry-api. (We do NOT sniff the exception for a "401": that
+    #    string-match is fragile; a transport failure is rare and always re-fetching on retry
+    #    is strictly safe.)
     try:
         call_result = await cached.session.call_tool(req.mcp_tool_name, req.arguments)
     except Exception as exc:  # noqa: BLE001 — transport/protocol/upstream-auth error
@@ -398,6 +426,8 @@ async def tools_call(
         )
         if connection.identity_mode == "service_identity":
             keycloak_client.invalidate(connection.identity_audience)
+        if connection.external_auth_mode == "oauth" and x_user_sub:
+            oauth_tokens.invalidate(server_id, x_user_sub)
         await session_cache.evict(server_id, x_user_sub)
         try:
             # Re-read the Secret (picks up a rotated static credential) + re-resolve identity
@@ -410,6 +440,16 @@ async def tools_call(
             cached = CachedSession(session=session, connection=fresh)
             await session_cache.set_session(server_id, cached, user_sub=x_user_sub)
             call_result = await cached.session.call_tool(req.mcp_tool_name, req.arguments)
+        except (
+            identity.OAuthUserRequired,
+            identity.OAuthAuthorizationRequired,
+            identity.OAuthTokenUnavailable,
+        ) as exc2:
+            # WS-2: a needs_auth/unavailable surfacing on the re-resolve (e.g. the grant was
+            # revoked between the two calls) stays on the 200-error path — never a 5xx.
+            return McpToolCallResponse(
+                is_error=True, error=f"oauth token unavailable: {exc2}"
+            )
         except (identity.OnBehalfOfIdentityRequired, identity.OnBehalfOfNotAvailable) as exc2:
             # Defensive: the same identity_mode already yielded a 200 is_error above, so this
             # is normally unreachable — but keep an on_behalf_of server on the 200-error path.

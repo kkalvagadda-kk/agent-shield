@@ -153,6 +153,42 @@ KEYCLOAK_TOKEN_CACHE_SKEW_SECONDS: int = int(
 )
 
 
+# ---------------------------------------------------------------------------
+# WS-2 external OAuth — access-token READ from registry-api (contracts/mcp-proxy-oauth-phase4.md §4)
+# ---------------------------------------------------------------------------
+#
+# For an EXTERNAL MCP server registered with external_auth_mode == "oauth", the proxy
+# presents a short-lived upstream ACCESS token as the upstream Authorization header. It
+# holds NO refresh token, NO DB, and NO AGENTSHIELD_ENCRYPTION_KEY (still §3b) — it PULLS
+# a fresh access token from registry-api (which owns the refresh token + the refresh-with-
+# rotation) and caches it IN MEMORY only (oauth_tokens._access_cache). This adds one
+# OUTBOUND call + one projected token; it does NOT add a DB URL, the master key, or a new
+# inbound endpoint — the "no DB, no master key" invariant above still holds.
+
+# registry-api endpoint the proxy POSTs {server_id, user_sub} to for a fresh access token.
+# Derived from REGISTRY_API_URL so the host/port stays a SINGLE source of truth (the same
+# in-cluster registry-api Service the proxy already reaches for the authorize-tool-call
+# hop — port 8000). The chart sets this explicitly (T014); the default matches the code.
+REGISTRY_API_OAUTH_TOKEN_URL: str = os.getenv(
+    "REGISTRY_API_OAUTH_TOKEN_URL",
+    f"{REGISTRY_API_URL}/api/v1/internal/mcp/oauth/access-token",
+)
+
+# Path to the file-mounted projected SA token (audience agentshield-registry-api) the
+# proxy presents to that endpoint. Read FRESH from disk on every actual pull (projected
+# tokens rotate ~hourly). A read-only volume mount (chart deployment.yaml projects it
+# here). NEVER read via the k8s get-secrets API and NEVER the master key (§3b).
+MCP_PROXY_REGISTRY_API_TOKEN_PATH: str = os.getenv(
+    "MCP_PROXY_REGISTRY_API_TOKEN_PATH", "/var/run/secrets/registry-api/token"
+)
+
+# Serve a cached access token until this many seconds BEFORE its exp — a safety skew so a
+# token never expires mid-flight to an upstream server (mirrors the Keycloak skew above).
+OAUTH_ACCESS_TOKEN_CACHE_SKEW_SECONDS: int = int(
+    os.getenv("OAUTH_ACCESS_TOKEN_CACHE_SKEW_SECONDS", "30")
+)
+
+
 def server_secret_name(server_id: str) -> str:
     """The K8s Secret name registry-api materialized for a given server_id."""
     return f"{SERVER_SECRET_PREFIX}{server_id}"

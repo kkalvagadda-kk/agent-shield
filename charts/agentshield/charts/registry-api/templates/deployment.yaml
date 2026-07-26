@@ -221,6 +221,18 @@ spec:
               value: {{ (.Values.credentialProvider).awsRegion | default "" | quote }}
             - name: AWS_SECRETS_MANAGER_PREFIX
               value: {{ (.Values.credentialProvider).awsSecretsManagerPrefix | default "" | quote }}
+            {{- /* MCP OAuth 2.1 for external servers (Phase 4 WS-2). registry-api runs
+                   the authorization-code + PKCE dance, so it must know its OWN public
+                   callback (the redirect_uri registered with every upstream AS) and
+                   Studio's base URL (where the callback 302-redirects the browser back).
+                   Both derive from global.publicUrl — the single source of truth, set
+                   per-env exactly like publicUrl — unless explicitly overridden. When
+                   mcpOauthCallbackUrl is empty the authorize endpoint 409s
+                   oauth_not_configured, so a deploy with a real public URL enables OAuth. */}}
+            - name: MCP_OAUTH_CALLBACK_URL
+              value: {{ .Values.mcpOauthCallbackUrl | default (printf "%s/api/v1/mcp-servers/oauth/callback" (((.Values.global).publicUrl) | default "")) | quote }}
+            - name: STUDIO_BASE_URL
+              value: {{ .Values.studioBaseUrl | default (((.Values.global).publicUrl) | default "") | quote }}
           resources:
             requests:
               cpu: {{ .Values.resources.requests.cpu | default "100m" }}

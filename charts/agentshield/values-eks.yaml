@@ -61,6 +61,13 @@ registry-api:
     awsRegion: ""
     awsSecretsManagerPrefix: ""
     awsRoleArn: ""
+  # MCP OAuth 2.1 (Phase 4 WS-2). Leave empty — the deployment derives
+  # MCP_OAUTH_CALLBACK_URL ({publicUrl}/api/v1/mcp-servers/oauth/callback) and
+  # STUDIO_BASE_URL ({publicUrl}) from global.publicUrl, which on EKS is reconciled
+  # AFTER the internal ELB DNS is known (same follow-up as publicUrl above). Set these
+  # explicitly only if the callback / Studio live on a different host than publicUrl.
+  mcpOauthCallbackUrl: ""
+  studioBaseUrl: ""
 
 # --- Bitnami deps (postgres/redis): repoint to bitnamilegacy (2025 relocation) ---
 # Nodes have egress; images pull from docker.io/bitnamilegacy directly. Metrics

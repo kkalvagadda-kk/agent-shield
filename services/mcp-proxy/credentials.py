@@ -46,6 +46,17 @@ class ServerConnection:
     # token audience for service_identity / on_behalf_of.
     identity_mode: str = "none"
     identity_audience: str | None = None
+    # WS-2 external OAuth selector (Phase 4). Default "static" makes a pre-WS-2 Secret
+    # (whose connection JSON lacks the key) behave EXACTLY as Phase 2 — the FIRST-checked
+    # OAuth branch in identity.resolve_headers is skipped and the identity_mode matrix runs
+    # byte-identically. "oauth" (external servers only; they are always identity_mode="none")
+    # makes resolve_headers present a per-user upstream access token pulled from registry-api.
+    external_auth_mode: str = "static"
+    # The server's own id — needed to KEY the per-(server,user) OAuth access-token pull in
+    # identity.resolve_headers. Read from the connection JSON (registry-api may embed it),
+    # else the Secret's own server_id passed to read_server_secret. Empty for a Secret with
+    # neither (a static server never keys an OAuth pull, so it is never consulted).
+    server_id: str = ""
 
 
 async def read_server_secret(server_id: str) -> ServerConnection:
@@ -93,6 +104,13 @@ async def read_server_secret(server_id: str) -> ServerConnection:
     identity_mode = connection.get("identity_mode") or "none"
     identity_audience = connection.get("identity_audience")
 
+    # Default external_auth_mode to "static" when the key is absent → a Secret materialized
+    # before WS-2 (every Phase-2 Secret) skips the OAuth branch and is byte-identical.
+    external_auth_mode = connection.get("external_auth_mode") or "static"
+    # server_id keys the OAuth access-token pull. Prefer the connection JSON's own value,
+    # else fall back to the id we were asked to read (always the correct server).
+    resolved_server_id = connection.get("server_id") or str(server_id)
+
     return ServerConnection(
         server_url=server_url,
         transport=connection.get("transport", "http"),
@@ -102,4 +120,6 @@ async def read_server_secret(server_id: str) -> ServerConnection:
         auth_headers=auth_headers if isinstance(auth_headers, dict) else {},
         identity_mode=identity_mode,
         identity_audience=identity_audience,
+        external_auth_mode=external_auth_mode,
+        server_id=resolved_server_id,
     )

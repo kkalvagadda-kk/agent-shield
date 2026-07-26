@@ -23,6 +23,17 @@ smtp:
 
 langfuseProjectId: ""
 
+# MCP OAuth 2.1 for external servers (Phase 4 WS-2). registry-api runs the authorization-
+# code + PKCE dance and needs to know (a) its OWN public callback URL — the redirect_uri it
+# registers with every upstream authorization server — and (b) Studio's base URL, which the
+# callback 302-redirects the browser back to. BOTH are public, per-env values: leave them
+# empty here and the deployment derives them from global.publicUrl (the single source of
+# truth, like every other public endpoint) — mcpOauthCallbackUrl becomes
+# {global.publicUrl}/api/v1/mcp-servers/oauth/callback and studioBaseUrl becomes
+# {global.publicUrl}. Override here only if the callback / Studio live on a different host.
+mcpOauthCallbackUrl: ""
+studioBaseUrl: ""
+
 # Credential provider (Decision 31 — pluggable credential store). Default
 # pg-fernet keeps the value in Postgres (Fernet, behavior-preserving). aws-sm is
 # opt-in: the value moves to AWS Secrets Manager, reached via the IRSA role in

@@ -65,11 +65,29 @@ spec:
               value: {{ .Values.listChanged.reconnectBackoffSeconds | quote }}
             - name: MCP_LIST_CHANGED_MAX_RECONNECT_ATTEMPTS
               value: {{ .Values.listChanged.maxReconnectAttempts | quote }}
+            # WS-2 external OAuth (Phase 4): for an EXTERNAL server registered with
+            # external_auth_mode=oauth the proxy PULLS a short-lived upstream access
+            # token from registry-api (which owns the refresh token + refresh-with-
+            # rotation) and presents it upstream. It holds NO refresh token / DB /
+            # master key — only the projected agentshield-registry-api SA token below
+            # authenticates the pull (registry-api TokenReviews it + pins the proxy SA).
+            - name: REGISTRY_API_OAUTH_TOKEN_URL
+              value: {{ .Values.oauth.registryApiTokenUrl | quote }}
+            - name: MCP_PROXY_REGISTRY_API_TOKEN_PATH
+              value: "/var/run/secrets/registry-api/token"
+            - name: OAUTH_ACCESS_TOKEN_CACHE_SKEW_SECONDS
+              value: {{ .Values.oauth.accessTokenCacheSkewSeconds | quote }}
           volumeMounts:
             # Read-only mount of the Keycloak client secret (WS-C). The proxy reads
             # it from disk on each mint — NOT via the k8s get-secrets API (§3b).
             - name: mcp-proxy-keycloak
               mountPath: /var/run/secrets/mcp-proxy-keycloak
+              readOnly: true
+            # WS-2 (Phase 4): projected SA token (audience agentshield-registry-api)
+            # the proxy presents to registry-api's /internal/mcp/oauth/access-token
+            # endpoint. Read fresh from disk on each pull; NOT via the k8s API. §3b.
+            - name: registry-api-token
+              mountPath: /var/run/secrets/registry-api
               readOnly: true
           livenessProbe:
             httpGet:
@@ -92,3 +110,16 @@ spec:
         - name: mcp-proxy-keycloak
           secret:
             secretName: {{ .Values.keycloak.existingSecret | default (printf "%s-mcp-proxy-keycloak" .Release.Name) }}
+        # WS-2 (Phase 4): projected bound SA token (audience agentshield-registry-api,
+        # TTL 1h) so the proxy can authenticate to registry-api's OAuth access-token
+        # endpoint. The SYMMETRIC mirror of registry-api's agentshield-mcp-proxy
+        # projected token (registry-api deployment.yaml) — that endpoint TokenReviews
+        # this token (spec.audiences=[agentshield-registry-api]) and pins the subject
+        # to the mcp-proxy SA. Without it every OAuth access-token pull 401s.
+        - name: registry-api-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: agentshield-registry-api
+                  expirationSeconds: 3600
+                  path: token
