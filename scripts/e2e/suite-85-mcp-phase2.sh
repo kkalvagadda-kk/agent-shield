@@ -96,10 +96,13 @@ async def main():
 
     threshold = settings.mcp_health_failure_threshold  # default 3
 
-    async def fake_fail(server_id):
+    # Accept **kwargs so the mock matches health_check_server's real signature, which grew a
+    # keyword-only `user_sub=` in Phase 4 (mcp_health probes an OAuth server as its authorized
+    # user). Without this the WS-A state-machine assertions crash with a TypeError.
+    async def fake_fail(server_id, **kwargs):
         return {"ok": False, "health_detail": "simulated probe failure"}
 
-    async def fake_ok(server_id):
+    async def fake_ok(server_id, **kwargs):
         return {"ok": True}
 
     # `_probe_and_apply` does `from mcp_proxy_client import health_check_server` at call

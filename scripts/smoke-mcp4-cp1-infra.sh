@@ -37,12 +37,20 @@ API_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-a
 [ -n "$API_POD" ] || fail "no Running registry-api pod found"
 echo "  OK: pod $API_POD Ready"
 
-# ── 2. alembic current == 0073 ────────────────────────────────────────────────
-echo "--- alembic current == 0073 ---"
+# ── 2. alembic revision >= 0073 (WS-1 seam applied) ───────────────────────────
+# The WS-1 seam is migration 0073. Assert it is APPLIED, not that it is the current
+# tip: history is linear (each later migration's down_revision chains back through
+# 0073), so any revision >= 0073 proves 0073 ran. A strict "== 0073" check breaks the
+# moment a later migration (0074+) lands — which is exactly what happened. Parse the
+# 4-digit revision and compare in base-10 (10# guards against the octal trap when a
+# future revision contains an 8/9, e.g. 0088).
+echo "--- alembic revision >= 0073 ---"
 CUR="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- alembic current 2>/dev/null || true)"
 echo "  alembic current: ${CUR:-<empty>}"
-echo "$CUR" | grep -q "0073" || fail "alembic head is not 0073 (got: ${CUR:-<empty>})"
-echo "  OK: alembic at 0073"
+CUR_REV="$(echo "$CUR" | grep -oE '^[0-9]{4}' | head -1)"
+[ -n "$CUR_REV" ] || fail "could not parse alembic revision (got: ${CUR:-<empty>})"
+[ "$((10#$CUR_REV))" -ge "$((10#0073))" ] || fail "alembic revision $CUR_REV is before 0073 (WS-1 seam not applied)"
+echo "  OK: alembic at $CUR_REV (>= 0073)"
 
 # ── 3. Table + column + backfill + legacy-resolve (in-pod ORM, suite-84 style) ─
 echo "--- credential_blobs table + credential_ref column + backfill + legacy resolve ---"

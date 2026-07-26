@@ -411,7 +411,7 @@ DECLARATIVE_RUNNER_TAG="0.1.61"   # 0.1.61: P2 WS-C — McpToolNodeExecutor emit
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"
-MCP_PROXY_TAG="0.1.4"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (file-mounted client secret + env) + list_changed subscription knobs. 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS). 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
+MCP_PROXY_TAG="0.1.5"   # 0.1.5: P4 WS-2 — bound call_tool by MCP_CONNECT_TIMEOUT_SECONDS (matches initialize/list_tools) so a revoked-token upstream 401 fails closed via evict+re-pull→needs_auth instead of hanging. 0.1.2: P2 WS-C — Keycloak service-identity mint (file-mounted client secret + env) + list_changed subscription knobs. 0.1.1: Phase 2 — POST /internal/health reachability probe (bounded by MCP_CONNECT_TIMEOUT_SECONDS). 0.1.0: new — MCP-as-tool-source Phase 1 proxy (streamable_http discovery + governed /internal/tools/call; K8s TokenReview auth; reads per-server Secrets in agentshield-mcp only)
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"

@@ -92,15 +92,20 @@ trap cleanup EXIT
 # ── 1+2. Register → authorize → callback → assert authorized + refresh ref ─────
 echo "--- register External+OAuth server → drive authorize→callback ---"
 INPOD="$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SERVER_NAME="$SERVER_NAME" USER_SUB="$USER_SUB" python3 - <<'PY'
-import os, asyncio, httpx, sys
+  env SERVER_NAME="$SERVER_NAME" python3 - <<'PY'
+import os, asyncio, httpx, sys, base64, json
 from urllib.parse import urlparse, parse_qs
 SERVER_NAME = os.environ["SERVER_NAME"]
-USER_SUB = os.environ["USER_SUB"]
 BASE = "http://localhost:8000/api/v1"
 FIX = "http://127.0.0.1:9100"
+# The OAuth /authorize endpoint anchors the grant to a VERIFIED jwt.sub (require_user) so
+# the callback cannot be steered to another user — a spoofable X-User-Sub is correctly
+# rejected there. So authenticate the way real Studio does: a genuine Keycloak JWT minted
+# via the seeded admin + the `agentshield-studio` public client (same identity the
+# Playwright e2e login uses). register/list still accept the X-User-Sub dev header (their
+# router honours it), so only the OAuth sub-routes need the bearer.
+KC = "http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token"
 ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": "platform"}
-HDR = {"X-User-Sub": USER_SUB, "X-User-Team": "platform"}
 
 async def main():
     from db import AsyncSessionLocal
@@ -108,6 +113,19 @@ async def main():
     from models import MCPOAuthGrant
     from sqlalchemy import select
     async with httpx.AsyncClient(timeout=40) as c:
+        # Mint a real Keycloak JWT (ROPC) and recover its subject — the OAuth grant will
+        # be bound to THIS sub, so every later lookup (token endpoint, rotation) must use
+        # it, not a synthetic value. Decoding the payload needs no verification here (the
+        # server verifies the signature); we only read the `sub` claim.
+        tok = await c.post(KC, data={"grant_type": "password", "client_id": "agentshield-studio",
+                                     "username": "platform-admin", "password": "PlatformAdmin2024"})
+        if tok.status_code != 200:
+            print("TOKENFAIL", tok.status_code, tok.text[:200]); sys.exit(1)
+        access = tok.json()["access_token"]
+        _pl = access.split(".")[1]
+        real_sub = json.loads(base64.urlsafe_b64decode(_pl + "=" * (-len(_pl) % 4)))["sub"]
+        BEARER = {"Authorization": f"Bearer {access}"}
+
         r = await c.post(f"{BASE}/mcp-servers/", headers=ADMIN, json={
             "name": SERVER_NAME, "server_url": f"{FIX}/mcp",
             "transport": "streamable_http", "owner_team": "platform",
@@ -116,7 +134,7 @@ async def main():
             print("REGFAIL", r.status_code, r.text[:200]); sys.exit(1)
         sid = r.json()["id"]
         print("SERVER_ID", sid)
-        a = await c.post(f"{BASE}/mcp-servers/{sid}/oauth/authorize", headers=HDR)
+        a = await c.post(f"{BASE}/mcp-servers/{sid}/oauth/authorize", headers=BEARER)
         if a.status_code != 200:
             print("AUTHZFAIL", a.status_code, a.text[:200]); sys.exit(1)
         auth_url = a.json()["authorization_url"]
@@ -133,13 +151,16 @@ async def main():
         print("OUTCOME", outcome)
     async with AsyncSessionLocal() as s:
         g = (await s.execute(select(MCPOAuthGrant).where(
-            MCPOAuthGrant.server_id == sid, MCPOAuthGrant.user_sub == USER_SUB))).scalar_one_or_none()
+            MCPOAuthGrant.server_id == sid, MCPOAuthGrant.user_sub == real_sub))).scalar_one_or_none()
     if g is None:
         print("GRANT none"); sys.exit(1)
     print("GRANT_STATUS", g.status)
     print("CREDENTIAL_REF", g.credential_ref)
     stored = await get_provider().get(CredentialRef.parse(g.credential_ref)) if g.credential_ref else {}
     print("REFRESH_BEFORE", (stored or {}).get("refresh_token", ""))
+    # The authorizing user's real Keycloak sub — the grant is keyed on it, so the token
+    # endpoint + rotation steps below must query by THIS value.
+    print("USER_SUB", real_sub)
 asyncio.run(main())
 PY
 )" || { echo "$INPOD"; fail "authorize/callback block errored"; }
@@ -150,6 +171,10 @@ OUTCOME="$(echo "$INPOD" | sed -n 's/^OUTCOME //p' | tr -d '[:space:]')"
 GRANT_STATUS="$(echo "$INPOD" | sed -n 's/^GRANT_STATUS //p' | tr -d '[:space:]')"
 CREDENTIAL_REF="$(echo "$INPOD" | sed -n 's/^CREDENTIAL_REF //p' | head -1 | tr -d '[:space:]')"
 REFRESH_BEFORE="$(echo "$INPOD" | sed -n 's/^REFRESH_BEFORE //p' | tr -d '[:space:]')"
+# The grant is keyed on the authorizing JWT's real sub, not the synthetic SUFFIX value —
+# adopt it so the token-endpoint + rotation lookups below find the grant just created.
+USER_SUB="$(echo "$INPOD" | sed -n 's/^USER_SUB //p' | tr -d '[:space:]')"
+[ -n "$USER_SUB" ] || fail "could not resolve the authorizing user_sub from the JWT"
 
 [ "$OUTCOME" = "connected" ] || fail "callback outcome=$OUTCOME (want connected)"
 [ "$GRANT_STATUS" = "authorized" ] || fail "grant status=$GRANT_STATUS (want authorized)"

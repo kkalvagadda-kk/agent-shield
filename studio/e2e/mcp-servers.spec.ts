@@ -374,8 +374,12 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await authorizeBtn.click();
     const auth = await authResp;
     expect(auth.status()).toBe(200);
-    expect((await auth.json()).authorization_url).toBe(AUTH_URL);
-    // The redirect was attempted — the browser is now on the stubbed consent page.
+    // Do NOT read auth.json() here: the frontend sets window.location.href to the returned
+    // authorization_url the instant the response arrives, so Chromium discards the response
+    // body before Playwright can read it ("No resource with given identifier"). The redirect
+    // assertion below proves the SAME wiring end-to-end — the browser navigated to AUTH_URL
+    // (= https://as.e2e.invalid/...) — which only happens if the frontend used the returned
+    // authorization_url. That is the actual proof; the body-equality was redundant + racy.
     await expect(page).toHaveURL(/as\.e2e\.invalid/, { timeout: 15_000 });
 
     // ── 4. Simulate the callback landing + save→reload→assert: flip the stub to

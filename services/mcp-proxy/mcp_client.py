@@ -140,7 +140,17 @@ class McpSession:
 
     async def call_tool(self, name: str, arguments: dict) -> CallResult:
         assert self._session is not None, "session not connected"
-        result = await self._session.call_tool(name, arguments)
+        # Bound by MCP_CONNECT_TIMEOUT_SECONDS, exactly like initialize/list_tools above: a
+        # tool call over a session whose upstream stops answering (e.g. an OAuth server that
+        # 401s a now-revoked access token — the streamable-HTTP client then blocks on the
+        # response stream instead of raising) must fail fast, not hang forever. The raised
+        # TimeoutError propagates to the tools/call handler, which evicts + invalidates the
+        # token cache and retries → the re-pull surfaces the grant's needs_auth as a
+        # 200 is_error (fail-closed on revoke), instead of a stuck coroutine.
+        result = await asyncio.wait_for(
+            self._session.call_tool(name, arguments),
+            timeout=config.MCP_CONNECT_TIMEOUT_SECONDS,
+        )
         return CallResult(
             result=_flatten_content(getattr(result, "content", None)),
             is_error=bool(getattr(result, "isError", False)),

@@ -40,6 +40,23 @@ FIXTURE="${SCRIPT_DIR}/e2e/fixtures/oauth_mcp_server.py"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# Free TCP 9100 in the proxy pod ROBUSTLY. `pkill -f oauth_mcp_server.py` is not enough: a
+# fixture left over from an interrupted run can present an EMPTY /proc/<pid>/cmdline (so
+# pkill -f never matches it) while still holding the LISTEN socket — which then makes the
+# "fixture listening" probe below a false positive against the STALE process. So also find
+# whoever owns the 9100 (0x238C) LISTEN socket via its inode and kill by PID.
+free_fixture_port() {
+  kubectl exec -n "$NAMESPACE" "$1" -c mcp-proxy -- sh -c '
+    pkill -9 -f oauth_mcp_server.py 2>/dev/null || true
+    inode=$(grep -i "238C 00000000:0000 0A" /proc/net/tcp 2>/dev/null | awk "{print \$10}" | head -1)
+    if [ -n "$inode" ]; then
+      for p in $(ls /proc 2>/dev/null | grep -E "^[0-9]+$"); do
+        ls -l /proc/$p/fd 2>/dev/null | grep -q "socket:\[$inode\]" && kill -9 "$p" 2>/dev/null
+      done
+    fi
+    sleep 1' >/dev/null 2>&1 || true
+}
+
 API_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 PROXY_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=mcp-proxy \
@@ -54,6 +71,7 @@ echo "  api=$API_POD proxy=$PROXY_POD proxy_ip=$PROXY_IP base=$FIXTURE_BASE"
 
 # ── Start the fixture in the PROXY pod, bound 0.0.0.0, advertising the pod IP ───
 echo "--- starting stub OAuth+MCP fixture in the proxy pod (base=$FIXTURE_BASE) ---"
+free_fixture_port "$PROXY_POD"   # ensure a clean 9100 (kill any stale/zombie listener)
 kubectl exec -i -n "$NAMESPACE" "$PROXY_POD" -c mcp-proxy -- \
   sh -c 'cat > /tmp/oauth_mcp_server.py' < "$FIXTURE"
 kubectl exec -n "$NAMESPACE" "$PROXY_POD" -c mcp-proxy -- \
@@ -66,12 +84,17 @@ for _ in $(seq 1 20); do
   sleep 2
 done
 [ -n "$READY" ] || fail "stub OAuth fixture did not start in the proxy pod"
+# Assert OUR fixture actually bound — a stale listener freed above must not have raced back,
+# and a bind failure (address already in use) must fail loudly, not read as "listening".
+if kubectl exec -n "$NAMESPACE" "$PROXY_POD" -c mcp-proxy -- \
+     sh -c 'grep -q "address already in use" /tmp/oauth_stub.log' 2>/dev/null; then
+  fail "fixture could not bind 9100 (address already in use) — stale listener not cleared"
+fi
 echo "  OK: fixture listening"
 
 SERVER_ID=""
 cleanup() {
-  kubectl exec -n "$NAMESPACE" "$PROXY_POD" -c mcp-proxy -- \
-    sh -c "pkill -f oauth_mcp_server.py" >/dev/null 2>&1 || true
+  free_fixture_port "$PROXY_POD"   # robust: also kills an empty-cmdline zombie holding 9100
   kubectl delete sa "$AGENT_SA" -n "$AGENTS_NS" --ignore-not-found >/dev/null 2>&1 || true
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
     env SRVNAME="$SERVER_NAME" python3 - <<'PY' 2>/dev/null || true
@@ -98,10 +121,36 @@ PY
 }
 trap cleanup EXIT
 
+# ── 0. Mint a real Keycloak JWT (ROPC) once ───────────────────────────────────
+# Both OAuth control-plane endpoints this smoke drives — POST …/oauth/authorize and
+# DELETE …/oauth (revoke) — anchor to a VERIFIED jwt.sub (require_user), so a spoofable
+# X-User-Sub is correctly rejected there. Authenticate the way real Studio does: a genuine
+# Keycloak token via the seeded admin + the `agentshield-studio` public client (same
+# identity the Playwright e2e uses). Its `sub` becomes the grant owner, so the data-plane
+# tool calls below carry that same sub as x-user-sub.
+echo "--- mint a real Keycloak JWT (platform-admin, agentshield-studio client) ---"
+JWT_OUT="$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY'
+import httpx, json, base64
+t = httpx.post("http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token",
+    data={"grant_type": "password", "client_id": "agentshield-studio",
+          "username": "platform-admin", "password": "PlatformAdmin2024"}, timeout=15)
+at = t.json()["access_token"]
+pl = at.split(".")[1]
+sub = json.loads(base64.urlsafe_b64decode(pl + "=" * (-len(pl) % 4)))["sub"]
+print("ACCESS_TOKEN", at)
+print("SUB", sub)
+PY
+)"
+ACCESS_TOKEN="$(echo "$JWT_OUT" | sed -n 's/^ACCESS_TOKEN //p' | tr -d '[:space:]')"
+USER_SUB="$(echo "$JWT_OUT" | sed -n 's/^SUB //p' | tr -d '[:space:]')"
+[ -n "$ACCESS_TOKEN" ] || fail "could not mint a Keycloak JWT (ROPC — is platform-admin seeded?)"
+[ -n "$USER_SUB" ] || fail "could not resolve the JWT subject"
+echo "  OK: JWT minted; authorizing user_sub=$USER_SUB"
+
 # ── 1+2. Register → authorize → callback → grant authorized + tool discovered ──
 echo "--- register + authorize→callback (discover-as-user materializes echo) ---"
 INPOD="$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SERVER_NAME="$SERVER_NAME" USER_SUB="$USER_SUB" FIXTURE_BASE="$FIXTURE_BASE" python3 - <<'PY'
+  env SERVER_NAME="$SERVER_NAME" USER_SUB="$USER_SUB" ACCESS_TOKEN="$ACCESS_TOKEN" FIXTURE_BASE="$FIXTURE_BASE" python3 - <<'PY'
 import os, asyncio, httpx, sys
 from urllib.parse import urlparse, parse_qs
 SERVER_NAME = os.environ["SERVER_NAME"]
@@ -109,7 +158,9 @@ USER_SUB = os.environ["USER_SUB"]
 BASEURL = os.environ["FIXTURE_BASE"]
 BASE = "http://localhost:8000/api/v1"
 ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": "platform"}
-HDR = {"X-User-Sub": USER_SUB, "X-User-Team": "platform"}
+# register/list honour the X-User-Sub dev header (ADMIN); the OAuth authorize sub-route
+# requires the verified bearer.
+BEARER = {"Authorization": f"Bearer {os.environ['ACCESS_TOKEN']}"}
 
 async def main():
     from db import AsyncSessionLocal
@@ -123,7 +174,7 @@ async def main():
         if r.status_code != 201:
             print("REGFAIL", r.status_code, r.text[:200]); sys.exit(1)
         sid = r.json()["id"]; print("SERVER_ID", sid)
-        a = await c.post(f"{BASE}/mcp-servers/{sid}/oauth/authorize", headers=HDR)
+        a = await c.post(f"{BASE}/mcp-servers/{sid}/oauth/authorize", headers=BEARER)
         if a.status_code != 200:
             print("AUTHZFAIL", a.status_code, a.text[:200]); sys.exit(1)
         rr = await c.get(a.json()["authorization_url"], follow_redirects=False)
@@ -184,10 +235,13 @@ extra = os.environ.get("EXTRA") or ""
 if ":" in extra:
     k, _, v = extra.partition(":")
     headers[k.strip()] = v.strip()
+# 75s > the proxy's worst case on the revoke arm: the first call_tool blocks on the
+# fixture's 401 until MCP_CONNECT_TIMEOUT_SECONDS (30s), then the proxy evicts + re-pulls
+# and returns 200 is_error. Steps 3/4 answer in well under a second; only step 5 waits.
 r = httpx.post("http://localhost:8080/internal/tools/call",
     json={"server_id": os.environ["SID"], "mcp_tool_name": "echo",
           "arguments": {"text": "cp3c-hi"}, "session_id": "cp3c", "agent_name": "cp3c"},
-    headers=headers, timeout=30)
+    headers=headers, timeout=75)
 b = r.json() if r.status_code == 200 else {}
 print("CODE", r.status_code, "ISERR", b.get("is_error"),
       "RESULT", (b.get("result") or "")[:40], "MSG", (b.get("error") or "")[:80])
@@ -213,18 +267,22 @@ echo "  OK: fail-closed on missing user identity"
 # ── 5. Revoke → 200 is_error re-authorize ─────────────────────────────────────
 echo "--- DELETE …/oauth (revoke) → tools/call → 200 is_error (re-authorize) ---"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SID="$SERVER_ID" US="$USER_SUB" python3 - >/dev/null 2>&1 <<'PY' || true
+  env SID="$SERVER_ID" AT="$ACCESS_TOKEN" python3 - >/dev/null 2>&1 <<'PY' || true
 import os, asyncio, httpx
 async def main():
     async with httpx.AsyncClient(timeout=20) as c:
+        # revoke is a require_user OAuth endpoint → present the verified bearer, not a header.
         await c.delete(f"http://localhost:8000/api/v1/mcp-servers/{os.environ['SID']}/oauth",
-                       headers={"X-User-Sub": os.environ["US"], "X-User-Team": "platform"})
+                       headers={"Authorization": f"Bearer {os.environ['AT']}"})
 asyncio.run(main())
 PY
 R="$(tools_call "x-user-sub: $USER_SUB")"
 echo "  $R"
 echo "$R" | grep -q "CODE 200 ISERR True" || fail "revoked tools/call was not 200 is_error: $R"
-echo "$R" | grep -qiE "authoriz" || fail "revoked error text did not mention (re-)authorize: $R"
-echo "  OK: fail-closed on a revoked grant (re-authorize)"
+# The proxy's retry path re-pulls after the revoked-token 401 and surfaces the grant's
+# state; the exact wording is "grant status is 'needs_auth'" (the re-authorize signal —
+# needs_auth is precisely "the user must authorize again"). Accept either phrasing.
+echo "$R" | grep -qiE "needs_auth|authoriz|re-authoriz" || fail "revoked error text did not signal needs-auth/re-authorize: $R"
+echo "  OK: fail-closed on a revoked grant (needs_auth / re-authorize)"
 
 echo "PASS"

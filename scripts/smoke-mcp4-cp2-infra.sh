@@ -34,12 +34,17 @@ API_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-a
 [ -n "$API_POD" ] || fail "no Running registry-api pod found"
 echo "  OK: pod $API_POD Ready"
 
-# ── 2. alembic current == 0074 ────────────────────────────────────────────────
-echo "--- alembic current == 0074 ---"
+# ── 2. alembic revision >= 0074 (OAuth-grants migration applied) ──────────────
+# WS-2 is migration 0074. Assert it is APPLIED, not the current tip: linear history
+# means any revision >= 0074 proves 0074 ran, so this survives a later migration
+# landing. Base-10 comparison (10#) guards the octal trap for a future 8/9 revision.
+echo "--- alembic revision >= 0074 ---"
 CUR="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- alembic current 2>/dev/null || true)"
 echo "  alembic current: ${CUR:-<empty>}"
-echo "$CUR" | grep -q "0074" || fail "alembic head is not 0074 (got: ${CUR:-<empty>})"
-echo "  OK: alembic at 0074"
+CUR_REV="$(echo "$CUR" | grep -oE '^[0-9]{4}' | head -1)"
+[ -n "$CUR_REV" ] || fail "could not parse alembic revision (got: ${CUR:-<empty>})"
+[ "$((10#$CUR_REV))" -ge "$((10#0074))" ] || fail "alembic revision $CUR_REV is before 0074 (OAuth grants not applied)"
+echo "  OK: alembic at $CUR_REV (>= 0074)"
 
 # ── 3. Table + columns (in-pod ORM) ───────────────────────────────────────────
 echo "--- mcp_oauth_grants table + mcp_servers.external_auth_mode/oauth_client_ref columns ---"

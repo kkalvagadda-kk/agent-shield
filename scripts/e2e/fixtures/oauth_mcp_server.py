@@ -44,13 +44,17 @@ rejected (invalid_grant), exactly as a spec-compliant AS would.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import secrets
 import urllib.parse
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,43 @@ BASE = "http://127.0.0.1:9100"
 # Scopes the AS advertises + grants (echoed into the token response `scope`).
 SCOPES = ["mcp:tools", "read"]
 
-app = FastAPI(title="agentshield-stub-oauth-mcp", docs_url=None, redoc_url=None)
+# ── Real MCP surface (FastMCP streamable-http) ───────────────────────────────────────
+# The proxy dials /mcp with the official MCP streamable-http CLIENT, which requires the
+# full protocol handshake (initialize → notifications/initialized → tools/list). A
+# hand-rolled JSON endpoint can't satisfy that (it 404s `initialize`), so serve a REAL
+# FastMCP app — the same library/transport the proxy uses (mirrors stub_mcp_server.py) —
+# and gate it behind the AS-issued bearer. One `echo` tool: returns its input verbatim
+# (the de-anonymize / round-trip proof).
+# DNS-rebinding protection validates the Host header against localhost by default and
+# 421s anything else. This fixture is dialed cross-pod via the proxy pod's IP (e.g.
+# http://10.233.x.y:9100/mcp), so that guard would reject every real MCP request — disable
+# it (a test fixture, not an internet-exposed server).
+_mcp = FastMCP(
+    "agentshield-oauth-stub-mcp",
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+)
+
+
+@_mcp.tool()
+def echo(text: str) -> str:
+    """Return the provided text verbatim."""
+    return text
+
+
+# Starlette ASGI app serving the streamable-http MCP endpoint at /mcp. Its lifespan starts
+# the StreamableHTTP session manager and MUST run — a mounted sub-app's lifespan does NOT
+# fire on its own, so thread it through the parent FastAPI app's lifespan below.
+_mcp_asgi = _mcp.streamable_http_app()
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    async with _mcp_asgi.router.lifespan_context(_mcp_asgi):
+        yield
+
+
+app = FastAPI(title="agentshield-stub-oauth-mcp", docs_url=None, redoc_url=None,
+              lifespan=_lifespan)
 
 # ── In-memory stores (fixture-scoped, per-process; never persisted) ──────────────────
 # DCR-registered clients: client_id -> client_secret.
@@ -73,6 +113,16 @@ _codes: dict[str, dict] = {}
 _access_tokens: set[str] = set()
 # Live refresh tokens; rotated (old discarded, new issued) on every refresh.
 _refresh_tokens: set[str] = set()
+# refresh_token -> the access_token issued ALONGSIDE it (the most recent in its lineage).
+_token_pairs: dict[str, str] = {}
+# refresh_token -> the SET of every access token in its rotation lineage. registry-api's
+# revoke sends only the current (rotated) refresh token, and the proxy may be serving a
+# cached access token minted by an EARLIER pull in the same lineage (the background health
+# loop rotates independently). Tracking the whole lineage lets /revoke invalidate the exact
+# token the proxy holds — without which the fail-closed-on-revoke path (CP3 step 5) could
+# never fire. Keyed per grant (each user's authorize starts a fresh lineage), so revoking
+# one user's grant never touches another's tokens (suite-87 isolation).
+_token_lineage: dict[str, set] = {}
 
 
 def _u(path: str) -> str:
@@ -98,6 +148,34 @@ async def _form(request: Request) -> dict[str, str]:
     ``python-multipart`` dependency the registry-api image may not ship."""
     raw = (await request.body()).decode("utf-8", "replace")
     return {k: v[-1] for k, v in urllib.parse.parse_qs(raw, keep_blank_values=True).items()}
+
+
+class _BearerGatedMCP:
+    """ASGI wrapper: reject any request whose ``Authorization: Bearer`` is absent or not a
+    token THIS AS issued with a ``401`` + RFC 9728 ``WWW-Authenticate`` (so fail-closed is
+    observable); otherwise delegate to the real FastMCP app UNTOUCHED. Pure ASGI (no body
+    buffering) because streamable-http may stream the response."""
+
+    def __init__(self, app):
+        self._app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            hdrs = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+            tok = _bearer(hdrs.get("authorization"))
+            if not tok or tok not in _access_tokens:
+                body = json.dumps({
+                    "error": "invalid_token",
+                    "error_description": "missing or invalid access token",
+                }).encode()
+                await send({"type": "http.response.start", "status": 401, "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"www-authenticate",
+                     f'Bearer resource_metadata="{_u("/.well-known/oauth-protected-resource")}"'.encode()),
+                ]})
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self._app(scope, receive, send)
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +320,8 @@ async def token(request: Request):
         refresh = "stub-refresh-" + secrets.token_hex(12)
         _access_tokens.add(access)
         _refresh_tokens.add(refresh)
+        _token_pairs[refresh] = access
+        _token_lineage[refresh] = {access}
         logger.info("stub-oauth: code exchanged → access+refresh issued")
         return {
             "access_token": access,
@@ -262,11 +342,23 @@ async def token(request: Request):
                 },
             )
         # ROTATE (RFC 9700): the presented refresh token is now dead; issue a new one.
+        # Re-key the pairing onto the NEW refresh token but KEEP the old access token valid:
+        # a real AS leaves already-issued access tokens live until they expire, and the proxy
+        # may still be serving a cached access token from an earlier pull. (Deliberately NOT
+        # invalidating the old access token here — doing so races the background health loop,
+        # which pulls/rotates independently and would then kill the proxy's in-use token.)
         _refresh_tokens.discard(old)
+        carried = _token_pairs.pop(old, None)
         access = "stub-access-" + secrets.token_hex(12)
         refresh = "stub-refresh-" + secrets.token_hex(12)
         _access_tokens.add(access)
         _refresh_tokens.add(refresh)
+        # Map the new refresh token to EVERY access token in this lineage, so revoking it
+        # later invalidates the proxy's cached token regardless of which pull minted it.
+        _token_pairs[refresh] = access
+        _lineage = _token_lineage.pop(old, set()) | {carried, access}
+        _lineage.discard(None)
+        _token_lineage[refresh] = _lineage
         logger.info("stub-oauth: refresh exchanged → access + ROTATED refresh issued")
         return {
             "access_token": access,
@@ -287,80 +379,31 @@ async def token(request: Request):
 # ---------------------------------------------------------------------------
 @app.post("/revoke")
 async def revoke(request: Request):
-    """RFC 7009 — drop the presented token from both live sets. Always ``200``."""
+    """RFC 7009 — revoke the presented token. registry-api sends the (rotated) REFRESH
+    token on disconnect, so also invalidate the access token issued alongside it: a real AS
+    kills a grant's access tokens when the grant is revoked, and without this the proxy's
+    cached access token would keep working until expiry (the fail-closed-on-revoke path
+    could never be observed). Always ``200``."""
     form = await _form(request)
     tok = form.get("token")
     if tok:
         _refresh_tokens.discard(tok)
         _access_tokens.discard(tok)
+        _token_pairs.pop(tok, None)
+        # Revoking a refresh token kills EVERY access token in its lineage (the proxy's
+        # cached token may be any of them) — mirroring an AS that invalidates a grant's
+        # tokens on revocation.
+        for acc in _token_lineage.pop(tok, set()):
+            _access_tokens.discard(acc)
     return JSONResponse(status_code=200, content={})
 
 
 # ---------------------------------------------------------------------------
-# Bearer-gated MCP surface — 401 without a valid access token; tools/list + tools/call
+# The bearer-gated MCP surface is a REAL FastMCP streamable-http app, mounted in __main__
+# (after every AS route is registered) at "/" behind _BearerGatedMCP, so POST/GET /mcp
+# reaches the real protocol handler while /authorize, /token, /.well-known/* etc. keep
+# matching first. See the _mcp / _BearerGatedMCP definitions above.
 # ---------------------------------------------------------------------------
-@app.post("/mcp")
-async def mcp(request: Request, authorization: Optional[str] = Header(None)):
-    """The protected MCP resource. Rejects any request whose ``Authorization: Bearer`` is
-    absent or not a token this AS issued — ``401`` with an RFC 9728 ``WWW-Authenticate``
-    pointing at the protected-resource metadata (so fail-closed is observable). With a
-    valid access token it serves ``tools/list`` (one ``echo`` tool) and ``tools/call``
-    (echoes ``arguments.text`` verbatim)."""
-    tok = _bearer(authorization)
-    if not tok or tok not in _access_tokens:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "invalid_token", "error_description": "missing or invalid access token"},
-            headers={
-                "WWW-Authenticate": (
-                    f'Bearer resource_metadata="{_u("/.well-known/oauth-protected-resource")}"'
-                )
-            },
-        )
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        body = {}
-    method = body.get("method")
-    req_id = body.get("id", 1)
-
-    if method == "tools/list":
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "echo",
-                        "description": "Return the provided text verbatim.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {"text": {"type": "string"}},
-                            "required": ["text"],
-                        },
-                    }
-                ]
-            },
-        }
-
-    if method == "tools/call":
-        params = body.get("params") or {}
-        arguments = params.get("arguments") or {}
-        text = arguments.get("text", "")
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {"content": [{"type": "text", "text": text}], "isError": False},
-        }
-
-    return JSONResponse(
-        status_code=200,
-        content={
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "error": {"code": -32601, "message": f"method not found: {method}"},
-        },
-    )
 
 
 if __name__ == "__main__":
@@ -386,5 +429,11 @@ if __name__ == "__main__":
 
     BASE = args.base or f"http://{args.host}:{args.port}"
     logger.info("stub-oauth: serving AS + bearer-gated MCP at %s", BASE)
+    # Mount the bearer-gated real MCP app LAST — after every @app AS route is registered —
+    # at "/" so the specific AS paths (/authorize, /token, /.well-known/*, /register,
+    # /revoke, /healthz) match first and only the otherwise-unmatched /mcp falls through to
+    # the FastMCP handler. Mount("/") passes the path through unchanged, so the sub-app sees
+    # "/mcp" (its default streamable_http_path) — no trailing-slash remount needed.
+    app.mount("/", _BearerGatedMCP(_mcp_asgi))
     # Blocks — serves every endpoint above at http://{host}:{port}.
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

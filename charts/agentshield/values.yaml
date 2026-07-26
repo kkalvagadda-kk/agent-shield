@@ -112,7 +112,7 @@ mcp-proxy:
   enabled: true
   image:
     repository: registry.internal/agentshield/mcp-proxy
-    tag: "0.1.4"   # 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
+    tag: "0.1.5"   # 0.1.5: bound call_tool by MCP_CONNECT_TIMEOUT_SECONDS so a revoked-token upstream 401 fails closed (evict+re-pull→needs_auth) instead of hanging. 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
   # WS-C identity: wire the proxy's Keycloak client-credentials mint to the
   # in-cluster platform Keycloak (same host/realm registry-api uses — see the
   # registry-api KEYCLOAK_URL env below). clientSecret is supplied at deploy time
