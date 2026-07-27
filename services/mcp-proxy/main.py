@@ -265,8 +265,14 @@ async def health_check(
 
     # 2. Resolve the admin-plane upstream credential. A service-identity mint failure is a
     #    reachability outcome (200 ok=false), never a 5xx. (No OnBehalfOf* here: admin plane.)
+    #    WS-2 (C9): an OAuth external server can only be probed AS an authorized user — thread
+    #    req.user_sub (registry-api supplies the most-recently-authorized user) so resolve_headers
+    #    fetches THAT user's access token. None (static/service-identity) is byte-identical to
+    #    before. This mirrors /internal/discover, which already threads user_sub for OAuth.
     try:
-        headers = await identity.resolve_headers(connection, user_sub=None, is_data_plane=False)
+        headers = await identity.resolve_headers(
+            connection, user_sub=req.user_sub, is_data_plane=False
+        )
     except Exception as exc:  # noqa: BLE001 — identity/mint failure
         logger.warning("mcp-proxy health: identity resolution failed for %s: %s", server_id, exc)
         return McpHealthResponse(ok=False, status="error", health_detail=f"identity: {exc}")

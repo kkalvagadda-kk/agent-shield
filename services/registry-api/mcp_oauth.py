@@ -332,14 +332,18 @@ async def discover_oauth_metadata(server_url: str) -> OAuthMetadata:
         )
 
     as_scopes = as_meta.get("scopes_supported")
+    # Prefer the RESOURCE's scopes (RFC 9728 protected-resource metadata) — those are the
+    # scopes the MCP endpoint actually needs (e.g. GitHub's repo/read:org/read:user). The AS's
+    # own scopes_supported (e.g. GitHub's OIDC 'openid') are only a fallback: requesting just
+    # those yields a token that can DISCOVER the tools but not CALL them (insufficient scope).
     return OAuthMetadata(
         issuer=as_meta.get("issuer"),
         authorization_endpoint=auth_ep,
         token_endpoint=token_ep,
         registration_endpoint=as_meta.get("registration_endpoint"),
         revocation_endpoint=as_meta.get("revocation_endpoint"),
-        scopes_supported=(as_scopes if isinstance(as_scopes, list) else None)
-        or prm_scopes,
+        scopes_supported=prm_scopes
+        or (as_scopes if isinstance(as_scopes, list) else None),
         resource=resource or server_url,
     )
 

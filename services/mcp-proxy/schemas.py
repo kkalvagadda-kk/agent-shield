@@ -53,6 +53,10 @@ class McpDiscoverResponse(BaseModel):
 
 class McpHealthRequest(BaseModel):
     server_id: UUID
+    # WS-2 (C9): for an OAuth external server the health loop probes AS the most-recently-
+    # authorized user (registry-api resolves that user + sends it here). None for a
+    # static/service-identity server (admin-plane probe, byte-identical to Phase 2).
+    user_sub: str | None = None
 
 
 class McpHealthResponse(BaseModel):

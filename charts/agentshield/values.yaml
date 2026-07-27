@@ -112,7 +112,7 @@ mcp-proxy:
   enabled: true
   image:
     repository: registry.internal/agentshield/mcp-proxy
-    tag: "0.1.5"   # 0.1.5: bound call_tool by MCP_CONNECT_TIMEOUT_SECONDS so a revoked-token upstream 401 fails closed (evict+re-pull→needs_auth) instead of hanging. 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
+    tag: "0.1.6"   # 0.1.6: /internal/health threads user_sub so an OAuth server is probed AS its authorized user (health badge Connected, not Error). 0.1.5: bound call_tool by MCP_CONNECT_TIMEOUT_SECONDS so a revoked-token upstream 401 fails closed (evict+re-pull→needs_auth) instead of hanging. 0.1.2: P2 WS-C — Keycloak service-identity mint (client secret mount + env) + list_changed knobs. 0.1.1: POST /internal/health reachability probe
   # WS-C identity: wire the proxy's Keycloak client-credentials mint to the
   # in-cluster platform Keycloak (same host/realm registry-api uses — see the
   # registry-api KEYCLOAK_URL env below). clientSecret is supplied at deploy time
@@ -709,7 +709,7 @@ registry-api:
     # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop + health_check_server
     #   client + mcp_health_* settings + lifespan task; advisory-lock single-flight,
     #   writes mcp_servers.status/health_detail (NOT last_synced_at).
-    tag: "0.2.231"
+    tag: "0.2.232"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
