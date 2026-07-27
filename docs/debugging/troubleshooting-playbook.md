@@ -148,6 +148,29 @@ TypeError without a failed deploy cycle.
 
 ---
 
+### C-10. `helm upgrade` fails on an object that "exists and cannot be imported into the current release"
+- **Look:** the error names ONE object and never the cause. Sweep for the whole class instead of fixing them one error at a time (each retry costs a full chart download + render):
+  ```bash
+  for kind in clusterrole clusterrolebinding secret configmap serviceaccount role rolebinding service deployment; do
+    case "$kind" in clusterrole|clusterrolebinding) S="";; *) S="-n agentshield-platform";; esac
+    kubectl get "$kind" $S -l app.kubernetes.io/managed-by=Helm -o json | python3 -c "
+  import json,sys
+  for i in json.load(sys.stdin).get('items',[]):
+      if 'meta.helm.sh/release-name' not in (i['metadata'].get('annotations') or {}):
+          print(f\"{i['kind']}/{i['metadata']['name']}\")"
+  done
+  ```
+- **Evidence pattern:** the object carries the `app.kubernetes.io/managed-by: Helm` **label** but not the `meta.helm.sh/release-name` **annotation**. Helm reads only the annotation; the label is decoration. A `kubectl.kubernetes.io/last-applied-configuration` annotation on the object is the fingerprint of the hand `kubectl apply` that created it.
+- **Root cause:** something the chart already templates was created by hand (usually during a checkpoint/smoke session), copying Helm's labels and none of its ownership annotations. Nothing fails at creation; the trap springs on the next `helm upgrade`, weeks later, naming an object unrelated to that person's change.
+- **Recover — adopt, do NOT delete:**
+  ```bash
+  kubectl annotate <kind>/<name> [-n <ns>] \
+    meta.helm.sh/release-name=agentshield \
+    meta.helm.sh/release-namespace=agentshield-platform --overwrite
+  ```
+  Two checks first, both load-bearing: (1) compare the LIVE value against what the template renders — adopting a Secret whose template is empty *schedules* the credential's destruction for the next upgrade; (2) confirm your own chart templates it (`grep -rl <name> charts/`). The same sweep surfaces objects from OTHER releases (e.g. `eg-gateway-helm-certgen:*` belongs to Envoy Gateway) and annotating those to `agentshield` hijacks another release.
+- Detail: `docs/bugs/helm-upgrade-blocked-by-unowned-objects.md`.
+
 ## Part 3 — Recurring root-cause PATTERNS (what to suspect)
 
 - **P0 — The error message names the wrong layer.** "Unreachable" was a lifecycle-drift bug; "auth issue" was an OPA bundle timing bug; "connection lost" was a missing SSE handler + node re-run; "can't locate revision" was a stale init container. Diagnose from state, not the string.
