@@ -1123,7 +1123,9 @@ studio:
     #   discovered-tool count, last sync) with the whole card as the link. The
     #   server detail page's discovered-tools tab deliberately stays a table:
     #   nothing on it is selectable, and its five columns are the point.
-    tag: "0.1.165"
+    # 0.1.166: every tool-listing surface pages the full catalog (listAllTools).
+    #   ToolsPage still used the 100-default and hid 7 of 107 tools with no error.
+    tag: "0.1.166"
     pullPolicy: IfNotPresent
 
   service:

@@ -8,12 +8,12 @@ vi.mock("../api/registryApi", () => ({
   createTool: vi.fn(),
   deleteTool: vi.fn(),
   listAuthConfigs: vi.fn(),
-  listTools: vi.fn(),
+  listAllTools: vi.fn(),
   updateTool: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
-import { createTool, listAuthConfigs, listTools, updateTool } from "../api/registryApi";
+import { createTool, listAuthConfigs, listAllTools, updateTool } from "../api/registryApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -78,7 +78,7 @@ const NAME = "get_order_status";
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mock(listTools).mockResolvedValue({ items: [EXISTING_TOOL], total: 1 });
+  mock(listAllTools).mockResolvedValue([EXISTING_TOOL]);
   mock(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
   mock(createTool).mockResolvedValue({ ...EXISTING_TOOL, id: "t2" });
   mock(updateTool).mockResolvedValue(EXISTING_TOOL);
@@ -166,7 +166,7 @@ describe("ToolsPage — multi-line tool description", () => {
 
 describe("ToolsPage — PII de-anonymize flag", () => {
   it("creates an HTTP tool with the pii_deanonymize_allowed flag in the payload", async () => {
-    mock(listTools).mockResolvedValue({ items: [HTTP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([HTTP_TOOL]);
     mock(createTool).mockResolvedValue({ ...HTTP_TOOL, id: "new" });
 
     const user = userEvent.setup();
@@ -193,7 +193,7 @@ describe("ToolsPage — PII de-anonymize flag", () => {
   });
 
   it("creates a Python tool carrying python_code + the pii flag (default false)", async () => {
-    mock(listTools).mockResolvedValue({ items: [HTTP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([HTTP_TOOL]);
     mock(createTool).mockResolvedValue({ ...HTTP_TOOL, id: "py", type: "python" });
 
     const user = userEvent.setup();
@@ -214,7 +214,7 @@ describe("ToolsPage — PII de-anonymize flag", () => {
   });
 
   it("pre-fills the edit form (name + pii checkbox) and sends pii in the update payload", async () => {
-    mock(listTools).mockResolvedValue({ items: [HTTP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([HTTP_TOOL]);
     mock(updateTool).mockResolvedValue(HTTP_TOOL);
 
     const user = userEvent.setup();
@@ -239,7 +239,7 @@ describe("ToolsPage — PII de-anonymize flag", () => {
 
 describe("ToolsPage — MCP-sourced rows", () => {
   it("renders an mcp_tool row read-only: no Edit/Delete, a link to its source server", async () => {
-    mock(listTools).mockResolvedValue({ items: [MCP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([MCP_TOOL]);
     renderWithProviders(<ToolsPage />);
 
     const nameCell = await screen.findByText("github-mcp__search_issues");
@@ -257,7 +257,7 @@ describe("ToolsPage — MCP-sourced rows", () => {
   // name, so two servers each exposing `search` render as two identical rows.
   // Without the origin on the row they are indistinguishable.
   it("names the source server in its own column", async () => {
-    mock(listTools).mockResolvedValue({ items: [MCP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([MCP_TOOL]);
     renderWithProviders(<ToolsPage />);
 
     const row = (await screen.findByText("github-mcp__search_issues")).closest("tr")!;
@@ -266,7 +266,7 @@ describe("ToolsPage — MCP-sourced rows", () => {
   });
 
   it("leaves the Source cell blank for a native tool", async () => {
-    mock(listTools).mockResolvedValue({ items: [HTTP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([HTTP_TOOL]);
     renderWithProviders(<ToolsPage />);
 
     const row = (await screen.findByText("Get Order")).closest("tr")!;
@@ -279,7 +279,7 @@ describe("ToolsPage — MCP-sourced rows", () => {
   // HTTP tool and save back as one. The row being read-only is what makes that
   // unreachable; this pins it.
   it("offers no path to edit an mcp_tool as an http tool", async () => {
-    mock(listTools).mockResolvedValue({ items: [MCP_TOOL], total: 1 });
+    mock(listAllTools).mockResolvedValue([MCP_TOOL]);
     renderWithProviders(<ToolsPage />);
     await screen.findByText("github-mcp__search_issues");
 

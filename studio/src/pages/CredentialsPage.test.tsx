@@ -17,7 +17,7 @@ vi.mock("../api/registryApi", async () => {
     createAuthConfig: vi.fn(),
     updateAuthConfig: vi.fn(),
     deleteAuthConfig: vi.fn(),
-    listTools: vi.fn(),
+    listAllTools: vi.fn(),
   };
 });
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -26,7 +26,7 @@ import {
   listAuthConfigs,
   createAuthConfig,
   updateAuthConfig,
-  listTools,
+  listAllTools,
 } from "../api/registryApi";
 import { toast } from "sonner";
 import type { AuthConfig } from "../api/registryApi";
@@ -58,7 +58,7 @@ const SERPER_TOOL: RegistryTool = {
 
 function seedApis() {
   mk(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
-  mk(listTools).mockResolvedValue({ items: [SERPER_TOOL], total: 1 });
+  mk(listAllTools).mockResolvedValue([SERPER_TOOL]);
   mk(createAuthConfig).mockResolvedValue(mkConfig({ id: "ac1" }));
 }
 

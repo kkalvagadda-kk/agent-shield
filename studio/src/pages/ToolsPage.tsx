@@ -10,7 +10,7 @@ import {
   createTool,
   deleteTool,
   listAuthConfigs,
-  listTools,
+  listAllTools,
   updateTool,
   type CreateToolPayload,
   type RegistryTool,
@@ -83,7 +83,12 @@ export default function ToolsPage() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['registry-tools'],
-    queryFn: () => listTools(),
+    // The whole catalog, paged. This page's ONE job is listing every tool, and
+    // listTools() defaults to 100 — at 107 tools on the test cluster seven were
+    // simply absent from the screen, with no error. Caught by
+    // e2e/tool-description-multiline.spec.ts, which could not find the tool it
+    // had just created.
+    queryFn: () => listAllTools(),
   });
 
   const deleteMutation = useMutation({
@@ -99,7 +104,7 @@ export default function ToolsPage() {
     },
   });
 
-  const tools: RegistryTool[] = data?.items ?? [];
+  const tools: RegistryTool[] = data ?? [];
 
   const openCreate = () => {
     setEditingTool(null);

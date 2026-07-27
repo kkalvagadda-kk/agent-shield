@@ -11,7 +11,7 @@ import {
   expectedCredentialKeys,
   isValidEnvVarName,
   listAuthConfigs,
-  listTools,
+  listAllTools,
   updateAuthConfig,
   type AuthConfig,
   type CreateAuthConfigPayload,
@@ -266,10 +266,10 @@ function CredentialForm({
 
   const { data: toolsData } = useQuery({
     queryKey: ['tools', 'credential-picker'],
-    queryFn: () => listTools(200, 0),
+    queryFn: () => listAllTools(),
   });
   // Only HTTP tools carry credential-bearing header placeholders.
-  const tools: RegistryTool[] = (toolsData?.items ?? []).filter(
+  const tools: RegistryTool[] = (toolsData ?? []).filter(
     (t) => expectedCredentialKeys(t).length > 0,
   );
 

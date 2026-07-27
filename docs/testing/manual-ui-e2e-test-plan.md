@@ -12,11 +12,12 @@
 
 ---
 
-## MCP picker parity + the `main` merge — code + tests complete, cluster run pending — 2026-07-27
+## MCP picker parity + the `main` merge — deployed and verified on EKS — 2026-07-27
 
 `main` merged into `mcp-tool-source`. The browse-and-select tile drawers, the multi-line tool
 description and the `viewer`→`consumer` role rename now sit on the same branch as MCP-as-a-tool-source,
-and MCP tools are first-class in the drawer. Ships as **studio 0.1.164 / registry-api 0.2.233**.
+and MCP tools are first-class in the drawer. Ships as **studio 0.1.166 / registry-api 0.2.233**
+(0.1.164 merge → 0.1.165 MCP server tile grid → 0.1.166 the third truncation site, below).
 
 **Two production bugs fixed here, both pre-existing and both made reachable by MCP** — postmortems in
 `docs/bugs/tool-picker-offers-retired-tools.md` and `docs/bugs/tool-picker-silently-truncates-at-200.md`:
@@ -41,6 +42,23 @@ and MCP tools are first-class in the drawer. Ships as **studio 0.1.164 / registr
   never built. Merged work ships as `0.1.164`, and `studio/src/lib/build.ts` was re-synced (it had drifted
   to `0.1.160` on **both** branches, which would have failed suite-79 T-S79-002).
 
+**Cluster run — CLOSED (was the standing debt on this entry).** Deployed to EKS (helm revision 41) and
+verified on **studio 0.1.166 / registry-api 0.2.233**. Browser layer `--group tools,mcp` **12/12**,
+including the MCP bind journey (open drawer → filter to the server → check → Done → save → **reload**
+→ still checked) and both `tools-picker-drawer` save→reload cases. API layer `--group tools,mcp,rbac`
+**11/0** on suite-88. Alembic advanced `0074` → `0075` rather than skipping. Vitest **510/510**,
+`tsc --noEmit` clean, `--audit` clean.
+
+**A third truncation site, found by the cluster run and not by any test I wrote:**
+
+`listAllTools()` fixed the pickers; `ToolsPage` — the page whose entire job is listing tools — was
+still on `listTools()` and its **default limit of 100**. The cluster had crossed **107 tools**, so
+seven were absent from the screen with no error. `e2e/tool-description-multiline.spec.ts` caught it
+only incidentally, by failing to find a tool it had just created. `CredentialsPage` and
+`AdminArtifactsPage` had the same hole at `listTools(200, 0)` — one page-load below the cap. All
+three now page the full catalog (studio **0.1.166**); the only surviving `listTools(` references are
+the pager's own call and a comment. Live confirmation: `total=107, one-page@100=100`.
+
 **Known gaps from this change:**
 
 - **deferred (intentional) — MCP `resources` / `prompts` primitives.** There is no MCP analogue of a
@@ -52,10 +70,28 @@ and MCP tools are first-class in the drawer. Ships as **studio 0.1.164 / registr
   selection affordance and nothing on that tab is selectable (binding happens in the agent builder, as the
   tab's own hint says); tiling it would drop the five columns you scan and gain nothing. It did get the
   drawer's *vocabulary*: a filter box, the shared risk/PII chips, and an expandable `input_schema` row.
-- **not-yet-wired (debt) — cluster run.** Everything here is Vitest + typecheck green (501 tests) and
-  `--audit` clean, but **nothing has run against a cluster**: `suite-84` T-S84-030/031/032 and the rewritten
-  `e2e/mcp-servers.spec.ts` bind journey both need `studio 0.1.164` / `registry-api 0.2.233` deployed.
-  The EKS cluster is still on `0.1.163` / `0.2.232`.
+- **not-yet-wired (debt) — nothing counts tools against the page cap.** Three separate surfaces
+  truncated because a literal page size was written next to each call. `listAllTools()` removes the
+  literal, but no test asserts that a *new* caller can't reintroduce one — the guard shape that would
+  work is suite-80's discovered-scope grep (`grep -rl "listTools(" studio/src` must return only the
+  pager). Worth adding when the next listing surface lands.
+- **not-yet-wired (debt) — the e2e pod selector accepts a Running-but-not-Ready pod.**
+  `--field-selector=status.phase=Running` fixed the dominant failure (2612 Evicted pods on this
+  cluster today, up from 25 this morning), but a pod mid-rollout is Running and cannot serve — hit
+  live during this deploy. Not exposed in normal runs because `deploy-eks.sh` waits for rollout before
+  suites run. The real fix is a shared `api_pod()` helper the suites source, so the next refinement is
+  one line rather than a 49-file sweep; the selector is currently copy-pasted 51 times.
+- **not-yet-wired (debt) — `registry-api` has no `startupProbe`.** Two uvicorn workers under a 500m CPU
+  limit exceed the liveness probe's `initialDelaySeconds=15` on cold start, so the kubelet kills a
+  still-booting container. Observed this deploy: one replica CrashLooped twice (CPU pegged at 501m/500m
+  while its healthy sibling idled at 42m) before winning the race. A `startupProbe` is the correct
+  separation — liveness answers "is it wedged?", not "has it finished booting?".
+- **deferred (needs a decision) — `Chart.yaml` pins subcharts as `18.x.x` / `27.x.x`.** Every
+  `helm dependency update` re-resolves to whatever Bitnami published, so `Chart.lock` drifts on every
+  deploy (this one moved postgresql 18.8.0→18.8.1 and redis 27.0.15→27.0.18). The lock records the
+  drift but pins nothing, and the constraint would accept a whole new minor of a **stateful database**.
+  Reverted the lock rather than smuggle a subchart upgrade into a test-harness change; tightening the
+  constraint is an upgrade-policy call, not mine to make silently.
 
 ---
 
