@@ -381,8 +381,32 @@ async def oauth_access_token(
         )
     refresh_token = stored.get("refresh_token") if isinstance(stored, dict) else None
     if not refresh_token:
+        # No refresh token. RFC 6749 makes the refresh token OPTIONAL — a classic GitHub
+        # OAuth App (and any AS that hands back a long-lived / non-expiring access token)
+        # returns only an access token. Serve the STORED access token directly: valid while
+        # token_expires_at is None (non-expiring) or still in the future; needs_auth once it
+        # has actually expired (nothing can renew it, so the user re-authorizes).
+        access_token = stored.get("access_token") if isinstance(stored, dict) else None
+        if not access_token:
+            return OAuthAccessTokenResponse(
+                status="needs_auth",
+                detail="stored credential has neither a refresh nor an access token",
+            )
+        if (
+            grant.token_expires_at is not None
+            and grant.token_expires_at <= datetime.now(timezone.utc)
+        ):
+            grant.status = "needs_auth"
+            grant.last_error = "access token expired and no refresh token to renew"
+            grant.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            return OAuthAccessTokenResponse(
+                status="needs_auth", detail="access token expired — re-authorize"
+            )
         return OAuthAccessTokenResponse(
-            status="needs_auth", detail="stored credential has no refresh_token"
+            status="authorized",
+            access_token=access_token,
+            expires_at=grant.token_expires_at,
         )
 
     # (4) Load the server + the SAME client that obtained the refresh token, discover the

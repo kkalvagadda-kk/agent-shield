@@ -532,23 +532,28 @@ async def oauth_callback(
             await db.commit()
             return _studio_redirect(server_id, "error")
 
-        if not tokens.refresh_token:
-            # No refresh token → the proxy could never mint a fresh access token later.
-            # Fail closed rather than record a grant that cannot be sustained.
+        if not tokens.refresh_token and not tokens.access_token:
+            # Neither token → nothing to sustain the grant with. Fail closed.
             await _mark_grant_error(
                 db, server_id, user_sub,
-                "authorization server issued no refresh token (offline access "
-                "required for sustained tool calls)",
+                "authorization server issued neither a refresh nor an access token",
             )
             await db.commit()
             return _studio_redirect(server_id, "error")
 
-        # (contract §2 step 5) Store the refresh token ONLY behind the provider; the grant
-        # holds a ref, never the token. HARD invariant: no token in the redirect.
-        refresh_ref = mcp_oauth_refresh_ref(server_id, user_sub)
-        await get_provider().put(
-            refresh_ref, {"refresh_token": tokens.refresh_token}
-        )
+        # (contract §2 step 5) Store the durable credential ONLY behind the provider; the
+        # grant holds a ref, never the token (HARD invariant: no token in the redirect).
+        # Prefer the refresh token (short-lived-access + rotation model). If the AS issued
+        # none — RFC 6749 makes it OPTIONAL, and a classic GitHub OAuth App returns a
+        # non-expiring access token with no refresh — store the ACCESS token too and the pull
+        # endpoint serves it directly until it expires. Store whichever tokens we got.
+        cred_blob: dict[str, str] = {}
+        if tokens.refresh_token:
+            cred_blob["refresh_token"] = tokens.refresh_token
+        if tokens.access_token:
+            cred_blob["access_token"] = tokens.access_token
+        cred_ref = mcp_oauth_refresh_ref(server_id, user_sub)
+        await get_provider().put(cred_ref, cred_blob)
         expires_at = (
             datetime.now(timezone.utc) + timedelta(seconds=int(tokens.expires_in))
             if tokens.expires_in
@@ -559,7 +564,7 @@ async def oauth_callback(
             server_id,
             user_sub,
             status="authorized",
-            credential_ref=str(refresh_ref),
+            credential_ref=str(cred_ref),
             scopes=tokens.scope,
             token_expires_at=expires_at,
             last_error=None,
