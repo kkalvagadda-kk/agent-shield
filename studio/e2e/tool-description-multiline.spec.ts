@@ -127,7 +127,10 @@ test.describe("tool description — multi-line create + edit", () => {
     const saved = page.waitForResponse(
       (r) =>
         ["PUT", "PATCH"].includes(r.request().method()) &&
-        new RegExp(`/api/v1/tools/${TOOL_NAME}$`).test(r.url()),
+        // The update route is /tools/{tool_id} — a UUID, NOT the tool name. Matching
+        // on the name never fired, so this waited out its full timeout on a save
+        // that had actually succeeded. Same wrong assumption suite-88 encoded.
+        /\/api\/v1\/tools\/[0-9a-fA-F-]{36}$/.test(r.url()),
       { timeout: 30_000 },
     );
     await page.getByRole("button", { name: /^Save Changes$/i }).click();

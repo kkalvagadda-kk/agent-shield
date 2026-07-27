@@ -218,10 +218,15 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     // FR-MCP-42). Target by BOTH so it is unique among this run's tools — the chip
     // disambiguates from any same-named native tool, the display name from the
     // server's other discovered tool.
+    // hasText is a SUBSTRING match: filtering on a short tool name like "add" also
+    // catches a tile whose DESCRIPTION contains it (the stub's
+    // `simulate_tool_change` says "adds"). Match the tool's display name as an
+    // exact text node; keep the server filter so two servers exposing the same
+    // tool name stay distinguishable.
     const toolTile = grid
       .locator("label")
       .filter({ hasText: SERVER_NAME })
-      .filter({ hasText: firstToolName });
+      .filter({ has: page.getByText(firstToolName, { exact: true }) });
     await expect(toolTile).toBeVisible({ timeout: 15_000 });
     await expect(toolTile).toContainText(SERVER_NAME); // source-server chip
     // The raw type string must never reach a tile — it would read "mcp_tool".
@@ -263,7 +268,7 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
       .getByTestId("tools-picker-drawer-grid")
       .locator("label")
       .filter({ hasText: SERVER_NAME })
-      .filter({ hasText: firstToolName });
+      .filter({ has: page.getByText(firstToolName, { exact: true }) });
     await expect(reloadedTile.locator('input[type="checkbox"]')).toBeChecked({
       timeout: 15_000,
     });
@@ -309,7 +314,11 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     await detailResp;
 
     // The Health card header (WS-A section).
-    await expect(page.getByRole("heading", { name: "Health" })).toBeVisible({ timeout: 15_000 });
+    // exact: the accessible-name match is a substring, and this test's own server
+    // fixture is named "...-health", so the page <h1> matched too.
+    await expect(
+      page.getByRole("heading", { name: "Health", exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
 
     // Scope every assertion to the Health card so the error banner / tabs can't satisfy them.
     const health = page.locator(".card").filter({ hasText: "Health" });

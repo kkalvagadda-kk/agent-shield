@@ -143,12 +143,12 @@ test.describe("tools picker — browse-and-select tile drawer", () => {
 
     // Search narrows to our tool, then clears back.
     await toolsDrawer(page)
-      .getByPlaceholder(/search by name or description/i)
+      .getByPlaceholder(/search by name/i)
       .fill("widget by id for the picker-drawer");
     await expect(tile).toBeVisible();
-    await toolsDrawer(page).getByPlaceholder(/search by name or description/i).fill("zzz-no-match");
+    await toolsDrawer(page).getByPlaceholder(/search by name/i).fill("zzz-no-match");
     await expect(toolsDrawer(page)).toContainText(/tools are managed under tools/i);
-    await toolsDrawer(page).getByPlaceholder(/search by name or description/i).fill("");
+    await toolsDrawer(page).getByPlaceholder(/search by name/i).fill("");
 
     // Select it → Done → it surfaces as a chip on the builder.
     await toolCheckbox(page).check();
