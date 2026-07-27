@@ -1119,7 +1119,11 @@ studio:
     #   when one vendor's server contributes dozens. (d) ToolsPage gains a Source
     #   column. (e) ToolsPicker takes an explicit valueKey ('name' | 'id'), retiring
     #   the id-keyed duplicate pickers in PropertiesPanel and SkillsPage.
-    tag: "0.1.164"
+    # 0.1.165: MCP Servers list is a tile grid (name, url, status, description,
+    #   discovered-tool count, last sync) with the whole card as the link. The
+    #   server detail page's discovered-tools tab deliberately stays a table:
+    #   nothing on it is selectable, and its five columns are the point.
+    tag: "0.1.165"
     pullPolicy: IfNotPresent
 
   service:

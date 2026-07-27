@@ -142,7 +142,14 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     );
     await page.goto("/mcp-servers");
     await listResp;
-    await expect(page.getByText(SERVER_NAME)).toBeVisible({ timeout: 15_000 });
+    // Servers render as TILES, and the whole card is the link back to the detail
+    // page — assert the tile, not just that the name appears somewhere.
+    const tiles = page.getByTestId("mcp-server-tiles");
+    await expect(tiles).toBeVisible({ timeout: 15_000 });
+    const tile = tiles.getByRole("link").filter({ hasText: SERVER_NAME });
+    await expect(tile).toBeVisible({ timeout: 15_000 });
+    await expect(tile).toHaveAttribute("href", `/mcp-servers/${serverId}`);
+    await expect(tile).toContainText(/tool/i); // discovered-tool count on the tile
 
     // Hand the discovery result to the infra-gated tests below.
     discoveredToolCount = (detail.tools?.length ?? 0) as number;

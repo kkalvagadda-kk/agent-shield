@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../test/utils";
 import McpServersPage from "./McpServersPage";
@@ -44,14 +44,56 @@ const SERVER = {
 describe("McpServersPage", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("lists MCP servers from the API with status + tool count", async () => {
+  it("lists MCP servers as tiles with status + tool count", async () => {
     mk(listMcpServers).mockResolvedValue([SERVER]);
     renderWithProviders(<McpServersPage />);
 
     expect(await screen.findByText("github-mcp")).toBeInTheDocument();
     expect(screen.getByText("Connected")).toBeInTheDocument();
-    expect(screen.getByText("7")).toBeInTheDocument();
+    // The count is pluralised on the tile ("7 tools"), not a bare table cell.
+    expect(screen.getByText("7 tools")).toBeInTheDocument();
     expect(screen.getByText("External")).toBeInTheDocument();
+    expect(screen.getByTestId("mcp-server-tiles")).toBeInTheDocument();
+  });
+
+  // Servers are browsed and picked, so the whole card is the link — not just the
+  // name text. A tile whose only click target is a few characters of name is the
+  // usual regression when a table becomes a grid.
+  it("makes the whole tile a link to the server detail page", async () => {
+    mk(listMcpServers).mockResolvedValue([SERVER]);
+    renderWithProviders(<McpServersPage />);
+
+    const tile = (await screen.findByText("github-mcp")).closest("a")!;
+    expect(tile).toHaveAttribute("href", "/mcp-servers/srv-1");
+    // The URL, description and freshness all live inside that same target.
+    expect(within(tile).getByText("GitHub's MCP server")).toBeInTheDocument();
+    expect(within(tile).getByText(/Synced /)).toBeInTheDocument();
+  });
+
+  it("says so when a server has never been synced", async () => {
+    mk(listMcpServers).mockResolvedValue([{ ...SERVER, last_synced_at: null }]);
+    renderWithProviders(<McpServersPage />);
+
+    expect(await screen.findByText(/never synced/i)).toBeInTheDocument();
+  });
+
+  it("singularises a one-tool server", async () => {
+    mk(listMcpServers).mockResolvedValue([{ ...SERVER, discovered_tool_count: 1 }]);
+    renderWithProviders(<McpServersPage />);
+
+    expect(await screen.findByText("1 tool")).toBeInTheDocument();
+  });
+
+  it("renders a tile per server", async () => {
+    mk(listMcpServers).mockResolvedValue([
+      SERVER,
+      { ...SERVER, id: "srv-2", name: "tavily", status: "error", discovered_tool_count: 3 },
+    ]);
+    renderWithProviders(<McpServersPage />);
+
+    await screen.findByText("github-mcp");
+    expect(within(screen.getByTestId("mcp-server-tiles")).getAllByRole("link")).toHaveLength(2);
+    expect(screen.getByText("Error")).toBeInTheDocument();
   });
 
   it("shows an empty state when there are no servers", async () => {

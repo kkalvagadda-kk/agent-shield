@@ -71,66 +71,71 @@ export default function McpServersPage() {
         </button>
       </div>
 
-      <div className="card p-0 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-slate-100 bg-slate-50">
-              {["Name", "Scope", "Team", "Tools", "Status", "Synced"].map((h) => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100">
-            {isLoading && (
-              <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-slate-400">
-                  <Loader2 size={16} className="inline animate-spin mr-2" /> Loading MCP servers…
-                </td>
-              </tr>
-            )}
-            {isError && !isLoading && (
-              <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-red-500">
-                  Failed to load MCP servers.
-                </td>
-              </tr>
-            )}
-            {!isLoading && !isError && servers.length === 0 && (
-              <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-slate-400">
-                  No MCP servers registered yet. Register one to discover its tools.
-                </td>
-              </tr>
-            )}
-            {servers.map((s) => (
-              <tr key={s.id} className="hover:bg-slate-50 transition-colors">
-                <td className="px-4 py-3">
-                  <Link to={`/mcp-servers/${s.id}`} className="flex items-center gap-2 group">
-                    <Server size={14} className="text-blue-500 shrink-0" />
-                    <div>
-                      <p className="font-semibold text-slate-900 group-hover:text-blue-600">{s.name}</p>
-                      <p className="text-xs text-slate-400 truncate max-w-md font-mono">{s.server_url}</p>
-                    </div>
-                  </Link>
-                </td>
-                <td className="px-4 py-3">
-                  <span className={`badge ${s.is_external ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-600"}`}>
-                    {s.is_external ? "External" : "Internal"}
-                  </span>
-                </td>
-                <td className="px-4 py-3 text-slate-600">{s.owner_team ?? "—"}</td>
-                <td className="px-4 py-3 text-slate-600">
-                  <span className="inline-flex items-center gap-1"><Wrench size={12} className="text-slate-400" />{s.discovered_tool_count}</span>
-                </td>
-                <td className="px-4 py-3"><StatusBadge status={s.status} /></td>
-                <td className="px-4 py-3 text-slate-500 text-xs">
-                  {s.last_synced_at ? new Date(s.last_synced_at).toLocaleString() : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {isLoading && (
+        <div className="card px-4 py-10 text-center text-slate-400">
+          <Loader2 size={16} className="inline animate-spin mr-2" /> Loading MCP servers…
+        </div>
+      )}
+      {isError && !isLoading && (
+        <div className="card px-4 py-10 text-center text-red-500">Failed to load MCP servers.</div>
+      )}
+      {!isLoading && !isError && servers.length === 0 && (
+        <div className="card px-4 py-10 text-center text-slate-400">
+          No MCP servers registered yet. Register one to discover its tools.
+        </div>
+      )}
+
+      {/* Servers are TILES, not table rows. A server is a thing you browse and
+          pick — a handful of them, each with a name, a URL, a health state and a
+          tool count — which is exactly what a tile shows better than a row. (The
+          discovered-tools tab on the detail page stays a table: that IS a dense
+          read-only inventory, and its columns are the point.) The whole tile is
+          the link, so the click target is the card rather than the name text. */}
+      {!isLoading && !isError && servers.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4" data-testid="mcp-server-tiles">
+          {servers.map((s) => (
+            <Link
+              key={s.id}
+              to={`/mcp-servers/${s.id}`}
+              className="card p-4 flex flex-col gap-3 hover:border-blue-300 hover:shadow-sm transition-all group"
+            >
+              <div className="flex items-start gap-2.5">
+                <Server size={16} className="text-blue-500 shrink-0 mt-0.5" />
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-slate-900 group-hover:text-blue-600 truncate">
+                    {s.name}
+                  </p>
+                  <p className="text-xs text-slate-400 font-mono truncate">{s.server_url}</p>
+                </div>
+                <StatusBadge status={s.status} />
+              </div>
+
+              {s.description && (
+                <p className="text-xs text-slate-500 leading-relaxed line-clamp-2">{s.description}</p>
+              )}
+
+              <div className="flex items-center gap-1.5 flex-wrap text-xs mt-auto pt-1">
+                <span className={`badge ${s.is_external ? "bg-indigo-50 text-indigo-700" : "bg-slate-100 text-slate-600"}`}>
+                  {s.is_external ? "External" : "Internal"}
+                </span>
+                <span className="badge bg-slate-100 text-slate-600 inline-flex items-center gap-1">
+                  <Wrench size={11} className="text-slate-400" />
+                  {s.discovered_tool_count} {s.discovered_tool_count === 1 ? "tool" : "tools"}
+                </span>
+                {s.owner_team && <span className="badge bg-slate-100 text-slate-600">{s.owner_team}</span>}
+              </div>
+
+              {/* Last sync is the freshness signal for the tool count above it —
+                  a stale count is worse than no count, because it reads current. */}
+              <p className="text-xs text-slate-400 border-t border-slate-100 pt-2">
+                {s.last_synced_at
+                  ? `Synced ${new Date(s.last_synced_at).toLocaleString()}`
+                  : "Never synced"}
+              </p>
+            </Link>
+          ))}
+        </div>
+      )}
 
       {showNew && <RegisterServerModal onClose={() => setShowNew(false)} />}
     </div>
