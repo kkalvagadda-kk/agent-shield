@@ -594,7 +594,10 @@ POST   /api/v1/playground/evals/run
     dataset_id: "<PlaygroundDataset id>",   — its `mode` selects the scorer branch
     pass_threshold: 0.9,                    — optional; per-run, overrides the platform default
     dimension_weights: { ... },             — optional; per-run weights over the mode's dimensions
-    baseline_version: "<version_tag>"   — optional; enables diff view
+    # NOT IMPLEMENTED — `baseline_version` was specced here and never built. There is no
+    # `baseline` parameter anywhere in the API. Comparison is planned as a RUN-to-RUN diff
+    # over two runs that already exist (eval-ux-enrichment.md Wave 1 Slice 2), not as a
+    # paired A/B launch. See docs/design/eval-state-of-play.md.
   }
   Returns: { eval_run_id }              — poll GET below for results
 
@@ -603,14 +606,18 @@ GET    /api/v1/playground/evals/{eval_run_id}
   Returns: {
     status: "running" | "complete" | "failed",
     summary: { total, passed, failed, pass_rate },
-    assertions: [
+    results: [                           — `eval_run_results` rows
       {
-        test_case, prompt, expected, actual,
-        passed: bool, score: float,
-        baseline_actual: str | null,     — present only if baseline_version provided
-        baseline_passed: bool | null
+        dataset_item_idx, input_message, expected_output, response,
+        passed: bool,
+        dimension_scores: { ... },       — which keys exist depends on the dataset's mode
+        eval_detail: { ... },            — per-dimension evidence, incl. `veto` when one fired
+        langfuse_trace_id: str           — populated on every row; links to the run's trace
       }
     ]
+    # NOT IMPLEMENTED — the `baseline_actual` / `baseline_passed` fields specced here do not
+    # exist. Baseline comparison is a client-side diff of two existing runs (Wave 1 Slice 2),
+    # so it needs no per-row baseline field on this response.
   }
 
 # Compare two versions side-by-side
