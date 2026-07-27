@@ -45,7 +45,7 @@ PASS=0; FAIL=0
 TS=$(date +%s)
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
 
 # NOTE: AGENTSHIELD_OPA_URL lives on AGENT pods (read by the SDK), never on the

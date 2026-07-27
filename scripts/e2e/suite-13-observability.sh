@@ -38,7 +38,7 @@ echo "    CRITICAL: Failure here means the platform is operationally dark"
 echo ""
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l 'app.kubernetes.io/name=registry-api' \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 LF_SVC="http://agentshield-langfuse-web.${NAMESPACE}.svc.cluster.local:3000"
 SO_SVC="http://agentshield-safety-orchestrator.${NAMESPACE}.svc.cluster.local:8080"

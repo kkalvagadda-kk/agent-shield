@@ -4,7 +4,7 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}')
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
 run() {
   kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "$1"

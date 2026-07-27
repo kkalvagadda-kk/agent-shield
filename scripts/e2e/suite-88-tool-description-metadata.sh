@@ -118,6 +118,19 @@ def base_tool(name, **over):
     body.update(over)
     return body
 
+def list_all():
+    """Every tool, paging on `total` — `limit` is capped at 200 server-side."""
+    out, off, st = [], 0, 200
+    while True:
+        st, page = call("GET", f"/api/v1/tools/?limit=200&offset={off}", PT)
+        if st != 200:
+            return st, out
+        rows = (page or {}).get("items", [])
+        out.extend(rows)
+        off += 200
+        if not rows or len(out) >= (page or {}).get("total", 0):
+            return st, out
+
 try:
     # ---- T-S88-001 create with a multi-line description -------------------
     st, t = call("POST", "/api/v1/tools/", PT, base_tool(TOOL, description=MULTILINE))
@@ -129,8 +142,17 @@ try:
     else:
         bad("T-S88-001 create echo", f"got {t.get('description')!r}")
 
+    # The tools router keys single-tool routes on the UUID (`GET/PUT /tools/{tool_id}`),
+    # NOT the name — a name in that slot fails path validation with 422 before any
+    # handler runs. Capture the id once from the create response and use it for every
+    # read/update below.
+    TID = t.get("id")
+    if not TID:
+        bad("T-S88-001b create returned no id", f"{t}")
+        print(f"=== Suite 88: PASS={PASS} FAIL={FAIL} ==="); raise SystemExit(1)
+
     # ---- T-S88-002 round-trip: the newlines SURVIVED the DB ---------------
-    st, g = call("GET", f"/api/v1/tools/{TOOL}", PT)
+    st, g = call("GET", f"/api/v1/tools/{TID}", PT)
     desc = (g or {}).get("description")
     if st == 200 and desc == MULTILINE:
         ok("T-S88-002 GET returns the stored description with every newline intact")
@@ -143,8 +165,9 @@ try:
         bad("T-S88-002b newline count", f"{None if desc is None else desc.count(chr(10))}")
 
     # ---- T-S88-003 the LIST payload carries it too ------------------------
-    st, lst = call("GET", "/api/v1/tools/?limit=500", PT)
-    items = (lst or {}).get("items", lst if isinstance(lst, list) else [])
+    # limit is le=200 server-side — ?limit=500 is a 422, not a big page. Page to
+    # the end (same contract Studio's listAllTools relies on).
+    st, items = list_all()
     mine = [i for i in items if i.get("name") == TOOL]
     if st == 200 and mine and mine[0].get("description") == MULTILINE:
         ok("T-S88-003 list payload carries the full multi-line description")
@@ -153,10 +176,10 @@ try:
 
     # ---- T-S88-004 update to a different multi-line value -----------------
     UPDATED = MULTILINE + "\nEdited: now also returns the carrier tracking id."
-    st, u = call("PUT", f"/api/v1/tools/{TOOL}", PT, base_tool(TOOL, description=UPDATED))
-    if st not in (200, 201, 204):
-        st, u = call("PATCH", f"/api/v1/tools/{TOOL}", PT, {"description": UPDATED})
-    st2, g2 = call("GET", f"/api/v1/tools/{TOOL}", PT)
+    # PUT is the ONLY update verb on this router; there is no PATCH route, so the
+    # old PATCH fallback just turned a failure into a 405.
+    st, u = call("PUT", f"/api/v1/tools/{TID}", PT, base_tool(TOOL, description=UPDATED))
+    st2, g2 = call("GET", f"/api/v1/tools/{TID}", PT)
     if st2 == 200 and (g2 or {}).get("description") == UPDATED:
         ok("T-S88-004 edited multi-line description round-trips (5 lines)")
     else:
@@ -164,10 +187,8 @@ try:
 
     # ---- T-S88-005 a long description is not truncated --------------------
     LONG = "\n".join(f"Line {i:02d}: " + ("x" * 60) for i in range(60))
-    st, _u = call("PUT", f"/api/v1/tools/{TOOL}", PT, base_tool(TOOL, description=LONG))
-    if st not in (200, 201, 204):
-        call("PATCH", f"/api/v1/tools/{TOOL}", PT, {"description": LONG})
-    st, g3 = call("GET", f"/api/v1/tools/{TOOL}", PT)
+    st, _u = call("PUT", f"/api/v1/tools/{TID}", PT, base_tool(TOOL, description=LONG))
+    st, g3 = call("GET", f"/api/v1/tools/{TID}", PT)
     got = (g3 or {}).get("description") or ""
     if st == 200 and got == LONG:
         ok(f"T-S88-005 long description ({len(LONG)} bytes / 60 lines) not truncated")
@@ -177,8 +198,7 @@ try:
     # ---- T-S88-006 tile metadata contract ---------------------------------
     # Every tile renders risk_level + type; a list response missing either makes
     # every tile render without its governance signal.
-    st, lst = call("GET", "/api/v1/tools/?limit=500", PT)
-    items = (lst or {}).get("items", lst if isinstance(lst, list) else [])
+    st, items = list_all()
     missing = [i.get("name") for i in items if not i.get("type")]
     mine = [i for i in items if i.get("name") == TOOL]
     if st == 200 and mine and mine[0].get("risk_level") == "high" and mine[0].get("type"):
@@ -192,7 +212,7 @@ try:
 
     # ---- T-S88-007 no description at all still works ----------------------
     st, t2 = call("POST", "/api/v1/tools/", PT, base_tool(TOOL_NODESC))
-    st2, g4 = call("GET", f"/api/v1/tools/{TOOL_NODESC}", PT)
+    st2, g4 = call("GET", f"/api/v1/tools/{(t2 or {}).get('id')}", PT)
     if st in (200, 201) and st2 == 200 and not (g4 or {}).get("description"):
         ok("T-S88-007 a tool with no description creates and reads back empty (no 500)")
     else:

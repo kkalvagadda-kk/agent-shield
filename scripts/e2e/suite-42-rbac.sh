@@ -2,11 +2,16 @@
 # Suite 42: RBAC foundations — artifact_role_grants, creator auto-grant, /me enrichment
 set -euo pipefail
 
-POD=$(kubectl get pod -n agentshield-platform -l app=registry-api \
-  -o jsonpath='{.items[0].metadata.name}')
+NAMESPACE="${NAMESPACE:-agentshield-platform}"
+# Fixtures are timestamped: agents/workflows soft-delete, so a fixed name stays
+# reserved and every re-run 409s (see suite-6 for the same guard).
+RUN_TAG="$(date +%s)"
+
+POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
 run() {
-  kubectl exec -n agentshield-platform "$POD" -- python3 -c "$1"
+  kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "$1"
 }
 
 echo "=== Suite 42: RBAC Foundations ==="
@@ -20,7 +25,6 @@ import httpx
 from sqlalchemy import text
 # Direct DB check via internal Python
 import asyncio
-from db import get_engine
 async def check():
     from sqlalchemy.ext.asyncio import create_async_engine
     import os
@@ -41,15 +45,15 @@ print("PASS: T-S42-001")
 echo "T-S42-002 — Creator auto-grant on agent creation"
 run '
 import httpx, asyncio
-from db import get_engine
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 import os
 
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
 # Create agent
-ag = c.post("/agents", json={"name":"s42-rbac-agent","team":"default","agent_type":"declarative"}).json()
-agent_id = ag["id"]
+r = c.post("/agents", json={"name":"s42-rbac-agent-'"${RUN_TAG}"'","team":"default","agent_type":"declarative"})
+assert r.status_code in (200, 201), f"create agent -> {r.status_code} {r.text[:200]}"
+agent_id = r.json()["id"]
 
 # Check DB for auto-grant
 url = os.getenv("DATABASE_URL", "postgresql+asyncpg://agentshield:agentshield@agentshield-postgresql:5432/agentshield")
@@ -77,13 +81,14 @@ print("PASS: T-S42-002")
 echo "T-S42-003 — Creator auto-grant on workflow creation"
 run '
 import httpx, asyncio
-from db import get_engine
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 import os
 
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
-wf = c.post("/workflows", json={"name":"s42-rbac-wf","team":"default","orchestration":"sequential"}).json()
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
+rw = c.post("/workflows", json={"name":"s42-rbac-wf-'"${RUN_TAG}"'","team":"default","orchestration":"sequential"})
+assert rw.status_code in (200, 201), f"create workflow -> {rw.status_code} {rw.text[:200]}"
+wf = rw.json()
 wf_id = wf["id"]
 
 url = os.getenv("DATABASE_URL", "postgresql+asyncpg://agentshield:agentshield@agentshield-postgresql:5432/agentshield")
@@ -109,7 +114,7 @@ print("PASS: T-S42-003")
 echo "T-S42-004 — /me endpoint returns role and artifact_roles"
 run '
 import httpx
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
 # We need a JWT for /me (it uses require_user), so we test the structure exists
 # by calling without auth — should get 401 (proves endpoint is guarded)
 r = c.get("/me")
@@ -152,7 +157,7 @@ print("PASS: T-S42-005")
 # --------------------------------------------------------------------------
 # T-S42-007 — Migration 0072 left no legacy `viewer` rows behind
 # --------------------------------------------------------------------------
-echo "T-S42-007 — No viewer rows remain after 0072"
+echo "T-S42-007 — No viewer rows remain after migration 0075"
 run '
 import asyncio, os, sys
 sys.path.insert(0, "/app")
@@ -166,7 +171,7 @@ async def main():
             text("SELECT count(*) FROM user_team_assignments WHERE role = :r"),
             {"r": "viewer"},
         )).scalar_one()
-        assert n == 0, f"{n} rows still hold legacy role viewer — migration 0072 did not run"
+        assert n == 0, f"{n} rows still hold legacy role viewer — migration 0075 did not run"
         # consumer must be an accepted stored value (no CHECK constraint blocks it)
         await conn.execute(text(
             "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "

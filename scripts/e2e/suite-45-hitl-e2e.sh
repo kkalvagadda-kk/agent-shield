@@ -23,7 +23,7 @@ AGENT="${HITL_AGENT:-hitl-agent}"
 KALYAN="643b0e62-b437-40f8-8104-57c34203624b"
 ADMIN="75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
 
-POD=$(kubectl get pods -n agentshield-platform -l app.kubernetes.io/name=registry-api -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+POD=$(kubectl get pods -n agentshield-platform -l app.kubernetes.io/name=registry-api --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$POD" ]; then
   echo "FATAL: registry-api pod not found"
   exit 1

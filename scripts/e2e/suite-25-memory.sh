@@ -24,7 +24,7 @@ pass()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 if [ -z "${API_POD:-}" ]; then
   echo "FATAL: Registry API pod not found in $NAMESPACE"

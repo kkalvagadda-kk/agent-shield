@@ -26,7 +26,7 @@ echo ""
 # Locate the Registry API pod (used for in-cluster HTTP calls)
 # Helm chart sets label app.kubernetes.io/name=registry-api
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l 'app.kubernetes.io/name=registry-api' \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 # ── T-S1-001: Pod Readiness ────────────────────────────────────────────────
 echo "--- T-S1-001: Pod Readiness Check ---"
@@ -167,7 +167,7 @@ echo ""
 # ── T-S1-007: Langfuse Web Pod Ready ─────────────────────────────────────
 echo "--- T-S1-007: Langfuse Web Pod Ready ---"
 LF_POD=$(kubectl get pods -n "$NAMESPACE" -l 'app.kubernetes.io/name=langfuse-web' \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$LF_POD" ]; then
   # Try broader selector — chart may use different label
   LF_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep "langfuse-web" | awk '{print $1}' | head -1 || true)

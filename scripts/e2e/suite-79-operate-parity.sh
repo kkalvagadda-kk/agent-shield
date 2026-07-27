@@ -272,7 +272,7 @@ echo ""
 echo "--- T-S79-003  badge producer live (real GET /approvals/) ---"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
 if [ -z "$API_POD" ]; then
   rec FAIL "T-S79-003 badge count producer is live" \

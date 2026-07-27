@@ -52,7 +52,7 @@ echo ""
 # Find the registry-api pod (used for data.json checks + setup)
 # ---------------------------------------------------------------------------
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then
   echo "ERROR: No registry-api pod found"
   exit 1
@@ -233,7 +233,7 @@ if [ "$USE_DEDICATED_AGENT" = "true" ]; then
   DEADLINE=$(($(date +%s) + 180))
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     POD=$(kubectl get pods -n "$AGENTS_NS" -l "agentshield.io/agent-name=${AGENT_NAME}" \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+      --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     if [ -n "$POD" ]; then
       READY_COUNT=$(kubectl get pod "$POD" -n "$AGENTS_NS" \
         -o jsonpath='{range .status.containerStatuses[*]}{.ready}{"\n"}{end}' 2>/dev/null | grep -c "true" || true)

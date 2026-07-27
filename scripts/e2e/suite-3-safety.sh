@@ -59,7 +59,7 @@ echo "--- T-S3-006: Playground Header → context=playground Tagged in Response 
 # should be tagged with context='playground'. The request should NOT be blocked
 # for a benign message.
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 SESSION_ID="t3-006-$(date +%s)"
 SO_BASE="http://agentshield-safety-orchestrator.${NAMESPACE}.svc.cluster.local:8080"

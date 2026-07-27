@@ -34,7 +34,7 @@ SAFETY_SVC="agentshield-safety-orchestrator"
 SAFETY_PORT="8080"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 if [ -z "$API_POD" ]; then
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
@@ -416,7 +416,7 @@ print(data.get('total', len(data.get('items', []))))
 
     # Get new pod name
     NEW_API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+      --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
     echo "  New API pod: $NEW_API_POD"
 
     # Verify agent count after restart

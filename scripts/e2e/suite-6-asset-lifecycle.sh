@@ -32,7 +32,7 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 if [ -z "$API_POD" ]; then
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
@@ -484,7 +484,7 @@ fi
 # Audit row check — no API endpoint exists
 check_manual "T-S6-009-audit" \
   "Grant revocation creates a GrantAudit row — no GET /admin/grants/{id}/audit endpoint; verify in DB directly" \
-  "kubectl exec -n ${NAMESPACE} \$(kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=registry-api -o jsonpath='{.items[0].metadata.name}') -- python3 -c \"import asyncio; from db import AsyncSessionLocal; from models import GrantAudit; from sqlalchemy import select; ..." \
+  "kubectl exec -n ${NAMESPACE} \$(kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/name=registry-api --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}') -- python3 -c \"import asyncio; from db import AsyncSessionLocal; from models import GrantAudit; from sqlalchemy import select; ..." \
   "# Or query Postgres directly: SELECT * FROM grant_audits WHERE asset_id='${AGENT_ID}' ORDER BY created_at DESC LIMIT 5;"
 
 # Deploy-after-revocation check — requires a deployed version

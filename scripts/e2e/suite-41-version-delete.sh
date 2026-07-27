@@ -4,8 +4,8 @@
 # cascade-terminate sandbox deployments and block on production references.
 set -euo pipefail
 
-POD=$(kubectl get pod -n agentshield-platform -l app=registry-api \
-  -o jsonpath='{.items[0].metadata.name}')
+POD=$(kubectl get pod -n agentshield-platform -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
 run() {
   kubectl exec -n agentshield-platform "$POD" -- python3 -c "$1"
