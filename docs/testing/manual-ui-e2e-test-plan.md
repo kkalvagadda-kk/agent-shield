@@ -12,6 +12,53 @@
 
 ---
 
+## MCP picker parity + the `main` merge — code + tests complete, cluster run pending — 2026-07-27
+
+`main` merged into `mcp-tool-source`. The browse-and-select tile drawers, the multi-line tool
+description and the `viewer`→`consumer` role rename now sit on the same branch as MCP-as-a-tool-source,
+and MCP tools are first-class in the drawer. Ships as **studio 0.1.164 / registry-api 0.2.233**.
+
+**Two production bugs fixed here, both pre-existing and both made reachable by MCP** — postmortems in
+`docs/bugs/tool-picker-offers-retired-tools.md` and `docs/bugs/tool-picker-silently-truncates-at-200.md`:
+
+- The picker offered **deprecated and vanished-upstream tools** (13 deprecated rows live on EKS today).
+  Now active-only in the drawer, while an already-bound retired tool still shows as a removable
+  `(unavailable)` chip — hiding it would have left an unremovable binding in the database.
+- The picker's catalog **silently truncated**: `/tools/` caps `limit` at 200 and the pages asked for
+  exactly 200 without reading `total`. `listAllTools()` pages to the end. 54 of the 82 live tools already
+  come from four MCP servers, so this was two servers away from dropping native tools off the screen.
+
+**Collisions resolved by the merge, worth knowing about:**
+
+- **Alembic** — both branches forked a `0072` off parent `0071`. The live DB is stamped `0074` (the MCP
+  chain), so `main`'s unapplied migration renumbered to **`0075`** (`down_revision = "0074"`). Same
+  collision and same resolution as `ec48337`. Single head verified.
+- **Suite numbers** — MCP owns `suite-84`…`87`; `main`'s tool-description suite became
+  **`suite-88-tool-description-metadata.sh`** (case IDs `T-S88-00X`).
+- **Test registry** — this branch's `run-all.sh` registrations moved into `scripts/test-manifest.txt`
+  under a new **`mcp`** group (4 API suites + `e2e/mcp-servers.spec.ts`). `--audit` clean.
+- **Image tags** — both branches claimed `studio 0.1.163`. ECR's `0.1.163` is the MCP build; `main`'s was
+  never built. Merged work ships as `0.1.164`, and `studio/src/lib/build.ts` was re-synced (it had drifted
+  to `0.1.160` on **both** branches, which would have failed suite-79 T-S79-002).
+
+**Known gaps from this change:**
+
+- **deferred (intentional) — MCP `resources` / `prompts` primitives.** There is no MCP analogue of a
+  knowledge base to bind, so "apply the KB picker work to MCP" has no target today. Roadmap item 7.
+- **deferred (intentional) — drawer search is client-side** over the fully-paged catalog. Correct for
+  hundreds of tools; past roughly a thousand it needs a `q` parameter on `/tools/` plus a debounced
+  server-side search in the drawer. Threshold written down rather than left implicit.
+- **deferred (intentional) — the MCP server detail ToolsTab stays a TABLE, not tiles.** Tiles are a
+  selection affordance and nothing on that tab is selectable (binding happens in the agent builder, as the
+  tab's own hint says); tiling it would drop the five columns you scan and gain nothing. It did get the
+  drawer's *vocabulary*: a filter box, the shared risk/PII chips, and an expandable `input_schema` row.
+- **not-yet-wired (debt) — cluster run.** Everything here is Vitest + typecheck green (501 tests) and
+  `--audit` clean, but **nothing has run against a cluster**: `suite-84` T-S84-030/031/032 and the rewritten
+  `e2e/mcp-servers.spec.ts` bind journey both need `studio 0.1.164` / `registry-api 0.2.233` deployed.
+  The EKS cluster is still on `0.1.163` / `0.2.232`.
+
+---
+
 ## MCP as a Tool Source (Phase 1) — Studio UI shipped + verified on EKS; runtime dispatch (P7-P11) now BUILT, CP3/CP4 cluster-proof deferred — updated 2026-07-25
 
 Studio UI for MCP-as-a-tool-source (Phases 12-14, T060-T072 + CP5 + Playwright T075) is code-complete on branch `mcp-tool-source` at **studio 0.1.161** and now VERIFIED end-to-end on the EKS test cluster: the register→redirect→reload→persisted journey is green under both Playwright (`e2e/mcp-servers.spec.ts` test 1) and a live Claude-in-Chrome browser run (`mcp-servers-browser-e2e.gif`). Register/list/detail/sync/delete screens, the Sidebar "MCP Servers" entry + `/mcp-servers[/:id]` routes, the read-only `mcp_tool` rows + PII de-anon checkbox on ToolsPage, and the ToolsPicker source-server badge are wired and green under Vitest (full studio suite 440/440; `tsc --noEmit` clean).
@@ -57,10 +104,108 @@ Phase-2 CODE (WS-A health loop, WS-B `list_changed` auto-resync, WS-C internal i
 - **deferred (intentional) — FastMCP can't reliably push a runtime notification to a fully-idle subscriber:** the stub fixture's `simulate_tool_change` broadcasts `notifications/tools/list_changed` to sessions it has SEEN via a tool call; a separate, never-active subscriber (like the proxy's held-open session) may not receive it depending on the deployed FastMCP minor's session bookkeeping. CP2 therefore proves the re-sync path with a **direct `POST /api/v1/internal/mcp/list-changed`** (and documents the `--toolset` restart fallback for a deterministic cross-session tool-set change). The runtime cross-session notification is best-effort, confirmed at CP2.
 - **not-yet-wired (debt) — health-loop `_backoff_skip` is in-memory, per-replica:** `mcp_health._backoff_skip` (the exponential per-server probe-skip map) lives in process memory, not the DB. It resets on a registry-api restart, and with the advisory-lock single-flight the sweeping replica can change between sweeps — so a hard-down server's backoff can reset and it gets re-probed sooner than the accumulated backoff implies. At worst one extra probe of a dead server; not worth a DB column (data-model.md §2a). The threshold/`consecutive_failures` state IS durable (in `health_detail`); only the skip cadence is ephemeral.
 - **not-yet-wired (debt) — list_changed coalesce (`_last_resync`) is in-memory, per-replica:** the `/internal/mcp/list-changed` coalesce guard (`mcp_discovery._last_resync` + `_resync_locks`) is per-process, so with N registry-api replicas a burst of notifications load-balanced across replicas can trigger up to N re-syncs instead of 1 (each replica's window is independent). NOT a correctness bug — a re-sync is idempotent (`_materialize_and_discover` upserts) — only an efficiency ceiling. CP2c proves the coalesce logic by firing the burst from ONE process against ONE replica (localhost). A cross-replica-correct coalesce would need a shared clock (a Postgres timestamp / advisory lock), deferred.
-- **deferred (intentional) — on merge with main's `scripts/test-manifest.txt` system:** this branch predates the manifest — `run-all.sh` is still the suite registry here, so `suite-85` is registered there (per the T038/T039 plan). When rebased onto `main`, `suite-84`, `suite-85`, and `mcp-servers.spec.ts` need matching lines in `scripts/test-manifest.txt` (the new single source of truth for both layers, verified via `bash scripts/run-tests.sh --audit`).
+- ~~**deferred (intentional) — on merge with main's `scripts/test-manifest.txt` system**~~ **RESOLVED 2026-07-27 by the merge of `main`.** `run-all.sh` is now the thin wrapper it is on main, and `suite-84`/`85`/`86`/`87` plus `e2e/mcp-servers.spec.ts` carry lines in `scripts/test-manifest.txt` under a new `mcp` group. `bash scripts/run-tests.sh --audit` is the guard, and it fails on any suite or spec that is on disk but unregistered.
 - **deferred (intentional) — CP1–CP4 + T041 regression sweep are cluster runs the user executes:** the checkpoint smoke scripts (`scripts/deploy-mcp2-cp{1,2,3}.sh`, `scripts/smoke-mcp2-cp{1,2,3}-{infra,behaviour}.sh`, plus CP4) are **written but NOT executed** this run. They deploy mcp-proxy / registry-api / declarative-runner at their bumped tags and prove the health loop (dead→error after 3 cycles, recovery, single-flight under 2 replicas), the `list_changed` auto-resync (save→reload→assert, coalesce), and internal identity (Keycloak secret mount, RBAC unchanged, `none` byte-identical, service-identity bearer, OBO fail-closed). The blast-radius sweep (`suite-84`/`suite-18`/`suite-4`/`suite-3` + Vitest + `studio-e2e.sh e2e/mcp-servers.spec.ts`) is the CLAUDE.md-rule-5 gate, run on deploy.
 
 ---
+## Browser-plugin verification script — tools UX (multi-line description + tile pickers) — 2026-07-25
+
+**Ready to run; not yet run.** Drive this with the Claude-in-Chrome browser plugin (or by hand) once the cluster serves `studio 0.1.164`. It covers the same two changes the Vitest/Playwright/bash layers cover, but through a real browser session against the deployed app — the layer that catches "the screen is broken" when every other suite is green.
+
+Preconditions: Studio reachable (port-forward or gateway URL), logged in as `platform-admin`, cluster on `studio ≥ 0.1.164` and `registry-api ≥ 0.2.233`.
+
+**B-1 — Description is genuinely multi-line (create)**
+1. Go to `/tools` → **New Tool**.
+2. Confirm the Description control is a **textarea** (drag its resize handle; it should grow) with helper text explaining the LLM reads it.
+3. Name `browser_check_tool`, Display Name `Browser Check Tool`, URL `https://example.invalid/x`.
+4. In Description press Enter to type **4 separate lines**, including one blank line.
+5. **Expected:** all 4 lines stay visible and separate — no collapse into one line.
+6. **Create Tool** → the tool appears in the list.
+
+**B-2 — Description survives a reload (round-trip)**
+1. Hard-reload the page (⌘R), then click **Edit** on `Browser Check Tool`.
+2. **Expected:** the textarea is rehydrated with all 4 lines exactly as typed. *This is the regression that shipped before:* the old single-line `<input>` showed one flattened line here.
+3. Append a 5th line → **Save Changes** → hard-reload → Edit again → 5 lines still present.
+
+**B-3 — Tools picker is a browse-and-select drawer**
+1. Go to `/agents/new` → **No-code**.
+2. **Expected:** no tool list inline. You see "No tools selected." and an **Add from catalog** button.
+3. Click **Add from catalog** → a drawer opens from the right with a search box, a tile grid, and a "N selected" count.
+4. **Expected on each tile:** name, description clamped to 2 lines, a **risk** chip and a **type** chip.
+5. **Expected absent:** any Edit, Delete, or "New tool" control anywhere in the drawer. Tools are shared team resources — a destructive control here would let a mis-click during agent assembly delete a tool other agents depend on.
+6. Type a word from one tool's description → only matching tiles remain. Type gibberish → the empty state names where tools are managed.
+7. Confirm `knowledge_search` is **not** listed (it is attached server-side when a KB is bound).
+8. Select a tool → **Done** → it appears as a removable chip on the builder.
+
+**B-4 — Knowledge picker behaves identically**
+1. Same page, Knowledge Bases section → **Add from catalog**.
+2. **Expected:** same drawer; tiles show `ready/source` counts and **no risk badge** (KBs have no risk level).
+3. Select a KB → **Done** → chip appears.
+
+**B-5 — Selection persists (the round-trip that matters)**
+1. Name the agent, **Create Agent**.
+2. Navigate to the new agent → **Settings**.
+3. **Expected:** the tool and KB chips are still there, read back from the backend.
+4. Open each drawer → the corresponding tiles are checked.
+5. Remove the tool via its chip **×** → **Save Changes** → hard-reload → Settings.
+6. **Expected:** "No tools selected." — the removal persisted, not just the local state.
+
+**B-6 — Escape hatch / no lost draft**
+1. On `/agents/new`, fill the agent name, open the tools drawer, then press **Esc**.
+2. **Expected:** the drawer closes and the agent name is still filled — the drawer is an overlay, not a route, precisely so a half-filled form is never discarded.
+
+Record any deviation as a bug doc under `docs/bugs/` per the repo rule, with the failing step number.
+
+## Tools + Knowledge pickers → browse-and-select tile drawers — cluster verification pending — 2026-07-25
+
+**deferred (intentional) — code + tests complete, Playwright unrun.** `studio 0.1.164`. The inline checkbox lists in `ToolsPicker` and `KnowledgeBasePicker` are replaced by a shared browse-and-select tile drawer (`components/shared/PickerTile` + `TilePickerDrawer`). Selected entities render as removable chips on the builder surface; the catalog lives in the drawer behind "Add from catalog". Both pickers kept their previous prop signatures, so none of the three consumer pages (`CreateAgentPage`, `AgentListPage`, `AgentDetailPage`) needed edits.
+
+Deliberate design constraints, each pinned by a test:
+- **Tiles are selection-only — no edit/delete/create.** Tools and KBs are shared, team-scoped resources; a destructive control on the same tile as "attach this to my agent" would let a mis-click during agent assembly destroy something other agents depend on. Managing them stays on `ToolsPage` / `KnowledgeBasesPage`.
+- **A drawer, not a route.** Navigating to a separate browse page mid-agent-creation would discard the half-filled form.
+- **`knowledge_search` stays structurally excluded** — the filter remains in `ToolsPicker` alone rather than being scattered to the three callers.
+- **The tile's meta is a slot, not a `risk` prop** — KBs have no risk level, so they show `ready/source` counts where tools show risk + type. A hardcoded risk badge would render a meaningless "low" on a knowledge base.
+
+**Verified locally (green):** Vitest 60 files / 456 tests, including new `ToolsPicker.test.tsx` (12) and `KnowledgeBasePicker.test.tsx` (10) — neither component had any test before. `tsc --noEmit` clean. The 5 consumer tests that broke (they asserted an inline list) were **updated to open the drawer**, not deleted — and `AgentListPage`'s `knowledge_search` regression test still passes unchanged because its selected tool renders as a chip.
+
+**Known gaps (not-yet-wired, deploy-blocked):**
+- `studio/e2e/tools-picker-drawer.spec.ts` — **new, never executed.** Tool selection had *no* browser coverage before this: `agent-knowledge-config.spec.ts` only asserted `knowledge_search` was absent, never that picking a real tool works or persists. Test A drives the drawer (tiles + risk/type chips, absence of edit/delete/create, search narrowing, select → chip) and asserts `metadata.tools` in the create request; test B is the save→reload→assert round-trip plus a remove-and-persist pass.
+- `studio/e2e/agent-knowledge-config.spec.ts` — **updated for the drawer, never re-executed.** Note one assertion got *stronger*: `expect(tools-picker).not.toContainText("knowledge_search")` would now pass trivially against the collapsed picker (chips only contain what is already selected), so it was replaced with `expectKnowledgeSearchHidden()`, which opens the drawer and asserts against the real catalog. A spec that passes for the wrong reason is worse than one that fails.
+- Both need a deployed Studio at `0.1.164`; the EKS cluster is serving `0.1.163` (the MCP-branch build — a *different* image from main's own 0.1.163, which was never built; that duplicate tag is exactly why the merged work ships as 0.1.164).
+
+**Accepted UX dead-end (deferred, intentional):** with no create-new affordance in the drawer, someone who needs a tool or KB that does not exist yet still has to abandon their draft to go author it. The drawer's no-results state names where the entity is managed rather than linking away mid-draft. Revisit if it bites in practice.
+
+**Full coverage matrix for the two tools-UX changes** (all four layers written; none of the cluster-dependent ones executed yet):
+
+| Layer | Artifact | Covers | Status |
+|---|---|---|---|
+| Component (Vitest) | `ToolsPage.test.tsx` (5) | textarea shape, newline preservation, payload, edit rehydrate | **green locally** |
+| Component (Vitest) | `ToolsPicker.test.tsx` (12), `KnowledgeBasePicker.test.tsx` (10) | chips vs drawer, tiles + risk/type, `knowledge_search` exclusion, no edit/delete/create, search, empty states | **green locally** |
+| API (bash) | `scripts/e2e/suite-88-tool-description-metadata.sh` (T-S88-001…008) | newlines survive POST→GET→list→edit, ~4KB/60-line description not truncated, list carries `risk_level`+`type` for the tiles, no-description path does not 500 | **not run** (needs pod) |
+| Browser (Playwright) | `tool-description-multiline.spec.ts` | real form: textarea, 4 lines typed, POST body, reload→rehydrate, edit→reload→persisted | **not run** (needs 0.1.164) |
+| Browser (Playwright) | `tools-picker-drawer.spec.ts` | drawer tiles + risk/type, no edit/delete/create, search, select→chip, create persists, remove→save→reload | **not run** (needs 0.1.164) |
+| Browser (Playwright) | `agent-knowledge-config.spec.ts` (updated) | KB drawer bind/unbind round-trip; `knowledge_search` hidden asserted against the real catalog | **not run** (needs 0.1.164) |
+| Browser (plugin) | "Browser-plugin verification script" section above (B-1…B-6) | the same journeys driven interactively against the deployed app | **not run** |
+
+Note on why the bash suite exists at all for a frontend change: a `<textarea>` is worthless if the API or column collapses the newlines on the way through — the field would look multi-line while storing one line. Vitest proves only the React value; suite-88 proves the bytes survive the backend.
+
+## Global role `viewer` → `consumer` rename — cluster verification pending — 2026-07-25
+
+**deferred (intentional) — code + tests complete, cluster run blocked on a deploy.** `rbac-design.md` §2.1's read-only global role was renamed `viewer` → `consumer` (lowercase, matching `platform-admin`/`contributor`; all role comparisons are case-sensitive). Shipped in `registry-api 0.2.233` / `studio 0.1.164`:
+
+- Migration `0075` rewrites `user_team_assignments.role` `viewer` → `consumer`; `rbac._LEGACY_MAP` maps it on read so in-flight JWTs and un-migrated rows keep working either way.
+- `rbac.PLATFORM_ROLES` is now the single source for the platform-role name set — `keycloak_client.set_user_realm_role` and `routers/admin_users._kc_to_response` previously each hardcoded their own `{"admin","operator","viewer"}` copy, which is exactly how the two drifted.
+- Studio: `AuthContext` `ROLE_LEVEL`/`GlobalRole`, `RequireRole`, and `AdminAccessPage` (`ROLES` dropdown → canonical names per §8.4, form defaults `operator`→`contributor`, `ROLE_CHIP` retains legacy keys so un-migrated rows still render styled).
+
+**Verified locally (green):** Vitest 429/429 including the new `studio/src/contexts/AuthContext.test.tsx` (7 tests — canonical ordering, legacy-spelling parity, null/unknown → floor). That spec was proven to be a real guard, not a rubber stamp: deleting the legacy `ROLE_LEVEL` keys fails 2 of its tests (the silent-demotion mode, where a legacy `admin` collapses to level 0 and loses the admin section). Also green: `tsc --noEmit`, `bash -n` on suite-42, `ast.parse` on all four touched Python files, and a direct assertion pass over `ROLE_HIERARCHY`/`_LEGACY_MAP`/`PLATFORM_ROLES`.
+
+**Known gap — nothing ran against a cluster (not-yet-wired, deploy-blocked).** The EKS test cluster is still serving `registry-api 0.2.224` / `studio 0.1.160`, so none of the following has executed even once:
+
+- `scripts/e2e/suite-42-rbac.sh` — **T-S42-005** extended (asserts `_normalize_role("viewer") == "consumer"`, `viewer` absent from `ROLE_HIERARCHY`, every legacy spelling resolving to a real hierarchy key, and `PLATFORM_ROLES` covering canonical + legacy) and **T-S42-007** added (asserts migration 0075 left zero `viewer` rows, and that `consumer` is an accepted stored value). Both `kubectl exec` into the registry-api pod and need the new image.
+- `studio/e2e/admin-access-roles.spec.ts` — **new**, and the only browser coverage the role dropdown has ever had. Drives `/admin/access`: asserts the dropdown offers exactly the canonical names with no legacy spelling, then assigns `consumer`, waits on the real `PATCH`, does a **full page reload**, and re-asserts the chip plus the value read back from `GET /api/v1/admin/users`. Expected to FAIL against the deployed 0.1.160 (which still offers `admin`/`operator`/`viewer`) — that failure is the proof it guards the rename.
+- Migration `0075` itself has not been applied anywhere; it runs via the alembic init container on deploy.
+
+Note `studio/tsconfig.json` has `include: ["src"]`, so `npm run typecheck` does **not** cover `e2e/*.spec.ts` — the new spec was typechecked separately and matches the existing specs' baseline (the only diagnostics are `process` references, which every existing spec also produces because `@types/node` is not installed).
 
 ## Webhook Application Identity (Decision 30) — trigger-CRUD `require_user` breaks ~16 legacy e2e suites — 2026-07-19
 

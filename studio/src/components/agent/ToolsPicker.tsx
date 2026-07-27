@@ -1,5 +1,16 @@
+import { Plus, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import { cn } from "../../lib/utils";
 import type { RegistryTool } from "../../api/registryApi";
+import PickerTile from "../shared/PickerTile";
+import TilePickerDrawer from "../shared/TilePickerDrawer";
+import {
+  PiiChip,
+  RiskChip,
+  ToolSourceChip,
+  ToolStatusChip,
+  isSelectableTool,
+} from "../shared/ToolChips";
 
 /** The one tool that is NEVER hand-pickable: it is configured via the Knowledge
  *  Bases picker and attached server-side when a KB is bound. Filtered out here in
@@ -7,71 +18,227 @@ import type { RegistryTool } from "../../api/registryApi";
  *  list it as a selectable tool again. */
 export const KNOWLEDGE_SEARCH_TOOL = "knowledge_search";
 
+/** Sentinel source-filter values. Real MCP server names occupy the same filter
+ *  space, so these two carry a leading space to keep a server literally named
+ *  "native" from colliding with the built-in bucket. */
+const SOURCE_ALL = " all";
+const SOURCE_NATIVE = " native";
+
 interface ToolsPickerProps {
   tools: RegistryTool[];
-  /** Currently-selected tool names. */
+  /** Currently-selected tool identifiers — names by default, ids when
+   *  `valueKey="id"`. */
   selected: string[];
-  onToggle: (name: string) => void;
+  onToggle: (value: string) => void;
   emptyText?: string;
+  /** Which field of a tool the caller stores in `selected`.
+   *
+   *  Agent bindings persist tool NAMES; skill bundles and the legacy graph canvas
+   *  persist tool IDS. Those two callers used to each keep a private copy of this
+   *  component purely because of that one difference, and neither copy ever grew
+   *  the MCP badge, the active-only filter, or the source filter. An explicit
+   *  mode parameter is the fix — not a second component, and not sniffing whether
+   *  a string happens to look like a uuid. */
+  valueKey?: "name" | "id";
 }
 
-/** Shared Tools checklist for every agent-editing surface. Excludes
- *  `knowledge_search` structurally (callers must also strip it from what they
- *  persist), so the class of bug where one surface forgets the filter cannot
- *  recur. Presentational only — no data fetching, no form coupling. */
+function label(tool: RegistryTool) {
+  return tool.display_name || tool.name;
+}
+
+/** Shared Tools picker for every tool-selecting surface: the selected tools show
+ *  inline as removable chips, and "Add from catalog" opens a browse-and-select
+ *  tile drawer.
+ *
+ *  Excludes `knowledge_search` structurally in ONE place (callers must also strip
+ *  it from what they persist), so the class of bug where one surface forgets the
+ *  filter cannot recur. The filter lives here rather than in the callers on
+ *  purpose — scattering it is exactly how it would get dropped.
+ *
+ *  Presentational only — no data fetching, no form coupling. Callers must pass
+ *  the COMPLETE catalog (see `listAllTools`), not a first page: the drawer
+ *  filters client-side, so anything the caller failed to fetch is invisible here
+ *  with no error, and `/tools/` caps `limit` at 200. */
 export default function ToolsPicker({
   tools,
   selected,
   onToggle,
   emptyText = "No tools available.",
+  valueKey = "name",
 }: ToolsPickerProps) {
-  const pickable = tools.filter((t) => t.name !== KNOWLEDGE_SEARCH_TOOL);
+  const [open, setOpen] = useState(false);
+  const [source, setSource] = useState<string>(SOURCE_ALL);
+
+  const valueOf = (tool: RegistryTool) => (valueKey === "id" ? tool.id : tool.name);
+
+  // `knowledge_search` is excluded by NAME whatever the caller keys selection on —
+  // it is one specific platform tool, not a shape.
+  const visible = tools.filter((t) => t.name !== KNOWLEDGE_SEARCH_TOOL);
+
+  /** The drawer catalog: active tools only. A deprecated tool, or an MCP tool
+   *  whose upstream server stopped advertising it, must not be bindable to
+   *  something new. */
+  const pickable = visible.filter((t) => isSelectableTool(t.status));
+
+  /** Chips resolve from `visible`, NOT from `pickable`. If an agent already binds
+   *  a tool that has since been deprecated, dropping it from the chip row would
+   *  leave the binding in place while making it invisible — the user could
+   *  neither see it nor remove it. It stays visible, marked unavailable, and
+   *  removable. */
+  const selectedTools = visible.filter((t) => selected.includes(valueOf(t)));
+
+  /** Source buckets, derived from the catalog — no extra endpoint. Only shown
+   *  once at least one MCP server is represented; on a native-only install the
+   *  control would be a single dead button. */
+  const sources = useMemo(() => {
+    const servers = new Map<string, number>();
+    let native = 0;
+    for (const t of pickable) {
+      if (t.type === "mcp_tool") {
+        const key = t.mcp_server_name || "MCP";
+        servers.set(key, (servers.get(key) ?? 0) + 1);
+      } else {
+        native += 1;
+      }
+    }
+    if (servers.size === 0) return [];
+    return [
+      { key: SOURCE_ALL, label: "All", count: pickable.length },
+      ...(native > 0 ? [{ key: SOURCE_NATIVE, label: "Native", count: native }] : []),
+      ...[...servers.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([name, count]) => ({ key: name, label: name, count })),
+    ];
+  }, [pickable]);
+
+  const matchesSource = (t: RegistryTool) => {
+    if (source === SOURCE_ALL) return true;
+    if (source === SOURCE_NATIVE) return t.type !== "mcp_tool";
+    return t.type === "mcp_tool" && (t.mcp_server_name || "MCP") === source;
+  };
+
   return (
-    <div
-      data-testid="tools-picker"
-      className="border border-slate-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-slate-100"
-    >
-      {pickable.length === 0 && (
-        <p className="p-3 text-sm text-slate-400 italic">{emptyText}</p>
-      )}
-      {pickable.map((tool) => (
-        <label
-          key={tool.id}
-          className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer"
-        >
-          <input
-            type="checkbox"
-            checked={selected.includes(tool.name)}
-            onChange={() => onToggle(tool.name)}
-            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-          />
-          <div className="flex-1 min-w-0">
-            <span className="text-sm font-medium text-slate-800">{tool.display_name || tool.name}</span>
-            {tool.description && (
-              <span className="text-xs text-slate-400 ml-2 truncate">{tool.description}</span>
+    <div data-testid="tools-picker">
+      {/* Selected tools — compact removable chips, so the builder surface stays
+          short no matter how many tools exist in the catalog. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {selectedTools.length === 0 && (
+          <span className="text-sm text-slate-400 italic">No tools selected.</span>
+        )}
+        {selectedTools.map((tool) => (
+          <span
+            key={tool.id}
+            className={cn(
+              "inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded border text-xs",
+              isSelectableTool(tool.status)
+                ? "border-slate-200 bg-slate-50 text-slate-700"
+                : "border-amber-300 bg-amber-50 text-amber-800",
             )}
-          </div>
-          {/* Source-server badge — an mcp_tool carries its origin server so a
-              picker never lists a discovered tool as if it were a native one. */}
-          {tool.mcp_server_name && (
-            <span className="text-xs px-1.5 py-0.5 rounded bg-slate-100 text-slate-500">
-              {tool.mcp_server_name}
-            </span>
-          )}
-          {tool.risk_level && (
-            <span
-              className={cn(
-                "text-xs px-1.5 py-0.5 rounded font-medium",
-                tool.risk_level === "high" && "bg-red-50 text-red-700",
-                tool.risk_level === "medium" && "bg-amber-50 text-amber-700",
-                tool.risk_level === "low" && "bg-green-50 text-green-700",
-              )}
+            title={
+              isSelectableTool(tool.status)
+                ? undefined
+                : `This tool is ${tool.status} and can no longer be bound to a new agent.`
+            }
+          >
+            {label(tool)}
+            {tool.type === "mcp_tool" && tool.mcp_server_name && (
+              <span className="text-slate-400">· {tool.mcp_server_name}</span>
+            )}
+            {!isSelectableTool(tool.status) && <span className="font-medium">(unavailable)</span>}
+            <button
+              type="button"
+              onClick={() => onToggle(valueOf(tool))}
+              className="text-slate-400 hover:text-slate-700"
+              aria-label={`Remove ${label(tool)}`}
             >
-              {tool.risk_level}
-            </span>
-          )}
-        </label>
-      ))}
+              <X size={12} />
+            </button>
+          </span>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="btn-secondary mt-2"
+      >
+        <Plus size={13} />
+        Add from catalog
+      </button>
+
+      <TilePickerDrawer
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Add tools"
+        selectedCount={selectedTools.length}
+        isEmpty={pickable.length === 0}
+        emptyText={emptyText}
+        testId="tools-picker-drawer"
+        searchPlaceholder="Search by name, description, or source server"
+        toolbar={
+          sources.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5" data-testid="tools-source-filter">
+              {sources.map((s) => (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => setSource(s.key)}
+                  aria-pressed={source === s.key}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded-full border transition-colors",
+                    source === s.key
+                      ? "border-indigo-400 bg-indigo-50 text-indigo-700 font-medium"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50",
+                  )}
+                >
+                  {s.label}
+                  <span className="ml-1 text-slate-400">{s.count}</span>
+                </button>
+              ))}
+            </div>
+          ) : null
+        }
+      >
+        {(search) => {
+          const q = search.trim().toLowerCase();
+          const shown = pickable.filter((t) => {
+            if (!matchesSource(t)) return false;
+            if (!q) return true;
+            return (
+              label(t).toLowerCase().includes(q) ||
+              t.name.toLowerCase().includes(q) ||
+              (t.description ?? "").toLowerCase().includes(q) ||
+              (t.mcp_server_name ?? "").toLowerCase().includes(q)
+            );
+          });
+          if (shown.length === 0) {
+            return (
+              <p className="text-sm text-slate-400 italic col-span-full">
+                {q
+                  ? `No tools match “${search}”. Tools are managed under Tools.`
+                  : "No tools from this source."}
+              </p>
+            );
+          }
+          return shown.map((tool) => (
+            <PickerTile
+              key={tool.id}
+              title={label(tool)}
+              description={tool.description}
+              selected={selected.includes(valueOf(tool))}
+              onToggle={() => onToggle(valueOf(tool))}
+              meta={
+                <>
+                  <RiskChip risk={tool.risk_level} />
+                  <ToolSourceChip type={tool.type} mcpServerName={tool.mcp_server_name} />
+                  <PiiChip allowed={tool.pii_deanonymize_allowed} />
+                  <ToolStatusChip status={tool.status} />
+                </>
+              }
+            />
+          ));
+        }}
+      </TilePickerDrawer>
     </div>
   );
 }

@@ -17,7 +17,7 @@ import { toast } from "sonner";
 import {
   createGrant,
   listGrants,
-  listTools,
+  listAllTools,
   listAgents,
   listSkills,
   listCompositeWorkflows,
@@ -110,10 +110,15 @@ async function fetchTeamsSummary(): Promise<TeamSummary[]> {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const ROLES = ["admin", "operator", "viewer"] as const;
+const ROLES = ["platform-admin", "contributor", "consumer"] as const;
 type Role = typeof ROLES[number];
 
 const ROLE_CHIP: Record<string, string> = {
+  "platform-admin": "bg-red-50 text-red-700 border-red-200",
+  contributor:      "bg-blue-50 text-blue-700 border-blue-200",
+  consumer:         "bg-slate-100 text-slate-600 border-slate-200",
+  // Legacy values (pre-0044 / pre-0072 rows) keep their original colour so a
+  // not-yet-migrated user doesn't render as an unstyled chip.
   admin:    "bg-red-50 text-red-700 border-red-200",
   operator: "bg-blue-50 text-blue-700 border-blue-200",
   viewer:   "bg-slate-100 text-slate-600 border-slate-200",
@@ -339,7 +344,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
   const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
   const [form, setForm] = useState({
     username: "", email: "", first_name: "", last_name: "",
-    temp_password: "", team: "", role: "operator" as Role,
+    temp_password: "", team: "", role: "contributor" as Role,
   });
 
   const mutation = useMutation({
@@ -408,7 +413,7 @@ function EditUserModal({ user, onClose, onSuccess }: { user: User; onClose: () =
     first_name: user.first_name ?? "",
     last_name: user.last_name ?? "",
     team: user.team ?? "",
-    role: (user.role ?? "operator") as Role,
+    role: (user.role ?? "contributor") as Role,
   });
 
   const mutation = useMutation({
@@ -585,13 +590,14 @@ function GrantsTab() {
   });
 
   const { data: agentsPage } = useQuery({ queryKey: ["agents"], queryFn: () => listAgents(100, 0, "active") });
-  const { data: toolsPage } = useQuery({ queryKey: ["tools"], queryFn: () => listTools() });
+  // listAllTools, not a first page: a tool past the page boundary could never be granted.
+  const { data: allTools } = useQuery({ queryKey: ["tools", "all"], queryFn: () => listAllTools() });
   const { data: skillsPage } = useQuery({ queryKey: ["skills"], queryFn: () => listSkills() });
   const { data: workflows = [] } = useQuery({ queryKey: ["workflows-published"], queryFn: () => listCompositeWorkflows() });
   const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
 
   const agents = (agentsPage?.items ?? []).filter((a) => a.publish_status === "published");
-  const tools = (toolsPage?.items ?? []).filter((t) => (t as { publish_status?: string }).publish_status === "published");
+  const tools = (allTools ?? []).filter((t) => (t as { publish_status?: string }).publish_status === "published");
   const skills = (skillsPage?.items ?? []).filter((s) => (s as { publish_status?: string }).publish_status === "published");
   const publishedWorkflows = workflows.filter((w) => w.publish_status === "published");
 

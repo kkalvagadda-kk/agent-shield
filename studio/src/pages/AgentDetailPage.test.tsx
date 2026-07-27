@@ -13,7 +13,7 @@ vi.mock("../api/registryApi", () => ({
   deleteAgentVersion: vi.fn(),
   updateAgent: vi.fn(),
   listProviders: vi.fn().mockResolvedValue({ items: [], total: 0 }),
-  listTools: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  listAllTools: vi.fn().mockResolvedValue([]),
   // SettingsTab (settings tab) statically imports these; not exercised here.
   listTriggers: vi.fn(),
   createTrigger: vi.fn(),
@@ -247,10 +247,13 @@ describe("AgentDetailPage — Settings tab (Knowledge Bases)", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "settings" }));
     const picker = await screen.findByTestId("kb-picker");
+    // KBs are now browsed in a tile drawer — the list is not inline.
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     const cb = within(picker).getByRole("checkbox") as HTMLInputElement;
     await waitFor(() => expect(cb.checked).toBe(true));
     // Unbind it → save must call updateAgent AND unbindAgent for the removed KB.
     await userEvent.click(cb);
+    await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
     await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
     await waitFor(() => expect(updateAgent).toHaveBeenCalled());
     const { unbindAgent } = await import("../api/knowledgeApi");
@@ -264,7 +267,9 @@ describe("AgentDetailPage — Settings tab (Knowledge Bases)", () => {
     renderPage();
     await userEvent.click(await screen.findByRole("button", { name: "settings" }));
     const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     await userEvent.click(within(picker).getByRole("checkbox"));
+    await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
     await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
     await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
   });

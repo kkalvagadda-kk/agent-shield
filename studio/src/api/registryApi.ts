@@ -995,6 +995,39 @@ export const listTools = async (
   return data;
 };
 
+/** Every tool the caller can see, following pagination to the end.
+ *
+ *  `GET /tools/` declares `limit: int = Query(50, ge=1, le=200)` — **200 is a
+ *  hard server-side ceiling**, not a default. Every picker asked for one page
+ *  (100, or 200 = exactly the cap) and none read the `total` that came back, so
+ *  past that many tools the catalog was truncated with no error: a tool simply
+ *  was not in the list, and the only symptom was a user saying "I can't find it".
+ *  MCP is what made that reachable — one server contributes dozens of discovered
+ *  tools, and 54 of the 82 tools on the live cluster already come from four of
+ *  them. Raising the number was never an option; there is no number above 200.
+ *
+ *  Deliberately does NOT filter by status. The pickers need the deprecated and
+ *  inactive rows too, so an already-bound tool that has since been retired still
+ *  renders (marked unavailable) instead of vanishing from the UI while staying
+ *  bound in the database. Offer-ability is decided in the component — see
+ *  `isSelectableTool`. */
+export const listAllTools = async (
+  params?: { team?: string }
+): Promise<RegistryTool[]> => {
+  const PAGE = 200; // the server's `le=200`; a larger value is rejected outright.
+  const items: RegistryTool[] = [];
+  let offset = 0;
+  // Bounded by `total` and by a page returning nothing, so a server that ignores
+  // `offset` cannot spin this forever.
+  for (;;) {
+    const page = await listTools(PAGE, offset, params);
+    items.push(...page.items);
+    offset += PAGE;
+    if (page.items.length === 0 || items.length >= page.total) break;
+  }
+  return items;
+};
+
 export interface CreateToolPayload {
   name: string;
   display_name?: string;

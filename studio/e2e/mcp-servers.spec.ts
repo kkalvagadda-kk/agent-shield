@@ -191,21 +191,43 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
 
     const picker = page.getByTestId("tools-picker");
     await expect(picker).toBeVisible({ timeout: 15_000 });
-    // The picker labels a tool by its display_name (the RAW upstream name, e.g.
-    // "echo") and renders the source-server badge (mcp_server_name == SERVER_NAME,
-    // FR-MCP-42). Target the row by BOTH so it's unique among this run's tools —
-    // the badge disambiguates from any same-named native tool, the display name
-    // disambiguates from the server's other discovered tool.
-    const toolRow = picker
+
+    // The catalog now lives in a browse-and-select drawer behind "Add from
+    // catalog" — it is NOT rendered inline on the builder any more. Opening it is
+    // part of the journey, not test scaffolding.
+    await picker.getByRole("button", { name: /add from catalog/i }).click();
+    const grid = page.getByTestId("tools-picker-drawer-grid");
+    await expect(grid).toBeVisible({ timeout: 15_000 });
+
+    // Narrow to this server via the source filter. With several MCP servers
+    // registered the flat grid runs to dozens of tiles, and this is the control
+    // that makes one server's tools findable at all.
+    const sourceFilter = page.getByTestId("tools-source-filter");
+    await expect(sourceFilter).toBeVisible();
+    await sourceFilter.getByRole("button", { name: new RegExp(`^${SERVER_NAME}`) }).click();
+
+    // A tile labels a tool by its display_name (the RAW upstream name, e.g.
+    // "echo") and carries the source-server chip (mcp_server_name == SERVER_NAME,
+    // FR-MCP-42). Target by BOTH so it is unique among this run's tools — the chip
+    // disambiguates from any same-named native tool, the display name from the
+    // server's other discovered tool.
+    const toolTile = grid
       .locator("label")
       .filter({ hasText: SERVER_NAME })
       .filter({ hasText: firstToolName });
-    await expect(toolRow).toBeVisible({ timeout: 15_000 });
-    await expect(toolRow).toContainText(SERVER_NAME); // source-server badge
-    // Check the box to bind it.
-    const toolCheckbox = toolRow.locator('input[type="checkbox"]');
+    await expect(toolTile).toBeVisible({ timeout: 15_000 });
+    await expect(toolTile).toContainText(SERVER_NAME); // source-server chip
+    // The raw type string must never reach a tile — it would read "mcp_tool".
+    await expect(toolTile).not.toContainText("mcp_tool");
+
+    const toolCheckbox = toolTile.locator('input[type="checkbox"]');
     await toolCheckbox.check();
     await expect(toolCheckbox).toBeChecked();
+
+    // Close the drawer; the selection must survive as a chip on the builder.
+    await page.getByTestId("tools-picker-drawer").getByRole("button", { name: /^Done$/ }).click();
+    await expect(page.getByTestId("tools-picker-drawer")).toBeHidden();
+    await expect(picker).toContainText(firstToolName);
 
     const createResp = page.waitForResponse(
       (r) =>
@@ -221,12 +243,21 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
     //    bound mcp_tool (persistence round-trip through the backend).
     await page.goto(`/agents/${AGENT_NAME}`);
     await page.getByRole("button", { name: "settings" }).click();
-    const reloadedRow = page
-      .getByTestId("tools-picker")
+    const reloadedPicker = page.getByTestId("tools-picker");
+    // The binding is visible WITHOUT opening the drawer: a selected tool renders
+    // as a chip on the builder surface. That is the cheapest proof the round-trip
+    // closed — the chip is drawn from what the backend returned.
+    await expect(reloadedPicker).toContainText(firstToolName, { timeout: 15_000 });
+    await expect(reloadedPicker).toContainText(SERVER_NAME);
+
+    // ...and it is still checked inside the drawer.
+    await reloadedPicker.getByRole("button", { name: /add from catalog/i }).click();
+    const reloadedTile = page
+      .getByTestId("tools-picker-drawer-grid")
       .locator("label")
       .filter({ hasText: SERVER_NAME })
       .filter({ hasText: firstToolName });
-    await expect(reloadedRow.locator('input[type="checkbox"]')).toBeChecked({
+    await expect(reloadedTile.locator('input[type="checkbox"]')).toBeChecked({
       timeout: 15_000,
     });
   });

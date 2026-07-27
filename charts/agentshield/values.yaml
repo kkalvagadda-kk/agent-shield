@@ -709,7 +709,15 @@ registry-api:
     # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop + health_check_server
     #   client + mcp_health_* settings + lifespan task; advisory-lock single-flight,
     #   writes mcp_servers.status/health_detail (NOT last_synced_at).
-    tag: "0.2.232"
+    # 0.2.233: merge of origin/main. Brings the global role `viewer` -> `consumer`
+    #   rename (rbac-design.md §2.1): rbac._LEGACY_MAP maps viewer->consumer on read,
+    #   and rbac.PLATFORM_ROLES becomes the single source for the platform-role name
+    #   set (keycloak_client + admin_users no longer keep their own hardcoded copies).
+    #   Its migration ships as **0075**, not 0072: main and this branch each forked a
+    #   0072 off parent 0071, and the live DB is stamped 0074 from the MCP chain, so
+    #   main's unapplied migration is the one that renumbers. Same resolution as the
+    #   webhook collision in ec48337 — never renumber a chain that is already applied.
+    tag: "0.2.233"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1080,7 +1088,38 @@ studio:
     # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill,
     #   last_success_at, consecutive_failures, last_error, last_synced_at,
     #   list_changed_supported, identity note) + 15s refetchInterval.
-    tag: "0.1.163"
+    # --- merged from origin/main (its own 0.1.161-0.1.163 line, renumbered into
+    #     0.1.164 below since these tags were claimed twice, once per branch) ---
+    # main 0.1.161: role rename viewer->consumer across AuthContext (ROLE_LEVEL keys +
+    #   GlobalRole union + isAtLeast default), RequireRole, and AdminAccessPage
+    #   (ROLES dropdown -> canonical names per §8.4, form defaults operator->
+    #   contributor, ROLE_CHIP keeps legacy keys for un-migrated rows). Adds
+    #   AuthContext.test.tsx covering the role hierarchy + legacy-spelling parity.
+    # main 0.1.162: tool Description becomes a multi-line textarea (rows=4, resize-y) in
+    #   ToolsPage's ToolForm, which serves BOTH create and edit — the single-line
+    #   <input> silently collapsed newlines, and that description is what the
+    #   agent's LLM reads to decide whether to call the tool. Adds
+    #   ToolsPage.test.tsx (5 tests), the first coverage that page has had.
+    # main 0.1.163: Tools + Knowledge pickers become browse-and-select tile drawers.
+    #   Shared components/shared/PickerTile + TilePickerDrawer; ToolsPicker and
+    #   KnowledgeBasePicker are thin adapters that keep their previous prop
+    #   signatures, so none of the three consumer pages (CreateAgentPage,
+    #   AgentListPage, AgentDetailPage) needed edits. Selected entities render as
+    #   removable chips on the builder; the catalog lives in the drawer. Tiles are
+    #   selection-only — no edit/delete/create — because tools and KBs are shared
+    #   team resources and a destructive control there would let a mis-click during
+    #   agent assembly destroy something other agents depend on.
+    # 0.1.164: MCP picker parity on top of that merge. (a) listAllTools() pages the
+    #   catalog on the returned `total` and asks for status=active — /tools/ caps
+    #   `limit` at 200 and 54 of the 82 live tools already come from four MCP servers,
+    #   so the previous listTools(200) both truncated silently and offered the 13
+    #   deprecated rows as bindable. (b) An mcp_tool tile shows its source-server chip
+    #   instead of the raw type string (which would have read "mcp_tool"). (c) A source
+    #   filter (All / Native / per-server) in the drawer keeps native tools findable
+    #   when one vendor's server contributes dozens. (d) ToolsPage gains a Source
+    #   column. (e) ToolsPicker takes an explicit valueKey ('name' | 'id'), retiring
+    #   the id-keyed duplicate pickers in PropertiesPanel and SkillsPage.
+    tag: "0.1.164"
     pullPolicy: IfNotPresent
 
   service:

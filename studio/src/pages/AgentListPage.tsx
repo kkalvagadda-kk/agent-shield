@@ -30,7 +30,7 @@ import {
   getAgentHealth,
   listAgents,
   listProviders,
-  listTools,
+  listAllTools,
   updateAgent,
   type Agent,
 } from "../api/registryApi";
@@ -381,9 +381,10 @@ function AgentEditForm({
     queryKey: ["providers"],
     queryFn: () => listProviders(),
   });
+  // Whole catalog, not a page — the picker filters client-side (see listAllTools).
   const { data: tools } = useQuery({
-    queryKey: ["tools"],
-    queryFn: () => listTools(200),
+    queryKey: ["tools", "all"],
+    queryFn: () => listAllTools(),
   });
   const { data: allKbs } = useQuery({
     queryKey: ["kbs", agent.team],
@@ -537,7 +538,7 @@ function AgentEditForm({
         <div className="space-y-1">
           <label className="label">Tools</label>
           <ToolsPicker
-            tools={tools?.items ?? []}
+            tools={tools ?? []}
             selected={selectedTools}
             onToggle={toggleTool}
             emptyText="No tools registered."

@@ -1,4 +1,8 @@
+import { Plus, X } from "lucide-react";
+import { useState } from "react";
 import type { KnowledgeBase } from "../../api/knowledgeApi";
+import PickerTile from "../shared/PickerTile";
+import TilePickerDrawer from "../shared/TilePickerDrawer";
 
 interface KnowledgeBasePickerProps {
   kbs: KnowledgeBase[];
@@ -7,43 +11,108 @@ interface KnowledgeBasePickerProps {
   onToggle: (id: string) => void;
 }
 
-/** Shared Knowledge Bases multi-select for every agent-editing surface. Attaching
- *  a KB is how an agent gets a scoped `knowledge_search` tool (server-side) — which
- *  is exactly why `knowledge_search` is never a hand-pickable tool. Presentational
- *  only: the caller owns fetching KBs, the selection state, and (on save) the
- *  bind/unbind reconciliation. */
-export default function KnowledgeBasePicker({ kbs, selected, onToggle }: KnowledgeBasePickerProps) {
+/** Shared Knowledge Bases picker for every agent-editing surface: selected KBs
+ *  show inline as removable chips, and "Add from catalog" opens the same
+ *  browse-and-select tile drawer the Tools picker uses.
+ *
+ *  Attaching a KB is how an agent gets a scoped `knowledge_search` tool
+ *  (server-side) — which is exactly why `knowledge_search` is never a
+ *  hand-pickable tool. Presentational only: the caller owns fetching KBs, the
+ *  selection state, and (on save) the bind/unbind reconciliation.
+ *
+ *  Prop signature is unchanged from the previous checkbox-list version, so no
+ *  caller needed edits. */
+export default function KnowledgeBasePicker({
+  kbs,
+  selected,
+  onToggle,
+}: KnowledgeBasePickerProps) {
+  const [open, setOpen] = useState(false);
+  const selectedKbs = kbs.filter((kb) => selected.includes(kb.id));
+
   return (
-    <div
-      data-testid="kb-picker"
-      className="border border-slate-200 rounded-lg max-h-48 overflow-y-auto divide-y divide-slate-100"
-    >
-      {kbs.length === 0 && (
-        <p className="p-3 text-sm text-slate-400 italic">
-          No knowledge bases for your team.{" "}
-          <a href="/knowledge" className="underline hover:text-slate-600">Create one →</a>
-        </p>
-      )}
-      {kbs.map((kb) => (
-        <label
-          key={kb.id}
-          className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer"
-        >
-          <input
-            type="checkbox"
-            checked={selected.includes(kb.id)}
-            onChange={() => onToggle(kb.id)}
-            className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-          />
-          <div className="flex-1 min-w-0">
-            <span className="text-sm font-medium text-slate-800">{kb.name}</span>
-            {kb.description && (
-              <span className="text-xs text-slate-400 ml-2 truncate">{kb.description}</span>
-            )}
-          </div>
-          <span className="text-xs text-slate-400">{kb.ready_count}/{kb.source_count} ready</span>
-        </label>
-      ))}
+    <div data-testid="kb-picker">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {selectedKbs.length === 0 && (
+          <span className="text-sm text-slate-400 italic">
+            No knowledge bases selected.
+          </span>
+        )}
+        {selectedKbs.map((kb) => (
+          <span
+            key={kb.id}
+            className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded border border-slate-200 bg-slate-50 text-xs text-slate-700"
+          >
+            {kb.name}
+            <button
+              type="button"
+              onClick={() => onToggle(kb.id)}
+              className="text-slate-400 hover:text-slate-700"
+              aria-label={`Remove ${kb.name}`}
+            >
+              <X size={12} />
+            </button>
+          </span>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="btn-secondary mt-2"
+      >
+        <Plus size={13} />
+        Add from catalog
+      </button>
+
+      <TilePickerDrawer
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Add knowledge bases"
+        selectedCount={selectedKbs.length}
+        isEmpty={kbs.length === 0}
+        emptyText={
+          <>
+            No knowledge bases for your team. Knowledge bases are managed under
+            Knowledge.
+          </>
+        }
+        testId="kb-picker-drawer"
+      >
+        {(search) => {
+          const q = search.trim().toLowerCase();
+          const shown = q
+            ? kbs.filter(
+                (kb) =>
+                  kb.name.toLowerCase().includes(q) ||
+                  (kb.description ?? "").toLowerCase().includes(q),
+              )
+            : kbs;
+          if (shown.length === 0) {
+            return (
+              <p className="text-sm text-slate-400 italic col-span-full">
+                No knowledge bases match “{search}”.
+              </p>
+            );
+          }
+          return shown.map((kb) => (
+            <PickerTile
+              key={kb.id}
+              title={kb.name}
+              description={kb.description}
+              selected={selected.includes(kb.id)}
+              onToggle={() => onToggle(kb.id)}
+              // KBs have no risk level — the meaningful signal is how much of the
+              // corpus is actually queryable.
+              meta={
+                <span className="text-xs px-1.5 py-0.5 rounded font-medium bg-slate-100 text-slate-600">
+                  {kb.ready_count}/{kb.source_count} ready
+                </span>
+              }
+            />
+          ));
+        }}
+      </TilePickerDrawer>
     </div>
   );
 }

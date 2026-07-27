@@ -2,12 +2,17 @@ import { createContext, useContext } from "react";
 import type { KcUserInfo } from "../lib/keycloak";
 import { getKeycloak } from "../lib/keycloak";
 
-type GlobalRole = "viewer" | "contributor" | "platform-admin";
+type GlobalRole = "consumer" | "contributor" | "platform-admin";
 
 const ROLE_LEVEL: Record<string, number> = {
-  viewer: 0,
+  consumer: 0,
   contributor: 1,
   "platform-admin": 2,
+  // Legacy spellings still present in un-migrated rows / in-flight JWTs.
+  // Mirrors rbac._LEGACY_MAP on the backend.
+  viewer: 0,
+  operator: 1,
+  admin: 2,
 };
 
 interface AuthContextValue {
@@ -50,7 +55,7 @@ export function buildAuthValue(
     hasRole: (r: string) =>
       user?.realm_access?.roles?.includes(r) ?? false,
     isAtLeast: (minRole: GlobalRole) => {
-      const userLevel = ROLE_LEVEL[normalizedRole ?? "viewer"] ?? 0;
+      const userLevel = ROLE_LEVEL[normalizedRole ?? "consumer"] ?? 0;
       const minLevel = ROLE_LEVEL[minRole] ?? 0;
       return userLevel >= minLevel;
     },

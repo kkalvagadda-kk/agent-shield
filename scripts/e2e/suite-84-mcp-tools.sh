@@ -169,6 +169,67 @@ async def main():
         check(bool(got) and got[0].get("pii_deanonymize_allowed") is True, "T-S84-024",
               f"bundle grant flagged entry: {got}")
 
+        # ── T-S84-030 — /tools/ denormalizes mcp_server_name onto discovered rows ──
+        # The picker labels an MCP tile with its SOURCE SERVER rather than the raw
+        # type string. That label is only renderable if the list endpoint carries
+        # the field; without it every discovered tile falls back to reading "MCP".
+        lr = await c.get(f"{BASE}/tools/", params={"type": "mcp_tool", "limit": 200}, headers=ADMIN)
+        mcp_rows = lr.json().get("items", []) if lr.status_code == 200 else []
+        check(
+            lr.status_code == 200 and all(
+                ("mcp_server_name" in r and "mcp_server_id" in r) for r in mcp_rows
+            ),
+            "T-S84-030",
+            f"list mcp rows={len(mcp_rows)} status={lr.status_code}; "
+            f"missing-field rows={[r.get('name') for r in mcp_rows if 'mcp_server_name' not in r][:3]}",
+        )
+
+        # ── T-S84-031 — ?status=active excludes a retired tool ────────────────────
+        # mcp_discovery marks a vanished-upstream tool 'inactive' and NEVER deletes
+        # the row, so "is it still offerable" is a status question. Proven on a
+        # deprecated fixture rather than a live MCP row so the suite does not depend
+        # on an upstream server having dropped something.
+        async with AsyncSessionLocal() as s:
+            retired = Tool(name=f"s84-retired-{SUFFIX}", type="http", risk_level="low",
+                           owner_team=TEAM, http_url="https://example.com", http_method="GET",
+                           status="deprecated")
+            s.add(retired); await s.commit()
+        act = await c.get(f"{BASE}/tools/", params={"status": "active", "limit": 200}, headers=ADMIN)
+        act_names = [t["name"] for t in act.json().get("items", [])]
+        allr = await c.get(f"{BASE}/tools/", params={"name": f"s84-retired-{SUFFIX}"}, headers=ADMIN)
+        check(
+            f"s84-retired-{SUFFIX}" not in act_names
+            and any(t["name"] == f"s84-retired-{SUFFIX}" for t in allr.json().get("items", [])),
+            "T-S84-031",
+            f"retired-in-active={f's84-retired-{SUFFIX}' in act_names} "
+            f"retired-fetchable={allr.status_code}",
+        )
+
+        # ── T-S84-032 — the catalog is fully retrievable past the 200 page cap ────
+        # `limit` is declared le=200, so a >200-tool catalog CANNOT be fetched in one
+        # request — Studio's listAllTools pages on `total`. This asserts the two
+        # facts that makes that correct: the cap is enforced, and `total` reports the
+        # true count rather than the page length.
+        over = await c.get(f"{BASE}/tools/", params={"limit": 500}, headers=ADMIN)
+        p1 = await c.get(f"{BASE}/tools/", params={"limit": 200, "offset": 0}, headers=ADMIN)
+        body = p1.json()
+        total = body.get("total", 0)
+        seen = list(body.get("items", []))
+        off = 200
+        while len(seen) < total and off < 5000:
+            nxt = await c.get(f"{BASE}/tools/", params={"limit": 200, "offset": off}, headers=ADMIN)
+            page = nxt.json().get("items", [])
+            if not page:
+                break
+            seen.extend(page)
+            off += 200
+        check(
+            over.status_code == 422 and total >= len(body.get("items", [])) and len(seen) == total,
+            "T-S84-032",
+            f"limit=500 -> {over.status_code} (want 422); total={total} "
+            f"page1={len(body.get('items', []))} paged={len(seen)}",
+        )
+
     # ── cleanup (best-effort, uniquely suffixed) ────────────────────────────────
     try:
         async with AsyncSessionLocal() as s:
@@ -176,6 +237,7 @@ async def main():
             await s.execute(sqltext("DELETE FROM agents WHERE name = :n"), {"n": f"s84-agent-{SUFFIX}"})
             await s.execute(sqltext("DELETE FROM asset_grants WHERE granted_by = 'auto:suite84'"))
             await s.execute(delete(Tool).where(Tool.name.like(f"s84-%{SUFFIX}%")))
+            await s.execute(sqltext("DELETE FROM tools WHERE name = :n"), {"n": f"s84-retired-{SUFFIX}"})
             await s.execute(sqltext("DELETE FROM tools WHERE name LIKE :p"), {"p": f"s84-%{SUFFIX}"})
             if server_id is not None:
                 await s.execute(delete(MCPServer).where(MCPServer.id == server_id))

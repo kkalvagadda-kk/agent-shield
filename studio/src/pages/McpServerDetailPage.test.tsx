@@ -300,3 +300,92 @@ describe("McpServerDetailPage", () => {
     );
   });
 });
+
+describe("McpServerDetailPage — discovered-tools tab", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const WITH_SCHEMA = {
+    ...DETAIL,
+    tools: [
+      {
+        id: "t1",
+        name: "github-mcp__search_issues",
+        display_name: "search_issues",
+        description: "Search issues in a repository.",
+        mcp_tool_name: "search_issues",
+        input_schema: { type: "object", properties: { repo: { type: "string" } }, required: ["repo"] },
+        risk_level: "low",
+        status: "active",
+        pii_deanonymize_allowed: false,
+      },
+      {
+        id: "t2",
+        name: "github-mcp__create_pr",
+        display_name: "create_pr",
+        description: "Open a pull request.",
+        mcp_tool_name: "create_pr",
+        input_schema: null,
+        risk_level: "high",
+        status: "active",
+        pii_deanonymize_allowed: true,
+      },
+    ],
+  };
+
+  // A single upstream server routinely advertises dozens of tools; without a
+  // filter the table is a wall.
+  it("filters the table by name, mcp name and description", async () => {
+    mk(getMcpServer).mockResolvedValue(WITH_SCHEMA);
+    renderDetail();
+    await screen.findByText("Search issues in a repository.");
+
+    await userEvent.type(screen.getByLabelText(/filter tools/i), "pull request");
+    expect(screen.getByText("Open a pull request.")).toBeInTheDocument();
+    expect(screen.queryByText("Search issues in a repository.")).not.toBeInTheDocument();
+  });
+
+  it("says so when the filter matches nothing", async () => {
+    mk(getMcpServer).mockResolvedValue(WITH_SCHEMA);
+    renderDetail();
+    await screen.findByText("Search issues in a repository.");
+
+    await userEvent.type(screen.getByLabelText(/filter tools/i), "zzzz");
+    expect(screen.getByText(/no tool matches/i)).toBeInTheDocument();
+  });
+
+  // input_schema was fetched for every discovered tool and read by nobody — the
+  // exact orphan DoD rule 3 forbids. These are the parameters the agent's LLM is
+  // asked to fill in, and they appear nowhere else in the product.
+  it("expands a tool to show its input_schema parameters", async () => {
+    mk(getMcpServer).mockResolvedValue(WITH_SCHEMA);
+    renderDetail();
+    await screen.findByText("Search issues in a repository.");
+
+    expect(screen.queryByText(/"repo"/)).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /^parameters$/i }));
+    expect(screen.getByText(/"repo"/)).toBeInTheDocument();
+    expect(screen.getByText(/"required"/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /hide parameters/i }));
+    expect(screen.queryByText(/"repo"/)).not.toBeInTheDocument();
+  });
+
+  it("offers no expander for a tool the server published no schema for", async () => {
+    mk(getMcpServer).mockResolvedValue(WITH_SCHEMA);
+    renderDetail();
+    const row = (await screen.findByText("Open a pull request.")).closest("tr")!;
+    expect(within(row).getByText(/no schema/i)).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /parameters/i })).toBeNull();
+  });
+
+  // The tab is a read-only inventory: binding happens in the agent builder, so
+  // there must be no selection or destructive control here.
+  it("stays read-only — no checkboxes, no per-tool edit or delete", async () => {
+    mk(getMcpServer).mockResolvedValue(WITH_SCHEMA);
+    renderDetail();
+    await screen.findByText("Search issues in a repository.");
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^edit$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^delete$/i })).toBeNull();
+  });
+});

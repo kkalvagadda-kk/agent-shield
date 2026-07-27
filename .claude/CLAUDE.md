@@ -23,7 +23,7 @@ This project uses bash+curl e2e test suites in `scripts/e2e/`. Every new API end
 
 - **Pattern**: Create or extend a `scripts/e2e/suite-NN-<name>.sh` file following the existing pattern (kubectl exec into the registry-api pod, run Python/httpx assertions)
 - **Minimum coverage**: Test the happy path and at least one error/edge case
-- **Register** new suites in `scripts/e2e/run-all.sh`
+- **Register** the new suite in **`scripts/test-manifest.txt`** (single source of truth for both layers, with functional groups). `run-all.sh` is a thin wrapper over `scripts/run-tests.sh` and has no registry of its own. Verify with `bash scripts/run-tests.sh --audit`. Run targeted regressions with `bash scripts/run-tests.sh --group <group>` (`--groups` lists them).
 - **Naming**: `T-SNN-00X — <what it proves>` format for test case IDs
 
 ### 2. Image Version Bumps

@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
-import { Settings, Star, Wrench } from 'lucide-react';
-import { listTools, listSkills } from '../api/registryApi';
+import { Settings, Star } from 'lucide-react';
+import { listAllTools, listSkills } from '../api/registryApi';
+import ToolsPicker from './agent/ToolsPicker';
 import { useWorkflowStore } from '../stores/workflowStore';
 
 // ---------------------------------------------------------------------------
@@ -17,6 +18,13 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 // ---------------------------------------------------------------------------
 // ToolSelector — multi-select from Registry tools
+//
+// A thin adapter over the shared ToolsPicker. This used to be a private
+// checkbox-list copy of it, which meant the graph canvas silently missed every
+// improvement the picker got: the MCP source badge, the active-only catalog, the
+// source filter, and the full-catalog fetch. It differed from the shared
+// component in exactly one respect — it stores tool IDS, not names — which is
+// now an explicit `valueKey` instead of a reason to fork.
 // ---------------------------------------------------------------------------
 function ToolSelector({
   toolIds,
@@ -25,35 +33,21 @@ function ToolSelector({
   toolIds: string[];
   onChange: (ids: string[]) => void;
 }) {
-  const { data } = useQuery({
-    queryKey: ['registry-tools'],
-    queryFn: () => listTools(),
+  const { data: tools } = useQuery({
+    queryKey: ['tools', 'all'],
+    queryFn: () => listAllTools(),
   });
-  const tools = data?.items ?? [];
 
   return (
-    <div className="space-y-1">
-      {tools.map((tool) => (
-        <label key={tool.id} className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="checkbox"
-            checked={toolIds.includes(tool.id)}
-            onChange={(e) => {
-              if (e.target.checked) onChange([...toolIds, tool.id]);
-              else onChange(toolIds.filter((id) => id !== tool.id));
-            }}
-          />
-          <Wrench size={12} className="text-slate-400 shrink-0" />
-          <span className="font-medium">{tool.display_name ?? tool.name}</span>
-          {tool.description && (
-            <span className="text-slate-400 truncate text-xs">{tool.description}</span>
-          )}
-        </label>
-      ))}
-      {tools.length === 0 && (
-        <p className="text-xs text-slate-400">No tools registered yet. Add tools in the Registry.</p>
-      )}
-    </div>
+    <ToolsPicker
+      tools={tools ?? []}
+      selected={toolIds}
+      valueKey="id"
+      onToggle={(id) =>
+        onChange(toolIds.includes(id) ? toolIds.filter((t) => t !== id) : [...toolIds, id])
+      }
+      emptyText="No tools registered yet. Add tools in the Registry."
+    />
   );
 }
 

@@ -8,7 +8,7 @@ vi.mock("../api/registryApi", () => ({
   createAgent: vi.fn(),
   createTrigger: vi.fn(),
   listProviders: vi.fn(),
-  listTools: vi.fn(),
+  listAllTools: vi.fn(),
 }));
 vi.mock("../api/knowledgeApi", () => ({
   listKBs: vi.fn(),
@@ -16,7 +16,7 @@ vi.mock("../api/knowledgeApi", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
-import { createAgent, createTrigger, listProviders, listTools } from "../api/registryApi";
+import { createAgent, createTrigger, listAllTools, listProviders } from "../api/registryApi";
 import { listKBs, bindAgent } from "../api/knowledgeApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -31,7 +31,7 @@ async function openNoCode() {
 describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
   beforeEach(() => {
     mock(listProviders).mockResolvedValue({ items: [], total: 0 });
-    mock(listTools).mockResolvedValue({ items: [], total: 0 });
+    mock(listAllTools).mockResolvedValue([]);
     mock(listKBs).mockResolvedValue([]);
     mock(bindAgent).mockResolvedValue({});
     mock(createAgent).mockResolvedValue({ id: "agent-uuid-1", name: "wiz-agent", team: "default" });
@@ -179,13 +179,11 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
   beforeEach(() => {
     mock(listProviders).mockResolvedValue({ items: [], total: 0 });
     // The tool list INCLUDES knowledge_search — the page must hide it.
-    mock(listTools).mockResolvedValue({
-      items: [
-        { id: "t1", name: "web_search", description: "search", risk_level: "high" },
-        { id: "t2", name: "knowledge_search", description: "kb", risk_level: "low" },
-      ],
-      total: 2,
-    });
+    // listAllTools returns a flat, fully-paged array — not a page object.
+    mock(listAllTools).mockResolvedValue([
+      { id: "t1", name: "web_search", description: "search", risk_level: "high" },
+      { id: "t2", name: "knowledge_search", description: "kb", risk_level: "low" },
+    ]);
     mock(listKBs).mockResolvedValue([
       { id: "kb-1", team: "default", name: "Product Docs", description: "", created_by: "u", created_at: "", updated_at: "", source_count: 3, ready_count: 3, attached_agents: [] },
     ]);
@@ -196,15 +194,19 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
   it("hides knowledge_search from the Tools list but shows real tools", async () => {
     await openNoCode();
     const toolsPicker = await screen.findByTestId("tools-picker");
+    // Tools are browsed in a tile drawer now — open it to see the catalog.
+    await userEvent.click(within(toolsPicker).getByRole("button", { name: /add from catalog/i }));
     expect(within(toolsPicker).getByText("web_search")).toBeInTheDocument();
     // knowledge_search must NOT be a pickable tool (it appears only in the KB
-    // picker's hint text, which is outside tools-picker).
+    // picker's hint text, which is outside tools-picker). This is the structural
+    // guard ToolsPicker owns — it has to survive the tile-drawer rewrite.
     expect(within(toolsPicker).queryByText("knowledge_search")).not.toBeInTheDocument();
   });
 
   it("lists team KBs in a dedicated picker", async () => {
     await openNoCode();
     const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     expect(picker).toHaveTextContent("Product Docs");
   });
 
@@ -212,7 +214,9 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "kb-agent");
     const picker = await screen.findByTestId("kb-picker");
+    await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     await userEvent.click(within(picker).getByRole("checkbox"));
+    await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));

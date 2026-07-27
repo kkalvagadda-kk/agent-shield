@@ -9,7 +9,7 @@ import { useForm } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { z } from "zod";
-import { createAgent, createTrigger, listProviders, listTools } from "../api/registryApi";
+import { createAgent, createTrigger, listAllTools, listProviders } from "../api/registryApi";
 import { listKBs, bindAgent } from "../api/knowledgeApi";
 import { useAuth } from "../contexts/AuthContext";
 import { cn } from "../lib/utils";
@@ -761,9 +761,11 @@ function NoCodeForm({ team }: { team: string | null }) {
     queryFn: () => listProviders(team || undefined),
   });
 
-  const { data: toolsData } = useQuery({
-    queryKey: ["tools"],
-    queryFn: () => listTools(100, 0),
+  // The picker filters client-side, so it needs the WHOLE catalog — a single
+  // page silently hides tools (see listAllTools).
+  const { data: allTools } = useQuery({
+    queryKey: ["tools", "all"],
+    queryFn: () => listAllTools(),
   });
 
   const { data: kbData } = useQuery({
@@ -902,7 +904,7 @@ function NoCodeForm({ team }: { team: string | null }) {
       {/* Tools */}
       <Field label="Tools">
         <ToolsPicker
-          tools={toolsData?.items ?? []}
+          tools={allTools ?? []}
           selected={selectedTools}
           onToggle={toggleTool}
           emptyText="No tools available for your team."

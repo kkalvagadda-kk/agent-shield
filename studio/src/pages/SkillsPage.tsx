@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Loader2, Pencil, Plus, Star, Trash2, Wrench, X } from 'lucide-react';
+import ToolsPicker from '../components/agent/ToolsPicker';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -7,7 +8,7 @@ import {
   deleteSkill,
   listSkills,
   listTeams,
-  listTools,
+  listAllTools,
   updateSkill,
   type Skill,
 } from '../api/registryApi';
@@ -210,13 +211,14 @@ function SkillForm({
     queryFn: listTeams,
   });
 
-  const { data: toolsData } = useQuery({
-    queryKey: ['registry-tools'],
-    queryFn: () => listTools(),
+  // Whole catalog: this picker filters client-side, and /tools/ caps a page at
+  // 200 (see listAllTools).
+  const { data: allTools } = useQuery({
+    queryKey: ['tools', 'all'],
+    queryFn: () => listAllTools(),
   });
 
   const teams = teamsData?.items ?? [];
-  const tools = toolsData?.items ?? [];
 
   const [name, setName] = useState(skill?.name ?? '');
   const [team, setTeam] = useState(skill?.team ?? '');
@@ -356,38 +358,19 @@ function SkillForm({
           />
         </div>
 
-        {/* Tools */}
+        {/* Tools — the shared browse-and-select drawer. Was a private checkbox
+            copy that never grew the MCP source badge or the active-only filter;
+            it keys selection by tool id, which is now `valueKey` rather than a
+            reason to keep a second component. */}
         <div className="space-y-2">
           <label className="label">Tools</label>
-          {tools.length === 0 ? (
-            <p className="text-xs text-slate-400">
-              No tools registered yet. Add tools first.
-            </p>
-          ) : (
-            <div className="space-y-1 max-h-48 overflow-y-auto border border-slate-200 rounded-md p-3">
-              {tools.map((tool) => (
-                <label
-                  key={tool.id}
-                  className="flex items-center gap-2 text-sm cursor-pointer py-0.5"
-                >
-                  <input
-                    type="checkbox"
-                    checked={toolIds.includes(tool.id)}
-                    onChange={() => toggleTool(tool.id)}
-                  />
-                  <Wrench size={12} className="text-slate-400 shrink-0" />
-                  <span className="font-medium">
-                    {tool.display_name ?? tool.name}
-                  </span>
-                  {tool.description && (
-                    <span className="text-slate-400 text-xs truncate">
-                      {tool.description}
-                    </span>
-                  )}
-                </label>
-              ))}
-            </div>
-          )}
+          <ToolsPicker
+            tools={allTools ?? []}
+            selected={toolIds}
+            valueKey="id"
+            onToggle={toggleTool}
+            emptyText="No tools registered yet. Add tools first."
+          />
           <p className="text-xs text-slate-400">{toolIds.length} selected</p>
         </div>
 

@@ -3,7 +3,7 @@ import { ArrowLeft, Bot, CheckCircle, Loader2, MessageCircle, Rocket, Send, Tras
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { deleteAgentVersion, getAgent, getDeployments, listProviders, listTools, listVersions, publishAgent, updateAgent, type Agent, type AgentVersion, type Deployment } from "../api/registryApi";
+import { deleteAgentVersion, getAgent, getDeployments, listAllTools, listProviders, listVersions, publishAgent, updateAgent, type Agent, type AgentVersion, type Deployment } from "../api/registryApi";
 import { listKBs, getAgentKnowledgeBases, bindAgent, unbindAgent } from "../api/knowledgeApi";
 import DeployModal from "../components/DeployModal";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
@@ -445,9 +445,10 @@ function SettingsContent({ agent }: { agent: Agent }) {
     queryKey: ["providers"],
     queryFn: () => listProviders(),
   });
+  // Whole catalog, not a page — the picker filters client-side (see listAllTools).
   const { data: tools } = useQuery({
-    queryKey: ["tools"],
-    queryFn: () => listTools(200),
+    queryKey: ["tools", "all"],
+    queryFn: () => listAllTools(),
   });
   const { data: allKbs } = useQuery({
     queryKey: ["kbs", agent.team],
@@ -603,7 +604,7 @@ function SettingsContent({ agent }: { agent: Agent }) {
         <span className="text-xs text-slate-500 uppercase">Tools</span>
         <div className="mt-1">
           <ToolsPicker
-            tools={tools?.items ?? []}
+            tools={tools ?? []}
             selected={selectedTools}
             onToggle={toggleTool}
             emptyText="No tools registered."

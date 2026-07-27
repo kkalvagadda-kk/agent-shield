@@ -11,12 +11,12 @@
 // failed register/sync is not an API error, it's an unhealthy server row.
 // ---------------------------------------------------------------------------
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Server, Wrench, Trash2, RotateCw, Loader2, AlertCircle, ExternalLink,
-  Activity, CheckCircle2, KeyRound, Unlink,
+  Activity, CheckCircle2, KeyRound, Search, Unlink,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -26,15 +26,13 @@ import {
 } from "../api/mcpServersApi";
 import { listAuthConfigs } from "../api/registryApi";
 import { mcpErrorMessage } from "../lib/mcpError";
+import { PiiChip, RiskChip } from "../components/shared/ToolChips";
 
 type Tab = "tools" | "settings";
 
-const RISK_CLS: Record<string, string> = {
-  low: "bg-green-100 text-green-700",
-  medium: "bg-amber-100 text-amber-700",
-  high: "bg-red-100 text-red-700",
-  critical: "bg-red-100 text-red-700",
-};
+// Risk / PII chips come from components/shared/ToolChips — this page used to
+// keep its own RISK_CLS map, which is how the same risk level ended up a
+// different colour here than on the picker tile.
 
 // Duplicated from McpServersPage's list pill (contracts/studio-mcp-servers-phase2
 // §1 permits the tiny map to be duplicated) so the Health panel's status matches
@@ -355,61 +353,127 @@ function OAuthConnectionPanel({ serverId }: { serverId: string }) {
 }
 
 function ToolsTab({ tools, onSync, syncing }: { tools: McpServerTool[]; onSync: () => void; syncing: boolean }) {
+  const [q, setQ] = useState("");
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  // Deliberately still a TABLE, not the tile grid the agent builder uses. Tiles
+  // are a selection affordance; nothing here is selectable — binding happens in
+  // the agent builder, as the hint below says. The five columns are what you
+  // actually scan on this screen, and a tile would drop them.
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? tools.filter(
+        (t) =>
+          (t.display_name || t.name).toLowerCase().includes(needle) ||
+          (t.mcp_tool_name ?? "").toLowerCase().includes(needle) ||
+          (t.description ?? "").toLowerCase().includes(needle),
+      )
+    : tools;
+
   return (
     <div>
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-3">
         <p className="text-xs text-slate-500">
-          Tools discovered from this server. Bind them to agents from the agent builder's Tools picker.
+          Tools discovered from this server. Bind them to agents from the agent builder&apos;s Tools picker.
         </p>
-        <button onClick={onSync} disabled={syncing} className="btn-secondary">
-          {syncing ? <Loader2 size={14} className="animate-spin" /> : <><RotateCw size={14} /> Sync</>}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {/* One server can advertise dozens of tools; an unsearchable table of
+              that length is not readable. */}
+          <div className="relative">
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="input pl-8 py-1.5 text-sm w-56"
+              placeholder="Filter tools"
+              aria-label="Filter tools"
+            />
+          </div>
+          <button onClick={onSync} disabled={syncing} className="btn-secondary">
+            {syncing ? <Loader2 size={14} className="animate-spin" /> : <><RotateCw size={14} /> Sync</>}
+          </button>
+        </div>
       </div>
       <div className="card p-0 overflow-hidden">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-100 bg-slate-50">
-              {["Tool", "MCP name", "Risk", "PII", "Status"].map((h) => (
-                <th key={h} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
+              {["Tool", "MCP name", "Risk", "PII", "Status", ""].map((h, i) => (
+                <th key={h || `sp${i}`} className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider">{h}</th>
               ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {tools.length === 0 && (
               <tr>
-                <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
+                <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
                   No tools discovered. Sync to re-run discovery.
                 </td>
               </tr>
             )}
-            {tools.map((t) => {
+            {tools.length > 0 && shown.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                  No tool matches &ldquo;{q}&rdquo;.
+                </td>
+              </tr>
+            )}
+            {shown.map((t) => {
               const inactive = t.status !== "active";
+              const open = expanded === t.id;
               return (
-                <tr key={t.id} className={`transition-colors ${inactive ? "bg-slate-50/60" : "hover:bg-slate-50"}`}>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <Wrench size={13} className="text-slate-400 shrink-0" />
-                      <span className={`font-medium ${inactive ? "text-slate-400 line-through" : "text-slate-900"}`}>
-                        {t.display_name || t.name}
-                      </span>
-                    </div>
-                    {t.description && <p className="text-xs text-slate-400 truncate max-w-md mt-0.5 pl-5">{t.description}</p>}
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-500">{t.mcp_tool_name ?? "—"}</td>
-                  <td className="px-4 py-3">
-                    <span className={`badge capitalize ${RISK_CLS[t.risk_level] ?? "bg-slate-100 text-slate-600"}`}>{t.risk_level}</span>
-                  </td>
-                  <td className="px-4 py-3">
-                    {t.pii_deanonymize_allowed
-                      ? <span className="badge bg-amber-50 text-amber-700">de-anon</span>
-                      : <span className="text-xs text-slate-400">—</span>}
-                  </td>
-                  <td className="px-4 py-3">
-                    {inactive
-                      ? <span className="badge bg-slate-100 text-slate-400">inactive</span>
-                      : <span className="badge bg-green-100 text-green-700">active</span>}
-                  </td>
-                </tr>
+                <Fragment key={t.id}>
+                  <tr className={`transition-colors ${inactive ? "bg-slate-50/60" : "hover:bg-slate-50"}`}>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Wrench size={13} className="text-slate-400 shrink-0" />
+                        <span className={`font-medium ${inactive ? "text-slate-400 line-through" : "text-slate-900"}`}>
+                          {t.display_name || t.name}
+                        </span>
+                      </div>
+                      {t.description && <p className="text-xs text-slate-400 truncate max-w-md mt-0.5 pl-5">{t.description}</p>}
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-slate-500">{t.mcp_tool_name ?? "—"}</td>
+                    <td className="px-4 py-3">
+                      <RiskChip risk={t.risk_level} />
+                    </td>
+                    <td className="px-4 py-3">
+                      {t.pii_deanonymize_allowed ? <PiiChip allowed /> : <span className="text-xs text-slate-400">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {inactive
+                        ? <span className="badge bg-slate-100 text-slate-400">inactive</span>
+                        : <span className="badge bg-green-100 text-green-700">active</span>}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {/* input_schema is fetched for every discovered tool and,
+                          until now, read by nobody. These are the parameters the
+                          agent's LLM will be asked to fill in — the one thing you
+                          cannot see anywhere else in the product. */}
+                      {t.input_schema ? (
+                        <button
+                          type="button"
+                          onClick={() => setExpanded(open ? null : t.id)}
+                          aria-expanded={open}
+                          className="text-xs text-indigo-600 hover:text-indigo-800"
+                        >
+                          {open ? "Hide parameters" : "Parameters"}
+                        </button>
+                      ) : (
+                        <span className="text-xs text-slate-300">no schema</span>
+                      )}
+                    </td>
+                  </tr>
+                  {open && t.input_schema && (
+                    <tr className="bg-slate-50/80">
+                      <td colSpan={6} className="px-4 py-3">
+                        <pre className="text-xs text-slate-600 overflow-x-auto whitespace-pre-wrap">
+                          {JSON.stringify(t.input_schema, null, 2)}
+                        </pre>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               );
             })}
           </tbody>

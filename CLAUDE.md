@@ -30,8 +30,18 @@ This project uses bash+curl e2e test suites in `scripts/e2e/`. Every new API end
 
 - **Pattern**: Create or extend a `scripts/e2e/suite-NN-<name>.sh` file following the existing pattern (kubectl exec into the registry-api pod, run Python/httpx assertions)
 - **Minimum coverage**: Test the happy path and at least one error/edge case
-- **Register** new suites in `scripts/e2e/run-all.sh`
+- **Register** the new suite in **`scripts/test-manifest.txt`** — the single source of truth for both test layers. `run-all.sh` is now a thin wrapper over `scripts/run-tests.sh` and has no registry of its own, so a suite missing from the manifest runs in NO group and NO full run. Give it the functional groups it belongs to (`bash scripts/run-tests.sh --groups` lists them). Same for a new Playwright spec — add a `browser|...` line. Verify with `bash scripts/run-tests.sh --audit`, which fails if any suite/spec on disk is unregistered or any registered file is missing.
 - **Naming**: `T-SNN-00X — <what it proves>` format for test case IDs
+
+**Running a targeted regression instead of everything.** After a scoped change, run the groups your change touches rather than all ~89 suites:
+```bash
+bash scripts/run-tests.sh --groups                      # list functional groups + counts
+bash scripts/run-tests.sh --list --group tools          # preview what would run
+bash scripts/run-tests.sh --group tools                 # both layers, tools only
+bash scripts/run-tests.sh --layer api --group hitl,workflow
+bash scripts/run-tests.sh --layer browser --group eval
+```
+The two layers stay separate runs: `api` (bash, API-only — cannot catch a broken screen) and `browser` (Playwright against deployed Studio — the only layer that proves a UI journey). This does not replace the mandatory blast-radius sweep below; it makes it cheap to actually do.
 
 ### 2. Image Version Bumps
 

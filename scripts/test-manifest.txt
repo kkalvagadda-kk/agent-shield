@@ -1,0 +1,183 @@
+# AgentShield test manifest — the SINGLE source of truth for what tests exist,
+# which layer they run in, and which functional areas they cover.
+#
+# Format (pipe-delimited, 4 columns):
+#   layer|groups|file|title
+#
+#   layer   api      — bash suite under scripts/e2e/, kubectl-execs into a pod.
+#                      Tests the HTTP API only. Cannot catch a broken screen.
+#           browser  — Playwright spec under studio/e2e/, drives the real deployed
+#                      Studio in Chromium. The only layer that proves a UI journey.
+#   groups  comma-separated functional areas. A test may belong to several — the
+#           point is that "what should I re-run after touching X" has one answer.
+#   file    path relative to scripts/e2e/ (api) or studio/ (browser)
+#   title   human label printed by the runner
+#
+# Run with scripts/run-tests.sh:
+#   bash scripts/run-tests.sh --groups                 # list functional groups
+#   bash scripts/run-tests.sh --list --group tools     # what would run
+#   bash scripts/run-tests.sh --group tools            # both layers, tools only
+#   bash scripts/run-tests.sh --layer browser          # every browser test
+#   bash scripts/run-tests.sh --layer api --group hitl,workflow
+#
+# Adding a test? Add its line HERE. The runners have no other registry — a test
+# missing from this file will not run in any group, and scripts/run-tests.sh
+# --audit fails if a suite/spec file on disk has no manifest line.
+#
+# ---------------------------------------------------------------------------
+# Functional groups
+#   agent       agent CRUD, versions, classes, creation flows
+#   chat        playground, consumer chat, conversations, feedback
+#   cost        cost attribution and rollups
+#   debug       scratch/probe specs — excluded from group runs by default
+#   deploy      deployment lifecycle, overview, GC, drift, credentials
+#   eval        eval gate, eval runner, eval v2
+#   execution   execution shapes, triggers, scheduler, event gateway, daemons, webhooks
+#   governance  safety, OPA, quarantine, isolation, machine identity
+#   health      platform health, observability, alerting, resilience, smoke
+#   hitl        human-in-the-loop approvals, authority, resume
+#   knowledge   knowledge bases, RAG, KB bindings
+#   memory      agent memory, context storage, TTL/isolation
+#   rbac        role/permission model and artifact delegation
+#   tools       tool registry, schema build, tool metadata, tool pickers
+#   workflow    composite workflows, orchestration modes, workflow runs
+# ---------------------------------------------------------------------------
+
+# ── API layer (bash suites) ────────────────────────────────────────────────
+api|health|suite-1-health.sh|Platform Health
+api|agent,deploy|suite-2-lifecycle.sh|Agent Lifecycle
+api|governance|suite-3-safety.sh|Safety Scanning
+api|hitl|suite-4-hitl.sh|HITL Approval Flow
+api|hitl,governance|suite-5-hitl-authority.sh|HITL Authority Scoping
+api|agent,tools|suite-6-asset-lifecycle.sh|Asset Lifecycle
+api|governance|suite-7-machine-identity.sh|Machine Identity
+api|chat|suite-8-playground.sh|Playground
+api|eval|suite-9-eval.sh|Eval Runner
+api|workflow|suite-10-multi-agent.sh|Multi-Agent Handoff
+api|health|suite-11-resilience.sh|Resilience
+api|governance|suite-12-quarantine.sh|Quarantine
+api|health|suite-13-observability.sh|Observability (CRITICAL)
+api|chat|suite-14-consumer-chat.sh|Consumer Chat
+api|governance|suite-15-artifact-isolation.sh|Artifact Isolation
+api|agent|suite-16-create-agent.sh|Create Agent Flow
+api|eval,agent|suite-17-eval-gate.sh|Eval Gate (Decision 20)
+api|governance|suite-18-opa-governance.sh|OPA Governance
+api|execution|suite-19-execution-shape.sh|Execution Shape & Triggers
+api|chat,execution|suite-20-durable-playground.sh|Durable Playground
+api|chat,execution|suite-21-scheduled-playground.sh|Scheduled Playground
+api|chat,execution|suite-22-event-playground.sh|Event-Driven Playground
+api|execution|suite-23-production-runs.sh|Production Runs
+api|execution|suite-24-durable-production.sh|Durable Production
+api|memory|suite-25-memory.sh|Agent Memory
+api|execution|suite-26-scheduler.sh|Scheduler Service
+api|health|suite-27-alerting.sh|Alerting + Observability
+api|execution|suite-28-event-gateway.sh|Event Gateway
+api|workflow|suite-29-workflow-composite.sh|Composite Workflow
+api|workflow|suite-30-orchestration-modes.sh|Orchestration Modes
+api|execution,memory,agent|suite-31-wizard-triggers.sh|Wizard Triggers + Memory
+api|execution|suite-32-schedule-payload.sh|Per-schedule Input Payload
+api|workflow,agent|suite-33-composable-agents.sh|Composable Agent Filter
+api|workflow,execution|suite-34-workflow-triggers.sh|Workflow Triggers
+api|hitl|suite-35-approval-resume.sh|Approval Resume
+api|workflow,hitl|suite-36-workflow-hitl-pause-resume.sh|Workflow HITL Pause-Resume
+api|workflow,hitl,governance|suite-37-workflow-hitl-opa.sh|Workflow HITL OPA (gated)
+api|deploy|suite-38-deployment-overview.sh|Deployment Overview
+api|deploy|suite-39-deployment-lifecycle.sh|Deployment Lifecycle
+api|workflow,deploy|suite-40-workflow-deploy.sh|Workflow Deploy
+api|agent,deploy|suite-41-version-delete.sh|Version Delete Cascade
+api|governance,rbac|suite-42-rbac.sh|RBAC Foundations
+api|memory,governance|suite-43-memory-isolation-ttl.sh|Memory Isolation + TTL
+api|agent,deploy|suite-44-version-management.sh|Version Management
+api|hitl|suite-45-hitl-e2e.sh|HITL E2E (sandbox+prod)
+api|chat,deploy|suite-46-chat-deployment-pinning.sh|Chat Deployment Pinning
+api|chat,health|suite-47-deployment-chat-tracing.sh|Deployment Chat Tracing
+api|chat|suite-48-feedback-dashboard.sh|Feedback Dashboard Panel
+api|eval|suite-49-judge-agentrun-score.sh|Judge Score -> AgentRun
+api|deploy,agent|suite-50-version-dedup.sh|Version Dedup on Deploy
+api|deploy,governance|suite-51-credential-validation.sh|Credential Validation
+api|deploy|suite-52-reconcile-drift.sh|Reconcile Drift Recovery
+api|cost|suite-53-cost-tracking.sh|Cost Tracking
+api|agent,execution|suite-54-agent-class-shape-dispatch.sh|agent_class + shape dispatch
+api|execution|suite-55-durable-engine.sh|Durable engine (park/resume)
+api|workflow,execution|suite-56-workflow-durable-modes.sh|Workflow durable modes (D3)
+api|workflow|suite-57-workflow-start-node-warning.sh|Multi-start-node warning
+api|workflow|suite-58-workflow-live-run.sh|REAL durable-workflow run
+api|workflow,hitl|suite-59-workflow-orchestrations-live.sh|All orchestrations + HITL
+api|hitl,execution|suite-60-single-agent-durable-hitl.sh|Single-agent durable HITL
+api|eval|suite-61-eval-mode-plumbing.sh|Eval v2 E-0 reactive parity
+api|tools|suite-62-tool-schema-build.sh|Tool Schema Build
+api|tools,health|suite-63-echo-endpoint.sh|/echo endpoint (httpbin repl)
+api|workflow,execution|suite-64-production-workflow-golden-path.sh|PROD workflow golden path
+api|hitl|suite-65-production-hitl-console.sh|PROD reviewer-console HITL
+api|execution|suite-66-production-triggers.sh|PROD triggers (webhook+sched)
+api|deploy|suite-67-deployment-gc-and-drift.sh|Deploy GC + drift reconcile
+api|execution|suite-68-daemon-no-input.sh|Daemon run, no user input
+api|workflow,cost|suite-69-workflow-cost-rollup.sh|Workflow cost rollup
+api|execution,governance|suite-70-daemon-identity.sh|Daemon identity (WS-2 CP2)
+api|execution|suite-71-scheduled-e2e.sh|Scheduled e2e (WS-3)
+api|eval|suite-72-eval-v2-durable.sh|Eval v2 E-1 durable (no-fakes)
+api|eval,workflow|suite-73-eval-v2-workflow.sh|Eval v2 E-5 workflow run-tree (no-fakes)
+api|eval|suite-74-eval-v2-side-effects.sh|Eval v2 E-2 side-effect record/mock (no-fakes)
+api|memory|suite-75-context-storage.sh|Context Storage (POC-0/1)
+api|eval,execution|suite-75-eval-v2-scheduled.sh|Eval v2 E-3 scheduled job_spec eval (no-fakes)
+api|chat|suite-76-preferences.sh|User Response Preferences (POC-3)
+api|execution,governance|suite-76-webhook-client-signing.sh|WS-4 webhook client-id + allowlist + HMAC signing
+api|eval,execution|suite-77-eval-v2-webhook.sh|Eval v2 E-4 webhook filter+action+injection
+api|knowledge|suite-77-knowledge-rag.sh|Team Knowledge Base / RAG (POC-4)
+api|chat|suite-78-conversations.sh|Conversations (POC-5 list)
+api|deploy|suite-79-operate-parity.sh|WS-6 operate parity — Overview dispatcher
+api|workflow,hitl|suite-79-workflow-hitl.sh|Reactive-Workflow inline HITL
+api|knowledge,agent|suite-80-agent-knowledge-binding.sh|Multi-KB agent bindings + derived knowledge_search
+api|eval|suite-80-eval-v2-regression.sh|Eval v2 E-6 regression gate + per-run threshold
+api|tools,deploy,governance|suite-81-deploy-tool-autograt.sh|Deploy-time tool-access auto-grant
+api|governance,rbac|suite-82-artifact-grants.sh|Artifact Delegation Foundation (grants API)
+api|execution,governance|suite-83-webhook-applications.sh|Webhook Applications (invoker grants + signed invoke)
+api|tools,mcp,governance|suite-84-mcp-tools.sh|MCP as a tool source — schema, lifecycle guards, authorize, bundle field
+api|mcp|suite-85-mcp-phase2.sh|MCP Phase 2 — health loop, list_changed re-sync, internal identity
+api|mcp,governance|suite-86-credential-provider.sh|Pluggable CredentialProvider (Decision 31)
+api|mcp,governance|suite-87-mcp-oauth.sh|MCP external OAuth 2.1 (Phase 4 WS-2)
+api|tools|suite-88-tool-description-metadata.sh|Tool description (multi-line) + picker tile metadata
+
+# ── Browser layer (Playwright specs) ───────────────────────────────────────
+browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
+browser|governance,rbac|e2e/admin-access-roles.spec.ts|Admin access — canonical role names + persistence
+browser|governance,rbac|e2e/artifact-grants.spec.ts|Artifact grants — mixed roles, create + revoke
+browser|agent|e2e/agents.spec.ts|Agents list + detail
+browser|agent|e2e/agent-detail-modes.spec.ts|Agent detail — execution modes
+browser|agent|e2e/create-agent-wizard.spec.ts|Create Agent wizard
+browser|knowledge,agent,tools|e2e/agent-knowledge-config.spec.ts|Agent-side KB config (drawer) + knowledge_search hidden
+browser|knowledge|e2e/knowledge.spec.ts|Knowledge bases — sources, chunks, grounded answers
+browser|tools|e2e/tool-description-multiline.spec.ts|Tool description — multi-line create + edit round-trip
+browser|tools,agent,knowledge|e2e/tools-picker-drawer.spec.ts|Tools picker — browse-and-select tile drawer
+browser|mcp,tools,agent|e2e/mcp-servers.spec.ts|MCP Servers — register/discover/bind journey, health panel, OAuth authorize
+browser|workflow|e2e/workflows.spec.ts|Workflows list + detail
+browser|workflow|e2e/workflow-builder.spec.ts|Workflow builder — nodes, edges, persistence
+browser|workflow|e2e/agent-graphs.spec.ts|Agent graphs
+browser|workflow,memory|e2e/context-attribution.spec.ts|Workflow context sharing + attribution
+browser|workflow,chat|e2e/workflow-conversations.spec.ts|Workflow conversations
+browser|workflow,cost|e2e/workflow-cost.spec.ts|Workflow cost rollup
+browser|workflow,hitl|e2e/workflow-inline-approval-live.spec.ts|Workflow inline approval (live)
+browser|workflow,memory|e2e/workflow-memory.spec.ts|Workflow memory
+browser|hitl|e2e/approvals-badge.spec.ts|Approvals badge
+browser|hitl|e2e/approvals-inbox.spec.ts|Approvals inbox
+browser|hitl,chat|e2e/hitl-deployment-chat.spec.ts|HITL — deployment chat self-approve
+browser|hitl,chat|e2e/hitl-production-chat.spec.ts|HITL — production chat console approve
+browser|chat|e2e/playground.spec.ts|Playground
+browser|chat|e2e/conversations-sidebar.spec.ts|Conversations sidebar
+browser|chat|e2e/poc2b-rich-console.spec.ts|Rich console (POC-2b)
+browser|chat,deploy|e2e/deployment-conversations.spec.ts|Deployment conversations
+browser|execution,chat|e2e/durable-stream.spec.ts|Durable stream
+browser|deploy|e2e/deployment-overview.spec.ts|Deployment overview
+browser|deploy|e2e/catalog-overview-parity.spec.ts|Catalog/overview parity
+browser|execution|e2e/scheduled-overview.spec.ts|Scheduled overview
+browser|execution,governance|e2e/webhook-applications.spec.ts|Webhook applications
+browser|execution|e2e/webhook-public-url.spec.ts|Webhook public URL
+browser|cost|e2e/cost-console.spec.ts|Cost console
+browser|eval|e2e/eval-mode-plumbing.spec.ts|Eval mode plumbing
+browser|eval|e2e/eval-side-effects.spec.ts|Eval side effects
+browser|eval|e2e/eval-v2-durable.spec.ts|Eval v2 durable
+browser|eval,execution|e2e/eval-v2-scheduled.spec.ts|Eval v2 scheduled
+browser|eval,execution|e2e/eval-v2-webhook.spec.ts|Eval v2 webhook
+browser|eval,workflow|e2e/eval-v2-workflow.spec.ts|Eval v2 workflow
+browser|debug|e2e/zz-debug.spec.ts|Scratch — debug probe
+browser|debug|e2e/zzprobe.spec.ts|Scratch — probe

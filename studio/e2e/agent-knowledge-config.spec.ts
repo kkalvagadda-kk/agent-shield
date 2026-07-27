@@ -82,11 +82,46 @@ async function openNoCode(page: Page) {
 }
 
 // The KB checkbox inside the dedicated Knowledge Bases picker, scoped by name.
+// Both pickers are now browse-and-select tile drawers: the builder surface shows
+// only the SELECTED entities as chips, so the drawer must be open before any
+// catalog tile (or its checkbox) exists in the DOM.
 function kbCheckbox(page: Page) {
   return page
     .getByTestId("kb-picker")
     .locator("label", { hasText: KB_NAME })
     .getByRole("checkbox");
+}
+
+async function openKbDrawer(page: Page) {
+  const drawer = page.getByTestId("kb-picker-drawer");
+  if (!(await drawer.isVisible().catch(() => false))) {
+    await page
+      .getByTestId("kb-picker")
+      .getByRole("button", { name: /add from catalog/i })
+      .click();
+  }
+  await expect(drawer).toBeVisible({ timeout: 15_000 });
+}
+
+async function closeKbDrawer(page: Page) {
+  await page.getByTestId("kb-picker-drawer").getByRole("button", { name: /^Done$/ }).click();
+  await expect(page.getByTestId("kb-picker-drawer")).toBeHidden();
+}
+
+/** Asserts knowledge_search is absent from the Tools CATALOG, not merely from the
+ *  selected-chips row. Checking the collapsed picker would pass trivially — the
+ *  chips only ever contain what the user already picked — so the drawer has to be
+ *  opened for this assertion to mean anything. */
+async function expectKnowledgeSearchHidden(page: Page) {
+  const toolsPicker = page.getByTestId("tools-picker");
+  await expect(toolsPicker).toBeVisible();
+  await toolsPicker.getByRole("button", { name: /add from catalog/i }).click();
+  const drawer = page.getByTestId("tools-picker-drawer");
+  await expect(drawer).toBeVisible({ timeout: 15_000 });
+  await expect(drawer).not.toContainText("Knowledge Search");
+  await expect(drawer).not.toContainText("knowledge_search");
+  await drawer.getByRole("button", { name: /^Done$/ }).click();
+  await expect(drawer).toBeHidden();
 }
 
 test.describe("agent-side Knowledge Base config (special config, not a tool)", () => {
@@ -124,15 +159,20 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
 
     await openNoCode(page);
 
-    // The Knowledge Bases picker lists our KB; the Tools picker HIDES knowledge_search.
-    await expect(page.getByTestId("kb-picker")).toContainText(KB_NAME, { timeout: 15_000 });
-    await expect(page.getByTestId("tools-picker")).toBeVisible();
-    await expect(page.getByTestId("tools-picker")).not.toContainText("Knowledge Search");
+    // The Knowledge Bases catalog lists our KB; the Tools catalog HIDES knowledge_search.
+    await openKbDrawer(page);
+    await expect(page.getByTestId("kb-picker-drawer")).toContainText(KB_NAME, { timeout: 15_000 });
+    await closeKbDrawer(page);
+    await expectKnowledgeSearchHidden(page);
 
     // Fill name, select the KB, create.
     await page.getByPlaceholder("my-agent").fill(AGENT_NAME);
+    await openKbDrawer(page);
     await kbCheckbox(page).check();
     await expect(kbCheckbox(page)).toBeChecked();
+    await closeKbDrawer(page);
+    // Selected KBs surface as chips on the builder once the drawer is closed.
+    await expect(page.getByTestId("kb-picker")).toContainText(KB_NAME);
 
     const createResp = page.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
@@ -152,24 +192,34 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
     // (GET /knowledge-bases/agent-bindings/{id}) and still hides knowledge_search.
     await page.goto(`/agents/${AGENT_NAME}`);
     await page.getByRole("button", { name: "settings" }).click();
+    // The bound KB shows as a chip without opening anything — that IS the reload
+    // assertion; the drawer then confirms the underlying checkbox state.
+    await expect(page.getByTestId("kb-picker")).toContainText(KB_NAME, { timeout: 15_000 });
+    await openKbDrawer(page);
     await expect(kbCheckbox(page)).toBeChecked({ timeout: 15_000 });
-    await expect(page.getByTestId("tools-picker")).not.toContainText("knowledge_search");
+    await closeKbDrawer(page);
+    await expectKnowledgeSearchHidden(page);
   });
 
   test("B: Settings reconcile — unbind then rebind survive save→reload", async ({ page }) => {
     test.skip(!kbReady, "could not create the fixture KB (env gap)");
     test.setTimeout(60_000);
 
+    // Opens Settings and leaves the KB drawer OPEN, so the checkbox state read
+    // from the backend is directly assertable.
     const openSettings = async () => {
       await page.goto(`/agents/${AGENT_NAME}`);
       await page.getByRole("button", { name: "settings" }).click();
-      await expect(page.getByTestId("kb-picker")).toContainText(KB_NAME, { timeout: 15_000 });
+      await expect(page.getByTestId("kb-picker")).toBeVisible({ timeout: 15_000 });
+      await openKbDrawer(page);
+      await expect(page.getByTestId("kb-picker-drawer")).toContainText(KB_NAME, { timeout: 15_000 });
     };
 
     // Starts bound (from test A) → uncheck → Save (updateAgent PUT fires).
     await openSettings();
     await expect(kbCheckbox(page)).toBeChecked();
     await kbCheckbox(page).uncheck();
+    await closeKbDrawer(page);
     let saveResp = page.waitForResponse(
       (r) => r.request().method() === "PUT" && new RegExp(`/api/v1/agents/${AGENT_NAME}$`).test(r.url()),
       { timeout: 20_000 }
@@ -183,6 +233,7 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
 
     // Re-check → Save → reload → the bind persisted (checkbox checked again).
     await kbCheckbox(page).check();
+    await closeKbDrawer(page);
     saveResp = page.waitForResponse(
       (r) => r.request().method() === "PUT" && new RegExp(`/api/v1/agents/${AGENT_NAME}$`).test(r.url()),
       { timeout: 20_000 }
@@ -217,13 +268,11 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
       page.getByRole("heading", { name: new RegExp(`Edit Agent — ${AGENT_NAME}`) })
     ).toBeVisible({ timeout: 15_000 });
 
-    // Tools list must NOT list knowledge_search; the KB picker must be present + pre-selected.
-    await expect(page.getByTestId("tools-picker")).toBeVisible();
-    await expect(page.getByTestId("tools-picker")).not.toContainText("Knowledge Search");
-    await expect(page.getByTestId("tools-picker")).not.toContainText("knowledge_search");
+    // Tools catalog must NOT list knowledge_search; the KB picker must be present
+    // and pre-selected (chip on the surface, checked box in the drawer).
+    await expectKnowledgeSearchHidden(page);
     await expect(page.getByTestId("kb-picker")).toContainText(KB_NAME, { timeout: 15_000 });
-    await expect(
-      page.getByTestId("kb-picker").locator("label", { hasText: KB_NAME }).getByRole("checkbox")
-    ).toBeChecked();
+    await openKbDrawer(page);
+    await expect(kbCheckbox(page)).toBeChecked();
   });
 });

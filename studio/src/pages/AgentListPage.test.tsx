@@ -10,7 +10,7 @@ vi.mock("../api/registryApi", () => ({
   deleteAgent: vi.fn(),
   updateAgent: vi.fn(),
   listProviders: vi.fn().mockResolvedValue({ items: [], total: 0 }),
-  listTools: vi.fn().mockResolvedValue({ items: [], total: 0 }),
+  listAllTools: vi.fn().mockResolvedValue([]),
   listVersions: vi.fn().mockResolvedValue([]),
   getAgentHealth: vi.fn().mockResolvedValue({}),
 }));
@@ -22,7 +22,7 @@ vi.mock("../api/knowledgeApi", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-import { listAgents, deleteAgent, listTools } from "../api/registryApi";
+import { listAgents, deleteAgent, listAllTools } from "../api/registryApi";
 import { listKBs, getAgentKnowledgeBases } from "../api/knowledgeApi";
 
 const NOW = new Date().toISOString();
@@ -168,13 +168,10 @@ describe("AgentListPage", () => {
       items: [makeAgent({ metadata: { tools: ["calculator", "knowledge_search"] } })],
       total: 1,
     });
-    (listTools as ReturnType<typeof vi.fn>).mockResolvedValue({
-      items: [
-        { id: "t1", name: "calculator", display_name: "Calculator", description: "math", risk_level: "low" },
-        { id: "t2", name: "knowledge_search", display_name: "Knowledge Search", description: "kb", risk_level: "low" },
-      ],
-      total: 2,
-    });
+    (listAllTools as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: "t1", name: "calculator", display_name: "Calculator", description: "math", risk_level: "low" },
+      { id: "t2", name: "knowledge_search", display_name: "Knowledge Search", description: "kb", risk_level: "low" },
+    ]);
     (listKBs as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: "kb1", team: "platform", name: "Docs KB", description: "team docs", created_by: "u",
         created_at: NOW, updated_at: NOW, source_count: 3, ready_count: 3, attached_agents: [] },

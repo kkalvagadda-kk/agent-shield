@@ -11,6 +11,8 @@ from typing import Any
 
 import httpx
 
+from rbac import PLATFORM_ROLES
+
 _KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://agentshield-keycloak")
 _ADMIN_USER = os.getenv("KEYCLOAK_ADMIN_USER", "admin")
 _ADMIN_PASS = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "")
@@ -158,15 +160,18 @@ async def get_user_realm_roles(kc_id: str) -> list[str]:
 
 
 async def set_user_realm_role(kc_id: str, role_name: str) -> None:
-    """Replace the user's platform roles (admin/operator/viewer) with role_name."""
-    platform_roles = {"admin", "operator", "viewer"}
+    """Replace the user's platform roles with role_name.
+
+    Covers both canonical spellings (platform-admin/contributor/consumer) and
+    the legacy ones (admin/operator/viewer) via `rbac.PLATFORM_ROLES`.
+    """
     all_roles = await get_realm_roles()
     role_map = {r["name"]: r for r in all_roles}
 
     token = await _admin_token()
     async with httpx.AsyncClient(timeout=10) as client:
         current = await get_user_realm_roles(kc_id)
-        to_remove = [role_map[n] for n in current if n in platform_roles and n in role_map]
+        to_remove = [role_map[n] for n in current if n in PLATFORM_ROLES and n in role_map]
         if to_remove:
             await client.request(
                 "DELETE",

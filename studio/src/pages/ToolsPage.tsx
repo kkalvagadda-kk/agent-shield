@@ -175,7 +175,7 @@ export default function ToolsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {['Name', 'Type', 'Risk', 'Team', 'Status', ''].map((h) => (
+                  {['Name', 'Type', 'Source', 'Risk', 'Team', 'Status', ''].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -222,6 +222,20 @@ export default function ToolsPage() {
                         >
                           {tool.type === 'mcp_tool' ? 'MCP' : tool.type}
                         </span>
+                      </td>
+                      {/* Which MCP server a discovered tool came from. Its
+                          display_name is the BARE upstream name, so two servers
+                          each exposing a `search` produce two rows that are
+                          otherwise identical on screen. */}
+                      <td className="px-4 py-3 text-slate-600" data-testid="tool-source">
+                        {tool.type === 'mcp_tool' ? (
+                          <span className="inline-flex items-center gap-1">
+                            <Server size={11} className="text-indigo-400 shrink-0" />
+                            {tool.mcp_server_name ?? 'MCP'}
+                          </span>
+                        ) : (
+                          '—'
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <span className={`badge capitalize ${riskCls}`}>
@@ -459,10 +473,22 @@ function ToolForm({
         </div>
 
         <Field label="Description" error={errors.description?.message}>
-          <input
+          <p className="text-xs text-slate-500 mb-1.5">
+            The agent's LLM reads this to decide when to call the tool — describe what it
+            does, what it needs, and when NOT to use it. Multi-line is fine.
+          </p>
+          <textarea
             {...register('description')}
-            className="input"
-            placeholder="Retrieves the current status of an order"
+            rows={4}
+            className={cn(
+              'input resize-y leading-relaxed',
+              errors.description && 'border-red-400'
+            )}
+            placeholder={
+              'Retrieves the current status of an order.\n' +
+              'Args: order_id (str) — the customer-facing order number.\n' +
+              'Use for status lookups only; does not modify the order.'
+            }
           />
         </Field>
 
