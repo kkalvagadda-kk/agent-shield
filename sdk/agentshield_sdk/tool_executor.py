@@ -68,11 +68,16 @@ def _params_from_input_schema(
                 inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, annotation=pytype)
             )
         else:
+            # Carry the schema's DECLARED default (when present) instead of a blanket None,
+            # so an omitted optional sends the server's intended value — matching the runner's
+            # McpToolNodeExecutor. A param with no declared default keeps None and is dropped
+            # from the wire args (the None-filter in the tool fn), letting the upstream default.
+            schema_default = (defn or {}).get("default", None)
             params.append(
                 inspect.Parameter(
                     name,
                     inspect.Parameter.KEYWORD_ONLY,
-                    default=None,
+                    default=schema_default,
                     annotation=Optional[pytype],
                 )
             )
@@ -340,10 +345,19 @@ class McpToolExecutor:
                 )
 
             token = _read_sa_token(config.AGENTSHIELD_MCP_PROXY_SA_TOKEN_PATH)
+            # Drop optional params the LLM OMITTED. LangChain materializes every optional
+            # schema param the model left out as an explicit ``None`` (the ``default=None`` in
+            # _params_from_input_schema), and forwarding those nulls upstream makes an MCP
+            # server with typed optionals reject the call (e.g. Tavily: "max_results Input
+            # should be a valid integer [input_value=None]"). An omitted optional MUST be
+            # absent from the wire args so the upstream applies its OWN default — sending
+            # ``None`` is not the same as omitting. (A tool whose params are all required has
+            # nothing to drop, so this is a no-op for it — e.g. deepwiki__ask_question.)
+            mcp_arguments = {k: v for k, v in kwargs.items() if v is not None}
             payload = {
                 "server_id": executor.server_id,
                 "mcp_tool_name": executor.mcp_tool_name,
-                "arguments": kwargs,
+                "arguments": mcp_arguments,
                 # session_id/agent_name are best-effort trace correlation only.
                 "session_id": config.AGENT_ID or "",
                 "agent_name": config.AGENT_NAME,

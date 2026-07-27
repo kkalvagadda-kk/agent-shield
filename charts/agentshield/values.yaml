@@ -709,7 +709,7 @@ registry-api:
     # 0.2.227: MCP Phase 2 WS-A (P3) — periodic mcp_health loop + health_check_server
     #   client + mcp_health_* settings + lifespan task; advisory-lock single-flight,
     #   writes mcp_servers.status/health_detail (NOT last_synced_at).
-    tag: "0.2.229"
+    tag: "0.2.230"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -803,7 +803,7 @@ deploy-controller:
   # load/save + shared workflow transcript are all baked into this image.
   # 0.1.57: SDK ChatOllama (langchain-ollama) — LLM_PROVIDER=ollama + OLLAMA_BASE_URL.
   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4.
-  declarativeRunnerTag: "0.1.61"
+  declarativeRunnerTag: "0.1.63"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

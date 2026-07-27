@@ -59,11 +59,19 @@ def _mcp_params_from_schema(input_schema: Any) -> list[inspect.Parameter]:
                 inspect.Parameter(pname, inspect.Parameter.KEYWORD_ONLY, annotation=pytype)
             )
         else:
+            # Use the schema's DECLARED default when it has one, so an omitted optional
+            # carries the server's intended value rather than None. Tavily's tavily_search
+            # types its optionals with real defaults (topic='general', max_results=5,
+            # search_depth='basic') AND rejects None for them; forwarding None (the old
+            # blanket default) fails every call. A param with no declared default keeps
+            # default=None and is dropped from the wire args (see mcp_tool_fn) so the upstream
+            # applies its own default.
+            schema_default = (defn or {}).get("default", None)
             params.append(
                 inspect.Parameter(
                     pname,
                     inspect.Parameter.KEYWORD_ONLY,
-                    default=None,
+                    default=schema_default,
                     annotation=Optional[pytype],
                 )
             )
@@ -387,10 +395,16 @@ class McpToolNodeExecutor:
         async def mcp_tool_fn(**kwargs: Any) -> str:
             """Call an upstream MCP tool through the platform MCP proxy."""
             token = _read_sa_token(executor.token_path)
+            # Drop optional params the LLM omitted that have no schema default (LangChain
+            # materializes them as None). Sending None to a server that types its optionals
+            # makes it reject the call; an omitted optional must be ABSENT so the upstream
+            # applies its own default. Params WITH a schema default already carry that default
+            # (see _mcp_params_from_schema), so they are non-None and survive.
+            mcp_arguments = {k: v for k, v in kwargs.items() if v is not None}
             payload = {
                 "server_id": executor.server_id,
                 "mcp_tool_name": executor.mcp_tool_name,
-                "arguments": kwargs,
+                "arguments": mcp_arguments,
                 # session_id/agent_name are best-effort trace correlation only.
                 "session_id": "",
                 "agent_name": os.getenv("AGENT_NAME", "declarative-agent"),

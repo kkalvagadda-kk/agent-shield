@@ -187,7 +187,7 @@ async def main():
     # ── T-S87-003 — mcp_oauth mechanics (pure, no I/O) ──────────────────────────
     import base64, hashlib
     from mcp_oauth import (
-        generate_pkce_pair, make_state, read_state, OAuthStateError,
+        generate_pkce_pair, make_state, read_state, OAuthStateError, _prm_candidates,
     )
     verifier, challenge = generate_pkce_pair()
     expected_challenge = base64.urlsafe_b64encode(
@@ -209,6 +209,17 @@ async def main():
           and tamper_rejected, "T-S87-003",
           f"pkce_s256={challenge==expected_challenge} state_roundtrip="
           f"{back.get('code_verifier')==verifier} tamper_rejected={tamper_rejected}")
+
+    # T-S87-003b — PRM discovery is path-aware (RFC 9728 §3.1). A server whose MCP endpoint
+    # has a path (GitHub's api.githubcopilot.com/mcp) must have its protected-resource
+    # metadata probed at .../oauth-protected-resource/mcp FIRST (else discovery 404s to the AS
+    # fallback and fails); a root-path server still falls back to the origin-root location.
+    gh = _prm_candidates("https://api.githubcopilot.com/mcp/")
+    root = _prm_candidates("https://mcp.example.com/")
+    prm_ok = (gh[0] == "https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp"
+              and gh[-1] == "https://api.githubcopilot.com/.well-known/oauth-protected-resource"
+              and root == ["https://mcp.example.com/.well-known/oauth-protected-resource"])
+    check(prm_ok, "T-S87-003b", f"path_aware_first={gh[0].endswith('/mcp')} root_only={len(root)==1}")
 
     # T-S87-004..008 SKIPPED — redundant with CP2/CP3 (see the gap ledger). The OAuth
     # authorize/status/disconnect endpoints use require_user, which correctly REJECTS the

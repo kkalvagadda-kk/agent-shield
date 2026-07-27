@@ -140,6 +140,23 @@ def _origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+def _prm_candidates(server_url: str) -> list[str]:
+    """Protected-resource-metadata (RFC 9728) URLs to try, MOST SPECIFIC FIRST.
+
+    RFC 9728 §3.1 publishes the PRM path-aware: for a resource at ``https://host/path`` the
+    document lives at ``https://host/.well-known/oauth-protected-resource/path`` — this is how
+    GitHub's hosted MCP (``api.githubcopilot.com/mcp``) exposes it, and the origin-root
+    location 404s there. Single-resource servers (e.g. Linear, Notion, our stub) publish it at
+    the origin root, so try the path-aware location first, then fall back to the root."""
+    origin = _origin(server_url)
+    path = urllib.parse.urlsplit(server_url).path.rstrip("/")
+    candidates: list[str] = []
+    if path:
+        candidates.append(f"{origin}/.well-known/oauth-protected-resource{path}")
+    candidates.append(f"{origin}/.well-known/oauth-protected-resource")
+    return candidates
+
+
 async def _try_get_json(client: httpx.AsyncClient, url: str) -> dict | None:
     """GET ``url`` and return its JSON dict, or None on any error (a probe — the caller
     falls through to the next candidate). Never raises."""
@@ -263,10 +280,15 @@ async def discover_oauth_metadata(server_url: str) -> OAuthMetadata:
     async with httpx.AsyncClient(
         timeout=_HTTP_TIMEOUT, follow_redirects=True
     ) as client:
-        # 1. Protected-resource metadata (RFC 9728) — optional.
-        prm = await _try_get_json(
-            client, f"{origin}/.well-known/oauth-protected-resource"
-        )
+        # 1. Protected-resource metadata (RFC 9728) — optional. Try the path-aware location
+        #    (RFC 9728 §3.1) before the origin root, so a server that scopes its PRM under the
+        #    resource path (GitHub's hosted MCP) is discovered instead of 404ing to the AS
+        #    fallback.
+        prm = None
+        for _prm_url in _prm_candidates(server_url):
+            prm = await _try_get_json(client, _prm_url)
+            if prm:
+                break
         resource: str | None = None
         prm_scopes: list[str] | None = None
         as_urls: list[str] = []
