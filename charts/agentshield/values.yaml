@@ -803,7 +803,7 @@ deploy-controller:
   # load/save + shared workflow transcript are all baked into this image.
   # 0.1.57: SDK ChatOllama (langchain-ollama) — LLM_PROVIDER=ollama + OLLAMA_BASE_URL.
   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4.
-  declarativeRunnerTag: "0.1.63"
+  declarativeRunnerTag: "0.1.64"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

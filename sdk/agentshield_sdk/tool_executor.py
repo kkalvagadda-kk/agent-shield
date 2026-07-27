@@ -363,11 +363,20 @@ class McpToolExecutor:
                 "agent_name": config.AGENT_NAME,
             }
             headers = {"Authorization": f"Bearer {token}"} if token else {}
-            # WS-C (FR-MCP-21): forward the acting user's identity so the proxy can
-            # route on_behalf_of servers. Sent ONLY when non-empty — a daemon agent
-            # (no AGENTSHIELD_USER_SUB) emits a byte-identical Phase-1 request.
-            if config.USER_SUB:
-                headers["x-user-sub"] = config.USER_SUB
+            # WS-2 (C9): forward the PER-REQUEST acting user so the proxy pulls THAT user's
+            # stored OAuth token (an external OAuth server needs the user driving THIS run,
+            # not the pod's static identity). Read the request-scoped ContextVar governed_tool
+            # sets from the caller's identity; fall back to the static config.USER_SUB only
+            # when it is unset (daemon). Sent ONLY when non-empty (byte-identical otherwise).
+            acting_user = ""
+            try:
+                from agentshield_sdk.graph_builder import _current_user_context
+                acting_user = (_current_user_context.get() or {}).get("user_id", "") or ""
+            except Exception:  # noqa: BLE001 — no request context / shape drift
+                acting_user = ""
+            acting_user = acting_user or config.USER_SUB
+            if acting_user:
+                headers["x-user-sub"] = acting_user
             timeout = executor.timeout_ms / 1000.0 + 5
             # FR-MCP-14: a tool call must NEVER raise out of the executor — every
             # failure (auth, transport, protocol, upstream tool error) is surfaced

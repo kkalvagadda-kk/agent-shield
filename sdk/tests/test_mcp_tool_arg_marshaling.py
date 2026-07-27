@@ -30,9 +30,10 @@ class _FakeResponse:
 
 
 class _CapturingClient:
-    """Stand-in for httpx.AsyncClient that records the JSON body of the proxy call."""
+    """Stand-in for httpx.AsyncClient that records the JSON body + headers of the proxy call."""
 
     captured: dict = {}
+    captured_headers: dict = {}
 
     def __init__(self, *args, **kwargs):
         pass
@@ -45,6 +46,7 @@ class _CapturingClient:
 
     async def post(self, url, json=None, headers=None):  # noqa: A002 - mirror httpx kwarg
         _CapturingClient.captured = json or {}
+        _CapturingClient.captured_headers = headers or {}
         return _FakeResponse()
 
 
@@ -91,6 +93,32 @@ def test_explicitly_set_args_survive():
     # only None is dropped.
     args = _call_tool(query="x", max_results=3, search_depth="")
     assert args == {"query": "x", "max_results": 3, "search_depth": ""}
+
+
+def test_per_request_user_forwarded_as_x_user_sub():
+    # An OAuth external server needs the user DRIVING this run so the proxy pulls that user's
+    # stored token. The executor must forward the request-scoped ContextVar user
+    # (governed_tool's _current_user_context), not the static config.USER_SUB.
+    from agentshield_sdk.graph_builder import _current_user_context
+
+    ex = McpToolExecutor(
+        name="github__get_me", risk="low", server_id="srv-gh", mcp_tool_name="get_me",
+        input_schema={"type": "object", "properties": {}},
+    )
+    fn = ex.as_tool_callable()
+    _CapturingClient.captured_headers = {}
+    token = _current_user_context.set({"user_id": "user-abc", "user_team": "platform"})
+    try:
+        with patch.object(config, "DEV_MODE", False), \
+             patch.object(config, "AGENTSHIELD_MCP_PROXY_URL", "http://proxy"), \
+             patch.object(config, "USER_SUB", "static-pod-user"), \
+             patch("agentshield_sdk.tool_executor._read_sa_token", return_value="tok"), \
+             patch("agentshield_sdk.tool_executor.httpx.AsyncClient", _CapturingClient):
+            asyncio.get_event_loop().run_until_complete(fn())
+    finally:
+        _current_user_context.reset(token)
+    # The per-request ContextVar user wins over the static pod env.
+    assert _CapturingClient.captured_headers.get("x-user-sub") == "user-abc"
 
 
 def test_optional_param_uses_schema_default_not_none():

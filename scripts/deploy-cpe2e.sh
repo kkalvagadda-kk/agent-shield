@@ -407,7 +407,7 @@ DEPLOY_CONTROLLER_TAG="0.1.41"   # 0.1.41: project 2nd SA token (audience agents
 #   == STUDIO_TAG == chart == live pod) went RED. build.ts now reads 0.1.158, matching this tag.
 STUDIO_TAG="0.1.163"   # 0.1.162: MCP Phase 2 (WS-A) — McpServerDetailPage Health panel (status pill, last_success_at, consecutive_failures, last_error, last_synced_at, list_changed_supported, identity note) + 15s refetch
 EVAL_RUNNER_TAG="0.1.14"
-DECLARATIVE_RUNNER_TAG="0.1.63"   # 0.1.62: rebuilds sdk 0.2.5 — MCP tool-call arg-marshaling fix (drop omitted-optional None args so upstream applies its own default; fixes Tavily "max_results None" rejection). 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4 (McpToolExecutor x-user-sub). 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
+DECLARATIVE_RUNNER_TAG="0.1.64"   # 0.1.62: rebuilds sdk 0.2.5 — MCP tool-call arg-marshaling fix (drop omitted-optional None args so upstream applies its own default; fixes Tavily "max_results None" rejection). 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4 (McpToolExecutor x-user-sub). 0.1.60: MCP runtime dispatch (P8) — McpToolNodeExecutor + workflow_executor mcp_tool branch; rebuilds sdk 0.2.3 (McpToolExecutor + Decision-27 governed_tool gate). 0.1.59: prior.
 PYTHON_EXECUTOR_TAG="0.1.0"
 SCHEDULER_TAG="0.1.1"
 EVENT_GATEWAY_TAG="0.1.4"
