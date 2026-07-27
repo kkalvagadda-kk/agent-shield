@@ -39,9 +39,15 @@ echo "    pod: $API_POD"
 echo ""
 RUN_TAG="s88_$(date +%s)"
 
+# The heredoc delimiter is QUOTED (<<'PY'), so the shell treats the Python body as
+# inert text. Unquoted, bash expands it: backticks in a comment become command
+# substitution, which is how `total` and `limit` in the docstring below turned into
+# "total: command not found" on stderr AND were silently deleted from the source the
+# interpreter saw. Fixture values therefore arrive through the ENVIRONMENT, never by
+# splicing shell text into the program.
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  bash -c "cd /tmp && PYTHONPATH=/app python3 -" <<PY
-import base64, json, urllib.error, urllib.parse, urllib.request
+  bash -c "cd /tmp && RUN_TAG='$RUN_TAG' PYTHONPATH=/app python3 -" <<'PY'
+import base64, json, os, urllib.error, urllib.parse, urllib.request
 
 PASS = 0; FAIL = 0
 def ok(m):
@@ -96,8 +102,9 @@ MULTILINE = (
 )
 assert MULTILINE.count("\n") == 3
 
-TOOL = "${RUN_TAG}_desc"
-TOOL_NODESC = "${RUN_TAG}_nodesc"
+RUN_TAG = os.environ["RUN_TAG"]
+TOOL = f"{RUN_TAG}_desc"
+TOOL_NODESC = f"{RUN_TAG}_nodesc"
 
 def base_tool(name, **over):
     body = {
