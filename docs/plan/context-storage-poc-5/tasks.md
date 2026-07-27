@@ -1,6 +1,6 @@
 # POC-5 — Conversations & Memory in the Product — Executable Tasks
 
-**Branch:** `worktree-ux-preview-context-storage` (commit here ONLY — never merge/PR to main; Karthik merges manually).
+**Branch:** `worktree-ux-preview-context-storage` (commit here ONLY — never merge/PR to main; Kalyan merges manually).
 **Spec:** `docs/design/context-storage-poc-5-conversations.md` · **Plan:** `./plan.md` · **Research:** `./research.md`
 **Data model:** `./data-model.md` · **Contract:** `./contracts/list-conversations.md` · **Quickstart:** `./quickstart.md`
 **Constitution:** `/Users/kalyankalvagadda/code/agent-shield/CLAUDE.md` (Definition of Done + Post-Implementation Checklist)

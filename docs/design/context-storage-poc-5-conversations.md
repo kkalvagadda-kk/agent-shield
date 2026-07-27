@@ -1,7 +1,7 @@
 # POC-5 — Conversations & Memory in the Product
 
 **Status**: Proposed (2026-07-16)
-**Branch**: `worktree-ux-preview-context-storage` (commit only here; never merge to main — Karthik merges manually)
+**Branch**: `worktree-ux-preview-context-storage` (commit only here; never merge to main — Kalyan merges manually)
 **Companion**: [`context-storage-ux-roadmap.md`](./context-storage-ux-roadmap.md) §6 (sequencing) · [`context-storage-architecture.md`](./context-storage-architecture.md) §11 (subsystem spec)
 **Live baseline**: `registry-api:0.2.189`, `studio:0.1.142`
 **Mock**: interactive nav mock published 2026-07-16 (Studio nav before/after · env-filtered Conversations page · docked History both envs · deployment Overview Conversations tab)

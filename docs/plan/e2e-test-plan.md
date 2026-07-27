@@ -2,7 +2,7 @@
 
 **Version**: 1.0  
 **Date**: 2026-06-29  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Status**: Active — update as phases ship
 
 ---

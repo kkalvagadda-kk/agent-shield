@@ -1,7 +1,7 @@
 # Execution Models — Gap Analysis & Remaining Work
 
 **Date:** 2026-07-08  
-**Author:** Karthik + Claude  
+**Author:** Kalyan + Claude  
 **Sources:** `execution-models-and-memory.md`, `playground-execution-modes.md`, `execution-modes-production.md`
 
 ---

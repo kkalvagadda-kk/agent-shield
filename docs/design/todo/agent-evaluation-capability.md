@@ -2,7 +2,7 @@
 
 **Status**: RESEARCH — Product requirements definition  
 **Date**: 2026-07-07  
-**Author**: Karthik + Claude
+**Author**: Kalyan + Claude
 
 ## Context
 

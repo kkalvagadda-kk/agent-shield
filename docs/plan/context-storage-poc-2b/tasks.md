@@ -2,7 +2,7 @@
 
 **Spec (authoritative)**: `docs/design/context-storage-poc-2b-rich-console.md`
 **Plan**: `docs/plan/context-storage-poc-2b/plan.md` · **Research**: `research.md` · **Data model**: `data-model.md` · **Contracts**: `contracts/endpoints.md`, `contracts/sse-frames.md`
-**Branch**: `worktree-ux-preview-context-storage` — commit ONLY here, never merge/PR to main (Karthik merges manually).
+**Branch**: `worktree-ux-preview-context-storage` — commit ONLY here, never merge/PR to main (Kalyan merges manually).
 **Ships**: `registry-api:0.2.190` / `declarative-runner:0.1.55` / `studio:0.1.143` (baseline 0.2.189 / 0.1.54 / 0.1.142).
 
 ## How to read this file

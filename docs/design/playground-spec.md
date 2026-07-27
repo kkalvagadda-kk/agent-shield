@@ -2,7 +2,7 @@
 
 **Status**: Draft — Implementation source of truth  
 **Date**: 2026-06-27  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Referenced by**: `docs/spec.md` §Phase 2.5  
 
 ---

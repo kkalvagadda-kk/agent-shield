@@ -1,7 +1,7 @@
 # AgentShield — Context Storage & Cross-Agent Sharing
 
 **Status**: DRAFT v1 — 2026-07-15. Backend + data-model + UX spec. Not yet implemented.
-**Author**: Karthik + Claude
+**Author**: Kalyan + Claude
 **Supersedes**: the memory sections (§5–§6) of [`execution-models-and-memory.md`](./execution-models-and-memory.md) where they conflict — see §2.
 
 ---

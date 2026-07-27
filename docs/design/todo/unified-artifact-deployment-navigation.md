@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-08
 **Status:** Proposed
-**Author:** Karthik + Claude
+**Author:** Kalyan + Claude
 
 ---
 

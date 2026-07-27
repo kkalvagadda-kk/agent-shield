@@ -2,7 +2,7 @@
 
 **Status:** LOCKED — ready for team review
 **Date locked:** 2026-07-19
-**Author:** Karthik + Claude
+**Author:** Kalyan + Claude
 **Requirements:** `docs/design/todo/mcp-tools-for-agents-requirements.md`
 **Related decisions:** `docs/decisions.md` Decision 15 (Tool & MCP Registry), 27 (per-tool-call output-scan + de-anonymize gate), 28 (stdio sandboxing model), 29 (on-behalf-of impersonation exchange)
 **Related, separate-scope docs surfaced during this design (not duplicated here):** `docs/design/sdk-agent-gaps.md` (SDK-runtime parity gaps — identity binding, memory absence, broken streaming resume), `docs/design/identity-propagation-architecture.md` (external dependency for FR-MCP-21, §7a)

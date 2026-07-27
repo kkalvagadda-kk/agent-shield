@@ -2,7 +2,7 @@
 
 **Status**: DRAFT v2 — revised 2026-07-03. **Backend / data-model spec** — UX lives in the experience docs (see intro). Not yet implemented  
 **Date**: 2026-06-27  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Phase**: 3 (follows P1 safety proxy + P2 canvas/skills)
 
 ---

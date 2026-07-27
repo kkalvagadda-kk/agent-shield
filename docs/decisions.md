@@ -2,7 +2,7 @@
 
 **Project:** AgentShield — AI Agent Safety & Governance Platform  
 **Date:** 2026-06-24  
-**Participants:** Karthik + Claude (arch-design session)
+**Participants:** Kalyan + Claude (arch-design session)
 
 ---
 

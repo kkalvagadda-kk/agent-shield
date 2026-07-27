@@ -1,7 +1,7 @@
   # MCP as a Tool Source — Requirements
 
 **Status:** Requirements (not started)
-**Author:** Karthik + Claude
+**Author:** Kalyan + Claude
 **Last updated:** 2026-07-16
 **Related:** Decision 15 (Tool & MCP Registry), spec.md "MCP Proxy" component, `docs/design/todo/tool-credential-management.md`, `docs/design/todo/mcp-server.md` (the *opposite* direction — see below)
 

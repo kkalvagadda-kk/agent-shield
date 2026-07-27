@@ -1,7 +1,7 @@
 # POC-3 — Quickstart (cold-agent onboarding)
 
 You are implementing **user-profile response preferences** on branch
-`worktree-ux-preview-context-storage`. Commit here ONLY — never merge/PR to main (Karthik merges
+`worktree-ux-preview-context-storage`. Commit here ONLY — never merge/PR to main (Kalyan merges
 manually).
 
 ## Read first (in order)

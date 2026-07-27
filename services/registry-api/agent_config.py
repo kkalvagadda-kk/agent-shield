@@ -1,6 +1,6 @@
 """THE deployment config snapshot for an agent version. One definition, auto-complete.
 
-DESIGN PRINCIPLE (Karthik, 2026-07-16): **a change to ANY part of the agent
+DESIGN PRINCIPLE (Kalyan, 2026-07-16): **a change to ANY part of the agent
 definition bumps the version.** The snapshot is NOT an allow-list of hand-picked
 fields — it captures the WHOLE agent row and then subtracts an explicit, documented
 set of NON-definition fields. So:

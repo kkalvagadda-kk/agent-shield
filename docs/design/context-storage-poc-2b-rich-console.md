@@ -1,7 +1,7 @@
 # POC-2b — Rich Multi-Agent Workflow Console
 
 **Status**: Proposed (2026-07-16)
-**Branch**: `worktree-ux-preview-context-storage` (commit only here; never merge to main — Karthik merges manually)
+**Branch**: `worktree-ux-preview-context-storage` (commit only here; never merge to main — Kalyan merges manually)
 **Companion**: [`context-storage-ux-roadmap.md`](./context-storage-ux-roadmap.md) (roadmap), [`context-storage-architecture.md`](./context-storage-architecture.md) (subsystem spec)
 **Live baseline**: `registry-api:0.2.189`, `studio:0.1.142`, `declarative-runner:0.1.54`
 

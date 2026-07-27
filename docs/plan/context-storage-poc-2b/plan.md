@@ -2,7 +2,7 @@
 
 **Spec (authoritative)**: `docs/design/context-storage-poc-2b-rich-console.md`
 **Companion**: `docs/design/context-storage-ux-roadmap.md` §3, `docs/design/context-storage-architecture.md`
-**Branch**: `worktree-ux-preview-context-storage` — commit ONLY here, never merge to main (Karthik merges manually).
+**Branch**: `worktree-ux-preview-context-storage` — commit ONLY here, never merge to main (Kalyan merges manually).
 **Live baseline**: `registry-api:0.2.189` / `studio:0.1.142` / `declarative-runner:0.1.54`
 **This change ships**: `registry-api:0.2.190` / `studio:0.1.143` / `declarative-runner:0.1.55`
 

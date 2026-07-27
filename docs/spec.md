@@ -2,7 +2,7 @@
 
 **Status**: PROPOSED — Pending team review  
 **Date**: 2026-06-27  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Version**: 1.2.0
 
 ## Component Specifications

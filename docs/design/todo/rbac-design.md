@@ -2,7 +2,7 @@
 
 **Status**: Partially Implemented (foundation shipped, enforcement pending)  
 **Date**: 2026-07-06 (updated 2026-07-09)  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Version**: 1.1.0  
 **Decision**: `docs/decisions.md` §Decision 25  
 **Related**: `docs/design/authorization-model-spec.md` (data-plane auth — agent machine identity, OPA, Istio)  

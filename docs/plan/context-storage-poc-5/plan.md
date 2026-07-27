@@ -1,7 +1,7 @@
 # POC-5 — Conversations & Memory in the Product · Implementation Plan
 
 **Branch**: `worktree-ux-preview-context-storage` — commit here **only**; never merge/PR
-to main (Karthik merges manually).
+to main (Kalyan merges manually).
 **Spec (authoritative)**: `docs/design/context-storage-poc-5-conversations.md`.
 **Companions**: `context-storage-ux-roadmap.md` §6, `context-storage-architecture.md` §11.
 

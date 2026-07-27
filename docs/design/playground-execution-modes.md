@@ -2,7 +2,7 @@
 
 **Status:** DRAFT for review — not yet implemented
 **Date:** 2026-07-02
-**Author:** Karthik + Claude
+**Author:** Kalyan + Claude
 **Related:** `docs/design/execution-models-and-memory.md` (the models), `docs/experience/playground.md` (today's reactive-only playground), `docs/decisions.md` Decisions 20–21
 
 ---
@@ -381,7 +381,7 @@ Dependency order (playground scope): **T-3 → T-1/T-2 → T-4** unblock the eva
 ## 11. Resolved Decisions (reviewed 2026-07-02)
 
 - **OQ-A → Cap it.** Sandbox runs **auto-cancel after a wall-clock TTL** (proposed default **10 min**, configurable per agent). Reuses the existing `approval_timeout_worker.py` pattern. Applies to durable runs and any run left `awaiting_approval`.
-- **OQ-B → Reuse the StepTracker for now.** One StepTracker component for durable runs *and* durable-inner scheduled/event runs. **⏳ Revisit after hands-on testing** — Karthik to give input once he's tried it (tracked in memory `todo-revisit-steptracker`).
+- **OQ-B → Reuse the StepTracker for now.** One StepTracker component for durable runs *and* durable-inner scheduled/event runs. **⏳ Revisit after hands-on testing** — Kalyan to give input once they've tried it (tracked in memory `todo-revisit-steptracker`).
 - **OQ-C → No unified dataset shape.** Dataset item schemas **may differ per mode** (reactive: `{input, expected_output}`; event/scheduled: `{trigger_payload, expected_output}`). Batch eval interprets items by the agent's mode; do not force one schema.
 - **OQ-D → Distinct `environment=sandbox`.** The playground evaluates against a **dedicated `sandbox` deployment**, separate from production/staging/canary. Firms up Decision 20's "introduce a sandbox environment." Requires adding `sandbox` to the `deployments.environment` CHECK constraint (T-10).
 - **OQ-E → Always show the args.** **No one-click approve.** The durable HITL card always shows the full tool args on every approval — seeing and judging them *is* the evaluation.

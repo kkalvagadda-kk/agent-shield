@@ -2,7 +2,7 @@
 
 **Status:** DRAFT for review — not yet implemented
 **Date:** 2026-07-03
-**Author:** Karthik + Claude
+**Author:** Kalyan + Claude
 **Related:** `docs/design/execution-models-and-memory.md` (backend spec), `docs/design/playground-execution-modes.md` (the pre-publish half), `docs/decisions.md` Decisions 20–21
 
 ---

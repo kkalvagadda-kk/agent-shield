@@ -2,7 +2,7 @@
 
 **Status**: Draft — Implementation source of truth  
 **Date**: 2026-06-27  
-**Author**: Karthik + Claude  
+**Author**: Kalyan + Claude  
 **Version**: 2.0.0  
 **Requirements**: `docs/authorization-model.md`  
 **Referenced by**: `docs/spec.md` §Authorization Model

@@ -4,7 +4,7 @@ A cold agent should be able to implement POC-4 from `plan.md` + `contracts/` + `
 + `research.md` alone. This file is the run/verify loop.
 
 ## 0. Ground rules
-- Commit to `worktree-ux-preview-context-storage` ONLY. Never merge/push/PR to main (Karthik
+- Commit to `worktree-ux-preview-context-storage` ONLY. Never merge/push/PR to main (Kalyan
   verifies + merges).
 - Read `research.md` first — it locks the three prerequisites and the 6 findings (F-1…F-6)
   that shaped every task. Do NOT re-litigate the "Python vs HTTP tool" decision (F-1) or bump

@@ -1,7 +1,7 @@
 # AgentShield — Context-Storage UX Roadmap (POC-2 → POC-5)
 
 **Status**: DRAFT v1 — 2026-07-16. Sequenced UX build plan. Not yet implemented.
-**Author**: Karthik + Claude
+**Author**: Kalyan + Claude
 **Companion to**: [`context-storage-architecture.md`](./context-storage-architecture.md) — that doc is the authoritative subsystem spec (data model, ports, security §7, phasing §11). **This doc is the execution roadmap** for the user-facing phases POC-2→POC-5, in the build order the team committed to on 2026-07-16. Where the two overlap, the architecture doc's design wins; this doc sequences and details the *build*.
 
 ---
