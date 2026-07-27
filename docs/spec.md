@@ -81,7 +81,7 @@ A developer or product team member opens the Playground tab in Studio, sends a m
 3. **Given** a test message was run, **When** developer clicks "Save to Dataset", **Then** the input/output pair is appended to a named Langfuse dataset and visible in the Eval Runner.
 4. **Given** a passing run, **When** LLM-as-Judge scoring completes (async, <10s), **Then** a score badge appears on the run; developer can click thumbs-up/down to override and the feedback is stored.
 5. **Given** two versions of an agent exist, **When** developer enters comparison mode and sends a message, **Then** both versions run in parallel and outputs, trace depth, and token cost appear side by side.
-6. **Given** an eval suite exists for this agent, **When** developer clicks "Run Evals" in the Playground, **Then** promptfoo executes against the selected version, and pass/fail results per assertion appear inline within 60s.
+6. **Given** a dataset exists for this agent, **When** developer clicks "Run Evals" in the Playground, **Then** the eval-runner Job scores every item through the mode-aware scorer library and per-dimension results appear inline within 60s. (Promptfoo was the original intent and was never built — see the eval-gate note below.)
 
 ---
 
@@ -192,7 +192,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | FR-022 | P2 | Playground: sandbox mode | Tool calls return mocked responses; no external side effects; trace labels each call `[sandbox]` |
 | FR-023 | P2 | Playground: dataset curation | User saves any input/output pair to a named Langfuse dataset from the Playground UI |
 | FR-024 | P2 | Playground: LLM-as-Judge feedback override | User can thumbs-up/down a judge score; override stored as Langfuse annotation |
-| FR-025 | P2 | Playground: on-demand eval runner | Run a promptfoo eval suite against a specific agent version from Studio; pass/fail per assertion shown inline |
+| FR-025 | P2 | Playground: on-demand eval runner | Run a **PlaygroundDataset** (one of five modes) against a specific agent version from Studio; per-dimension scores + composite shown inline |
 | FR-026 | P2 | Playground: side-by-side version comparison | Run the same prompt against two agent versions in parallel; compare output, trace depth, token cost |
 
 ### Non-Functional Requirements
@@ -245,7 +245,7 @@ A security auditor needs to prove that all high-risk actions were approved by a 
 | PlaygroundRun | A single test execution from the Playground UI | run_id, user_id, team, sandbox, context='playground', langfuse_trace_id, judge_score | User-scoped and private — see [playground-spec.md](design/playground-spec.md) |
 | PlaygroundFeedback | User thumbs-up/down override on a judge score | run_id, rating, comment, reviewer | Stored as Langfuse score annotation |
 | PlaygroundDataset | A named collection of saved input/output pairs | dataset_name, owner_user_id, langfuse_dataset_id | User-scoped (not team-scoped); items stored in Langfuse |
-| EvalRun | An on-demand promptfoo eval execution | eval_run_id, user_id, k8s_namespace='agentshield-playground', status, assertions | Runs in playground namespace; Job uses triggering user's identity |
+| EvalRun | An on-demand eval execution over a PlaygroundDataset | eval_run_id, user_id, dataset_id, mode, pass_threshold, dimension_weights, overall_score, status | Runs in playground namespace; Job uses triggering user's identity. Per-item rows in `eval_run_results` carry `dimension_scores`, `eval_detail` (incl. vetoes) and `langfuse_trace_id` |
 
 ---
 
@@ -591,7 +591,9 @@ POST   /api/v1/playground/evals/run
   Body: {
     agent_name: "<name>",
     version: "<version_tag>",
-    suite: "<promptfoo config name | dataset_name>",
+    dataset_id: "<PlaygroundDataset id>",   — its `mode` selects the scorer branch
+    pass_threshold: 0.9,                    — optional; per-run, overrides the platform default
+    dimension_weights: { ... },             — optional; per-run weights over the mode's dimensions
     baseline_version: "<version_tag>"   — optional; enables diff view
   }
   Returns: { eval_run_id }              — poll GET below for results
@@ -1143,7 +1145,23 @@ Authorization covers three lifecycle stages: authoring (private workspace), cont
 
 **Asset lifecycle** — assets move through `private → pending_review → published`. Admin approval gates the transition and grants access to specific teams. A team must have an active grant to every tool in an agent's dependency graph before deployment is permitted.
 
-The `POST /publish` request is itself gated at the **version** level by two flags on the pinned `AgentVersion`: `eval_passed` (always required) and `adversarial_eval_passed` (required only when the version binds a **high/critical-risk** tool — the `has_risky` branch — else skipped). Both are operator sign-offs today, set from the Playground promote panel ("Mark Version Passed" / "Mark Adversarial Passed"); a failed gate returns `422` with a structured `detail` (`eval_not_passed` / `adversarial_eval_not_passed`). An automated red-team eval runner that would set `adversarial_eval_passed` on a passing evaluation is a deferred follow-up — the flag is currently a manual attestation, not an evaluated result.
+The `POST /publish` request is itself gated at the **version** level by two flags on the pinned `AgentVersion`: `eval_passed` (always required) and `adversarial_eval_passed` (required only when the version binds a **high/critical-risk** tool — the `has_risky` branch — else skipped). A failed gate returns `422` with a structured `detail` (`eval_not_passed` / `adversarial_eval_not_passed`).
+
+**The two flags are NOT symmetric, and the difference matters:**
+
+- **`eval_passed` is an evaluated result.** A completed `EvalRun` sets it automatically
+  (`routers/eval_runner.py:594`) when the run's **composite** clears its **own** `pass_threshold` — a
+  per-run value, not a platform-wide 0.7. The composite is a **weighted mean of mode-aware dimensions**
+  (`response`, `trajectory`, `tool_call`, `side_effect`, `filter`, `injection`, `member_path` — which
+  ones exist depends on the dataset's mode), reduced over **present dimensions only** so a weight for an
+  absent dimension cannot silently drag the score down. **Exact-fact vetoes** (`filter_error`,
+  `injection_succeeded`) force the composite to 0.0 and **no per-run weight override can switch them
+  off** — vetoes fire on facts, never on a heuristic. The Playground promote panel can still set the
+  flag by hand, but it is no longer the only producer.
+- **`adversarial_eval_passed` has no producer at all.** Nothing in the pipeline ever sets it; its only
+  writers are the manual `PATCH /agents/{name}/versions/{id}`. It is a manual attestation that blocks
+  production deploy — see the *Adversarial-eval-runner automation* improvement note above, and the
+  ledger at `docs/design/eval-state-of-play.md`.
 
 **HITL approval authority** — approval rights are scoped per-agent via the `approver` artifact-scoped role (see RBAC below). Reviewers see only HITL requests for agents they hold the `approver` role on. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
 

@@ -1,6 +1,8 @@
 # Richer Evaluation UX
 
 **Status:** approved — not started. Written 2026-07-27.
+**Read first:** [`eval-state-of-play.md`](eval-state-of-play.md) — the code-verified ledger of what
+evaluates today. **Slice 0 below is the same work as E-6's six open tasks**; doing it completes Eval v2.
 **Related:** `docs/design/eval-results-publish-lifecycle.md` (older, partly superseded), `docs/plan/execution-models-v2/eval-v2/` (E-0…E-6 — this doc closes E-6's open Studio tasks `T006`/`T007`/`T020`–`T022`), `docs/design/todo/agent-evaluation-capability.md` (RESEARCH-status product vision; this doc builds a subset), `docs/decisions.md` Decision 20 (eval-gate placement).
 
 ---

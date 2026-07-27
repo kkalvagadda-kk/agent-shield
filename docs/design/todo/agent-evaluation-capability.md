@@ -67,28 +67,39 @@ This document synthesizes research across **Langfuse, Braintrust, LangSmith, Dee
 
 ## 2. What AgentShield ALREADY Has (Current State)
 
-| Capability | Status |
-|-----------|--------|
-| Single-judge LLM scorer (response quality 0-1) | Done |
-| Batch eval runner (K8s Job per dataset) | Done |
-| Datasets (input + expected_output) | Done |
-| Per-item results with score + reasoning | Done |
-| Eval gating publish (score ≥ 0.7 → eval_passed) | Done |
-| Langfuse trace linkage per eval item | Done |
-| Workflow evaluation (trigger + poll) | Done |
+> ⚠️ **This section was written 2026-07-07 and is HISTORY, not status.** Eval v2 (E-0…E-5) shipped after
+> it and invalidated most of the gap list below — five of the ten "gaps" are now closed, including the
+> two the doc called out as the big ones. **The current, code-verified ledger is
+> [`docs/design/eval-state-of-play.md`](../eval-state-of-play.md).** Read that for status; read this
+> section for the market research and the prioritization frame, which still hold.
 
-### Gaps vs Market
+**As of 2026-07-07 (when this doc was written):** a single-dimension LLM judge (Haiku, 0–1 response
+quality), a batch eval-runner K8s Job, `{input, expected_output}` datasets, a fixed 0.7 threshold gating
+publish, Langfuse trace linkage per item, and workflow evaluation by trigger+poll.
 
-1. **Single dimension only** — no tool correctness, safety, faithfulness
-2. **No human annotation workflow** — thumbs-up/down exists in playground but no structured review queues
-3. **No online/production evaluation** — evals only run on-demand against datasets
-4. **No code/heuristic evaluators** — everything goes through LLM judge
-5. **No experiment comparison** — can't compare version A vs B systematically
-6. **No regression detection** — no CI/CD integration, no "score dropped" alerts
-7. **No dataset versioning** — items are flat, no snapshots
-8. **No custom evaluator authoring** — users can't define their own judge prompts
-9. **No agent-specific metrics** — tool selection accuracy, trajectory evaluation absent
-10. **No pairwise evaluation** — can't rank two versions against each other
+**What changed since (Eval v2, verified in code 2026-07-27):** scoring became **mode-aware**. Seven
+scorers in `judge.py` behind a single door (`POST /playground/eval/score`) dispatching on an explicit
+mode discriminator across five dataset modes. Six of the seven are **deterministic — no LLM**. The gate
+is now a weighted composite against a **per-run** threshold with exact-fact vetoes.
+
+### Gaps vs Market — re-scored 2026-07-27
+
+| # | Original gap | Now |
+|---|---|---|
+| 1 | Single dimension only | ✅ **Closed** — 7 dimensions: `response`, `trajectory`, `tool_call`, `side_effect`, `filter`, `injection`, `member_path` |
+| 9 | No agent-specific metrics (tool selection, trajectory) | ✅ **Closed** — `score_trajectory` with 4 match modes; `score_tool_calls` with arg-subset + fail-closed HITL-parking assertion |
+| 7 | No dataset versioning | ⚠️ **Still open**, but datasets are now a typed discriminated union per mode, not flat text pairs |
+| 2 | No human annotation workflow | ❌ Still open |
+| 3 | No online/production evaluation | ❌ Still open — no sampling of live traffic |
+| 4 | No code/heuristic evaluators | ✅ **Closed for platform scorers** (6 of 7 are pure code) — ❌ still open for *user-authored* ones |
+| 5 | No experiment comparison | ❌ Still open — the design is `eval-ux-enrichment.md` Wave 1 |
+| 6 | No regression detection | ❌ Still open — no score-drop alert exists |
+| 8 | No custom evaluator authoring | ❌ Still open — no evaluator model or table |
+| 10 | No pairwise evaluation | ❌ Still open |
+
+**Two gaps this doc never anticipated, both now live and tracked in the ledger:** `tool_mocks` is
+accepted and persisted but the record seam ignores it, and `adversarial_eval_passed` **blocks production
+deploy** while having no producer anywhere in the pipeline — it can only be set by hand.
 
 ---
 
