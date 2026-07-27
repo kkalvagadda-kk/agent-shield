@@ -152,4 +152,3 @@ validation — no DDL.
   EvalResultsPage trajectory panel (E-1 T5) in the same slice — no orphan columns.
 - If the harness does not yet emit `{tool, args}` into `RunStep.output`, adding it is a producer change in
   `durable.py` (shipped with E-1 T1), not a new table.
-</content>

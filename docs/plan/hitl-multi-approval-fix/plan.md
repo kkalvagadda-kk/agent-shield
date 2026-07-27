@@ -456,4 +456,3 @@ Vitest + typecheck all green.
 | Pod `resume()` `__interrupt__` return (Task 4) | **deferred (intentional) unless Task 5 needs it** | DB check (Task 2) is authoritative; include only if trivially low-risk. |
 | Single-agent double-approval (Task 5) | **verify-first** | Expected to already work via the stream path; fix only if the test proves a gap. |
 | OPA fail-open bypass / workflow ledger gaps | **out of scope** | Separate items per the design brief. |
-</content>

@@ -215,4 +215,3 @@ the results UI to the workflow run tree. No DDL. The run tree itself (parent + c
 - **`eval_passed` already handles workflow versions** (`eval_runner.py:~318-330`) — E-5 needs no gate change,
   only meaningful member-path scores behind the composite.
 - **Bump registry-api + eval-runner + studio** in both files.
-</content>

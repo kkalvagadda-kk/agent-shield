@@ -96,4 +96,3 @@ side_effect 0.3` (injection folded in when present). Overridable via `eval_runs.
 - Webhook datasets are new; no legacy rows.
 - `matched` → read by results UI + dashboards; `injection`/`filter` dims → read by results UI. Shipped with
   their readers, no orphans.
-</content>

@@ -236,5 +236,3 @@ then prove only the **independent wiring** (which decide endpoint fired; which U
 happens), and may SKIP-loud on local capacity (production needs published artifacts + warm prod
 pods; evals need the eval-runner + a dataset) — never a false pass, and the backstop still fully
 guards the shared code path they exercise.
-</content>
-</invoke>

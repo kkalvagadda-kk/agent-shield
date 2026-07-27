@@ -161,4 +161,3 @@ kubectl logs -n agentshield-platform "$MPOD" --since=15m | grep -iE "interrupt|a
    ```
 6. If gemma refuses to double-search, the deterministic backstop (`suite-79` T-S79-004b) is the
    binding proof — record the SKIP in the run notes, not a pass.
-</content>

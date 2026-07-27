@@ -194,5 +194,3 @@ non-negotiable gate**.
 - **Experience doc:** `docs/experience/playground.md` updated for side-effect record/mock under eval (T018) — a covered trigger file (`eval_runner.py`, `judge.py`, `EvalResultsPage.tsx` all changed).
 - **Verification:** Python `ast.parse` + `configure_mappers()` (schema/ORM); migration up/down/up; `cd studio && npm run typecheck && npm run test` green; Playwright `eval-side-effects.spec.ts` green via `scripts/studio-e2e.sh`.
 - **DoD gate:** (a) CP1c Playwright proves the real journey; (b) suite-74 T-S74-002 is the save→reload-assert on the new write surface (`recorded_side_effects` persisted + re-read); (c) T020 orphan-grep proves every new symbol has a live caller/reader; (d) deferred cassette replay is in the gap ledger.
-</content>
-</invoke>

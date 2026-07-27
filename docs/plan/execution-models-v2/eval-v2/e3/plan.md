@@ -195,4 +195,3 @@ side_effect 0.6` for reactive-inner). Overridable per run via `eval_runs.dimensi
 - **Side-effects safe by E-2.** Every scheduled eval runs `eval_mode=record`; a real delivery under eval is a
   bug. Assert the downstream was not hit.
 - **Bump eval-runner + registry-api + studio** in both files.
-</content>

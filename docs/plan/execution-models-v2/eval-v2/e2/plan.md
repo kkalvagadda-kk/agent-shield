@@ -268,4 +268,3 @@ shipped together (T020 grep gate).
   explicit param; make the SDK path honor the identical flag. No runner-side mocking, no `context` sniff.
 - **Bump registry-api + eval-runner + studio** in both files; SDK ships via pip into agent images (rebuild
   note — no separate SDK tag).
-</content>

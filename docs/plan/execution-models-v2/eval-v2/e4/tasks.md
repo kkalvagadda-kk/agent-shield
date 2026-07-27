@@ -306,5 +306,3 @@ run is correct — mirroring suite-75. The census is **ID-based** (`REQUIRED_IDS
 6. **DoD gate:** (a) T022 proves the real journey; (b) T022's reload + `T-S77-001` prove save→reload→assert;
    (c) [CP1d] proves no orphans **and closes the pre-existing `matched` orphan**; (d) the Gap Ledger (T025)
    records every deferral, with the plan's two false WS-4 rows **removed**.
-</content>
-</invoke>

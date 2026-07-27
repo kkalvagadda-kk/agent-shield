@@ -111,4 +111,3 @@ registry-api `0.2.160→0.2.164`, declarative-runner `0.1.38→0.1.40`, studio `
 - **Behind a TLS-terminating edge, app-generated redirects downgrade to http.** Call canonical
   (trailing-slash) collection URLs from the client AND rewrite `http://`→`https://` redirect
   Locations at the proxy so no endpoint can silently break from mixed content.
-</content>

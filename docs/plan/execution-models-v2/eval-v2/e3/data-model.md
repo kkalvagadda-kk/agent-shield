@@ -89,4 +89,3 @@ data work — no DDL.
 - Scheduled datasets are new; no legacy rows.
 - `expected_side_effects` → read by `score_side_effects`; `trigger_payload` → read by results UI. Shipped with
   their readers, no orphans.
-</content>

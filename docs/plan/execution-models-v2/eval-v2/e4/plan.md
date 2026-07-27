@@ -209,4 +209,3 @@ schema is a Pydantic/validation concern (`e4/data-model.md`). No DDL.
   penalized on utility — the right shape for measuring the OPA/HITL defense cost (`research.md` §4.5).
 - **Side-effects safe by E-2.** Matched action runs use `eval_mode=record`; a real delivery under eval is a bug.
 - **Bump eval-runner + registry-api + studio** in both files.
-</content>

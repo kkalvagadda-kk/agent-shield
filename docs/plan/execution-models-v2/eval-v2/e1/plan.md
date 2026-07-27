@@ -291,4 +291,3 @@ a task gate.
   tool **fails** the composite — that is the reason E-1 exists.
 - **Bump registry-api + eval-runner + studio** in both `deploy-cpe2e.sh` and `values.yaml`; the eval-runner
   Job image changes here.
-</content>

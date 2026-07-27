@@ -88,4 +88,3 @@ Authored on scheduled/webhook items (E-3/E-4); shape shared:
   E-0's `eval_detail`).
 - `side_effecting` → read by the wrapper; `recorded_side_effects` → read by `score_side_effects` + results UI —
   shipped together, no orphans.
-</content>

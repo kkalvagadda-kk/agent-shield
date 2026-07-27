@@ -98,4 +98,3 @@ not park **fails** the tool_call dimension for that step (fail-closed — never 
   the trajectory/tool dims (those are deterministic — no fallback needed).
 - **Fail-closed.** A poll-timeout (no terminal run) → the runner records the item **failed** with a reason,
   never calls `/eval/score` with an empty trajectory as a pass.
-</content>

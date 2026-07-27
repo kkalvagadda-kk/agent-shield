@@ -194,4 +194,3 @@ regression harness reuses the shipped runner + gate. No new producer without a r
   E-6 is where they get their reader — grep proves it (No-Bandaid: no orphan column left from E-0).
 - **Bump registry-api + eval-runner + studio** in both files; update the experience doc + the spec eval-gate
   section to the composite reality (DoD #3/#6).
-</content>
