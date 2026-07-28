@@ -112,13 +112,20 @@ there — only `eval_mode` rides the dispatch body. Wiring it means threading a 
 tests. *Consequence:* you can assert what the agent **called**, never how it behaves when a tool
 **returns** a particular value.
 
-**`adversarial_eval_passed` — a hard gate with no producer.** It blocks production deploy
-(`deployments.py:641`, `agents.py:551`) and blocks publish for risky tools (`agents.py:551`). Its only
-writers are the manual `PATCH` at `versions.py:120/205`. **No eval run can ever set it.** Do not
-"fix" this by auto-flipping it from injection scores: it is monotonic, it blocks production, and
-"ASR = 0 on the 2 probes this dataset happened to include" is not "adversarially safe". If built, it
-needs an explicit `adversarial=true` run, ≥N probed items, ASR = 0 on all, and zero vetoes — its own
-slice with its own review, never a side effect of another change.
+**`adversarial_eval_passed` — an attestation the product presents as an evaluation.** It gates production
+deploy (`deployments.py:641`) and publish for risky tools (`agents.py:551`), and **no eval run can set
+it** — the only writers are `versions.py:120/205`, reached by a manual `PATCH`.
+
+*Corrected 2026-07-28:* an earlier revision of this file called it "a hard gate with no producer", which
+overstated the impact. `PlaygroundPage.tsx:199` ships a working "mark adversarial-eval passed" button with
+clear 422 copy on the blocked path, so **nobody is blocked** — it is a one-click attestation, not an
+outage. The real gap is that a human clicking "yes, this is safe" is the same shape as the `eval_passed`
+rubber stamp Decision 20 existed to remove. Priority set accordingly in §6 (slot 5, not slot 1).
+
+Do not "fix" this by auto-flipping it from injection scores: it is monotonic, it blocks production, and
+"ASR = 0 on the 2 probes this dataset happened to include" is not "adversarially safe". If built, it needs
+an explicit `adversarial=true` run, ≥N probed items, ASR = 0 on all, and zero vetoes — its own slice with
+its own review, never a side effect of another change.
 
 **`_DatasetItemBase.weight`** — a declared field no scorer reads.
 
@@ -169,39 +176,106 @@ clustering.
 
 ## 6. What to work on — in this order
 
-### Now: `eval-ux-enrichment.md` **Slice 0** (~1.5 days)
+**Sequenced by what unblocks what, not by severity.** Three rules produced this order: fix the things
+that make *other* work unsafe first; fix the harness before you lean on it; don't build on a foundation
+you are about to change.
 
-**Slice 0 and E-6's six open tasks are the same work.** E-6 T006/T007 are the UI threshold hardcodes,
-T020/T021 the launch surface, T022 the Playwright journey, T026 the doc pass (this file closes most of
-T026). So this is not "new work vs finish the old thing" — starting Slice 0 **completes Eval v2**.
+> **Slice 0 is DONE** — shipped 2026-07-27 as registry-api **0.2.234** / studio **0.1.167**. Per-request
+> eval resolution + `eval_source` provenance, `lib/evalVerdict` as the single verdict owner, deny-by-default
+> on two listing routes, and `suite-80 T-S80-000b` rewritten to discover its scope. Verified: `suite-89`
+> 10/0, `suite-80` 15/15, API + browser `--group eval` green, Vitest 536, `CP3a` 6/6. It also closed E-6's
+> open Studio tasks, so **Eval v2 is complete**. Details: `docs/plan/eval-slice0/`, Decisions 32-33.
 
-It also fixes a live correctness bug that a human approves releases on. All three verified today:
+---
 
-- `routers/admin.py:177-178` resolves each publish request's eval by **`agent_name` only**
-  (`.order_by(agent_name, completed_at.desc()).distinct(agent_name)`), never filtering on
-  `PublishRequest.source_version_id`. The queue can show a **different version's** score.
-- `AdminPublishRequestsPage.tsx:167,169` renders that score against a hardcoded `>= 0.7` / `>= 0.4`,
-  and `PublishRequestResponse` carries no threshold — so the page **structurally cannot** render a
-  correct verdict. The fix needs a backend field, not a frontend edit.
-- `DatasetsPage.tsx:1756` hardcodes `>= 0.7` for the run status dot.
+### 1 · Deploy safety (~half a day)
 
-`EvalResultsPage.tsx` has **zero** threshold literals — it was fixed in `7b3e3fc`. The guard that was
-supposed to protect the class, `suite-80` `T-S80-000b`, greps **only that one already-fixed file**, so
-it passes while both real offenders ship. Rewrite it to **discover** its scope
-(`grep -rl "pass_threshold\|overall_score" studio/src/pages studio/src/components`) rather than name a
-file — otherwise the fourth copy appears somewhere new and the guard stays green.
+**First because everything after it ships through this.** Slice 0's first deploy exited green, helm
+reported `STATUS: deployed`, and the pod sat in `ImagePullBackOff` for seven minutes because the image
+had never been built.
 
-### Then: Wave 1 — the regression story (~1.5 weeks)
+- **ECR preflight** in `scripts/deploy-eks.sh`: before `helm upgrade`, assert every tag in
+  `values.yaml` exists (`aws ecr describe-images --image-ids imageTag=…`). Turns a seven-minute
+  ImagePullBackOff into a one-second failure naming the tag, and works regardless of how many tag lists
+  exist.
+- **Derive the build tags from `values.yaml`** so the third list stops existing. There are currently
+  three (`deploy-cpe2e.sh`, `values.yaml`, `deploy-eks.sh`) plus `studio/src/lib/build.ts`, and
+  CLAUDE.md documents two. Bumping a third list is the fix that already failed.
+- **Add a `startupProbe` to registry-api** in the same change. Two uvicorn workers under a 500m CPU
+  limit exceed the liveness `initialDelaySeconds=15` on cold start, so the kubelet kills a *still-booting*
+  container. Liveness answers "is it wedged?", not "has it finished booting?".
 
-Eval-runs list page (the sidebar currently labels an item "Eval Runs" and points at `/playground`, which
-has none), run-to-run diff, trend with the threshold as a reference line.
+Detail: `docs/bugs/three-tag-sites-eks-build-vs-helm-deploy.md`.
 
-### Then, and only then: the two engine gaps
+### 2 · Test harness (~2-3 days)
 
-`tool_mocks` threading, then multi-turn. In that order, for the reason in §4.
+**Before Wave 1, because Wave 1 is where you actually depend on it.**
 
-**Not next:** custom evaluator authoring. It is P0 in the 2026-07-07 doc, but that ranking predates the
-scorer library — seven dimensions now ship, which was the actual need behind it. Revisit after Wave 1.
+- **Run the twelve unverified functional groups.** The pod-selector sweep touched 49 suites; only
+  `tools`, `mcp`, `rbac` and `eval` were re-run. The rest is genuinely unknown, and unknown is the point.
+- **Shared `api_pod()` helper.** `--field-selector=status.phase=Running` is copy-pasted 51 times and
+  still admits a Running-but-**not-Ready** pod. Fix it in one place instead of a third 51-site sweep.
+- **`embedding-sidecar`** is in ImagePullBackOff — never built by `deploy-eks.sh`, absent from ECR.
+  Degrades KB/RAG on EKS.
+
+### 3 · Decision 33 option B — team-scoped eval reads (~2-3 days)
+
+**Deliberately ahead of Wave 1.** Without it, `list_eval_runs` returns only the caller's own runs, so an
+approver reviewing someone else's agent sees an empty eval history — you would build the whole regression
+story and then find that half its audience cannot see it. Cheaper before Wave 1 than retrofitted into it.
+
+Collision to settle first: Decision 25 left `rbac.py: ENFORCE=False` platform-wide, so this cannot lean on
+`has_artifact_role`. It must scope on `user_team_assignments` directly or wait for the enforcement flip.
+
+### 4 · Wave 1 — the regression story (~1.5 weeks)
+
+Eval-runs list page (the sidebar labels an item "Eval Runs" and points at `/playground`, which has none)
+→ run-to-run diff → trend with the threshold as a `<ReferenceLine>`.
+
+Two corrections already banked, both of which would have cost a day mid-flight:
+
+- The migration is **0076**. The doc says 0073; that number is taken
+  (`0073_credential_blobs_and_credential_ref.py`) and the head is 0075.
+- **Two** Recharts components, not three. The heading said three from the first draft while the body
+  always enumerated two; the sparkline stays hand-rolled.
+
+The non-negotiable inside Slice 2 is **fingerprinting the join key**. UI-authored dataset items get no
+stable `id`, so runs can only be joined positionally — without the fingerprint, a diff silently compares
+two unrelated test cases and reports it as a regression.
+
+### 5 · `adversarial_eval_passed` gets a real producer (~2-3 days)
+
+**Not urgent — corrected 2026-07-28.** An earlier revision of this file called it "a hard gate with no
+producer", which overstated it: `PlaygroundPage.tsx:199` ships a working "mark adversarial-eval passed"
+button with clear 422 copy, so **nobody is blocked**. The gap is that it is an *attestation* where the
+product implies an *evaluation* — the same shape as the `eval_passed` rubber stamp Decision 20 existed to
+remove.
+
+If built: an explicit `adversarial=true` run, ≥N probed items, ASR = 0 on all of them, and zero vetoes.
+Never a side effect of another change, and **never auto-flipped from injection scores** — it is monotonic,
+it gates production, and "ASR = 0 on the two probes this dataset happened to include" is not
+"adversarially safe".
+
+### 6 · Wave 2 + the engine gaps
+
+Failure triage (`lib/failureReason.ts`, `clusterFailures`, `dimensionRollup`), the real eval-gate card on
+`AgentDetailPage`, what-if re-scoring, traffic→cases, dataset quality.
+
+**Folded in here: the observability score vocabulary.** `ObservabilityTracesPage.tsx:22` holds a **fourth**
+`scoreColor`, hardcoding 0.8/0.5 over a trace's `judge_score`. It lands here not because Wave 2 edits that
+file — it does not — but because Wave 2 is when observability score-rendering comes into scope at all
+(`ObservabilityComparePage:70-82` for the diff vocabulary, `ObservabilityDashboardPage:204-217` for
+`BarRow`, `:223` for the latency chart). Extracting one band for those three is worth doing once, at that
+moment. **It cannot simply import `lib/evalVerdict`:** that `scoreColor` takes no threshold, and a trace has
+no `pass_threshold` to grade against, so it needs its own explicit judge-score band rather than an invented
+threshold.
+
+Then the two engine gaps, **in this order**: `tool_mocks` threading, then multi-turn. That is a dependency,
+not a preference — a multi-turn path is only reproducible once tools return fixed values across turns
+(§4).
+
+**Still not next:** custom evaluator authoring. It is P0 in the 2026-07-07 doc, but that ranking predates
+the scorer library — seven dimensions now ship, which was the actual need behind it.
 
 ---
 
