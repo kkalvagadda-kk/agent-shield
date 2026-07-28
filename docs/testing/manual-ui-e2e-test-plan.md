@@ -59,6 +59,42 @@ only incidentally, by failing to find a tool it had just created. `CredentialsPa
 three now page the full catalog (studio **0.1.166**); the only surviving `listTools(` references are
 the pager's own call and a comment. Live confirmation: `total=107, one-page@100=100`.
 
+## Eval UX — Slice 0 / Wave 1 design round (arch-design) — 2026-07-27
+
+Design decisions locked as **Decision 32** (verdict single-owner + `eval_source` provenance) and
+**Decision 33** (deny-by-default reads). Plan: `docs/design/eval-ux-enrichment.md`. Ledger:
+`docs/design/eval-state-of-play.md`. **Nothing implemented yet** — these are the gaps the design round
+opened, recorded before any code moves.
+
+- **not-yet-wired (debt) — SECURITY: unauthenticated full-table read on two endpoints.**
+  `GET /api/v1/playground/eval-runs` (`routers/eval_runner.py:471`) and `GET /api/v1/playground/datasets`
+  (`routers/datasets.py:72`) filter inside `if caller:` with **no `else:`**. registry-api installs no
+  global auth middleware (`main.py:176` = CORS + trace-ID only) and both routes use `get_optional_user`,
+  which returns `None` instead of raising — so **no identity means no filter**, and the caller receives
+  every eval run / every playground dataset on the platform. Datasets carry test inputs and expected
+  outputs. Same class already fixed and documented in `routers/agents.py:167-170`; `agents`, `tools`,
+  `skills` and `composite_workflows` carry the deny-by-default `else:`, these two do not because they
+  have no `publish_status` to key the template on. **Fix lands in Slice 1** (Decision 33 option A), both
+  routes in one commit, plus a regression test asserting the **unauthenticated** case returns empty —
+  every existing suite authenticates, which is exactly why this survived.
+- **deferred (intentional) — team-scoped eval reads (Decision 33 option B).** Even once deny-by-default
+  lands, `list_eval_runs` returns only the caller's **own** runs, so an approver reviewing someone
+  else's agent sees an empty eval history and Wave 1's regression story serves the developer but not the
+  reviewer. Deferred to its own slice because it changes the access model, and because it collides with
+  Decision 25's platform-wide `rbac.py: ENFORCE=False` — it must scope on `user_team_assignments`
+  directly or wait for the enforcement flip. **Do not let this fall off:** it is the difference between
+  Wave 1 being useful to one person and useful to a team.
+- **corrected — Slice 2's migration number.** `eval-ux-enrichment.md` says migration **0073**; that is
+  taken (`0073_credential_blobs_and_credential_ref.py`) and the head is **0075**. Slice 2's
+  `UNIQUE (eval_run_id, dataset_item_idx)` + `eval_runs.error_message` migration must be **0076**. Same
+  alembic collision class as the `main` merge earlier today.
+- **not-yet-wired (debt) — the Slice 0 guard cannot catch the Slice 0 bug.** Rewriting `suite-80`
+  `T-S80-000b` to discover its scope catches hardcoded threshold literals. It cannot catch a *correct*
+  threshold rendered against the *wrong run's* score. That needs a separate API-level assertion that the
+  publish queue's returned `last_eval_run_id` actually belongs to the request's `source_version_id`.
+
+---
+
 **Known gaps from this change:**
 
 - **deferred (intentional) — MCP `resources` / `prompts` primitives.** There is no MCP analogue of a

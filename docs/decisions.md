@@ -786,6 +786,69 @@ Their weaknesses: **one master key decrypts everything** — anything holding `A
 
 ---
 
+## Decision 32: Eval verdict has one owner, and eval provenance is explicit
+
+**Date:** 2026-07-27
+
+**Design doc:** `docs/design/eval-ux-enrichment.md` Slice 0. Live ledger: `docs/design/eval-state-of-play.md`.
+
+**Context:** A reviewer approving a release can be shown **the wrong version's eval score**, graded against **the wrong bar**. Both verified in code 2026-07-27:
+
+- `routers/admin.py:177-178` resolves each publish request's eval with `.order_by(EvalRun.agent_name, EvalRun.completed_at.desc()).distinct(EvalRun.agent_name)` — the agent's *latest* run, never filtered on `PublishRequest.source_version_id`.
+- `AdminPublishRequestsPage.tsx:167,169` renders that score against a hardcoded `>= 0.7` / `>= 0.4`, and `PublishRequestResponse` (`schemas.py`) carries `last_eval_score` + `last_eval_run_id` but **no threshold** — so the page *structurally cannot* render a correct verdict without a backend field. `DatasetsPage.tsx:1756` hardcodes the same literal.
+- The guard that should have caught this, `suite-80` `T-S80-000b`, greps **only** `EvalResultsPage.tsx` — the one file already fixed (`7b3e3fc`, now zero `0.7` literals) — while its failure message claims to cover "the Studio". Registration-as-coverage: green over a live bug.
+
+**The resolver already exists.** `effective_pass_threshold(run)` (`eval_runner.py:49`) is THE single resolution, and its docstring is the postmortem for this exact class: *"The threshold used to exist four times across three services… They agreed, so nothing ever errored."* Slice 0 must **expose** it, not re-derive it.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: Strict version join only** | Resolve eval by `source_version_id`; show nothing when the request pins no version | Never wrong — but blanks the queue for legacy unpinned requests, and reviewers lose a signal they use today |
+| **B: Version join + silent `agent_name` fallback** | What the design doc originally said | Fixes the common case; one field still carries two meanings, so the reviewer cannot tell a version-exact score from a neighbour's |
+| **C: Version join + fallback + explicit provenance** | B, plus `eval_source: "version" \| "agent_latest" \| "none"` on the response | One extra field and one extra UI state; the ambiguity becomes visible and the human decides |
+
+**Choice: C.** Server owns the verdict inputs (score, threshold via the existing resolver, provenance); the client only renders. B was rejected because a silent fallback recreates the same *class* of bug the slice exists to kill — quieter, and therefore harder to find next time. A was rejected because blanking the queue is a regression for unpinned legacy requests.
+
+**Consequences / trade-offs:**
+- `PublishRequestResponse` gains `last_eval_pass_threshold: float | None` and `eval_source`. No migration — both are derived at read time.
+- The UI gains a third state ("scored, but from a different version"). Slightly widens Slice 0 beyond its ~1.5-day estimate.
+- **The rewritten guard does not cover this.** Discovering-scope grep catches hardcoded literals; it cannot catch a correct threshold rendered against the wrong run. That needs an API-level assertion that the returned `last_eval_run_id` belongs to `source_version_id` — added as its own case, not folded into `000b`.
+
+---
+
+## Decision 33: Eval-run / dataset reads are deny-by-default now; team-scoped reads are their own slice
+
+**Date:** 2026-07-27
+
+**Design doc:** `docs/design/eval-ux-enrichment.md` Wave 1 Slice 1.
+
+**Context:** Found while grounding Slice 1, which rewrites `list_eval_runs` to add filters. Two listing endpoints return **every row in the platform to an unauthenticated caller**:
+
+```python
+caller = (user or {}).get("sub") or x_user_sub
+q = select(EvalRun).order_by(EvalRun.created_at.desc())
+if caller:
+    q = q.where(EvalRun.user_id == caller)   # <- no else branch
+```
+
+`routers/eval_runner.py:471` (every eval run) and `routers/datasets.py:72` (every playground dataset). Both use `get_optional_user`, which returns `None` rather than raising, and **registry-api installs no global auth middleware** — `main.py:176` adds only CORS and a trace-ID middleware, so authorization is per-route. No identity ⇒ no filter ⇒ full-table read.
+
+**This is a known class already fixed elsewhere.** `routers/agents.py:167-170` carries the postmortem in a comment: *"DENY-BY-DEFAULT: an unauthenticated caller (no JWT and no X-User-Sub) sees ONLY published agents… (Previously a missing caller skipped the filter entirely and leaked every agent.)"* Four routers got the `else:` — `agents`, `tools`, `skills`, `composite_workflows`. Two did not — `eval_runner`, `datasets`. Those two are precisely the ones with **no `publish_status` column**, so the "published to all, private to creator" fix template did not map cleanly and they were passed over. Datasets are the sharper exposure: they hold test inputs and expected outputs, frequently real business logic.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: Deny-by-default only** | Add the missing `else:` so an unauthenticated caller gets an empty list; keep own-runs-only semantics | Two lines per route, closes the live gap today; an approver reviewing someone else's agent still sees an empty eval history |
+| **B: A + team-scoped reads** | Also let a caller read eval runs for agents their team owns | Makes Wave 1 useful to reviewers, not only to the person who ran the eval; changes the access model and touches `user_team_assignments` + `artifact_role_grants` |
+
+**Choice: A now, B recorded as its own slice.** A is a security fix and ships inside Slice 1 (same function, same commit). B is an access-model change — who may read whose evaluation evidence — and deserves its own decision record and its own tests rather than riding in on a UX slice.
+
+**Consequences / trade-offs:**
+- Until B lands, the Wave 1 regression story serves the **developer who ran the eval**, not the **approver reviewing it**. Slice 0's publish queue is unaffected — `routers/admin.py` runs its own query and is admin-gated.
+- The fix must be applied to **both** routes in the same change. Fixing only the one Slice 1 happens to touch would leave `datasets.py` as the next instance of exactly this pattern.
+- A regression test must assert the **unauthenticated** case returns empty. Every existing suite authenticates, which is why this survived.
+- **B interacts with Decision 25's `ENFORCE=False`.** Artifact-role enforcement is off platform-wide (`rbac.py`), so B cannot simply lean on `has_artifact_role` — it must either scope on `user_team_assignments` directly or wait for the enforcement flip. Sequencing to settle when B is picked up.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -821,3 +884,5 @@ Their weaknesses: **one master key decrypts everything** — anything holding `A
 | 29 | On-behalf-of identity for internal MCP servers (FR-MCP-21) | Impersonation-based Keycloak token exchange, not Classic exchange (no re-presentable access token ever propagates internally, even under `identity-propagation-architecture.md`) and not JWT-forward (raw JWT confirmed dead past `auth_middleware.py`). Hard dependency on `identity-propagation-architecture.md` Phase 0–2 landing first. |
 | 30 | Webhook application identity & invoker grants | Webhook-sending applications become team-owned, reusable RBAC principals (one secret, many artifacts) instead of per-trigger `webhook_clients` secrets. `artifact_role_grants` extended with `grantee_type='application'` + role `invoker`, scoped per agent/workflow (not per trigger). First real implementation of Decision 25's undelivered delegation endpoint, generalized to all grantee types. `webhook_clients` deprecated and migrated. Deferred: cross-team application reuse, split manage-user vs. manage-application RBAC capability, bounded unattended-approval fallback policy (required before production reliance on `invoker` grants). |
 | 31 | Pluggable credential provider (external secret store) | Evolve credential storage from single-master-key Postgres-Fernet + K8s Secrets to a `CredentialProvider` interface (put/get/rotate/delete over a `CredentialRef` pointer); only the pointer lives in Postgres, the value moves to the backend. Backends: `FernetPgProvider` (dev/default = today), `K8sSecretProvider`, `VaultProvider`, `AwsSecretsManagerProvider`. Phase-4 (MCP OAuth 2.1) prerequisite — durably stores per-`(server,user)` refresh tokens + Decision 29 impersonation minting material (NOT short-lived minted access tokens, which stay ephemeral). Proxy containment improves: scoped IRSA/Vault path read replaces namespace-wide `secrets: get`. Recommended first external backend: AWS Secrets Manager via IRSA (platform already on EKS). Accepted; implementation deferred to Phase 4. Design: `docs/design/credential-provider-architecture.md`. |
+| 32 | Eval verdict has one owner, and provenance is explicit | The publish queue resolved a request's eval by `agent_name` only, so a reviewer could approve a release while reading **a different version's** score, rendered against a hardcoded `0.7`. Fix: server sends the verdict inputs, client only renders. Reuse the existing `effective_pass_threshold(run)` (`eval_runner.py:49`) — do **not** add a second resolver; that duplication IS the bug. Join the queue's eval on `PublishRequest.source_version_id`, falling back to `agent_name` only when the request pins no version — and carry an explicit **`eval_source: "version" \| "agent_latest" \| "none"`** discriminator so the fallback is visible rather than silent. Without it the fallback recreates the same bug quietly: one field, two meanings, reviewer can't tell which. Design: `docs/design/eval-ux-enrichment.md` Slice 0. |
+| 33 | Eval-run/dataset read visibility | **A now, B deferred.** `list_eval_runs` (`eval_runner.py:471`) and `list_datasets` (`datasets.py:72`) filter inside `if caller:` with **no `else:`**, and registry-api has no global auth middleware (`main.py:176` = CORS + trace-ID only) — so an **unauthenticated** caller gets an unfiltered full-table read of every eval run / every playground dataset. Same class `agents.py:167-170` already fixed and documented ("previously a missing caller skipped the filter entirely and leaked every agent"); `agents`/`tools`/`skills`/`composite_workflows` got the `else:`, these two did not because they have no `publish_status` to key the template on. **(A)** deny-by-default lands inside Slice 1, both routes, one commit, with a regression test that asserts the *unauthenticated* case is empty. **(B)** team-scoped reads — so an approver can see eval history for their team's agents — is deferred to its own slice: it changes the access model and collides with Decision 25's platform-wide `ENFORCE=False`. |
