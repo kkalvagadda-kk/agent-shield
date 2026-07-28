@@ -38,11 +38,26 @@ So this is not an undiscovered bug; it is a known bug whose tracking drifted ont
 
 ## Cross-cutting decisions
 
-### Recharts, in exactly three places
+### Recharts, in exactly two places
 
 The deciding factor is Definition-of-Done rule 1, not aesthetics: Chart.js and uPlot render to `<canvas>`, invisible to Testing Library and Playwright — structurally unprovable in this repo. Recharts emits queryable SVG. `ObservabilityDashboardPage.tsx:223` already names it in a TODO (`// Latency chart (simple text-based for now; Recharts added in M2 chart task)`), so this is an unpaid decision, not a new one.
 
-Earns its place for: the score-over-time trend with a `<ReferenceLine>` at the threshold (a div-bar has no shared y-axis, so "we dropped below the gate at run 7" is unrenderable), and baseline-vs-current grouped bars over dimensions. Hand-rolled bars stay for single-series rollups and table sparklines. Do **not** convert the existing observability/cost bars — unrelated churn.
+Earns its place in **two** components, and only two:
+
+1. **`ScoreTrend`** (slice 3) — score over the last N runs with a `<ReferenceLine>` at the threshold. A
+   div-bar has no shared y-axis, so "we dropped below the gate at run 7" is literally unrenderable
+   without a charting library. This is the one that justifies the dependency.
+2. **Baseline-vs-current grouped bars** over dimensions (slice 2's diff header).
+
+Everything else stays hand-rolled: single-series rollups, and the slice-1 table sparkline
+(~10-line inline `<svg><polyline>` — axis machinery is pure overhead at 60px). Do **not** convert the
+existing observability/cost bars — unrelated churn. The `ObservabilityDashboardPage.tsx:223` latency-chart
+TODO is cited above only as evidence the library decision was already made; converting it is **not** part
+of this plan.
+
+> Count corrected 2026-07-27: this heading read "three places" from the first draft through the commit,
+> while the body always enumerated two. There was no third component — the number was simply never
+> re-counted. Enumerated as a list now so the next reader cannot inherit the same miscount.
 
 Two traps to design around:
 
