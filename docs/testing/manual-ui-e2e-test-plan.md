@@ -76,13 +76,17 @@ clean.
 
 **NOT DONE in this slice — carried, not hidden:**
 
-- **not-yet-wired (debt) — the Playwright journey (`T015`) was not written.** DoD rule 1 wants a browser
-  spec driving `/admin/publish-requests` and asserting the verdict + provenance survive a reload. The API
-  layer (`suite-89`) proves the backend and 7 Vitest cases prove the rendering, but **no test drives the
-  real screen**, which is exactly the gap this repo's DoD exists to close. Highest-priority follow-up.
-- **not-yet-wired (debt) — checkpoint scripts `CP1a`/`CP2a`/`CP3a`** from `docs/plan/eval-slice0/tasks.md`
-  were not written. Their assertions were executed by hand this session (served-tag check, no-orphan
-  greps, blast-radius sweep) but are not reproducible by anyone else.
+- **CLOSED — the Playwright journey (`T015`) shipped.** `studio/e2e/eval-verdict-publish-queue.spec.ts` drives `/admin/publish-requests` against the deployed
+  Studio, asserts the verdict renders against the run's own 0.9 ("0.85 / needs 0.90", non-green badge),
+  and survives a reload. Browser `--group eval` **8/8**. Writing it found two bugs: my fixture RACED the
+  real eval-runner Job (which PATCHes its own score on completion, overwriting the pinned 0.85 — passed
+  once, failed twice), and `eval-mode-plumbing.spec.ts` asserted a heading that could never exist on
+  `EvalResultsPage` and had simply never executed that branch before.
+- **CLOSED — the checkpoint gate shipped as `scripts/checkpoints/cp3a-slice0-mvp-gate.sh` (6/6).**
+  Asserts what a green test run does not: the three tag sites agree, the LIVE pods run them, the RUNNING
+  pod carries the code (not just the tag), no new symbol is orphaned, both new tests are registered, and
+  this ledger still carries Decision 33 option B as OPEN. CP1a/CP2a were folded in deliberately — two
+  more scripts redeploying to re-assert the same things cost two build cycles for no coverage.
 - **deferred (intentional) — Decision 33 option B, team-scoped eval reads.** Unchanged and still open:
   an approver reviewing someone else's agent sees an empty eval history. Do not let this close silently.
 
