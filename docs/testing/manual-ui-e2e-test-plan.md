@@ -69,6 +69,23 @@ Postmortems: `docs/bugs/publish-queue-shows-wrong-version-eval.md`,
 **Both defects were reproduced RED before any fix** (DoD rule 7). `T-S89-001` returned v1's score for a
 request pinning v2; `T-S89-005/006` returned **60 eval runs and 120 datasets to an anonymous caller**.
 
+**VERIFIED on the cluster** — registry-api `0.2.234` / studio `0.1.167` live and Ready:
+`suite-89` **10/0** (every red now green), `suite-80` **15/15** incl. the three rewritten guards
+`T-S80-000b1/b2/b3`, API `--group eval` **5 suites 0 failed**, Vitest **536**, `tsc` clean, `--audit`
+clean.
+
+**NOT DONE in this slice — carried, not hidden:**
+
+- **not-yet-wired (debt) — the Playwright journey (`T015`) was not written.** DoD rule 1 wants a browser
+  spec driving `/admin/publish-requests` and asserting the verdict + provenance survive a reload. The API
+  layer (`suite-89`) proves the backend and 7 Vitest cases prove the rendering, but **no test drives the
+  real screen**, which is exactly the gap this repo's DoD exists to close. Highest-priority follow-up.
+- **not-yet-wired (debt) — checkpoint scripts `CP1a`/`CP2a`/`CP3a`** from `docs/plan/eval-slice0/tasks.md`
+  were not written. Their assertions were executed by hand this session (served-tag check, no-orphan
+  greps, blast-radius sweep) but are not reproducible by anyone else.
+- **deferred (intentional) — Decision 33 option B, team-scoped eval reads.** Unchanged and still open:
+  an approver reviewing someone else's agent sees an empty eval history. Do not let this close silently.
+
 **Found during implementation, not during design** — recorded because each is a live literal or a guard
 weakness that outlives this slice:
 

@@ -962,3 +962,69 @@ describe("DatasetsPage — webhook item editor (Eval v2 E-4)", () => {
     expect(mock(createDataset).mock.calls[0][0].items[0]).not.toHaveProperty("injection_probe");
   });
 });
+
+// ---------------------------------------------------------------------------
+// The run status dot is a VERDICT, so it must use the run's OWN threshold.
+// This dot hardcoded `>= 0.7` until Slice 0, so a 0.85 run on a 0.9-threshold
+// dataset rendered GREEN while the publish gate refused it — the UI contradicting
+// the product it reports on. `pass_threshold` was already on the wire (EvalRun,
+// resolved server-side), so nothing was missing except someone noticing the literal.
+// Decision 32; regression for docs/bugs/publish-queue-shows-wrong-version-eval.md.
+// ---------------------------------------------------------------------------
+describe("DatasetsPage — the run dot uses the run's own threshold", () => {
+  const dataset = {
+    id: "ds-1",
+    name: "regression-set",
+    mode: "reactive",
+    schema_version: 1,
+    items: [],
+    owner_user_id: "u1",
+    created_at: "2026-07-27T10:00:00Z",
+    updated_at: "2026-07-27T10:00:00Z",
+  };
+
+  const run = (over: Record<string, unknown>) => ({
+    id: "run-1",
+    user_id: "u1",
+    dataset_id: "ds-1",
+    agent_name: "refund-agent",
+    agent_version_id: "v-1",
+    workflow_id: null,
+    workflow_version_id: null,
+    status: "completed",
+    total_items: 1,
+    passed_count: 1,
+    failed_count: 0,
+    overall_score: 0.85,
+    // ALWAYS give the fixture its real threshold: E-4's D9 shipped mocks modelling
+    // a response the API never sends, and five tests broke the moment the page read
+    // the real field.
+    pass_threshold: 0.7,
+    started_at: null,
+    completed_at: "2026-07-27T10:05:00Z",
+    created_at: "2026-07-27T10:00:00Z",
+    ...over,
+  });
+
+  const renderWith = async (passThreshold: number) => {
+    mock(listDatasets).mockResolvedValue([dataset]);
+    mock(listEvalRuns).mockResolvedValue([run({ pass_threshold: passThreshold })]);
+    mock(listAllDeployments).mockResolvedValue([]);
+    mock(listAllWorkflowDeployments).mockResolvedValue([]);
+    renderWithProviders(<DatasetsPage />);
+    await waitFor(() => expect(screen.getByText("regression-set")).toBeInTheDocument());
+  };
+
+  it("renders the dot GREEN for 0.85 when the run's threshold was 0.7", async () => {
+    await renderWith(0.7);
+    await waitFor(() =>
+      expect(document.querySelector(".bg-green-500")).toBeTruthy(),
+    );
+  });
+
+  it("renders the SAME 0.85 amber when the run's threshold was 0.9", async () => {
+    await renderWith(0.9);
+    await waitFor(() => expect(document.querySelector(".bg-amber-500")).toBeTruthy());
+    expect(document.querySelector(".bg-green-500")).toBeNull();
+  });
+});
