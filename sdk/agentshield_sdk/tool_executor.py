@@ -100,6 +100,47 @@ def _annotations_from_params(params: list[inspect.Parameter]) -> dict[str, Any]:
     }
 
 
+def _render_http_body(template: str, variables: dict) -> tuple[Any, bool]:
+    """Render an HTTP tool body_template with ``{{var}}`` substitution.
+
+    Returns ``(body, is_json)``. For a JSON template the STRUCTURE-SAFE path is
+    taken: the template is parsed ONCE, then ``{{var}}`` placeholders are
+    substituted inside the string *leaves* with real values — so a value that
+    contains a quote, backslash or newline (e.g. an email body) can no longer
+    break the surrounding JSON. Falls back to the legacy substitute-then-parse
+    for non-JSON templates or templates whose placeholders sit outside quotes
+    (e.g. a numeric ``{"count": {{n}}}``), preserving old behaviour.
+    """
+    def _sub_str(s: str) -> str:
+        return re.sub(
+            r"\{\{(\w+)\}\}",
+            lambda m: str(variables.get(m.group(1), m.group(0))),
+            s,
+        )
+
+    # Structure-safe path: the TEMPLATE itself is valid JSON (placeholders live
+    # inside quoted string values), so parse then substitute in the leaves.
+    try:
+        parsed = json.loads(template)
+    except (json.JSONDecodeError, TypeError):
+        substituted = _sub_str(template)
+        try:
+            return json.loads(substituted), True
+        except json.JSONDecodeError:
+            return substituted, False
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, str):
+            return _sub_str(node)
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        return node
+
+    return _walk(parsed), True
+
+
 class HttpToolExecutor:
     """Executes an HTTP tool by calling its registered endpoint."""
 
@@ -151,11 +192,6 @@ class HttpToolExecutor:
         async def http_tool_fn(**kwargs: str) -> str:
             """Call the platform-registered HTTP tool endpoint."""
             url = executor._substitute_vars(executor.url, kwargs)
-            body = (
-                executor._substitute_vars(executor.body_template, kwargs)
-                if executor.body_template
-                else None
-            )
 
             resolved_headers = {
                 k: executor._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
@@ -165,10 +201,11 @@ class HttpToolExecutor:
             timeout = executor.timeout_ms / 1000.0
             async with httpx.AsyncClient(timeout=timeout) as client:
                 req_kwargs: dict[str, Any] = {"headers": resolved_headers}
-                if body:
-                    try:
-                        req_kwargs["json"] = json.loads(body)
-                    except json.JSONDecodeError:
+                if executor.body_template:
+                    body, is_json = _render_http_body(executor.body_template, kwargs)
+                    if is_json:
+                        req_kwargs["json"] = body
+                    else:
                         req_kwargs["content"] = body.encode()
 
                 http_fn = getattr(client, executor.method.lower())

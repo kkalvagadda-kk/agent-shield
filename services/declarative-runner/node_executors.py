@@ -82,6 +82,47 @@ def _mcp_params_from_schema(input_schema: Any) -> list[inspect.Parameter]:
 # HttpToolNodeExecutor
 # ---------------------------------------------------------------------------
 
+def _render_http_body(template: str, variables: dict) -> tuple[Any, bool]:
+    """Render an HTTP tool body_template with ``{{var}}`` substitution.
+
+    Returns ``(body, is_json)``. For a JSON template the STRUCTURE-SAFE path is
+    taken: the template is parsed ONCE, then ``{{var}}`` placeholders are
+    substituted inside the string *leaves* with real values — so a value that
+    contains a quote, backslash or newline (e.g. an email body) can no longer
+    break the surrounding JSON. Falls back to the legacy substitute-then-parse
+    for non-JSON templates or placeholders outside quotes (e.g. ``{"n": {{n}}}``).
+
+    Kept byte-identical to the SDK's ``tool_executor._render_http_body`` — the two
+    services are separate images and already duplicate ``_substitute_vars``.
+    """
+    def _sub_str(s: str) -> str:
+        return re.sub(
+            r"\{\{(\w+)\}\}",
+            lambda m: str(variables.get(m.group(1), m.group(0))),
+            s,
+        )
+
+    try:
+        parsed = json.loads(template)
+    except (json.JSONDecodeError, TypeError):
+        substituted = _sub_str(template)
+        try:
+            return json.loads(substituted), True
+        except json.JSONDecodeError:
+            return substituted, False
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, str):
+            return _sub_str(node)
+        if isinstance(node, dict):
+            return {k: _walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(x) for x in node]
+        return node
+
+    return _walk(parsed), True
+
+
 class HttpToolNodeExecutor:
     """Makes an httpx HTTP call with {{variable}} substitution in URL/body.
 
@@ -141,7 +182,6 @@ class HttpToolNodeExecutor:
         """
         variables = dict(state)  # include all state fields as substitution context
         endpoint = self._substitute_vars(self.endpoint, variables)
-        body = self._substitute_vars(self.body_template, variables) if self.body_template else None
 
         resolved_headers = {
             k: self._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
@@ -150,10 +190,11 @@ class HttpToolNodeExecutor:
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             request_kwargs: dict[str, Any] = {"headers": resolved_headers}
-            if body:
-                try:
-                    request_kwargs["json"] = json.loads(body)
-                except json.JSONDecodeError:
+            if self.body_template:
+                body, is_json = _render_http_body(self.body_template, variables)
+                if is_json:
+                    request_kwargs["json"] = body
+                else:
                     request_kwargs["content"] = body.encode()
 
             http_fn = getattr(client, self.method.lower())
@@ -197,7 +238,6 @@ class HttpToolNodeExecutor:
         async def http_tool_fn(**kwargs: str) -> str:
             """Call the configured HTTP endpoint."""
             url = executor._substitute_vars(executor.endpoint, kwargs)
-            body = executor._substitute_vars(executor.body_template, kwargs) if executor.body_template else None
 
             resolved_headers = {
                 k: executor._substitute_vars(v, dict(os.environ)) if "{{" in str(v) else v
@@ -206,10 +246,11 @@ class HttpToolNodeExecutor:
 
             async with httpx.AsyncClient(timeout=10.0) as client:
                 req_kwargs: dict[str, Any] = {"headers": resolved_headers}
-                if body:
-                    try:
-                        req_kwargs["json"] = json.loads(body)
-                    except json.JSONDecodeError:
+                if executor.body_template:
+                    body, is_json = _render_http_body(executor.body_template, kwargs)
+                    if is_json:
+                        req_kwargs["json"] = body
+                    else:
                         req_kwargs["content"] = body.encode()
                 elif kwargs and executor.method in ("POST", "PUT", "PATCH"):
                     # Schema-driven tool with no {{body_template}}: send the structured
