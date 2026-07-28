@@ -1126,6 +1126,23 @@ class PublishRequestResponse(BaseModel):
     source_version_id: Optional[uuid.UUID] = None
     last_eval_score: Optional[float] = None
     last_eval_run_id: Optional[uuid.UUID] = None
+    # THE bar that run had to clear — resolved server-side by
+    # `eval_runner.effective_pass_threshold`, never re-derived by the client.
+    # Without it this response was a score with no verdict rule, so
+    # AdminPublishRequestsPage rendered it against a hardcoded 0.7 and a 0.85 run
+    # on a 0.9-threshold dataset showed GREEN while the gate refused to publish.
+    # Nullable because a request may legitimately have NO eval — and
+    # `verdictOf(score, null)` is "unknown", never "pass" (fail-closed).
+    last_eval_pass_threshold: Optional[float] = None
+    # WHERE the score came from. A score alone cannot distinguish "this version's
+    # eval" from "some other version's", and those demand different reviewer
+    # behaviour: the first is evidence, the second is a warning. Collapsing them —
+    # or falling back silently — recreates the bug this field exists to kill,
+    # only quieter. See docs/decisions.md Decision 32.
+    #   version      — the eval belongs to `source_version_id`
+    #   agent_latest — request pins NO version; this is the agent's latest run
+    #   none         — no eval resolved; score/run/threshold are all null
+    eval_source: Literal["version", "agent_latest", "none"] = "none"
     asset_name: Optional[str] = None
     asset_team: Optional[str] = None
 

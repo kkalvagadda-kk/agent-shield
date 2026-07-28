@@ -717,7 +717,7 @@ registry-api:
     #   0072 off parent 0071, and the live DB is stamped 0074 from the MCP chain, so
     #   main's unapplied migration is the one that renumbers. Same resolution as the
     #   webhook collision in ec48337 — never renumber a chain that is already applied.
-    tag: "0.2.233"
+    tag: "0.2.234"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1125,7 +1125,7 @@ studio:
     #   nothing on it is selectable, and its five columns are the point.
     # 0.1.166: every tool-listing surface pages the full catalog (listAllTools).
     #   ToolsPage still used the 100-default and hid 7 of 107 tools with no error.
-    tag: "0.1.166"
+    tag: "0.1.167"
     pullPolicy: IfNotPresent
 
   service:

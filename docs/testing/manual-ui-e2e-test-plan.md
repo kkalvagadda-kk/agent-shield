@@ -59,14 +59,40 @@ only incidentally, by failing to find a tool it had just created. `CredentialsPa
 three now page the full catalog (studio **0.1.166**); the only surviving `listTools(` references are
 the pager's own call and a comment. Live confirmation: `total=107, one-page@100=100`.
 
-## Eval UX — Slice 0 / Wave 1 design round (arch-design) — 2026-07-27
+## Eval UX — Slice 0 IMPLEMENTED — 2026-07-27 · registry-api 0.2.234 / studio 0.1.167
 
-Design decisions locked as **Decision 32** (verdict single-owner + `eval_source` provenance) and
-**Decision 33** (deny-by-default reads). Plan: `docs/design/eval-ux-enrichment.md`. Ledger:
-`docs/design/eval-state-of-play.md`. **Nothing implemented yet** — these are the gaps the design round
-opened, recorded before any code moves.
+Decisions **32** (verdict single-owner + `eval_source` provenance) and **33** (deny-by-default reads).
+Plan + tasks: `docs/plan/eval-slice0/`. Ledger: `docs/design/eval-state-of-play.md`.
+Postmortems: `docs/bugs/publish-queue-shows-wrong-version-eval.md`,
+`docs/bugs/unauthenticated-full-table-read-eval-runs-datasets.md`.
 
-- **not-yet-wired (debt) — SECURITY: unauthenticated full-table read on two endpoints.**
+**Both defects were reproduced RED before any fix** (DoD rule 7). `T-S89-001` returned v1's score for a
+request pinning v2; `T-S89-005/006` returned **60 eval runs and 120 datasets to an anonymous caller**.
+
+**Found during implementation, not during design** — recorded because each is a live literal or a guard
+weakness that outlives this slice:
+
+- **not-yet-wired (debt) — a FOURTH `scoreColor` in `ObservabilityTracesPage.tsx:22`**, hardcoding
+  `0.8`/`0.5` over a trace's `judge_score`. Deliberately **excluded** from the single-owner guard with a
+  written reason: it takes no threshold, and a trace has no `pass_threshold` to grade against, so folding
+  it into `lib/evalVerdict` would mean inventing one. It is a different rule in a different domain — but
+  it is still an unowned literal, and nobody swept for it before the discovering guard existed.
+- **fixed here — the `suite-80` comment stripper could not strip multi-line comments.** The original
+  `sed -E 's:/\*.*\*/::'` works line-at-a-time, so a JSX block comment spanning lines survived and the
+  guard flagged the very comment *explaining* the bug — precisely the failure its own comment warned
+  about ("teaches the next dev to delete the explanation to get green"). Now `perl -0pe` over the whole
+  file. Pre-existing; exposed by this change.
+- **deferred (intentional) — `AdminPublishRequestsPage.tsx:129` header cells have no React `key`.**
+  Pre-existing, surfaced by the new Vitest. Not fixed here — unrelated to the verdict work, and silently
+  widening a slice is how blast radius gets lost.
+- **not-yet-wired (debt) — the rewritten guard cannot catch the version-join bug.** `T-S80-000b1/b2/b3`
+  guard *literals* and *single ownership*. A correct threshold rendered against the wrong run's score
+  passes every grep. Only `T-S89-001..004` at the API layer catches that. Do not read a green
+  `T-S80-000b` as coverage of this bug.
+
+**Original design-round gaps, carried forward:**
+
+- **RESOLVED — SECURITY: unauthenticated full-table read on two endpoints.**
   `GET /api/v1/playground/eval-runs` (`routers/eval_runner.py:471`) and `GET /api/v1/playground/datasets`
   (`routers/datasets.py:72`) filter inside `if caller:` with **no `else:`**. registry-api installs no
   global auth middleware (`main.py:176` = CORS + trace-ID only) and both routes use `get_optional_user`,

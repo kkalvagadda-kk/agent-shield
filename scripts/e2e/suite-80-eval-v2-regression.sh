@@ -152,25 +152,97 @@ else
 fi
 
 # (b) The Studio half — REPORTED, never silently skipped. Owned by WS-6.
-if [ -f "studio/src/pages/EvalResultsPage.tsx" ]; then
+#
+# This guard used to name ONE file: studio/src/pages/EvalResultsPage.tsx — the file
+# that had ALREADY been fixed (7b3e3fc) and carried zero literals — while its failure
+# message claimed to cover "the Studio". It was green over a live bug:
+# AdminPublishRequestsPage.tsx and DatasetsPage.tsx both still hardcoded 0.7, and a
+# reviewer approved releases on the first one. Naming a file is how a guard rots; the
+# scope must be DISCOVERED so a NEW offender fails it instead of being invisible.
+#
+# What this CANNOT catch, stated plainly so nobody assumes otherwise: a *correct*
+# threshold rendered against the *wrong run's* score passes every grep here. That is
+# the version-join half of the same bug, and it is asserted separately by
+# suite-89 T-S89-001..004 at the API layer.
+# Test files are EXCLUDED: a fixture legitimately carries `pass_threshold: 0.9` and
+# `overall_score: 0.85` — that is the point of the one-fixture-two-thresholds test.
+# Including them would fail this gate forever and teach the next dev to weaken it.
+SCOPE=$(grep -rl "pass_threshold\|overall_score" studio/src/pages studio/src/components 2>/dev/null \
+        | grep -v "\.test\.tsx$" || true)
+if [ -z "$SCOPE" ]; then
+  bfail "T-S80-000b1 no Studio files mention pass_threshold/overall_score — scope discovery broke"
+else
   # Strip comments before grepping — the SAME false-positive class this suite's sibling
   # `check-suite-guards.sh` already fixed (a fake suite passed on a `# T-S99-999` in a
   # header comment). Here it points the other way: a COMMENT explaining the bug that was
   # fixed ("used to hardcode >= 0.7") would fail the gate forever, which teaches the next
   # dev to delete the explanation to get green. A gate must read CODE, not prose.
-  n_ui=$(sed -E 's://.*::; s:/\*.*\*/::' studio/src/pages/EvalResultsPage.tsx \
-         | grep -c "0\.7" || true)
-  if [ "$n_ui" -eq 0 ]; then
-    bpass "T-S80-000b the Studio no longer re-declares the publish threshold"
+  offenders=""
+  n_files=0
+  for f in $SCOPE; do
+    n_files=$((n_files + 1))
+    # Strip comments with perl -0 (whole-file slurp), NOT sed: a JSX block comment
+    # spans lines, and a line-at-a-time `s:/\*.*\*/::` only strips it when both
+    # delimiters sit on one line. The old single-line stripper therefore flagged the
+    # very comment that EXPLAINS this bug — the failure mode its own comment warned
+    # about ("a comment explaining the bug would fail the gate forever, which teaches
+    # the next dev to delete the explanation to get green").
+    hits=$(perl -0pe 's{/\*.*?\*/}{}gs; s{//.*$}{}gm' "$f" | grep -cE "0\.7|0\.4" || true)
+    if [ "$hits" -ne 0 ]; then
+      offenders="${offenders}          $f ($hits)
+$(perl -0pe 's{/\*.*?\*/}{}gs; s{//.*$}{}gm' "$f" | grep -nE "0\.7|0\.4" | sed 's/^/            /')
+"
+    fi
+  done
+  if [ -z "$offenders" ]; then
+    bpass "T-S80-000b1 no threshold literal in any of the $n_files Studio files that render a score"
   else
-    bfail "T-S80-000b the Studio still hardcodes the threshold in $n_ui place(s)" \
-          "$(grep -n "0\.7" studio/src/pages/EvalResultsPage.tsx | sed 's/^/          /')
-          The UI renders its OWN verdict + colour band against a literal 0.7, so a run with
-          pass_threshold=0.9 scoring 0.85 renders 'passed' while the gate refuses to publish.
-          OWNED BY WS-6 (studio/**) — tracked in the E-6 Gap Ledger, not silently green."
+    bfail "T-S80-000b1 a Studio file re-declares the publish threshold" \
+          "$offenders
+          A literal verdict rule means a run with pass_threshold=0.9 scoring 0.85 renders
+          'passed' while the gate refuses to publish. Import from lib/evalVerdict instead.
+          Scope is DISCOVERED (grep -rl pass_threshold/overall_score), so a new page is
+          covered the day it is written — this guard used to name one already-clean file."
   fi
-else
-  bfail "T-S80-000b EvalResultsPage.tsx not found — cannot assert the UI's threshold"
+
+  # The EVAL VERDICT rule must have exactly ONE definition. Two implementations that
+  # agree today are how it reached four copies across three services in the first place.
+  #
+  # ObservabilityTracesPage.tsx is EXCLUDED, deliberately and with a reason: its
+  # `scoreColor(score)` takes NO threshold — it is a fixed 0.8/0.5 heat scale over a
+  # trace's `judge_score`, and a trace has no `pass_threshold` to grade against. It is a
+  # different rule in a different domain, not a fifth copy of this one, and folding it in
+  # would mean inventing a threshold that does not exist. Its bare literals are recorded
+  # in the gap ledger instead — nobody approves a release on a trace heat colour.
+  defs=$(grep -rlE "^(export )?(function|const) (scoreColor|verdictOf)\b" studio/src \
+         | grep -v "ObservabilityTracesPage.tsx" || true)
+  n_def=$(echo "$defs" | grep -c . || true)
+  if [ "$n_def" -eq 1 ] && [ "$defs" = "studio/src/lib/evalVerdict.ts" ]; then
+    bpass "T-S80-000b2 the eval verdict rule is defined exactly once, in lib/evalVerdict.ts"
+  else
+    bfail "T-S80-000b2 the eval verdict rule is not single-owner" \
+          "definitions=$n_def
+$(echo "$defs" | sed 's/^/            /')
+          Expected exactly one: studio/src/lib/evalVerdict.ts"
+  fi
+
+  # Every discovered file that renders a verdict must IMPORT the rule rather than
+  # reimplement it. A file that mentions overall_score but imports nothing is either
+  # display-only or about to grow a fifth copy.
+  missing=""
+  for f in $SCOPE; do
+    if grep -qE "scoreColor|verdictOf|passesGate|thresholdLabel" "$f" \
+       && ! grep -q "lib/evalVerdict" "$f"; then
+      missing="${missing}          $f
+"
+    fi
+  done
+  if [ -z "$missing" ]; then
+    bpass "T-S80-000b3 every Studio file that renders a verdict imports lib/evalVerdict"
+  else
+    bfail "T-S80-000b3 a file uses verdict vocabulary without importing the single owner" \
+          "$missing"
+  fi
 fi
 
 echo ""

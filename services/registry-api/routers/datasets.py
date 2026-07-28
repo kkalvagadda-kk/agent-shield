@@ -17,6 +17,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +72,20 @@ async def list_datasets(
     q = select(PlaygroundDataset).order_by(PlaygroundDataset.created_at.desc())
     if caller:
         q = q.where(PlaygroundDataset.owner_user_id == caller)
+    else:
+        # DENY-BY-DEFAULT — see the twin comment in `routers/eval_runner.py`.
+        # This route used `get_optional_user` (returns None, never raises) with the
+        # ownership filter inside `if caller:` and no else, and registry-api has no
+        # global auth middleware. An anonymous caller therefore received EVERY
+        # playground dataset — and datasets carry test inputs and expected outputs,
+        # which is frequently real business logic.
+        #
+        # Fixed here in the same change as eval-runs on purpose: patching only the
+        # route that happened to be under edit would have left this one standing as
+        # the next instance of a class `agents.py` already documented.
+        #
+        # Regression: suite-89 T-S89-006.
+        q = q.where(sa.false())
     result = await db.execute(q)
     return [PlaygroundDatasetResponse.model_validate(d) for d in result.scalars().all()]
 

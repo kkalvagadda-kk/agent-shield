@@ -23,6 +23,7 @@ import {
   type WorkflowDatasetItem,
 } from "../api/playgroundApi";
 import { listAllDeployments, listAllWorkflowDeployments } from "../api/registryApi";
+import { passesGate } from "../lib/evalVerdict";
 
 export default function DatasetsPage() {
   const qc = useQueryClient();
@@ -1753,7 +1754,12 @@ function DatasetEvalRuns({ runs, navigate }: { runs: EvalRun[]; navigate: (path:
           className="flex items-center gap-1.5 text-xs hover:bg-slate-100 rounded px-1 py-0.5 -mx-1 w-full text-left"
         >
           <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${
-            r.status === "completed" && r.overall_score != null && r.overall_score >= 0.7
+            // The run's OWN threshold, never a literal. This dot used to read
+            // `>= 0.7`, so a 0.85 run on a 0.9-threshold dataset showed GREEN while
+            // the publish gate refused it. `pass_threshold` is already on the wire
+            // (EvalRun, resolved server-side), so this needed no plumbing — only
+            // someone to notice the literal. Decision 32.
+            r.status === "completed" && passesGate(r.overall_score, r.pass_threshold)
               ? "bg-green-500"
               : r.status === "completed"
                 ? "bg-amber-500"

@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -470,6 +471,25 @@ async def list_eval_runs(
     q = select(EvalRun).order_by(EvalRun.created_at.desc())
     if caller:
         q = q.where(EvalRun.user_id == caller)
+    else:
+        # DENY-BY-DEFAULT. Three individually-reasonable choices compose into a
+        # full-table read for anyone with no identity: this route uses
+        # `get_optional_user` (returns None rather than raising 401), registry-api
+        # installs NO global auth middleware (`main.py` adds only CORS + trace-ID),
+        # and the ownership filter used to live inside `if caller:` with no else.
+        # So "no JWT and no X-User-Sub" meant "no filter" — every eval run on the
+        # platform, to an anonymous caller.
+        #
+        # `agents.py:167-176` fixed exactly this class and left the note:
+        # "previously a missing caller skipped the filter entirely and leaked every
+        # agent." `tools.py`, `skills.py` and `composite_workflows.py` carry the same
+        # branch. This route and `datasets.py` were the two that did not — they are
+        # the only ones with no `publish_status`, so that fix's "published to all,
+        # private to creator" template did not map and they were passed over.
+        #
+        # Regression: suite-89 T-S89-005 (and T-S89-007, which proves an authenticated
+        # caller still sees their own rows — the over-correction guard).
+        q = q.where(sa.false())
     result = await db.execute(q)
     return [eval_run_response(r) for r in result.scalars().all()]
 

@@ -137,6 +137,7 @@ api|mcp|suite-85-mcp-phase2.sh|MCP Phase 2 — health loop, list_changed re-sync
 api|mcp,governance|suite-86-credential-provider.sh|Pluggable CredentialProvider (Decision 31)
 api|mcp,governance|suite-87-mcp-oauth.sh|MCP external OAuth 2.1 (Phase 4 WS-2)
 api|tools|suite-88-tool-description-metadata.sh|Tool description (multi-line) + picker tile metadata
+api|eval,rbac|suite-89-publish-queue-verdict.sh|Publish-queue verdict per pinned version + deny-by-default reads
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes

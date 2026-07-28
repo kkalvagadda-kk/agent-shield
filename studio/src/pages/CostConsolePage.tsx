@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { DollarSign, TrendingUp, Cpu, Bot, Coins } from "lucide-react";
 import { useState } from "react";
+import { StatCard } from "../components/shared/StatCard";
 import { getCosts, CostConsoleData } from "../api/observabilityApi";
 
 const PERIOD_OPTIONS = [
@@ -19,15 +20,7 @@ function fmtUsd(n: number | null | undefined, digits = 4): string {
   return `$${n.toFixed(digits)}`;
 }
 
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="bg-white border border-slate-200 rounded-lg p-4">
-      <p className="text-xs text-slate-500 uppercase tracking-wide">{label}</p>
-      <p className="text-2xl font-semibold text-slate-800 mt-1">{value}</p>
-      {sub && <p className="text-xs text-slate-400 mt-0.5">{sub}</p>}
-    </div>
-  );
-}
+// StatCard moved to components/shared/StatCard.tsx — this page was its donor.
 
 export default function CostConsolePage() {
   const [environment, setEnvironment] = useState<"production" | "sandbox">("production");

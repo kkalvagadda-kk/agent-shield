@@ -1116,6 +1116,15 @@ export interface PublishRequest {
   source_version_id: string | null;
   last_eval_score: number | null;
   last_eval_run_id: string | null;
+  /** The bar THAT RUN had to clear, resolved server-side. Render verdicts against
+   *  this, never a local literal — the queue used to grade every score against a
+   *  hardcoded 0.7. Nullable (unlike `EvalRun.pass_threshold`) because a request may
+   *  have no eval at all; `verdictOf(score, null)` is "unknown", never "pass". */
+  last_eval_pass_threshold: number | null;
+  /** Where the score came from. `agent_latest` means the request pins no version and
+   *  this is the agent's most recent run — evidence about something else, so the UI
+   *  must say so rather than render it as if it described this version. Decision 32. */
+  eval_source: "version" | "agent_latest" | "none";
   asset_name: string | null;
   asset_team: string | null;
 }

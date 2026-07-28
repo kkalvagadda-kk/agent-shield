@@ -3,6 +3,7 @@ import { CheckCircle, Loader2, RefreshCw, XCircle, FlaskConical } from "lucide-r
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { scoreColor, thresholdLabel } from "../lib/evalVerdict";
 import {
   approvePublishRequest,
   listPublishRequests,
@@ -160,20 +161,44 @@ export default function AdminPublishRequestsPage() {
                         {new Date(pr.submitted_at).toLocaleString()}
                       </td>
                       <td className="px-4 py-3">
+                        {/* The verdict a human approves a release on. Two things were
+                            wrong here and both are fixed by the SERVER, not by this
+                            markup: the score could belong to a DIFFERENT VERSION than
+                            the one being published (the eval was resolved by agent
+                            name alone), and it was graded against a hardcoded 0.7
+                            regardless of the threshold that run actually used.
+                            `eval_source` now says where the number came from, and
+                            `last_eval_pass_threshold` is the bar it had to clear.
+                            Decision 32. */}
                         {pr.last_eval_score != null ? (
-                          <button
-                            onClick={() => pr.last_eval_run_id && navigate(`/playground/eval-runs/${pr.last_eval_run_id}`)}
-                            className={`badge text-xs cursor-pointer ${
-                              pr.last_eval_score >= 0.7
-                                ? "bg-green-100 text-green-700"
-                                : pr.last_eval_score >= 0.4
-                                  ? "bg-amber-100 text-amber-700"
-                                  : "bg-red-100 text-red-700"
-                            }`}
-                          >
-                            <FlaskConical size={10} className="mr-0.5 inline" />
-                            {Math.round(pr.last_eval_score * 100)}%
-                          </button>
+                          <div className="flex flex-col gap-0.5">
+                            <button
+                              onClick={() => pr.last_eval_run_id && navigate(`/playground/eval-runs/${pr.last_eval_run_id}`)}
+                              className={`badge text-xs cursor-pointer ${scoreColor(
+                                pr.last_eval_score,
+                                pr.last_eval_pass_threshold,
+                              )}`}
+                              title={thresholdLabel(pr.last_eval_score, pr.last_eval_pass_threshold)}
+                            >
+                              <FlaskConical size={10} className="mr-0.5 inline" />
+                              {Math.round(pr.last_eval_score * 100)}%
+                            </button>
+                            {/* Why a good-looking score will not publish. */}
+                            <span className="text-[10px] text-slate-400" data-testid="eval-threshold-label">
+                              {thresholdLabel(pr.last_eval_score, pr.last_eval_pass_threshold)}
+                            </span>
+                            {pr.eval_source === "agent_latest" && (
+                              /* The score is real but it is not about THIS version.
+                                 Silently rendering it as if it were is the bug. */
+                              <span
+                                className="badge bg-amber-100 text-amber-700 text-[10px]"
+                                data-testid="eval-provenance-warning"
+                                title="This request pins no version, so the score shown is the agent's most recent eval — not an evaluation of what is being published."
+                              >
+                                from a different version
+                              </span>
+                            )}
+                          </div>
                         ) : (
                           <span className="badge bg-amber-50 text-amber-600 text-xs">No eval</span>
                         )}

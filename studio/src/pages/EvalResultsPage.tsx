@@ -31,6 +31,7 @@ import {
   type SideEffectDiff,
 } from "../api/playgroundApi";
 import { tokenizeArgsForDisplay } from "../lib/piiTokenize";
+import { scoreColor } from "../lib/evalVerdict";
 import {
   listMemory,
   patchVersion,
@@ -48,23 +49,13 @@ const STATUS_CHIP: Record<string, string> = {
   failed: "bg-red-100 text-red-700",
 };
 
-// The colour band is a VERDICT, so it uses the run's OWN threshold — never a literal.
-// Green = "this would publish", amber = "it would not". Hardcoded, a 0.85 run on a
-// 0.9-threshold dataset rendered GREEN while the gate refused it: the UI contradicted
-// the product it reports on.
+// `scoreColor` moved to `../lib/evalVerdict` — the single owner of the verdict
+// vocabulary, shared with AdminPublishRequestsPage and DatasetsPage, which each
+// carried their own hardcoded 0.7 ladder until Slice 0. The rule and the comment
+// explaining it live there now; this page is a consumer.
 //
-// `threshold` is REQUIRED and has NO local default. The API always resolves it
-// (`eval_run_response` fills pre-E-6 rows from the single platform default), so a
-// default here would just re-declare the threshold — which is exactly how it came to
-// exist four times across three services. If it is ever absent at runtime the
-// comparison yields false and we render the NEUTRAL band: fail-closed, never a
-// confident wrong verdict.
-function scoreColor(score: number | null, threshold: number): string {
-  if (score == null) return "";
-  if (!(score >= threshold * 0.6)) return "bg-red-50 text-red-700";
-  if (!(score >= threshold)) return "bg-amber-50 text-amber-700";
-  return "bg-green-50 text-green-700";
-}
+// Behaviour is unchanged, and EvalResultsPage.test.tsx passing UNMODIFIED after this
+// move is what proves it.
 
 // Eval v2 dimensions rendered per result. E-0 populates `response`; E-1 adds the
 // durable `trajectory` + `tool_call` scorers; E-2 `side_effect`; E-5 `member_path`;

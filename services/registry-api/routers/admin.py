@@ -28,6 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bundle_generator import generate_bundle_data
 from db import get_db
+# THE threshold resolution — imported, never re-implemented. It already handles the
+# pre-E-6 NULL rows, and its docstring is the postmortem for what happens when this
+# rule gets copied: "the threshold used to exist four times across three services...
+# they agreed, so nothing ever errored." A fifth copy here would be the same bug.
+from routers.eval_runner import effective_pass_threshold
 from models import (
     Agent, AgentVersion, ApprovalAuthority, AssetGrant, CompositeWorkflow,
     EvalRun, GrantAudit, PublishRequest, PublishedArtifact, PublishedVersion,
@@ -160,29 +165,85 @@ async def list_publish_requests(
         for row in (await db.execute(select(Skill.id, Skill.name, Skill.team).where(Skill.id.in_(ids_by_type["skill"])))).all():
             asset_name_map[row.id] = (row.name, row.team)
 
-    # Enrich with latest eval score per agent publish request
-    eval_map: dict[uuid.UUID, tuple[float | None, uuid.UUID | None]] = {}
-    agent_names = [name for aid, (name, _) in asset_name_map.items() if aid in (ids_by_type.get("agent") or [])]
-    if agent_names:
-        latest_eval_q = (
-            select(
-                EvalRun.agent_name,
-                EvalRun.overall_score,
-                EvalRun.id,
-            )
+    # ------------------------------------------------------------------
+    # Resolve each request's eval PER REQUEST, against the version it pins.
+    #
+    # This map used to be keyed by ASSET_ID and resolved by `agent_name` alone
+    # (`.order_by(agent_name, completed_at.desc()).distinct(agent_name)`), so
+    # `PublishRequest.source_version_id` was never read and EVERY pending request
+    # for one agent received the SAME latest eval. A reviewer approves a release on
+    # that number, which made it a correctness bug rather than a missing feature.
+    # Keying by request id is what makes per-request resolution expressible at all.
+    #
+    # Two batched queries, never per-request: this is an admin list view whose whole
+    # job is showing many rows, so an N+1 here is a page-load regression.
+    #
+    # Decision 32. Regression: suite-89 T-S89-001..004.
+    # ------------------------------------------------------------------
+    eval_map: dict[
+        uuid.UUID, tuple[float | None, uuid.UUID | None, float | None, str]
+    ] = {}
+    agent_ids = set(ids_by_type.get("agent") or [])
+    agent_requests = [r for r in rows if r.asset_id in agent_ids]
+
+    pinned = {r.id: r.source_version_id for r in agent_requests if r.source_version_id}
+    unpinned = [r for r in agent_requests if not r.source_version_id]
+
+    # (1) Version-pinned requests — the common case, and the one that was wrong.
+    if pinned:
+        version_rows = (await db.execute(
+            select(EvalRun)
             .where(
-                EvalRun.agent_name.in_(agent_names),
+                EvalRun.agent_version_id.in_(set(pinned.values())),
                 EvalRun.status == "completed",
             )
-            .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
-            .distinct(EvalRun.agent_name)
-        )
-        eval_rows = (await db.execute(latest_eval_q)).all()
-        name_to_eval = {row.agent_name: (row.overall_score, row.id) for row in eval_rows}
-        for aid in ids_by_type.get("agent", []):
-            aname = asset_name_map.get(aid, (None, None))[0]
-            if aname and aname in name_to_eval:
-                eval_map[aid] = name_to_eval[aname]
+            .order_by(EvalRun.agent_version_id, EvalRun.completed_at.desc())
+            .distinct(EvalRun.agent_version_id)
+        )).scalars().all()
+        by_version = {run.agent_version_id: run for run in version_rows}
+        for req_id, version_id in pinned.items():
+            run = by_version.get(version_id)
+            if run is not None:
+                eval_map[req_id] = (
+                    run.overall_score,
+                    run.id,
+                    effective_pass_threshold(run),
+                    "version",
+                )
+            # else: left out of the map entirely -> eval_source stays "none".
+            # A pinned version with no eval must NEVER borrow another version's
+            # score. That silent borrow IS the bug.
+
+    # (2) Legacy requests that pin no version. `POST /agents/{name}/publish` always
+    #     pins one, so this covers rows written before that landed. The fallback is
+    #     LABELLED `agent_latest` rather than silent, so the reviewer can see that
+    #     the number is not evidence about the thing being published.
+    if unpinned:
+        names = [
+            asset_name_map.get(r.asset_id, (None, None))[0] for r in unpinned
+        ]
+        names = [n for n in names if n]
+        if names:
+            latest_rows = (await db.execute(
+                select(EvalRun)
+                .where(
+                    EvalRun.agent_name.in_(names),
+                    EvalRun.status == "completed",
+                )
+                .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
+                .distinct(EvalRun.agent_name)
+            )).scalars().all()
+            by_name = {run.agent_name: run for run in latest_rows}
+            for r in unpinned:
+                aname = asset_name_map.get(r.asset_id, (None, None))[0]
+                run = by_name.get(aname) if aname else None
+                if run is not None:
+                    eval_map[r.id] = (
+                        run.overall_score,
+                        run.id,
+                        effective_pass_threshold(run),
+                        "agent_latest",
+                    )
 
     items: list[PublishRequestResponse] = []
     for r in rows:
@@ -190,9 +251,13 @@ async def list_publish_requests(
         if r.asset_id in asset_name_map:
             resp.asset_name = asset_name_map[r.asset_id][0]
             resp.asset_team = asset_name_map[r.asset_id][1]
-        if r.asset_id in eval_map:
-            resp.last_eval_score = eval_map[r.asset_id][0]
-            resp.last_eval_run_id = eval_map[r.asset_id][1]
+        # Keyed by REQUEST id, not asset id — see the resolution block above.
+        if r.id in eval_map:
+            score, run_id, threshold, source = eval_map[r.id]
+            resp.last_eval_score = score
+            resp.last_eval_run_id = run_id
+            resp.last_eval_pass_threshold = threshold
+            resp.eval_source = source
         items.append(resp)
 
     return PaginatedResponse[PublishRequestResponse](
