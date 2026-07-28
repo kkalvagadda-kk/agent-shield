@@ -182,3 +182,4 @@ browser|eval,execution|e2e/eval-v2-webhook.spec.ts|Eval v2 webhook
 browser|eval,workflow|e2e/eval-v2-workflow.spec.ts|Eval v2 workflow
 browser|debug|e2e/zz-debug.spec.ts|Scratch — debug probe
 browser|debug|e2e/zzprobe.spec.ts|Scratch — probe
+browser|eval|e2e/eval-verdict-publish-queue.spec.ts|Publish-queue verdict against the run's own threshold + reload

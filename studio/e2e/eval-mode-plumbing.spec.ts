@@ -110,9 +110,14 @@ test.describe("eval v2 E-0 — mode-aware datasets + dimension render", () => {
 
     // We navigate to the EvalResultsPage for the new run.
     await page.waitForURL(/\/playground\/eval-runs\//);
-    await expect(
-      page.getByRole("heading", { name: /Eval/i }).first()
-    ).toBeVisible();
+    // Assert on what the page ACTUALLY renders. This used to look for a heading
+    // matching /Eval/i; EvalResultsPage's only <h1> is the AGENT NAME
+    // (EvalResultsPage.tsx:225), so that assertion could never pass here. It went
+    // unnoticed because this line is only reached when a running sandbox
+    // deployment exists — every earlier run took the "skip the launch loudly"
+    // branch above, so the assertion was never executed. The "Run ID:" line is
+    // stable, is unique to this page, and proves we actually landed on it.
+    await expect(page.getByText(/Run ID:/)).toBeVisible({ timeout: 15_000 });
 
     // The results table renders the Response (composite) dimension column header.
     // (The per-row score only fills once the run completes — a live-pod boundary.)
