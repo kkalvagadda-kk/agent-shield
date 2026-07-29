@@ -178,6 +178,22 @@ been rewritten to say so, with an explicit instruction not to restore the old me
   confused.** `production_deployment_id` / `sandbox_deployment_id` cost an entire wrong fix
   direction before the constraint surfaced.
 
+### Process gap found while shipping this
+
+Image tags live in **three** files, not two:
+
+| File | Drives |
+|---|---|
+| `scripts/deploy-cpe2e.sh` | the local/kind build |
+| `charts/agentshield/values.yaml` | the helm deploy (both clusters) |
+| **`scripts/deploy-eks.sh`** (L67, L71) | the **EKS** build + push |
+
+`CLAUDE.md`'s Image Version Bumps checklist names only the first two. `deploy-eks.sh`'s own
+comments say "MUST match values.yaml", so the requirement is known there but not in the checklist
+a contributor reads. Bumping only the documented two leaves the EKS build pushing the *old* tag
+while the chart pulls the new one — an ImagePullBackOff, which `deploy-eks.sh` warns is "not an
+error message". Worth folding into the CLAUDE.md checklist.
+
 ## Not fixed here (see the gap ledger)
 
 - The event-gateway still returns **202** to a webhook sender whose run is then refused. The failure
