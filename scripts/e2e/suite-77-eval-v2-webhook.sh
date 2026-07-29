@@ -485,7 +485,11 @@ def det(row):
 
 async def main():
     c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90, auth=BearerAuth())
-    gw = httpx.AsyncClient(timeout=30, auth=BearerAuth())
+    # NO auth=BearerAuth() here. This client talks to the EVENT GATEWAY, which
+    # authenticates a webhook by its own token/HMAC — and webhook_auth.presented_token()
+    # resolves X-Webhook-Token -> Authorization: Bearer -> URL path token IN THAT ORDER,
+    # so a Keycloak Bearer here is read AS the webhook token and shadows the real one.
+    gw = httpx.AsyncClient(timeout=30)
     ds_id = None
     ds_nh = None
     try:

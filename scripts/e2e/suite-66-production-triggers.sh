@@ -110,13 +110,26 @@ async def main():
         # WEBHOOK
         wh=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"webhook","name":"s66-hook"})).json()
         token=wh.get("token")
-        async with httpx.AsyncClient(timeout=30, auth=BearerAuth()) as gwc:
+        # NO auth=BearerAuth() here. This client talks to the EVENT GATEWAY, which
+        # authenticates a webhook by its own token/HMAC — and webhook_auth.presented_token()
+        # resolves X-Webhook-Token -> Authorization: Bearer -> URL path token IN THAT ORDER,
+        # so a Keycloak Bearer here is read AS the webhook token and shadows the real one.
+        async with httpx.AsyncClient(timeout=30) as gwc:
             fired=await gwc.post(f"{GW}/hooks/workflow/{WFN}/{token}", json={"message":"What is the capital of France?"})
         p,kids=await run_of(WFN,"webhook",40)
         out["T-S66-001 webhook_fires_prod_run"]= bool(fired.status_code in (200,202) and p and p.status=="completed" and p.context=="production" and len(kids)>=2 and all(k.status=="completed" for k in kids))
         # SCHEDULE (every minute) — delete immediately after firing once
         sch=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"schedule","name":"s66-sched","cron_expression":"* * * * *","input_payload":{"message":"What is 2+2?"}})).json()
-        p2,kids2=await run_of(WFN,"schedule",30)  # ~90s for reload+fire
+        # 80 polls x 3s = 240s. The old 30 (90s) was sized for "reload+fire" and
+        # under-counted twice: the scheduler's reload interval (up to 60s) and the
+        # cron minute boundary are INDEPENDENT waits, and the run then has to
+        # COMPLETE two member agents on top. Observed on a passing cluster:
+        #   14:27:30  scheduler registered the trigger
+        #   14:28:00  dispatched  -> already past a 90s window opened at ~14:26:40
+        # The result was `sched run=None`, which reads as "the scheduler never
+        # fired" when the scheduler had fired correctly and the test had stopped
+        # looking. Do not tighten this without re-doing that arithmetic.
+        p2,kids2=await run_of(WFN,"schedule",80)
         out["T-S66-002 scheduler_fires_prod_run"]= bool(p2 and p2.status=="completed" and p2.context=="production" and len(kids2)>=2 and all(k.status=="completed" for k in kids2))
         # CRITICAL: delete the every-minute schedule trigger so it stops firing
         try: await c.delete(f"/workflows/{wid}/triggers/{sch['id']}")
