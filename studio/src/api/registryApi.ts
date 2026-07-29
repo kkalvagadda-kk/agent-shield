@@ -1628,6 +1628,10 @@ export interface AgentHealth {
   last_run_status: string | null;
   next_fire_at: string | null;
   missed_fires: number | null;
+  // Why the badge is red, carried with the status that made it red. Without this
+  // the UI could show "Failing" and nothing else — which it did, directly above
+  // "Last Run: No runs yet".
+  last_error: string | null;
   // event-driven
   match_rate_24h: number | null;
   rejected_count_24h: number | null;
@@ -1635,6 +1639,27 @@ export interface AgentHealth {
 
 export const getAgentHealth = async (name: string): Promise<AgentHealth> => {
   const { data } = await http.get<AgentHealth>(`/agents/${name}/health`);
+  return data;
+};
+
+/**
+ * A schedule's own run history.
+ *
+ * Deliberately NOT `listDeploymentRuns`: every trigger-driven run has both
+ * deployment FK columns NULL, so a deployment-scoped read is always empty for a
+ * schedule, while the health badge reads across the whole agent — the two cards
+ * on the scheduled overview disagreed because they asked different questions.
+ * Keyed on `trigger_id`, both now answer from the same set.
+ */
+export const listTriggerRuns = async (
+  agentName: string,
+  triggerId: string,
+  params?: { limit?: number }
+): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>(
+    `/agents/${agentName}/triggers/${triggerId}/runs`,
+    { params }
+  );
   return data;
 };
 

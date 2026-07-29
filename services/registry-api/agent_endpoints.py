@@ -33,8 +33,26 @@ RULES:
     explicit identifiers — never rely on a default."
   * Production-only doors (`/internal/runs/start`, workflow-run dispatch) pass
     `environment="production"` EXPLICITLY. That is a statement, not a default.
+
+ADDRESS vs. ADMISSIBILITY (added after the trigger-dispatch bug):
+
+`agent_pod_base` answers "what is the address?" and nothing else. It will happily
+name a Service that was never created — which is exactly what happened at
+`routers/internal.py`, the last surviving instance of the eight-places problem
+above: it imported `team_namespace` from here but still hand-built
+`f"...{agent_name}-production..."`. Its admission check asked a DIFFERENT question
+("is ANY deployment running?", no environment filter), so a sandbox-only agent
+passed the door and DNS-failed. 1,197 scheduled runs died that way.
+
+`resolve_dispatch_target` is the fix: ONE call that answers both, deriving the
+address from the very row it validated. Two questions that must agree cannot be
+asked in two places. Use it for every dispatch to a deployed agent; use bare
+`agent_pod_base` only where the caller has already proven the deployment exists.
 """
 from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
 
 
 def team_namespace(team: str | None) -> str:
@@ -58,3 +76,81 @@ def agent_pod_base(agent_name: str, team: str | None, environment: str) -> str:
     callers then swallow — see the module docstring).
     """
     return f"http://{agent_name}-{environment}.{team_namespace(team)}.svc.cluster.local:8080"
+
+
+class DispatchTargetError(Exception):
+    """No dispatchable deployment in the requested environment.
+
+    Carries an OPERATOR-READABLE reason, because it is written straight onto the
+    failed run row and read in the UI. The old failure text was
+    `dispatch failed: [Errno -2] Name or service not known` — technically true and
+    operationally useless: it named the symptom (DNS) instead of the cause (the
+    agent was never deployed to production). Never let this message degrade back
+    into a transport error.
+    """
+
+
+@dataclass(frozen=True)
+class DispatchTarget:
+    """A validated dispatch destination: the address AND the row that justifies it.
+
+    `deployment_id` is the `deployments` row that was checked. Note it CANNOT be
+    written to `agent_runs.production_deployment_id` — that column FKs to
+    `production_deployments` (the published-artifact table), a different lifecycle
+    from `deployments` (the table with the `environment` column, which is what the
+    deploy-controller turns into a `{agent}-{environment}` Service). Two tables,
+    two meanings, one confusable name. Run history keys on `agent_runs.trigger_id`
+    instead — see `routers/triggers.py::list_trigger_runs`.
+    """
+    base_url: str
+    deployment_id: uuid.UUID
+    environment: str
+
+
+async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTarget:
+    """Resolve where a run for `agent` goes in `environment` — or refuse, with a reason.
+
+    THE point of this function is that admissibility and address are decided
+    together, from the same row. A caller cannot check one thing and dispatch to
+    another, because there is only one call and it returns both.
+
+    `environment` is required and explicit for the same reason it is on
+    `agent_pod_base`: a wrong default is invisible at the call site.
+
+    Raises `DispatchTargetError` when the environment has no running deployment.
+    The message names what IS deployed, so the operator's next action is obvious
+    ("deployed to sandbox, needs production") rather than a guess.
+    """
+    # Imported here, not at module top: this module is imported by low-level
+    # callers and must stay cheap; `models` pulls the whole ORM graph.
+    from sqlalchemy import select
+
+    from models import Deployment
+
+    rows = (await db.execute(
+        select(Deployment.id, Deployment.environment, Deployment.status)
+        .where(Deployment.agent_id == agent.id)
+        .order_by(Deployment.deployed_at.desc().nulls_last())
+    )).all()
+
+    for dep_id, env, status in rows:
+        if env == environment and status == "running":
+            return DispatchTarget(
+                base_url=agent_pod_base(agent.name, agent.team, env),
+                deployment_id=dep_id,
+                environment=env,
+            )
+
+    # Refuse with the diagnosis, not the symptom.
+    live = sorted({env for _i, env, status in rows if status == "running"})
+    if live:
+        detail = f"it is deployed to {', '.join(live)}"
+    elif rows:
+        detail = "none of its deployments are running"
+    else:
+        detail = "it has never been deployed"
+    raise DispatchTargetError(
+        f"agent '{agent.name}' has no running {environment} deployment — {detail}. "
+        f"Schedule and webhook triggers dispatch to {environment}; "
+        f"deploy the agent to {environment} (or publish it) before arming a trigger."
+    )

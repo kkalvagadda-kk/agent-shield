@@ -1902,6 +1902,13 @@ class AgentHealthResponse(BaseModel):
     last_run_status: str | None = None
     next_fire_at: datetime | None = None
     missed_fires: int | None = None
+    # WHY this field exists: `health` went red purely from `last_run_status ==
+    # 'failed'`, and the reason lived only on a run row the scheduled overview
+    # never queried — so the UI showed a "Failing" badge directly above "No runs
+    # yet" and offered no way to learn why. A badge that cannot explain itself at
+    # its own source sends the operator to kubectl. Carried alongside the status
+    # it justifies, so the two can never be rendered apart.
+    last_error: str | None = None
 
     # event-driven
     match_rate_24h: float | None = None

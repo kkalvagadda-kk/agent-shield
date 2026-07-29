@@ -142,6 +142,7 @@ api|health|suite-90-durable-trace-fallback.sh|Durable run_steps trace fallback w
 api|memory|suite-91-memory-save-recall-decouple.sh|Decouple conversation-save from memory_enabled (save always; recall gated)
 api|hitl,chat|suite-92-playground-hitl-resume-session-id.sh|Playground HITL resume-stream resolves run by session_id OR PK (F-F regression; resume-after-approve 404'd)
 api|hitl,rbac|suite-93-hitl-admin-approve-authority.sh|HITL decide honors platform-admin role (special case) + no 500 on multiple grants
+api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves ONE environment (admission+address agree); refusal is a legible run row, not a DNS error
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
@@ -175,6 +176,7 @@ browser|execution,chat|e2e/durable-stream.spec.ts|Durable stream
 browser|deploy|e2e/deployment-overview.spec.ts|Deployment overview
 browser|deploy|e2e/catalog-overview-parity.spec.ts|Catalog/overview parity
 browser|execution|e2e/scheduled-overview.spec.ts|Scheduled overview
+browser|execution|e2e/schedule-failure-reason.spec.ts|A failed scheduled run shows WHY on the overview (no "Failing" over "No runs yet")
 browser|execution,governance|e2e/webhook-applications.spec.ts|Webhook applications
 browser|execution|e2e/webhook-public-url.spec.ts|Webhook public URL
 browser|cost|e2e/cost-console.spec.ts|Cost console

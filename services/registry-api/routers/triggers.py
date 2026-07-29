@@ -10,15 +10,17 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user, require_user
 from db import AsyncSessionLocal
-from models import Agent, AgentTrigger
+from models import Agent, AgentRun, AgentTrigger
+from observability_backend import get_observability_backend
 from rbac import ENFORCE_TRIGGER_MGMT, can_manage_artifact
 from schemas import (
+    AgentRunResponse,
     AgentTriggerCreate,
     AgentTriggerResponse,
     AgentTriggerUpdate,
@@ -153,6 +155,68 @@ async def get_trigger(
     if not trigger:
         raise HTTPException(status_code=404, detail="Trigger not found")
     return trigger
+
+
+@router.get(
+    "/{name}/triggers/{trigger_id}/runs",
+    response_model=list[AgentRunResponse],
+    summary="List the runs this trigger fired",
+)
+async def list_trigger_runs(
+    name: str,
+    trigger_id: uuid.UUID,
+    limit: int = Query(20, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentRunResponse]:
+    """A schedule's own run history, keyed on `agent_runs.trigger_id`.
+
+    WHY THIS EXISTS RATHER THAN A DEPLOYMENT-SCOPED READ
+    ---------------------------------------------------
+    The scheduled overview showed a red "Failing" badge above "Last Run: No runs
+    yet" — two cards, two different scopes. The badge came from
+    `GET /agents/{name}/health` (all runs for the agent); the list came from
+    `GET /deployments/{id}/runs` (runs carrying that deployment's FK). Every
+    trigger-driven run has BOTH deployment FK columns NULL, so the list was always
+    empty while the badge was red. 1,328 runs, none of them visible.
+
+    The obvious repair — stamp the deployment FK — is not available:
+    `agent_runs.production_deployment_id` FKs to `production_deployments` (the
+    published-artifact lifecycle) while the row a dispatch validates lives in
+    `deployments` (the one with the `environment` column). Two tables, one
+    confusable name; the validated id does not belong in that column.
+
+    So the scope is corrected instead of the data patched. A schedule's runs are a
+    property of the SCHEDULE, not of whichever deployment the operator happens to
+    have open — `trigger_id` is already populated on every trigger-driven run,
+    including the ones refused before dispatch (`_record_denied_run`). Reading by
+    trigger makes the badge and the list answer from the same set by construction.
+    """
+    agent = await _get_agent(name, db)
+    # Scope through the agent so a trigger id from another agent 404s rather than
+    # leaking its runs — the id alone is not an authorization.
+    trigger = (await db.execute(
+        select(AgentTrigger).where(
+            AgentTrigger.id == trigger_id,
+            AgentTrigger.agent_id == agent.id,
+        )
+    )).scalar_one_or_none()
+    if not trigger:
+        raise HTTPException(status_code=404, detail="Trigger not found")
+
+    rows = (await db.execute(
+        select(AgentRun)
+        .where(AgentRun.trigger_id == trigger_id)
+        .order_by(AgentRun.started_at.desc())
+        .limit(limit)
+    )).scalars().all()
+
+    obs = get_observability_backend()
+    items: list[AgentRunResponse] = []
+    for r in rows:
+        resp = AgentRunResponse.model_validate(r)
+        resp.trace_url = obs.build_trace_url(r.langfuse_trace_id)
+        items.append(resp)
+    return items
 
 
 @router.patch("/{name}/triggers/{trigger_id}", response_model=AgentTriggerResponse)

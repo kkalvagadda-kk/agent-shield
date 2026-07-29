@@ -38,8 +38,9 @@
 #               (same few-pods boundary suite-56/58/59 accept) — documented, never
 #               faked.
 #   T-S71-005 — ALERTING: a scheduled trigger with alert_on_failure=true + a known
-#               alert_email; a REAL scheduled run is forced to FAIL (durable
-#               dispatch to an undeployed production pod fails-closed) →
+#               alert_email; a REAL scheduled run is forced to FAIL (a sandbox-only
+#               agent cannot serve a production trigger, so resolve_dispatch_target
+#               REFUSES and the refusal is recorded fail-closed) →
 #               dispatch_failure_alert fires with THAT trigger's alert_email. The
 #               REAL observable in dev (SMTP_HOST unset) is the alerting log line
 #               `ALERT (log-only, SMTP_HOST unset) to=<email>` on the registry-api
@@ -461,12 +462,30 @@ async def main():
         record("T-S71-004 scheduled workflow modes park→async reviewer approve→resume (sequential gating; branching modes to strongest real state)", ok4, d4)
 
         # ═══ T-S71-005: alerting on a REAL forced scheduled FAILURE ══════════════
-        # A daemon+durable agent deployed to SANDBOX ONLY: it has a service identity
-        # + a running sandbox deployment (so /internal/runs/start passes its
-        # running-deployment check and resolve_principal succeeds), but the durable
-        # dispatch targets the UNDEPLOYED {agent}-production pod → dispatch_durable_run
-        # fails → _mark_agent_run_failed → dispatch_failure_alert with the trigger's
-        # alert_email. REAL failure path, no injected error.
+        # A daemon+durable agent deployed to SANDBOX ONLY. Trigger dispatch targets
+        # production, this agent has no production deployment, so
+        # `resolve_dispatch_target` REFUSES → `_record_denied_run` writes a failed
+        # AgentRun carrying the reason → `dispatch_failure_alert` fires with the
+        # trigger's alert_email. REAL failure path, no injected error.
+        #
+        # HISTORY — READ THIS BEFORE "SIMPLIFYING" THE FIXTURE. This case used to
+        # describe its own mechanism as: "it has a running sandbox deployment (so
+        # /internal/runs/start passes its running-deployment check) but the durable
+        # dispatch targets the UNDEPLOYED {agent}-production pod". That was not a
+        # fixture — that was a BUG, written down as if it were the design. The
+        # admission check ignored environment while dispatch hardcoded
+        # `-production`, so ANY sandbox-only agent DNS-failed on every fire; 1,197
+        # scheduled runs died that way, each reporting only
+        # `[Errno -2] Name or service not known`. This test was green throughout,
+        # because the defect was load-bearing on its fixture.
+        #
+        # The fixture is unchanged and still valid — a sandbox-only agent genuinely
+        # cannot serve a production trigger. What changed is that the refusal is now
+        # a deliberate, legible one instead of a DNS accident. If this case ever
+        # starts failing because the run does NOT fail, do not restore the old
+        # mechanism: the correct forced failure is to deploy to production and then
+        # scale that pod to zero. See suite-94 and
+        # docs/bugs/trigger-dispatch-environment-mismatch.md.
         pos_run = None; neg_run = None; d5 = ""
         try:
             await create_daemon_agent(c, FAILAGENT, pid, ["refund_action"])

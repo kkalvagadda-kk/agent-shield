@@ -819,11 +819,17 @@ async def get_agent_health(
         resp.health = "failing" if failed > 0 else ("degraded" if awaiting > 0 else "healthy")
 
     elif mode == "scheduled":
-        last = (await db.execute(
-            select(AgentRun.status).where(AgentRun.agent_name == name)
+        # Select the status AND its reason in ONE query over ONE row. Fetching the
+        # reason separately would let the badge and the explanation come from
+        # different runs — a smaller copy of the bug this field exists to fix.
+        last_row = (await db.execute(
+            select(AgentRun.status, AgentRun.error_message)
+            .where(AgentRun.agent_name == name)
             .order_by(AgentRun.started_at.desc()).limit(1)
-        )).scalar_one_or_none()
+        )).first()
+        last = last_row.status if last_row else None
         resp.last_run_status = last
+        resp.last_error = (last_row.error_message if last_row else None) if last == "failed" else None
         resp.missed_fires = 0
         # Next fire time from the first enabled schedule trigger's cron.
         cron = (await db.execute(
