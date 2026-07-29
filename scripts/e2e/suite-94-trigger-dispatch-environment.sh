@@ -402,7 +402,7 @@ if [ -n "$MISSING" ]; then
   echo "  --- driver log tail (why it stopped) ---"
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S94-COMPLETE every gate assertion ran (001-005 — none skipped)"
+  echo "PASS  T-S94-COMPLETE every gate assertion ran (001-007 — none skipped)"
   PASS=$((PASS+1))
 fi
 
