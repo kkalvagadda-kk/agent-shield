@@ -1631,7 +1631,13 @@ export interface AgentHealth {
   // Why the badge is red, carried with the status that made it red. Without this
   // the UI could show "Failing" and nothing else — which it did, directly above
   // "Last Run: No runs yet".
+  //
+  // HISTORICAL: the most recent failed run's error. "What went wrong last time."
   last_error: string | null;
+  // CURRENT: why this schedule cannot dispatch right now, independent of any run.
+  // "What is broken now" — the actionable one. Present ⇒ every fire will fail
+  // until it is fixed; absent ⇒ the config is sound whatever history says.
+  dispatch_error: string | null;
   // event-driven
   match_rate_24h: number | null;
   rejected_count_24h: number | null;

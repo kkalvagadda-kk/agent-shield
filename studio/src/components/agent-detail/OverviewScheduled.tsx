@@ -90,11 +90,18 @@ export default function OverviewScheduled({ agentName }: Props) {
   });
 
   const lastRun = runs[0];
-  // A failure is only actionable with its reason. Prefer the run's own
-  // `error_message`; fall back to the health producer's `last_error` so the badge
-  // is never the only thing on screen saying something is wrong.
-  const lastFailureReason =
-    (lastRun?.status === "failed" ? lastRun.error_message : null) ?? health?.last_error ?? null;
+  // What to show under the badge, in order of ACTIONABILITY — not recency.
+  //
+  // `dispatch_error` is the live config problem: every future fire will fail until
+  // it is fixed, so it outranks anything historical. Only when the config is sound
+  // do we fall back to why the last run failed (which may have been transient).
+  // Showing the historical error while a config problem exists would send the
+  // operator to debug the wrong thing.
+  const badgeReason =
+    health?.dispatch_error ??
+    (lastRun?.status === "failed" ? lastRun.error_message : null) ??
+    health?.last_error ??
+    null;
 
   return (
     <div className="space-y-4">
@@ -160,16 +167,47 @@ export default function OverviewScheduled({ agentName }: Props) {
               </span>
             )}
           </div>
-          {/* A red badge must be able to explain itself. Previously "Failing" was the
+          {/* A badge must be able to explain itself. Previously "Failing" was the
               entire message and the reason lived only in a run row this page never
-              read — the operator's only next step was kubectl. */}
-          {health?.health === "failing" && lastFailureReason && (
+              read — the operator's only next step was kubectl.
+              Rendered for `degraded` too: "runs are failing but the config is fine"
+              is just as much in need of a reason as a hard failure. */}
+          {(health?.health === "failing" || health?.health === "degraded") && badgeReason && (
             <div
               data-testid="schedule-health-reason"
-              className="mt-3 flex items-start gap-2 rounded bg-red-50 border border-red-200 p-2.5"
+              className={`mt-3 flex items-start gap-2 rounded border p-2.5 ${
+                health.health === "failing"
+                  ? "bg-red-50 border-red-200"
+                  : "bg-amber-50 border-amber-200"
+              }`}
             >
-              <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
-              <p className="text-xs text-red-700 break-words">{lastFailureReason}</p>
+              <AlertTriangle
+                size={14}
+                className={`shrink-0 mt-0.5 ${
+                  health.health === "failing" ? "text-red-500" : "text-amber-500"
+                }`}
+              />
+              <div className="min-w-0">
+                {/* Name WHICH question the reason answers. "This schedule cannot run"
+                    and "the last run failed" call for different next actions, and the
+                    old single red box could not tell them apart. */}
+                <p
+                  className={`text-xs font-medium ${
+                    health.health === "failing" ? "text-red-800" : "text-amber-800"
+                  }`}
+                >
+                  {health.dispatch_error
+                    ? "This schedule cannot run"
+                    : "The last run failed"}
+                </p>
+                <p
+                  className={`text-xs mt-0.5 break-words ${
+                    health.health === "failing" ? "text-red-700" : "text-amber-700"
+                  }`}
+                >
+                  {badgeReason}
+                </p>
+              </div>
             </div>
           )}
         </div>

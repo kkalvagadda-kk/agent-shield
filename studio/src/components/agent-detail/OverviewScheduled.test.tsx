@@ -50,6 +50,7 @@ const scheduledHealth: AgentHealth = {
   next_fire_at: NEXT_FIRE,
   missed_fires: 0,
   last_error: null,
+  dispatch_error: null,
   match_rate_24h: null,
   rejected_count_24h: null,
 };
@@ -228,6 +229,7 @@ describe("OverviewScheduled", () => {
       health: "failing",
       last_run_status: "failed",
       last_error: ENV_REASON,
+      dispatch_error: ENV_REASON,
     });
     renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
@@ -249,6 +251,7 @@ describe("OverviewScheduled", () => {
       health: "failing",
       last_run_status: "failed",
       last_error: ENV_REASON,
+      dispatch_error: ENV_REASON,
     });
     renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
 
@@ -333,6 +336,72 @@ describe("OverviewScheduled", () => {
     expect(screen.getByText(/notify nobody/i)).toBeInTheDocument();
     // The misleading bare "On" must be gone, not merely supplemented.
     expect(screen.queryByText(/^On$/)).not.toBeInTheDocument();
+  });
+
+  it("REGRESSION: a schedule that cannot dispatch reads failing with NO runs at all", async () => {
+    // Reported from the UI. health used to be `"failing" if last_run == "failed"`,
+    // so a brand-new schedule on an agent that can NEVER fire read HEALTHY — the
+    // most broken state the product can be in rendered green. Config, not history.
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    (listTriggerRuns as ReturnType<typeof vi.fn>).mockResolvedValue([]); // nothing has ever run
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...scheduledHealth,
+      health: "failing",
+      last_run_status: null,
+      last_error: null,
+      dispatch_error: ENV_REASON,
+    });
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    const box = await screen.findByTestId("schedule-health-reason");
+    expect(box).toHaveTextContent(/this schedule cannot run/i);
+    expect(box).toHaveTextContent(/no running production deployment/i);
+    expect(screen.getByText("failing")).toBeInTheDocument();
+  });
+
+  it("shows degraded + 'the last run failed' when the config is sound", async () => {
+    // Config fine, a run still failed. Distinct from "cannot run" — different next
+    // action, so it must not render identically. Amber, and named as history.
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    (listTriggerRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...failedRun, error_message: "tool 'notify' returned 503" },
+    ]);
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...scheduledHealth,
+      health: "degraded",
+      last_run_status: "failed",
+      last_error: "tool 'notify' returned 503",
+      dispatch_error: null, // dispatchable — this is NOT a config problem
+    });
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    const box = await screen.findByTestId("schedule-health-reason");
+    expect(box).toHaveTextContent(/the last run failed/i);
+    expect(box).toHaveTextContent(/503/);
+    expect(box).not.toHaveTextContent(/this schedule cannot run/i);
+    expect(screen.getByText("degraded")).toBeInTheDocument();
+  });
+
+  it("dispatch_error OUTRANKS a historical run error", async () => {
+    // Both present: the config problem is what the operator must act on, and the
+    // stale run error would send them to debug the wrong layer. Actionability, not
+    // recency, decides what the badge explains.
+    (listTriggers as ReturnType<typeof vi.fn>).mockResolvedValue([scheduleTrigger]);
+    (listTriggerRuns as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...failedRun, error_message: "tool 'notify' returned 503" },
+    ]);
+    (getAgentHealth as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...scheduledHealth,
+      health: "failing",
+      last_run_status: "failed",
+      last_error: "tool 'notify' returned 503",
+      dispatch_error: ENV_REASON,
+    });
+    renderWithProviders(<OverviewScheduled agentName="my-agent" deploymentId="d1" context="playground" />);
+
+    const box = await screen.findByTestId("schedule-health-reason");
+    expect(box).toHaveTextContent(/no running production deployment/i);
+    expect(box).not.toHaveTextContent(/503/);
   });
 
   it("does not render next-fire/health/alert cards when no schedule", async () => {

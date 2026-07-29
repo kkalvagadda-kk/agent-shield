@@ -1908,7 +1908,20 @@ class AgentHealthResponse(BaseModel):
     # yet" and offered no way to learn why. A badge that cannot explain itself at
     # its own source sends the operator to kubectl. Carried alongside the status
     # it justifies, so the two can never be rendered apart.
+    #
+    # Strictly HISTORICAL: the error of the most recent failed run. It answers
+    # "what went wrong last time".
     last_error: str | None = None
+    # Strictly CURRENT: why this schedule cannot dispatch AS OF NOW, independent of
+    # any run. It answers "what is broken right now", which is the actionable
+    # question and often has a different answer from `last_error` — after the
+    # operator fixes the cause, `dispatch_error` clears immediately while
+    # `last_error` still describes the fire that failed before the fix.
+    #
+    # Two fields, not one, deliberately. Decision 32's lesson was a single field
+    # carrying two meanings that the reader could not tell apart; overloading
+    # `last_error` with a live config problem would repeat it.
+    dispatch_error: str | None = None
 
     # event-driven
     match_rate_24h: float | None = None

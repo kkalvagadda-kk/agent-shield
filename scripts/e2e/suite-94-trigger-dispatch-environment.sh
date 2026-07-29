@@ -42,6 +42,15 @@
 #   T-S94-005 — POSITIVE CONTROL: an agent deployed to PRODUCTION still dispatches
 #               (the fix must reject the undeployable case WITHOUT breaking the
 #               deployable one).
+#   T-S94-006 — HEALTH IS CONFIG-FIRST: a schedule that can never dispatch reads
+#               `failing` with a `dispatch_error` even with ZERO runs. Old code
+#               said `healthy` here (nothing had failed yet), so the most broken
+#               state the product can be in rendered GREEN. RED before fix.
+#   T-S94-007 — ...and it CLEARS the moment production exists, with NO new run.
+#               Old code stayed `failing` until the next successful fire — up to an
+#               hour of "I fixed it and nothing changed", which is exactly how this
+#               was reported from the UI. RED before fix.
+#               006 and 007 pin the two directions health used to get wrong.
 #
 # Detached in-pod driver (PYTHONPATH=/app -> result file); polled with short execs.
 set -euo pipefail
@@ -89,6 +98,7 @@ OUT = os.environ["S94_OUT"]
 SFX = uuid.uuid4().hex[:6]
 SBX_ONLY = f"s94-sbxonly-{SFX}"     # sandbox only -> must be REJECTED at admission
 PROD_OK  = f"s94-prodok-{SFX}"      # deployed to production -> must still dispatch
+NORUN    = f"s94-norun-{SFX}"       # NEVER fired -> health must judge CONFIG, not history
 INSTR = ("You are an autonomous check agent. When you run, reply with exactly the "
          "word READY and nothing else. There is no user to talk to.")
 
@@ -218,6 +228,57 @@ async def main():
                f"status={hh.status_code} mode={hj.get('mode')} health={hj.get('health')} "
                f"last_error={str(hj.get('last_error'))[:160]!r}")
 
+        # ── HEALTH IS CONFIG-FIRST, NOT LAST-RUN-DERIVED ─────────────────────────
+        # Reported from the UI: "I deployed the agent and it still says Failing."
+        # health used to be `"failing" if last_run == "failed"`, which comes apart
+        # from reality in BOTH directions — pinned here.
+        #
+        # (a) A schedule that can NEVER dispatch, with ZERO runs, must read failing.
+        #     Old behaviour: healthy, because nothing had failed yet — the most
+        #     broken state the product can be in rendered green.
+        await create_daemon_agent(c, NORUN, pid)
+        await c.post(f"/agents/{NORUN}/deploy", json={"environment": "sandbox"})
+        await wait_running(NORUN, "sandbox")
+        tnr = await c.post(f"/agents/{NORUN}/triggers", json={
+            "trigger_type": "schedule", "cron_expression": "0 0 * * *", "alert_on_failure": False})
+        h6 = await c.get(f"/agents/{NORUN}/health")
+        j6 = h6.json() if h6.status_code == 200 else {}
+        nruns = 0
+        async with AsyncSessionLocal() as s:
+            nruns = len((await s.execute(select(AgentRun).where(AgentRun.agent_name == NORUN))).scalars().all())
+        record("T-S94-006 a never-run schedule that cannot dispatch reads failing on CONFIG alone",
+               tnr.status_code in (200, 201) and nruns == 0
+               and j6.get("health") == "failing" and bool(j6.get("dispatch_error")),
+               f"trigger={tnr.status_code} runs={nruns} (want 0) health={j6.get('health')} "
+               f"dispatch_error={str(j6.get('dispatch_error'))[:110]!r} last_error={j6.get('last_error')!r}")
+
+        # (b) After the cause is fixed, health must clear WITHOUT waiting for a fire.
+        #     Old behaviour: stayed failing until the next successful run — up to an
+        #     hour of "I fixed it and nothing changed". We deploy production and
+        #     re-read health WITHOUT firing anything.
+        vid_nr = None
+        av_nr = await c.get(f"/agents/{NORUN}/versions")
+        if av_nr.status_code == 200 and av_nr.json():
+            vid_nr = av_nr.json()[0].get("id")
+        if vid_nr:
+            from models import AgentVersion
+            async with AsyncSessionLocal() as s:
+                v = (await s.execute(select(AgentVersion).where(AgentVersion.id == uuid.UUID(vid_nr)))).scalars().first()
+                if v:
+                    v.eval_passed = True
+                    await s.commit()
+        pdn = await c.post(f"/agents/{NORUN}/deploy",
+                           json={"environment": "production", **({"version_id": vid_nr} if vid_nr else {})})
+        prod_nr = pdn.status_code in (200, 201) and await wait_running(NORUN, "production")
+        h7 = await c.get(f"/agents/{NORUN}/health")
+        j7 = h7.json() if h7.status_code == 200 else {}
+        async with AsyncSessionLocal() as s:
+            nruns2 = len((await s.execute(select(AgentRun).where(AgentRun.agent_name == NORUN))).scalars().all())
+        record("T-S94-007 health clears the moment production exists, with NO new run",
+               prod_nr and nruns2 == 0 and j7.get("health") == "healthy" and not j7.get("dispatch_error"),
+               f"prod_running={prod_nr} runs={nruns2} (want 0 — nothing fired) "
+               f"health={j7.get('health')} dispatch_error={j7.get('dispatch_error')!r}")
+
         # ── POSITIVE CONTROL: production-deployed agent must STILL dispatch ──────
         # Without this the fix could "pass" by rejecting everything.
         await create_daemon_agent(c, PROD_OK, pid)
@@ -288,7 +349,7 @@ async def main():
             for name, ok, detail in results:
                 f.write(f"{'PASS' if ok else 'FAIL'}  {name}  |  {detail}\n")
             f.write(f"SUMMARY {passed}/{len(results)}\n")
-        for n in (SBX_ONLY, PROD_OK):
+        for n in (SBX_ONLY, PROD_OK, NORUN):
             try:
                 await c.delete(f"/agents/{n}")
             except Exception:
@@ -330,7 +391,7 @@ done <<< "$RES"
 # Completeness gate (the suite-74 lesson): FAIL=0 is only a pass if every gate
 # assertion actually RAN. REQUIRED_IDS is the ONE source of truth — add a case here
 # and nowhere else. Trailing space in the grep guards against prefix collisions.
-REQUIRED_IDS="001 002 003 004 005"
+REQUIRED_IDS="001 002 003 004 005 006 007"
 MISSING=""
 for id in $REQUIRED_IDS; do
   echo "$RES" | grep -q "T-S94-$id " || MISSING="$MISSING T-S94-$id"

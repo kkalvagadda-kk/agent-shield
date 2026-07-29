@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_endpoints import DispatchTargetError, resolve_dispatch_target
 from auth_middleware import get_optional_user
 from db import get_db
 from rbac import grant_creator_admin
@@ -846,7 +847,41 @@ async def get_agent_health(
                 resp.next_fire_at = croniter(cron, base).get_next(datetime)
             except Exception:  # bad cron / lib missing — leave null
                 resp.next_fire_at = None
-        resp.health = "failing" if last == "failed" else "healthy"
+
+        # CONFIG FIRST, HISTORY SECOND.
+        #
+        # This used to be `"failing" if last == "failed" else "healthy"` — health
+        # derived purely from the most recent run. That answered "did the last run
+        # fail?" when the operator is asking "is this schedule OK now?", and the two
+        # come apart in both directions:
+        #
+        #   * Fix the cause (deploy to production) and the badge stayed RED until the
+        #     next fire — up to an hour of "I fixed it and nothing changed". Reported
+        #     from the UI with a screenshot; this is that fix.
+        #   * A brand-new schedule on an agent that can NEVER dispatch read
+        #     "healthy", because no run had failed yet. The most broken state the
+        #     product can be in rendered green.
+        #
+        # So ask the resolver the live question. It is the same single owner the
+        # dispatch door uses, so the badge cannot disagree with what a fire would
+        # actually do.
+        try:
+            await resolve_dispatch_target(db, agent, environment="production")
+            resp.dispatch_error = None
+        except DispatchTargetError as exc:
+            resp.dispatch_error = str(exc)
+
+        if resp.dispatch_error:
+            # Cannot dispatch: every fire WILL fail until this is fixed. Actionable now.
+            resp.health = "failing"
+        elif last == "failed":
+            # Config is sound and a run still failed — a real problem, but a different
+            # one: worth investigating rather than blocking, and the run rows carry the
+            # detail. `degraded` keeps it visibly amber without claiming the schedule
+            # can never work, which is what `failing` now means.
+            resp.health = "degraded"
+        else:
+            resp.health = "healthy"
 
     else:  # event-driven
         rate = (completed / total) if total else None
