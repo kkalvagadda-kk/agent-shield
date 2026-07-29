@@ -39,18 +39,34 @@ const DNS_RE = /name or service not known|errno -2/i;
 test.describe("scheduled overview explains a failed run", () => {
   test("a sandbox-only schedule fire renders its reason, not a bare Failing badge", async ({
     page,
-    request,
   }) => {
-    // ── Seed through the real API, in the browser's authenticated context ──────
-    // `request` inherits storageState from global-setup, so these calls carry the
-    // same Keycloak session the UI uses.
+    // ── Capture a real Bearer token off the app's own traffic ─────────────────
+    // The `request` fixture inherits storageState (cookies) but NOT the Keycloak
+    // access token — keycloak-js holds that in JS, so bare API calls 401 on any
+    // route gated by `require_user` (trigger CRUD is). Same sniff-the-header
+    // approach eval-v2-scheduled.spec.ts uses.
+    let authHeader: string | undefined;
+    page.on("request", (req) => {
+      const h = req.headers()["authorization"];
+      if (h && h.startsWith("Bearer ") && req.url().includes("/api/v1/")) {
+        authHeader = h;
+      }
+    });
+    await page.goto("/agents");
+    await page.waitForLoadState("networkidle");
+    expect(authHeader, "could not capture a Bearer token from the app").toBeTruthy();
+
+    const request = page.request;
+    const H = { Authorization: authHeader! };
+
     const providers = await (
-      await request.get(`/api/v1/llm-providers/?team=platform`)
+      await request.get(`/api/v1/llm-providers/?team=platform`, { headers: H })
     ).json();
     const providerId = providers.items?.[0]?.id;
     test.skip(!providerId, "no LLM provider seeded in this environment");
 
     const created = await request.post(`/api/v1/agents/`, {
+      headers: H,
       data: {
         name: AGENT,
         team: "platform",
@@ -69,10 +85,12 @@ test.describe("scheduled overview explains a failed run", () => {
     try {
       // SANDBOX ONLY — never deployed to production. This is the whole fixture.
       await request.post(`/api/v1/agents/${AGENT}/deploy`, {
+        headers: H,
         data: { environment: "sandbox" },
       });
 
       const trig = await request.post(`/api/v1/agents/${AGENT}/triggers`, {
+        headers: H,
         data: {
           trigger_type: "schedule",
           cron_expression: "0 0 * * *",
@@ -85,6 +103,7 @@ test.describe("scheduled overview explains a failed run", () => {
 
       // Fire the REAL door the scheduler hits on a cron tick.
       const fired = await request.post(`/api/v1/internal/runs/start`, {
+        headers: H,
         data: {
           agent_name: AGENT,
           trigger_type: "schedule",
@@ -136,7 +155,7 @@ test.describe("scheduled overview explains a failed run", () => {
       await expect(page.getByTestId("alert-config-incomplete")).toBeVisible();
     } finally {
       // Best-effort teardown — a cleanup hiccup must not mask the verdict.
-      await request.delete(`/api/v1/agents/${AGENT}`).catch(() => undefined);
+      await request.delete(`/api/v1/agents/${AGENT}`, { headers: H }).catch(() => undefined);
     }
   });
 });
