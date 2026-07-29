@@ -31,8 +31,9 @@ const NEXT_FIRE = new Date(Date.now() + 3600_000).toISOString();
 // (rather than "some error appeared") is what proves the operator learns the CAUSE.
 const ENV_REASON =
   "agent 'my-agent' has no running production deployment — it is deployed to sandbox. " +
-  "Schedule and webhook triggers dispatch to production; deploy the agent to production " +
-  "(or publish it) before arming a trigger.";
+  "Schedule and webhook triggers dispatch to production. Publish the agent " +
+  "(Studio: agent page → Publish; requires a passing eval) or deploy it to production " +
+  "via the API, then re-enable the trigger.";
 
 const scheduledHealth: AgentHealth = {
   agent_name: "my-agent",

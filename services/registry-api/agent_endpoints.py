@@ -149,8 +149,26 @@ async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTar
         detail = "none of its deployments are running"
     else:
         detail = "it has never been deployed"
+    # The remedy names what the operator can actually DO, in the surface they are
+    # most likely reading this from. Studio's agent page has no "deploy to
+    # production" control at all — its Deploy button opens a "Deploy to sandbox"
+    # modal with no environment choice, and the only route to production is
+    # Publish, which is gated on a passing eval (Decision 20; the button's own
+    # tooltip reads "Run an eval that passes before publishing").
+    #
+    # An earlier wording here led with "deploy the agent to production", which is
+    # true of the API and unreachable from the UI — advice that sends the reader
+    # looking for a button that does not exist is only marginally better than the
+    # DNS error this message replaced. Caught by driving the real screen
+    # (docs/testing/claude-in-chrome-schedule-failure-journey.md, leg 7).
+    remedy = (
+        "Publish the agent (Studio: agent page → Publish; requires a passing eval) "
+        f"or deploy it to {environment} via the API"
+        if environment == "production"
+        else f"deploy the agent to {environment}"
+    )
     raise DispatchTargetError(
         f"agent '{agent.name}' has no running {environment} deployment — {detail}. "
-        f"Schedule and webhook triggers dispatch to {environment}; "
-        f"deploy the agent to {environment} (or publish it) before arming a trigger."
+        f"Schedule and webhook triggers dispatch to {environment}. {remedy}, "
+        f"then re-enable the trigger."
     )
