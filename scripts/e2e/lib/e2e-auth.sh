@@ -69,6 +69,23 @@ except Exception as exc:
   printf '%s' "$out"
 }
 
+# e2e_install_pyauth <namespace> <pod> [container]
+# Copy lib/e2e_auth.py into the pod at /tmp/e2e_auth.py so a detached driver can
+# `from e2e_auth import BearerAuth` and refresh its own token.
+#
+# REQUIRED for any suite that runs longer than the 300s token lifespan — i.e.
+# every detached-driver suite (66, 70, 71, 75, 77). A statically-interpolated
+# token is fine ONLY for the short inline suites that finish inside 5 minutes.
+# Getting this wrong does not fail loudly at the start; it fails 20 minutes in,
+# on whichever case happens to run last, and looks like a feature bug.
+e2e_install_pyauth() {
+  local ns="$1" pod="$2" container="${3:-registry-api}" lib
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e_auth.py"
+  [ -f "$lib" ] || { echo "FATAL: $lib missing" >&2; exit 1; }
+  kubectl exec -i -n "$ns" "$pod" -c "$container" -- bash -c 'cat > /tmp/e2e_auth.py' < "$lib" \
+    || { echo "FATAL: could not install e2e_auth.py into $pod" >&2; exit 1; }
+}
+
 # e2e_require_token <namespace> <pod> [container]
 # Same, but aborts the suite with a message that NAMES THE CAUSE. Use this in
 # any suite whose assertions depend on trigger CRUD — a missing token must read

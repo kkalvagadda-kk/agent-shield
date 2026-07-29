@@ -32,7 +32,8 @@ if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 
 echo "=== Suite 66: PRODUCTION triggers — webhook + scheduled (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
@@ -49,8 +50,12 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun, CompositeWorkflow
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform",
-   "Authorization":"Bearer "+os.environ["E2E_TOKEN"]}
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
+H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
 GW="http://agentshield-event-gateway:8091"
 SFX=uuid.uuid4().hex[:6]; NAMES=[f"s66-a-{SFX}",f"s66-b-{SFX}"]; WFN=f"s66-wf-{SFX}"
 INSTR="You answer factual questions. Reply with ONLY the answer — no preamble."
@@ -76,7 +81,7 @@ async def run_of(wfname, trig, tries):
     return None, []
 async def main():
     out={}; wid=None
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60, auth=BearerAuth())
     pid=await prov(c)
     try:
         for n in NAMES:
@@ -105,7 +110,7 @@ async def main():
         # WEBHOOK
         wh=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"webhook","name":"s66-hook"})).json()
         token=wh.get("token")
-        async with httpx.AsyncClient(timeout=30) as gwc:
+        async with httpx.AsyncClient(timeout=30, auth=BearerAuth()) as gwc:
             fired=await gwc.post(f"{GW}/hooks/workflow/{WFN}/{token}", json={"message":"What is the capital of France?"})
         p,kids=await run_of(WFN,"webhook",40)
         out["T-S66-001 webhook_fires_prod_run"]= bool(fired.status_code in (200,202) and p and p.status=="completed" and p.context=="production" and len(kids)>=2 and all(k.status=="completed" for k in kids))
@@ -146,7 +151,7 @@ async def main():
 asyncio.run(main())
 PY
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  bash -c "rm -f $OUTFILE; cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN nohup python3 $DRIVER > $OUTFILE 2>&1 & echo launched pid \$!"
+  bash -c "rm -f $OUTFILE; cd /app && PYTHONPATH=/app nohup python3 $DRIVER > $OUTFILE 2>&1 & echo launched pid \$!"
 echo "  driving webhook + schedule trigger lifecycle (detached in-pod)..."
 DONE=""
 for i in $(seq 1 120); do

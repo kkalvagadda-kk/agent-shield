@@ -189,7 +189,8 @@ if [ -z "$API_POD" ]; then
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
   exit 1
@@ -254,8 +255,12 @@ BASE = "http://localhost:8000/api/v1"
 # mocked transport, never an in-process app.
 GW = "http://agentshield-event-gateway:8091"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-H = {"X-User-Sub": ADMIN, "X-User-Team": "platform",
-     "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
+H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 
 SFX = os.environ["S77_SFX"]
 OUT = os.environ["S77_OUT"]
@@ -479,8 +484,8 @@ def det(row):
 
 
 async def main():
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90)
-    gw = httpx.AsyncClient(timeout=30)
+    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90, auth=BearerAuth())
+    gw = httpx.AsyncClient(timeout=30, auth=BearerAuth())
     ds_id = None
     ds_nh = None
     try:
@@ -996,7 +1001,7 @@ echo "--- T-S77-001..010: real webhook dataset + real filter + real eval Job + l
 echo "  running detached in-pod driver (1 real agent deploy + a real 6-item eval Job +"
 echo "  a real signed gateway control + a real unhandled-MODE Job — can take ~25-45 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN S77_SFX=$RUN_SFX S77_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S77_SFX=$RUN_SFX S77_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 720); do   # up to ~60 min

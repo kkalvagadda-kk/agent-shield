@@ -82,7 +82,8 @@ if [ -z "$API_POD" ]; then echo "ERROR: no running registry-api pod"; exit 1; fi
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 
 echo "  driver pod: $API_POD"
 echo ""
@@ -112,8 +113,12 @@ from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform",
-       "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
+HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 OUT = os.environ["S71_OUT"]
 SFX = uuid.uuid4().hex[:6]
 AGENT = f"s71-agent-{SFX}"
@@ -218,7 +223,7 @@ async def main():
     sa_subject = None
     approval_id = None
     mode_results = {}   # hoisted: the finally-write references it even on an early crash
-    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0)
+    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0, auth=BearerAuth())
     try:
         pid = await prov(c)
 
@@ -582,7 +587,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume+4 modes+alert — can take many min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN S71_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 300); do   # up to ~25 min (prod deploy + park + resume + 4 workflow modes + alert)
   sleep 5
