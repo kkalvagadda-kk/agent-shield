@@ -41,6 +41,13 @@
 # The token is fetched INSIDE the pod (cluster-internal Keycloak Service DNS),
 # so it needs no port-forward and no host-side Keycloak reachability.
 
+# Resolve THIS library's directory ONCE, at source time. Do not compute it inside
+# a function from `${BASH_SOURCE[0]}`: the value there is not reliably this file
+# when the function is invoked from a sourcing script, and the failure mode is a
+# path silently rooted at the caller's cwd (`<repo>/e2e_auth.py missing`) rather
+# than an obvious error.
+E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Seeded by charts/agentshield/templates/realm-init-job.yaml.
 E2E_KC_USER="${E2E_KC_USER:-platform-admin}"
 E2E_KC_PASS="${E2E_KC_PASS:-PlatformAdmin2024}"
@@ -79,11 +86,17 @@ except Exception as exc:
 # Getting this wrong does not fail loudly at the start; it fails 20 minutes in,
 # on whichever case happens to run last, and looks like a feature bug.
 e2e_install_pyauth() {
-  local ns="$1" pod="$2" container="${3:-registry-api}" lib
-  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/e2e_auth.py"
+  local ns="$1" pod="$2" container="${3:-registry-api}" lib="$E2E_LIB_DIR/e2e_auth.py"
   [ -f "$lib" ] || { echo "FATAL: $lib missing" >&2; exit 1; }
   kubectl exec -i -n "$ns" "$pod" -c "$container" -- bash -c 'cat > /tmp/e2e_auth.py' < "$lib" \
     || { echo "FATAL: could not install e2e_auth.py into $pod" >&2; exit 1; }
+  # VERIFY the module actually landed and imports. A silent no-op here does not
+  # fail now — it fails twenty minutes later inside the driver, as a
+  # ModuleNotFoundError that never reaches the result file, and the suite reports
+  # "driver did not finish" with no output at all. Check while it is still cheap.
+  kubectl exec -n "$ns" "$pod" -c "$container" -- \
+    python3 -c 'import sys; sys.path.insert(0, "/tmp"); import e2e_auth' >/dev/null 2>&1 \
+    || { echo "FATAL: /tmp/e2e_auth.py did not import inside $pod" >&2; exit 1; }
 }
 
 # e2e_require_token <namespace> <pod> [container]

@@ -101,6 +101,36 @@ class. One definition, fifteen callers.
 | suite-28 (event gateway) | exit 1, empty diagnostic, 0 assertions | **7/7 PASS** |
 | suite-66 (production triggers) | 1 pass / 2 fail — `sched run=None` | see run log |
 
+## The second bug, made while fixing the first
+
+The initial fix minted **one** token in bash at suite start. Keycloak issues
+`expires_in = 300`. suite-71 runs ~25 minutes. So the token died mid-suite and the last
+cases 401'd, twenty minutes after the same client had been working:
+
+```
+POST /api/v1/agents/s71-fail-da2215/triggers  401 Unauthorized
+→ suite-71 reported: T-S71-005 alerting … pos_run=None
+```
+
+An alerting failure, three layers from an expired token — **the same misdirection this helper
+exists to eliminate, reproduced one layer down.** "Suites don't authenticate" was replaced by
+"suites authenticate once."
+
+The real fix is that authentication is a **per-request** concern, not a per-run one.
+`lib/e2e_auth.py::BearerAuth` is an `httpx.Auth`, which httpx re-evaluates on every request for
+both sync and async clients, re-minting ~60s before expiry. A static
+`headers={"Authorization": …}` is evaluated once at client construction and structurally cannot
+outlive the token — no amount of tuning fixes that shape.
+
+Applied to the five detached-driver suites (66, 70, 71, 75, 77). The ten short inline suites keep
+the interpolated token: they finish well inside 300s, proven by 26 (4/4) and 28 (7/7).
+
+### Operational footnote
+
+Editing a suite **while it is running** corrupts it. Bash reads a script incrementally by byte
+offset, so a mid-run edit lands it mid-line — suite-66 died with `line 156: c: command not found`,
+which looks like a syntax defect and is not one. Let a suite finish, or copy it first.
+
 ## Lessons
 
 - **An audit header is not a credential.** `X-User-Sub` says *who is acting*; it cannot say *whether
@@ -113,3 +143,9 @@ class. One definition, fifteen callers.
 - **Reading a suite is not running it.** The earlier finding that these suites "asserted the wrong
   things" was drawn from their source while they were failing at setup. Run the neighbours before
   characterising them.
+- **A credential's lifetime is part of its contract.** "Does it authenticate?" and "does it still
+  authenticate at minute 25?" are different questions, and only the second one is answered by
+  actually running the long suite. The first fix passed a 4-minute suite and failed a 25-minute one.
+- **Fixing a class of bug is where you are most likely to re-commit it.** Both the original defect
+  and my own repair failed the same way: the error surfaced far from its cause, and the surface
+  reading ("the scheduler is broken", "alerting is broken") was wrong both times.
