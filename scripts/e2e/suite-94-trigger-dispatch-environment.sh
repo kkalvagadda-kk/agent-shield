@@ -51,6 +51,12 @@
 #               hour of "I fixed it and nothing changed", which is exactly how this
 #               was reported from the UI. RED before fix.
 #               006 and 007 pin the two directions health used to get wrong.
+#   T-S94-008 — THE PUBLISH LEG: a PUBLISHED agent (production_deployments, its own
+#               `production-{artifact}-{id8}` namespace) resolves. The first fix read
+#               only `deployments` and always composed `agents-{team}`, so the only
+#               production route Studio offers reported "no production deployment" and
+#               told the operator to Publish — the action that lands in the unseen leg.
+#               RED before fix. Read-only: no fire, no side effects.
 #
 # Detached in-pod driver (PYTHONPATH=/app -> result file); polled with short execs.
 set -euo pipefail
@@ -70,7 +76,7 @@ RUNLOG="/tmp/s94_run_${RUN_TAG}.log"
 
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, json, os, urllib.parse, urllib.request, uuid, httpx
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, text
 from db import AsyncSessionLocal
 from models import Agent, Deployment, AgentRun
 
@@ -279,6 +285,56 @@ async def main():
                f"prod_running={prod_nr} runs={nruns2} (want 0 — nothing fired) "
                f"health={j7.get('health')} dispatch_error={j7.get('dispatch_error')!r}")
 
+        # ── THE PUBLISH LEG: production_deployments, not just deployments ─────────
+        # An agent reaches production by TWO routes, in DIFFERENT namespaces:
+        #   deployments(environment='production')  -> agents-{team}
+        #   production_deployments (Publish)       -> production-{artifact}-{id8}
+        # The first version of resolve_dispatch_target read only the former and
+        # always composed `agents-{team}`, so a PUBLISHED agent — the only
+        # production route Studio offers — was reported as having no production
+        # deployment, and the refusal told the operator to Publish: the very action
+        # that lands in the unseen leg. See sandbox-production-parity-architecture
+        # §41 ("any query that assumes a deployment id is a `deployments` id breaks
+        # for production") and bundle_generator's UNION.
+        #
+        # Read-only assertion: arm a schedule on a REALLY published agent and read
+        # health. No fire — proving the resolver SEES the leg needs no side effects.
+        pub_name, pub_ns = None, None
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(text("""
+                SELECT pa.name, pd.namespace
+                FROM production_deployments pd
+                JOIN published_artifacts pa ON pd.artifact_id = pa.id
+                JOIN agents a ON a.id = pa.source_id
+                WHERE pd.status = 'running' AND pa.type = 'agent' AND a.status = 'active'
+                LIMIT 1"""))).first()
+            if row:
+                pub_name, pub_ns = row[0], row[1]
+
+        if not pub_name:
+            # Honest skip, never a silent pass: without a published agent on the
+            # cluster this case cannot be evaluated at all.
+            record("T-S94-008 a PUBLISHED agent's schedule resolves the production_deployments leg",
+                   False, "SKIP-AS-FAIL: no running production_deployments for an active agent — "
+                          "publish an agent so this leg can be exercised")
+        else:
+            tp = await c.post(f"/agents/{pub_name}/triggers", json={
+                "trigger_type": "schedule", "cron_expression": "0 0 * * *", "alert_on_failure": False})
+            tpid = tp.json().get("id") if tp.status_code in (200, 201) else None
+            h8 = await c.get(f"/agents/{pub_name}/health")
+            j8 = h8.json() if h8.status_code == 200 else {}
+            derr = j8.get("dispatch_error")
+            record("T-S94-008 a PUBLISHED agent's schedule resolves the production_deployments leg",
+                   tpid is not None and not derr and j8.get("health") != "failing",
+                   f"agent={pub_name} ns={pub_ns} trigger={tp.status_code} "
+                   f"health={j8.get('health')} dispatch_error={str(derr)[:130]!r} (want None)")
+            # leave no armed schedule behind on somebody else's published agent
+            if tpid:
+                try:
+                    await c.delete(f"/agents/{pub_name}/triggers/{tpid}")
+                except Exception:
+                    pass
+
         # ── POSITIVE CONTROL: production-deployed agent must STILL dispatch ──────
         # Without this the fix could "pass" by rejecting everything.
         await create_daemon_agent(c, PROD_OK, pid)
@@ -391,7 +447,7 @@ done <<< "$RES"
 # Completeness gate (the suite-74 lesson): FAIL=0 is only a pass if every gate
 # assertion actually RAN. REQUIRED_IDS is the ONE source of truth — add a case here
 # and nowhere else. Trailing space in the grep guards against prefix collisions.
-REQUIRED_IDS="001 002 003 004 005 006 007"
+REQUIRED_IDS="001 002 003 004 005 006 007 008"
 MISSING=""
 for id in $REQUIRED_IDS; do
   echo "$RES" | grep -q "T-S94-$id " || MISSING="$MISSING T-S94-$id"
@@ -402,7 +458,7 @@ if [ -n "$MISSING" ]; then
   echo "  --- driver log tail (why it stopped) ---"
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S94-COMPLETE every gate assertion ran (001-007 — none skipped)"
+  echo "PASS  T-S94-COMPLETE every gate assertion ran (001-008 — none skipped)"
   PASS=$((PASS+1))
 fi
 

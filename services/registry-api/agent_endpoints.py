@@ -94,17 +94,26 @@ class DispatchTargetError(Exception):
 class DispatchTarget:
     """A validated dispatch destination: the address AND the row that justifies it.
 
-    `deployment_id` is the `deployments` row that was checked. Note it CANNOT be
-    written to `agent_runs.production_deployment_id` — that column FKs to
-    `production_deployments` (the published-artifact table), a different lifecycle
-    from `deployments` (the table with the `environment` column, which is what the
-    deploy-controller turns into a `{agent}-{environment}` Service). Two tables,
-    two meanings, one confusable name. Run history keys on `agent_runs.trigger_id`
-    instead — see `routers/triggers.py::list_trigger_runs`.
+    `deployment_id` identifies the row that was checked, and `source_table` says
+    WHICH table it came from — because there are two, with different namespaces:
+
+      deployments (environment='production')  -> pod in `agents-{team}`
+      production_deployments (the Publish flow) -> pod in its OWN namespace,
+          `production-{artifact}-{id8}` (catalog.py mints it; production_reconciler
+          names the Deployment `{agent}-production` inside it)
+
+    So `deployment_id` alone is ambiguous and must never be treated as a
+    `deployments` id — `docs/design/sandbox-production-parity-architecture.md` §41
+    lists four prior bugs from exactly that assumption. It also cannot be written
+    to `agent_runs.production_deployment_id` unless it came from the production
+    table. Run history keys on `agent_runs.trigger_id` instead
+    (`routers/triggers.py::list_trigger_runs`).
     """
     base_url: str
     deployment_id: uuid.UUID
     environment: str
+    # "deployments" | "production_deployments" — which lifecycle justified this.
+    source_table: str
 
 
 async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTarget:
@@ -114,35 +123,91 @@ async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTar
     together, from the same row. A caller cannot check one thing and dispatch to
     another, because there is only one call and it returns both.
 
+    TWO LEGS FOR PRODUCTION, AND BOTH MUST BE CHECKED
+    -------------------------------------------------
+    An agent can be in production by two independent routes, and they land in
+    DIFFERENT NAMESPACES:
+
+      1. `POST /agents/{name}/deploy {"environment":"production"}` writes a
+         `deployments` row; the pod goes to `agents-{team}`.
+      2. **Publish** (`routers/catalog.py`) writes a `production_deployments` row
+         and mints its OWN namespace, `production-{artifact}-{id8}`;
+         `production_reconciler` names the Deployment `{agent}-production` inside it.
+
+    The first version of this function checked only leg 1 and always composed
+    `agents-{team}`. So a PUBLISHED agent — the only production route Studio
+    actually offers — was reported as "has no running production deployment",
+    which was false, and the refusal message told the operator to Publish: the
+    exact action that lands in the leg the resolver could not see. Self-defeating
+    advice, and worse than the DNS error it replaced because it was confidently
+    wrong rather than merely unhelpful.
+
+    `docs/design/sandbox-production-parity-architecture.md` §41 states the rule —
+    "any column or query that assumes 'a deployment id is a `deployments` id'
+    breaks for production" — and lists four earlier bugs from the same assumption.
+    `bundle_generator` already solved it with a UNION over both legs; this mirrors
+    that shape rather than inventing a second approach.
+
     `environment` is required and explicit for the same reason it is on
     `agent_pod_base`: a wrong default is invisible at the call site.
 
-    Raises `DispatchTargetError` when the environment has no running deployment.
-    The message names what IS deployed, so the operator's next action is obvious
-    ("deployed to sandbox, needs production") rather than a guess.
+    Raises `DispatchTargetError` when nothing serves `environment`. The message
+    names what IS deployed so the next action is obvious rather than a guess.
     """
     # Imported here, not at module top: this module is imported by low-level
     # callers and must stay cheap; `models` pulls the whole ORM graph.
     from sqlalchemy import select
 
-    from models import Deployment
+    from models import Deployment, ProductionDeployment, PublishedArtifact
 
+    # ── Leg 1: `deployments` (has an `environment` column) ────────────────────
     rows = (await db.execute(
-        select(Deployment.id, Deployment.environment, Deployment.status)
+        select(Deployment.id, Deployment.environment, Deployment.status,
+               Deployment.k8s_namespace)
         .where(Deployment.agent_id == agent.id)
         .order_by(Deployment.deployed_at.desc().nulls_last())
     )).all()
 
-    for dep_id, env, status in rows:
+    for dep_id, env, status, ns in rows:
         if env == environment and status == "running":
+            # Namespace from the ROW, not recomposed. `k8s_namespace` is NOT NULL,
+            # but fall back to the team default rather than emit "None" into a host.
+            namespace = ns or team_namespace(agent.team)
             return DispatchTarget(
-                base_url=agent_pod_base(agent.name, agent.team, env),
+                base_url=f"http://{agent.name}-{env}.{namespace}.svc.cluster.local:8080",
                 deployment_id=dep_id,
                 environment=env,
+                source_table="deployments",
+            )
+
+    # ── Leg 2: `production_deployments` (the Publish flow) ────────────────────
+    # Only meaningful for production; a published artifact has no sandbox leg here.
+    if environment == "production":
+        pub = (await db.execute(
+            select(ProductionDeployment.id, ProductionDeployment.namespace)
+            .join(PublishedArtifact, PublishedArtifact.id == ProductionDeployment.artifact_id)
+            .where(
+                PublishedArtifact.source_id == agent.id,
+                PublishedArtifact.type == "agent",
+                ProductionDeployment.status == "running",
+            )
+            .order_by(ProductionDeployment.deployed_at.desc().nulls_last())
+            .limit(1)
+        )).first()
+        if pub:
+            pd_id, pd_ns = pub
+            # The published pod lives in the namespace catalog.py minted for it.
+            # Composing `agents-{team}` here is the bug this leg exists to fix.
+            namespace = pd_ns or f"production-{agent.name}"
+            return DispatchTarget(
+                base_url=f"http://{agent.name}-production.{namespace}.svc.cluster.local:8080",
+                deployment_id=pd_id,
+                environment="production",
+                source_table="production_deployments",
             )
 
     # Refuse with the diagnosis, not the symptom.
-    live = sorted({env for _i, env, status in rows if status == "running"})
+    live = sorted({env for _i, env, status, _ns in rows if status == "running"})
     if live:
         detail = f"it is deployed to {', '.join(live)}"
     elif rows:

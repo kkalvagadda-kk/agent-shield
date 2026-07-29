@@ -729,7 +729,7 @@ registry-api:
     #          browser decide 403 fix + console scoping (suite-93 T-S93-004).
     # 0.2.242: resolve caller from the JWT Bearer (get_optional_user) — no Envoy SecurityPolicy
     #          injects claim headers, so the browser decide fell back to "studio-user" -> 403.
-    tag: "0.2.245"
+    tag: "0.2.246"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

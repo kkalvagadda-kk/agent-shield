@@ -203,3 +203,82 @@ error message". Worth folding into the CLAUDE.md checklist.
 - **Zombie schedules:** 8 archived + 1 draft workflow still have armed schedules firing. No lifecycle
   path disarms a trigger. Separate workstream —
   `docs/design/todo/schedule-lifecycle-and-operations.md`, Finding 1.
+
+---
+
+## Follow-up defect in the fix itself: only ONE of two production legs
+
+**Found:** 2026-07-29, by the reporter asking "I see the same issue with deamon-agent-test —
+this agent was created before your fix, does that ring a bell?"
+**Fixed:** registry-api `0.2.246`
+
+### Symptom
+
+`GET /agents/cic-journey-agent/health` on an agent that IS published and IS running a
+production pod:
+
+```
+health          failing
+dispatch_error  agent 'cic-journey-agent' has no running production deployment
+                — it is deployed to sandbox. … Publish the agent …
+```
+
+Demonstrably false. The agent's production pod was live in
+`production-cic-journey-agent-ab199885`.
+
+### Root cause
+
+An agent reaches production by **two independent routes, into different namespaces**:
+
+| Route | Table | Namespace | Service FQDN |
+|---|---|---|---|
+| `POST /agents/{name}/deploy {"environment":"production"}` | `deployments` | `agents-{team}` | `{agent}-production.agents-platform` |
+| **Publish** (`routers/catalog.py:279`) | `production_deployments` | `production-{artifact}-{id8}` | `{agent}-production.production-{artifact}-{id8}` |
+
+`resolve_dispatch_target` as first shipped (0.2.243) read **only** `deployments` and always
+composed `agents-{team}`. So the *only production route Studio actually offers* was invisible
+to it.
+
+And the refusal message told the operator to **Publish** — the exact action that lands in the
+leg the resolver could not see. **Self-defeating advice.** Arguably worse than the
+`[Errno -2]` it replaced: a DNS error is unhelpful, a confident wrong diagnosis sends you to
+do the wrong thing and then reports the same failure.
+
+### Why this was avoidable
+
+`docs/design/sandbox-production-parity-architecture.md` §41 states the rule outright — *"any
+column or query that assumes 'a deployment id is a `deployments` id' breaks for production"* —
+and lists four earlier bugs from exactly this assumption. `bundle_generator` had already
+solved it with a `UNION ALL` over both legs.
+
+The original fix's own `DispatchTarget` docstring even documented the two-table split, for the
+FK-stamping question. **Half the lesson was absorbed and the other half missed in the same
+change**: "don't stamp a `deployments` id into `production_deployment_id`" was understood,
+while "don't ask only `deployments` whether production exists" was not.
+
+### Fix
+
+`resolve_dispatch_target` checks both legs and takes the namespace **from the row it
+validated** (`Deployment.k8s_namespace` / `ProductionDeployment.namespace`) rather than
+recomposing `agents-{team}`. `DispatchTarget` gains `source_table` so a caller can never treat
+the id as belonging to the wrong table.
+
+### Test
+
+`T-S94-008` — arms a schedule on a genuinely published agent and asserts `dispatch_error` is
+None. Read-only: no fire, so proving the resolver *sees* the leg needs no side effects. It
+skips-as-FAIL when no published agent exists, because an unevaluable case must not read green.
+
+Red against 0.2.245:
+```
+FAIL T-S94-008 … agent=cic-journey-agent ns=production-cic-journey-agent-ab199885
+     health=failing dispatch_error="… has no running production deployment …" (want None)
+```
+
+### Lesson
+
+**A message that prescribes a remedy must be tested against the remedy actually working.**
+Both `suite-94` and the Playwright spec asserted the reason *named the environment* — true of
+the broken advice too. Nothing asserted that following it would help. That gap is what the
+Claude-in-Chrome journey's leg 7 ("watch it clear") exists to close, and it caught the
+UI-reachability half; it did not catch this half because the fixture used the API route.
