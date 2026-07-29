@@ -69,13 +69,18 @@ echo "--- T-S70-002: OPA identity floor on the DEPLOYED served bundle (opa eval)
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: no running registry-api pod"; exit 1; fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
 echo "  pod: $API_POD"
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 # Pull the REAL served rego the sidecars load (bundle endpoint) into a local file.
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app python3 -c \"import httpx,sys; sys.stdout.write(httpx.get('http://localhost:8000/api/v1/bundle/policy.rego',timeout=10).text)\"" \
+  "cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN python3 -c \"import httpx,sys; sys.stdout.write(httpx.get('http://localhost:8000/api/v1/bundle/policy.rego',timeout=10).text)\"" \
   > "$WORK/agentshield.rego" 2>/dev/null
 if ! grep -q "user_identity_ok" "$WORK/agentshield.rego"; then
   bad "T-S70-002 fetch served policy" "served policy.rego missing user_identity_ok"
@@ -134,7 +139,8 @@ from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
+HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform",
+       "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 OUT = os.environ["S70_OUT"]
 SFX = uuid.uuid4().hex[:6]
 AGENT = f"s70-agent-{SFX}"
@@ -424,7 +430,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume can take a few min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN S70_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 150); do   # up to ~12.5 min (production deploy + park + resume)
   sleep 5

@@ -24,6 +24,11 @@ fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
 
 cleanup() {
   echo ""
@@ -51,7 +56,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
 })
 if r.status_code != 201:
     print(f'FAIL: create agent {r.status_code}: {r.text}'); sys.exit(1)
-r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', json={
+r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={
     'trigger_type': 'schedule', 'cron_expression': '0 * * * *', 'timezone': 'UTC',
     'enabled': True, 'alert_email': 'alerts@agentshield.local', 'alert_on_failure': True,
 })

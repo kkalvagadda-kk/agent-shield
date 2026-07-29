@@ -26,6 +26,11 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 if [ -z "${API_POD:-}" ]; then
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
   echo "FATAL: Registry API pod not found in $NAMESPACE"
   exit 1
 fi
@@ -140,7 +145,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
 
 # Create schedule trigger
-r = httpx.post('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}/triggers', json={
+r = httpx.post('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={
     'trigger_type': 'schedule',
     'cron_expression': '0 */6 * * *',
     'timezone': 'US/Pacific',
@@ -191,7 +196,7 @@ echo "--- T-S19-005: Schedule trigger without cron → 422 ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
 
-r = httpx.post('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}/triggers', json={
+r = httpx.post('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={
     'trigger_type': 'schedule',
 })
 if r.status_code == 422:

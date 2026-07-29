@@ -29,6 +29,11 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
 echo "=== Suite 66: PRODUCTION triggers — webhook + scheduled (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -44,7 +49,8 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun, CompositeWorkflow
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform",
+   "Authorization":"Bearer "+os.environ["E2E_TOKEN"]}
 GW="http://agentshield-event-gateway:8091"
 SFX=uuid.uuid4().hex[:6]; NAMES=[f"s66-a-{SFX}",f"s66-b-{SFX}"]; WFN=f"s66-wf-{SFX}"
 INSTR="You answer factual questions. Reply with ONLY the answer — no preamble."
@@ -140,7 +146,7 @@ async def main():
 asyncio.run(main())
 PY
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  bash -c "rm -f $OUTFILE; cd /app && PYTHONPATH=/app nohup python3 $DRIVER > $OUTFILE 2>&1 & echo launched pid \$!"
+  bash -c "rm -f $OUTFILE; cd /app && PYTHONPATH=/app E2E_TOKEN=$E2E_TOKEN nohup python3 $DRIVER > $OUTFILE 2>&1 & echo launched pid \$!"
 echo "  driving webhook + schedule trigger lifecycle (detached in-pod)..."
 DONE=""
 for i in $(seq 1 120); do

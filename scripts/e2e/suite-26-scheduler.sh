@@ -24,6 +24,11 @@ fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
 
 cleanup() {
   echo ""
@@ -79,7 +84,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
 })
 if r.status_code != 201:
     print(f'FAIL: create agent {r.status_code}: {r.text}'); sys.exit(1)
-r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', json={
+r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={
     'trigger_type': 'schedule', 'cron_expression': '* * * * *', 'timezone': 'UTC', 'enabled': True,
 })
 if r2.status_code not in (200, 201):
@@ -111,7 +116,7 @@ echo "--- T-S26-003: Disable trigger removes the job ---"
 if [ -n "${TRIGGER_ID:-}" ]; then
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers/${TRIGGER_ID}', json={'enabled': False})
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers/${TRIGGER_ID}', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={'enabled': False})
 sys.exit(0 if r.status_code in (200,204) else 1)
 " 2>/dev/null || true
   AFTER_DISABLE=$(sched_jobs); PREV=$AFTER_DISABLE

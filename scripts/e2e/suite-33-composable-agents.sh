@@ -20,12 +20,17 @@ TEAM="platform"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+
 
 cleanup() {
   echo ""; echo "==> Cleanup: deleting test agents..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
-c=httpx.Client(base_url='http://localhost:8000/api/v1', timeout=10, headers={'X-User-Sub':'system'})
+c=httpx.Client(base_url='http://localhost:8000/api/v1', timeout=10, headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'})
 for n in ['${PLAIN_AGENT}','${TRIGGERED_AGENT}']:
     try: c.delete('/agents/'+n)
     except Exception: pass
