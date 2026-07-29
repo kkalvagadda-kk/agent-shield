@@ -12,6 +12,47 @@
 
 ---
 
+## Known gaps found in the Claude-in-Chrome lifecycle journey — 2026-07-28
+
+Driving the real product on EKS (registry-api 0.2.242 / studio 0.1.171 / declarative-runner 0.1.67)
+surfaced three gaps. The first is the important one — it changes what "memory" means in the product.
+
+- **not-yet-wired (debt) — `memory_enabled=true` gives NO cross-conversation recall (Leg 20).** The
+  long-term (pgvector) memory path is scaffolding with no producer and no consumer: `save_turn` never
+  writes `content_embedding`, `/memory/search` is never called and uses a `[0.0]*1536` placeholder
+  query vector, and even the non-vector `load_context` filters strictly by `thread_id`. In the
+  Playground scope, same-thread history is injected **ungated**, so memory-ON and memory-OFF agents are
+  behaviorally identical (both recall within one chat; neither recalls across chats). Leg 20's ON/OFF
+  decouple is **not representable** against the running product and must not be reported green. Full
+  postmortem + recommended class-fix in `docs/bugs/memory-enabled-no-cross-conversation-recall.md`. The
+  *narrow* original failure (a memory-ON agent could not respond — seeded without `llm_provider_id`, so
+  no Bedrock secret injected) IS resolved by recreating via the Studio no-code pipeline (`cic-mem2`),
+  which then recalls within a chat and rehydrates after reload (validates Issue-1 / F-F).
+
+- **not-yet-wired (debt) — workflow Playground chat is dead on this cluster (Leg 19).** `POST
+  /workflows/{id}/runs/stream` → "failed to start workflow run" because registry-api's ServiceAccount
+  is not authorized to manage ServiceAccounts in namespace `agentshield-playground`
+  (`serviceaccounts "playground-runner-...-sa" is forbidden ... code: 403`). The ephemeral
+  playground-runner is never created, so no run/transcript rows are written and nothing can rehydrate —
+  an RBAC/infra blocker, not a persistence-logic bug (the persistence code path was verified by reading
+  in Phase 1, F-A). Fix: add a Role/RoleBinding in `agentshield-playground` for the registry-api SA.
+  Postmortem in `docs/bugs/workflow-playground-run-rbac-403.md`.
+
+- **deferred (intentional) — reasoning-as-its-own-block not observable (Leg 14).** With the deployed
+  Bedrock path (`us.anthropic.claude-sonnet-4-6` via declarative-runner 0.1.67) the model writes its
+  step-by-step reasoning as **inline answer markdown**, not a distinct `reasoning`/thinking SSE channel,
+  so F-E's reasoning block does not render. The documented fallback — **per-turn message-boundary bubble
+  split** — IS proven live (each user/assistant turn opens its own bubble). Ships as message-boundary
+  bubble-splitting; the reasoning channel stays a tagged gap until the deployed path emits reasoning
+  tokens.
+
+- **open TODO — email-form login redirects to the local dev URL.** Logging in as `kalvagadda@hotmail.com`
+  redirects to `https://agentshield.127.0.0.1.nip.io:8443/` instead of the EKS host (username `kalyan`
+  works). Keycloak client redirect-URI / frontend-URL mismatch. See
+  `docs/design/todo/email-login-redirects-to-localhost.md`.
+
+---
+
 ## MCP picker parity + the `main` merge — deployed and verified on EKS — 2026-07-27
 
 `main` merged into `mcp-tool-source`. The browse-and-select tile drawers, the multi-line tool
@@ -89,6 +130,18 @@ clean.
   more scripts redeploying to re-assert the same things cost two build cycles for no coverage.
 - **deferred (intentional) — Decision 33 option B, team-scoped eval reads.** Unchanged and still open:
   an approver reviewing someone else's agent sees an empty eval history. Do not let this close silently.
+- **not-yet-wired (debt) — reactive runs persist 0 `run_steps` (F-B(b), Issue 3).** The durable trace
+  fallback (`_trace_from_run_steps`) renders a trajectory for durable / workflow-member runs, but the
+  reactive streaming-chat path (`declarative-runner/main.py`) still writes no `run_steps`, so a *reactive*
+  run's drawer has no durable source and depends on Langfuse. With Langfuse healthy (F-C) reactive traces
+  populate from Langfuse; persisting reactive `run_steps` for full offline resilience is a separate slice.
+  See `docs/bugs/trace-drawer-langfuse-only-no-durable-fallback.md`.
+- **not-yet-wired (debt) — ClickHouse PVC expansion is not reflected in the chart (F-C, Issue 3).** The
+  live PVC was online-expanded 5→20Gi to unstick langfuse-web; the chart still carries the langfuse
+  subchart default. Setting `langfuse.clickhouse.persistence.size` would break `helm upgrade` (immutable
+  STS `volumeClaimTemplate`). To reconcile: `kubectl delete sts agentshield-clickhouse-shard0
+  --cascade=orphan` then re-`helm upgrade` at 20Gi (pods+PVC preserved). See
+  `docs/debugging/014-langfuse-web-crashloop-clickhouse-pvc-full.md`.
 
 **Found during implementation, not during design** — recorded because each is a live literal or a guard
 weakness that outlives this slice:
@@ -675,17 +728,17 @@ Tagged **deferred (intentional)** unless noted:
   only on an *error* end), so no `knowledge_search` result reaches the page. The **playground
   ChatPane** is the proven live citation surface; feeding the deployed-agent surface means having
   `_translate` forward the tool result on a successful `tool_call_end` — no frontend change needed.
-- **Playground docked History resumes the VIEW only, not the backend thread** — *not-yet-wired
-  (debt)*. POC-5 added a docked `ConversationSidebar` to the Playground (`PlaygroundPage` →
-  `ChatPane`), scoped to the selected sandbox deployment. Selecting a row seeds `ChatPane` with the
-  thread's transcript (via `listMemory`), but the playground run POST (`startPlaygroundRun` →
-  `PlaygroundRunCreate`) carries **no** `session_id`, so `stream_playground_run` keys the thread on
-  `run_id` every time — the next message starts a **fresh** backend thread rather than continuing
-  the seeded one. The backend already *reads* `run.session_id` at stream time
-  (`thread_id = run.session_id or run_id`); the only missing hop is accepting + persisting
-  `session_id` on `PlaygroundRunCreate` / `create_playground_run`. Until then, Playground History is
-  a browse-and-view lens over past sandbox runs (the AgentChatPage/CatalogChatPage docked History
-  already do full continue-with-context because their POST carries `session_id`).
+- **Playground now threads + rehydrates the backend conversation** — *SHIPPED (branch
+  `lifecycle-journey-suite`, Issue 1 / F-F, 2026-07-28).* `PlaygroundRunCreate` now carries
+  `session_id`; the shared builder stamps it on `PlaygroundRun`, so `stream_playground_run` keys the
+  thread on the stable session (`thread_id = run.session_id or run_id`) and every turn continues ONE
+  backend thread — the agent remembers prior turns. `ChatPane` forwards its parent-owned `sessionId`
+  (= `PlaygroundPage.chatKey`) on every `startPlaygroundRun`, and `PlaygroundPage` **auto-rehydrates
+  the agent's most recent thread on select** (reads the transcript back from the backend), so a
+  returning user resumes where they left off instead of a blank pane. Parity with
+  AgentChatPage/CatalogChatPage. Bug doc: `docs/bugs/playground-conversations-lost-single-turn.md`.
+  Real save→reload→survived proof (deployed agent) is the Playwright journey suite leg 5 — *pending
+  cluster run.*
 - **S7 ingest content-scanning** — *deferred (intentional)* to Tighten. Uploaded Source bytes are
   chunked/embedded without a malware/PII/prompt-injection scan on the ingested content.
 - **DOCX (and other rich-doc) extraction** — *deferred (intentional)*. POC supports `text/plain`,

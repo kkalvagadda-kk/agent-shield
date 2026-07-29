@@ -104,6 +104,27 @@ describe("PlaygroundPage — History sidebar (POC-5)", () => {
     expect(await screen.findByTestId("playground-history-toggle")).toBeInTheDocument();
   });
 
+  it("F-F: auto-rehydrates the agent's latest thread on select, with no manual click", async () => {
+    renderWithProviders(<PlaygroundPage />);
+
+    // On agent-select the page queries that agent's conversations for the deployment…
+    await waitFor(() =>
+      expect(api.listConversations).toHaveBeenCalledWith(
+        "risky-agent",
+        expect.objectContaining({ deployment_id: "dep-1" }),
+      ),
+    );
+    // …and auto-seeds the NEWEST thread's transcript from the backend WITHOUT any
+    // History-row click. Pre-fix the page had no mount effect, so listMemory was only
+    // called on a manual sidebar click → this fails against the single-turn page.
+    await waitFor(() =>
+      expect(api.listMemory).toHaveBeenCalledWith(
+        "risky-agent",
+        expect.objectContaining({ thread_id: "thread-abc", deployment_id: "dep-1" }),
+      ),
+    );
+  });
+
   it("opens the docked sidebar and seeds listMemory with the row's thread_id on select", async () => {
     renderWithProviders(<PlaygroundPage />);
 

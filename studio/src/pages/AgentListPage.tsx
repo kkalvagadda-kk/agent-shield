@@ -80,6 +80,9 @@ export default function AgentListPage() {
   const [globalFilter, setGlobalFilter] = useState("");
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [deployTarget, setDeployTarget] = useState<string | null>(null);
+  // In-app delete confirmation (was a native window.confirm(), which blocks and is
+  // inconsistent with the app's other in-app modals — Deploy/Edit/Promote).
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["agents"],
@@ -182,11 +185,7 @@ export default function AgentListPage() {
               Edit
             </button>
             <button
-              onClick={() => {
-                if (confirm(`Delete agent "${agent.name}"? This soft-deletes it (status → deprecated).`)) {
-                  deleteMutation.mutate(agent.name);
-                }
-              }}
+              onClick={() => setDeleteTarget(agent.name)}
               disabled={
                 deleteMutation.isPending &&
                 deleteMutation.variables === agent.name
@@ -257,6 +256,45 @@ export default function AgentListPage() {
           onClose={() => setDeployTarget(null)}
           onDeployed={() => qc.invalidateQueries({ queryKey: ["agents"] })}
         />
+      )}
+
+      {/* In-app delete confirmation (replaces native confirm — clickable + consistent). */}
+      {deleteTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          role="dialog"
+          aria-modal="true"
+          data-testid="delete-agent-modal"
+        >
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md p-5">
+            <h3 className="text-base font-semibold text-slate-900">Delete agent</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              Delete agent <span className="font-medium">"{deleteTarget}"</span>? This
+              soft-deletes it (status → deprecated) and removes it from the active list.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button className="btn-secondary text-sm" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </button>
+              <button
+                className="btn-danger text-sm"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  const name = deleteTarget;
+                  setDeleteTarget(null);
+                  deleteMutation.mutate(name);
+                }}
+              >
+                {deleteMutation.isPending ? (
+                  <Loader2 size={12} className="animate-spin" />
+                ) : (
+                  <Trash2 size={12} />
+                )}
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Search + stats row */}

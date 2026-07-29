@@ -471,6 +471,9 @@ export async function startPlaygroundRun(body: {
   agent_name: string;
   input_message: string;
   agent_version_id?: string;
+  // F-F (Issue 1): stable per-chat session so reactive turns thread into ONE
+  // reloadable backend conversation (backend keys thread_id = session_id or run_id).
+  session_id?: string;
 }): Promise<{ run_id: string; stream_url: string }> {
   const { data } = await http.post<{ run_id: string; stream_url: string }>(
     "/playground/runs",

@@ -2,7 +2,9 @@
 Streaming module — converts LangGraph astream_events() to SSE strings.
 
 SSE event types (per sse-protocol.md):
-    text_delta          — incremental LLM output token
+    message_start       — a new LLM turn began → client opens a new assistant bubble (F-E)
+    reasoning           — incremental extended-thinking/reasoning token (Bedrock/Claude) (F-E)
+    text_delta          — incremental LLM output token (answer text)
     tool_call_start     — tool invocation begins
     tool_call_end       — tool invocation completes
     approval_requested  — HITL interrupt fired (high-risk tool paused)
@@ -93,14 +95,55 @@ async def stream_events(
             event_type: str = event.get("event", "")
             event_counter += 1
 
-            if event_type == "on_chat_model_stream":
+            if event_type == "on_chat_model_start":
+                # F-E (Issue 2): a new LLM turn = a new assistant message. Emit an
+                # explicit boundary so the client opens a NEW bubble instead of
+                # appending post-tool answers onto the pre-tool bubble (the old flat
+                # stream had no boundary, so reasoning + every turn collapsed into one
+                # bubble). One `message_start` per model invocation → one bubble.
+                yield format_sse(
+                    "message_start",
+                    {"index": event_counter},
+                    event_id=str(event_counter),
+                )
+
+            elif event_type == "on_chat_model_stream":
                 chunk = event["data"]["chunk"]
                 content = chunk.content if hasattr(chunk, "content") else ""
                 if isinstance(content, list):
-                    content = "".join(
-                        block.get("text", "") if isinstance(block, dict) else str(block)
-                        for block in content
-                    )
+                    # F-E: split reasoning (Bedrock/Claude extended-thinking) blocks from
+                    # answer text. The old join used block.get("text") for every block, so
+                    # reasoning blocks — which carry their text under a DIFFERENT key
+                    # (`reasoning_content.text` on Bedrock Converse, `thinking` on Anthropic)
+                    # — were silently dropped. Now reasoning streams as its own `reasoning`
+                    # event and answer text as `text_delta`.
+                    text_parts: list[str] = []
+                    reasoning_parts: list[str] = []
+                    for block in content:
+                        if isinstance(block, dict):
+                            btype = block.get("type")
+                            if btype in ("reasoning_content", "thinking", "reasoning"):
+                                rc = block.get("reasoning_content")
+                                if isinstance(rc, dict):
+                                    reasoning_parts.append(rc.get("text", ""))
+                                else:
+                                    reasoning_parts.append(
+                                        block.get("thinking")
+                                        or block.get("reasoning")
+                                        or block.get("text", "")
+                                    )
+                            else:
+                                text_parts.append(block.get("text", ""))
+                        else:
+                            text_parts.append(str(block))
+                    reasoning = "".join(p for p in reasoning_parts if p)
+                    if reasoning:
+                        yield format_sse(
+                            "reasoning",
+                            {"content": reasoning, "index": event_counter},
+                            event_id=str(event_counter),
+                        )
+                    content = "".join(text_parts)
                 if content:
                     yield format_sse(
                         "text_delta",

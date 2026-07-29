@@ -207,3 +207,54 @@ governance suites. Cover at minimum:
 Register the new suite in `scripts/e2e/run-all.sh`; naming `T-S18-00X — <what it proves>`
 (pick the next free suite number). Do NOT edit `scripts/deploy-cpe2e.sh` or service source —
 that's the fix agent's lane.
+
+---
+
+## 10. Open issues observed in the field — GAP ledger (2026-07-28)
+
+Confirmed live on the EKS test cluster during the Claude-in-Chrome lifecycle journey
+(`docs/testing/claude-in-chrome-journey.md`). These are the still-open gaps this contract
+targets, now with real evidence, plus one adjacent authorization bug found + fixed.
+
+### 10.1 OPA `default_deny` still fires in real deployments — STILL OPEN
+The §2 defect ("in real deployments OPA denies every tool call") is **confirmed still
+present**. A high-risk HTTP tool (`cic-echo-tool`) bound to a deployed declarative agent, when
+actually invoked (sandbox playground leg 4/12 AND production consumer leg 12b), returns:
+
+> **Tool 'cic-echo-tool' denied by policy: default_deny**
+
+i.e. the OPA sidecar has no bundle loaded (fail-closed) so every tool call is denied. The agent
+handles it gracefully (reports the denial), so wiring/HITL/persistence assertions still passed,
+but **no tool ever actually executed** in the whole journey. This is exactly the §2/§9.2
+symptom: `Bundle load failed: … Forbidden`. The §2–§6 fix (serve a real `.tar.gz` bundle at
+`/bundles/agentshield`, ship the unified `package agentshield` policy, carry per-tool risk in
+`data.json`) is unshipped. Until it lands, `default_deny` is the live behavior for every bound
+tool.
+
+### 10.2 Production HITL decide — platform-admin 403 (adjacent, FIXED)
+Not the OPA sidecar layer but the **registry-api approval-authority** layer that HITL routes to
+(`routers/approvals.py::decide_approval`). A high-risk tool call in production correctly parks to
+the reviewer console, but the reviewer's **Approve** returned **403 `not_authorized_to_decide`**,
+so the run never resumed. Root cause:
+
+- The production interactive branch required a **per-tool `ApprovalAuthority` grant** and never
+  honored the caller's **`platform-admin` role** at all.
+- `_ADMIN_ROLES` was spelled `{"platform_admin","team_lead"}` (underscore) while the real role in
+  `user_team_assignments` is **`platform-admin`** (hyphen, per `rbac.ROLE_HIERARCHY`), so even the
+  daemon branch's admin check never matched.
+- Secondary: `_has_authority_for_tool` used `scalar_one_or_none()`, which **500s
+  (`MultipleResultsFound`)** when a user holds ≥2 active grants for one tool — which the auto-grant
+  pattern produces (sandbox + production deploys each grant the owner).
+
+**Fix (shipped):** a top-level **platform-admin special case** in `decide_approval` (an admin-role
+caller may decide ANY approval, any context, without a per-tool grant), corrected `_ADMIN_ROLES`
+to include the hyphenated `platform-admin`, and switched the authority existence checks from
+`scalar_one_or_none()` to `.limit(1)/.first()`. See `docs/bugs/production-hitl-decide-403-authority.md`.
+
+### 10.3 Sandbox/playground auto-approve note
+The journey confirmed §4's "future improvement" note is now real behavior on the **sandbox**
+side: a high-risk tool call in the playground/sandbox parks as an **inline self-service** approval
+(resumable in place), while the SAME call in **production** routes to the reviewer console
+(authority-scoped, no self-approve). The OPA policy still does not branch on
+`sandbox`/`playground` (§4) — this split is enforced above OPA (SDK/registry-api), consistent with
+this contract.

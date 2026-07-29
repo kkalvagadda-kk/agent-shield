@@ -118,7 +118,11 @@ export function attachRationale<M extends AttributedRich>(
 ): M[] {
   const last = messages[messages.length - 1];
   if (last && isOpenAssistantFor(last, author)) {
-    const updated: M = { ...last, rationale };
+    // F-E (Issue 2): ACCUMULATE — reasoning/rationale can stream in deltas (Bedrock
+    // extended thinking), so append rather than replace (a set would show only the last
+    // chunk). The single-frame workflow case (one complete rationale per member) appends
+    // once, so it is unchanged.
+    const updated: M = { ...last, rationale: (last.rationale ?? "") + rationale };
     return [...messages.slice(0, -1), updated];
   }
   const fresh: M = { ...make(author), rationale };

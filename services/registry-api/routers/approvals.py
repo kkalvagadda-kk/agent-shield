@@ -24,6 +24,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_timeout_worker import _agent_pod_url
+from auth_middleware import get_optional_user
 from db import AsyncSessionLocal, get_db
 from identity import principal_display as _principal_display
 from models import AgentRun, Approval, ApprovalAuthority
@@ -31,7 +32,13 @@ from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, Paginate
 
 # Roles that always have authority to see/decide production approvals,
 # even without a specific per-resource ApprovalAuthority record.
-_ADMIN_ROLES = {"platform_admin", "team_lead"}
+# Admin roles that may decide ANY approval (the platform-admin special case): an
+# admin-role caller is a trusted reviewer and does not also need a per-tool
+# ApprovalAuthority grant. The DB stores the hyphenated "platform-admin"
+# (rbac.ROLE_HIERARCHY + user_team_assignments); the underscore spellings are kept as
+# tolerant aliases so a future/legacy value still matches. (Was underscore-only, which
+# never matched the real hyphenated role → every platform-admin was 403'd on decide.)
+_ADMIN_ROLES = {"platform-admin", "platform_admin", "team_lead"}
 
 # WS-2 T011 — default reviewer role a DAEMON trigger-run's approval routes to when the
 # trigger carries no explicit approver-role config. The role literal is matched against
@@ -249,8 +256,11 @@ async def _has_authority_for_tool(caller: str, tool_name: str, db: AsyncSession)
         ApprovalAuthority.revoked_at.is_(None),
         ApprovalAuthority.approver_user_id == caller,
     )
-    result = await db.execute(q)
-    return result.scalar_one_or_none() is not None
+    # A user can legitimately hold >1 active grant for the same tool (e.g. auto-granted
+    # by BOTH a sandbox and a production deploy). Use an existence check, not
+    # scalar_one_or_none() — the latter raises MultipleResultsFound (500) on 2+ rows.
+    result = await db.execute(q.limit(1))
+    return result.first() is not None
 
 
 async def _caller_roles(caller: str, db: AsyncSession) -> set[str]:
@@ -521,6 +531,11 @@ async def list_approvals(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    # Browser requests carry a JWT Bearer (decoded here); in-cluster callers send
+    # X-User-Sub. Without a caller the console ran UNSCOPED (the `if caller_sub:` block
+    # skipped), showing every team's approvals to everyone.
+    caller_claims: Optional[dict] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ApprovalResponse]:
     """List approvals. Defaults to production context. Pass context=playground
@@ -540,10 +555,11 @@ async def list_approvals(
     if team:
         q = q.where(Approval.team == team)
 
-    if x_user_sub:
-        # Scope to tools where caller has authority OR there's an authority record
-        # for an admin role (hardcoded admin roles get all-access)
-        auth_tool_names = await _get_authority_tool_names(x_user_sub, db)
+    caller_sub = x_user_sub or x_user_id or (caller_claims or {}).get("sub")
+    if caller_sub and not (await _caller_roles(caller_sub, db)) & _ADMIN_ROLES:
+        # Non-admin caller → scope to tools where they hold authority OR a tool that has
+        # an admin-role authority record. (Admins skip this block and see everything.)
+        auth_tool_names = await _get_authority_tool_names(caller_sub, db)
 
         # Also include tools with role-based authority (platform_admin/team_lead)
         role_q = select(ApprovalAuthority.resource_id).where(
@@ -756,6 +772,13 @@ async def decide_approval(
     approval_id: uuid.UUID,
     body: ApprovalDecision,
     x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    # The browser authenticates with a JWT Bearer token (there is NO Envoy SecurityPolicy
+    # injecting claim headers in this deployment), so decode it for the real caller sub.
+    # Reading only the X-User-Sub header made every gateway decide fall back to the
+    # frontend's body.reviewer_id="studio-user" → 403. In-cluster e2e suites send
+    # X-User-Sub directly (no Bearer). Order: header, gateway header, JWT sub, body.
+    caller_claims: Optional[dict] = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
     """Submit approve/reject. Caller must have an active ApprovalAuthority
@@ -767,32 +790,43 @@ async def decide_approval(
     # role (WS-2 T011) — no live user is on the connection — so it is gated by the
     # routed reviewer scope, NOT the per-tool ApprovalAuthority path. Deriving a
     # non-None reviewer_scope IS the discriminator (explicit, no agent_class sniffing).
-    caller = x_user_sub or body.reviewer_id
+    caller = x_user_sub or x_user_id or (caller_claims or {}).get("sub") or body.reviewer_id
+    # PLATFORM-ADMIN SPECIAL CASE: an admin-role caller may decide ANY approval, in any
+    # context, without also holding a per-tool ApprovalAuthority grant. Admins are the
+    # trusted reviewers the console is built for; requiring a per-tool grant on top of the
+    # role is what 403'd them. Roles come from user_team_assignments (same source as /me).
+    caller_is_admin = bool(
+        caller
+        and caller != "system"
+        and (await _caller_roles(caller, db)) & _ADMIN_ROLES
+    )
     reviewer_scope, _ = await _derive_reviewer_audit(approval, None, db)
     if reviewer_scope is not None:
         # Daemon approval → fail-closed reviewer-role authority. A caller not in the
         # reviewer scope (nor an admin / explicit grantee) is REJECTED (403), never
         # silently allowed. 'system' is the internal auto-actor (timeout worker).
-        if caller and caller != "system":
+        if caller and caller != "system" and not caller_is_admin:
             if not await _caller_can_review(caller, approval, reviewer_scope, db):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="not_authorized_to_decide",
                 )
     elif approval.context == "production":
-        # Interactive / user-delegated production approval — existing per-tool path.
-        if caller and caller != "system":
+        # Interactive / user-delegated production approval — per-tool grant path, unless
+        # the caller is an admin (special case above).
+        if caller and caller != "system" and not caller_is_admin:
             has_auth = await _has_authority_for_tool(caller, approval.tool_name, db)
             if not has_auth:
-                # Check if caller has a role-based authority record
+                # Check if the tool has a role-based authority record (existence check —
+                # scalar_one_or_none() would 500 on 2+ role rows for one tool).
                 role_q = select(ApprovalAuthority).where(
                     ApprovalAuthority.resource_type == "tool",
                     ApprovalAuthority.resource_id == approval.tool_name,
                     ApprovalAuthority.revoked_at.is_(None),
                     ApprovalAuthority.approver_role.in_(list(_ADMIN_ROLES)),
-                )
+                ).limit(1)
                 role_result = await db.execute(role_q)
-                if role_result.scalar_one_or_none() is None:
+                if role_result.first() is None:
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="not_authorized_to_decide",

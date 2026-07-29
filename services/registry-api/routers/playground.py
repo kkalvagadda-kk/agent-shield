@@ -25,7 +25,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
@@ -59,6 +59,7 @@ async def _create_and_dispatch_playground_run(
     caller: str,
     input_message: Optional[str],
     input_payload: Optional[dict[str, Any]],
+    session_id: Optional[str],
     trigger_type: Optional[str],
     trigger_payload: Optional[dict[str, Any]],
     execution_shape: Optional[str],
@@ -112,6 +113,12 @@ async def _create_and_dispatch_playground_run(
         input_message=input_message,
         execution_shape=shape,
         input_payload=input_payload,
+        # F-F (Issue 1): thread reactive chat turns into one conversation. The
+        # reactive stream keys thread_id = run.session_id or run_id (below), so a
+        # stable session_id links every turn of a chat into one reloadable thread
+        # (and lets the agent remember prior turns). None for non-chat doors
+        # (test-event, durable) → falls back to run_id, unchanged.
+        session_id=session_id,
         trigger_type=trigger_type,
         trigger_payload=trigger_payload,
         requested_by_username=requested_by_username,
@@ -231,6 +238,7 @@ async def create_playground_run(
         caller=caller,
         input_message=body.input_message,
         input_payload=body.input_payload,
+        session_id=body.session_id,
         trigger_type=body.trigger_type,
         trigger_payload=body.trigger_payload,
         execution_shape=body.execution_shape,
@@ -952,14 +960,29 @@ async def get_playground_run_trace(
 # ---------------------------------------------------------------------------
 @router.get(
     "/traces/{trace_id}",
-    summary="Fetch Langfuse trace data by trace ID",
+    summary="Fetch trace data by trace ID (Langfuse, durable fallback)",
 )
-async def get_trace_by_id(trace_id: str) -> dict[str, Any]:
-    """Return the provider-neutral trace by trace_id (used by eval result View Trace)."""
+async def get_trace_by_id(
+    trace_id: str,
+    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    user: dict | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Return the provider-neutral trace by trace_id (the Playground trace drawer + eval
+    result View Trace). Langfuse-first, then a durable Postgres `run_steps` fallback (F-B)
+    so the drawer still renders when Langfuse is unreachable / hasn't ingested."""
     from observability_backend import get_observability_backend
 
     obs = get_observability_backend()
     trace = obs.get_trace(trace_id)
+    if trace is None or not trace.spans:
+        caller = (user or {}).get("sub") or x_user_sub
+        if caller:
+            # Lazy import avoids a router import cycle. Access-scoped inside the helper.
+            from routers.observability import _trace_from_run_steps
+            durable = await _trace_from_run_steps(db, trace_id, {"sub": caller})
+            if durable is not None and durable.spans:
+                trace = durable
     return {
         "trace_id": trace_id,
         "trace_url": obs.build_trace_url(trace_id),
@@ -1808,6 +1831,9 @@ async def test_event(
                 # control: the exact failure a filter-miss-only test cannot see.
                 input_message=_webhook_driving_message(body.payload),
                 input_payload=body.payload,
+                # Webhook-eval door, not an interactive chat → no session threading
+                # (keeps thread_id = run_id, unchanged from before F-F).
+                session_id=None,
                 trigger_type="webhook",
                 trigger_payload=body.payload,
                 execution_shape=None,
@@ -1953,14 +1979,24 @@ async def resume_stream_playground_run(
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid run_id format")
 
+    # The caller (PlaygroundPage.handleHitlDecided) sends the run's THREAD id, which
+    # for a persisted chat is the session_id (see run dispatch: reactive chat threads
+    # on `run.session_id or run_id`, playground.py ~L788). Resolve by EITHER the run's
+    # PK or its session_id so resume works whether the caller passes the per-turn run_id
+    # (durable/non-chat, where session_id is NULL) or the session-scoped thread_id
+    # (reactive chat, where they diverge). Matching only PlaygroundRun.id 404'd every
+    # HITL resume after session_id threading landed.
     result = await db.execute(
-        select(PlaygroundRun).where(PlaygroundRun.id == parsed_id)
+        select(PlaygroundRun)
+        .where(or_(PlaygroundRun.id == parsed_id, PlaygroundRun.session_id == run_id))
+        .order_by(PlaygroundRun.started_at.desc())
     )
-    run = result.scalar_one_or_none()
+    run = result.scalars().first()
     if not run:
         raise HTTPException(status_code=404, detail="Playground run not found")
 
-    thread_id = run_id
+    # Key the approval lookup on the SAME thread the graph checkpointed under.
+    thread_id = run.session_id or str(run.id)
 
     # Find the most recent decided approval for this thread.
     approval_result = await db.execute(

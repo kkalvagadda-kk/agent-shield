@@ -139,6 +139,19 @@ def _translate(event: Optional[str], payload: dict, author: str) -> Optional[dic
     emits a second frame when it signals an error (keeps one chip per call). ``done``
     is skipped so the reader continues to EOF and captures a trailing ``rationale``.
     """
+    if event == "message_start":
+        # F-E (Issue 2): a new LLM turn → open a NEW bubble for this author. Reuses the
+        # frontend's existing agent_start handling (openAuthorBubble no-ops on an empty
+        # open bubble, so the leading agent_start + the first message_start don't stack),
+        # so every chatStream.ts surface (AgentChatPage/WorkflowChatPage/CatalogChatPage)
+        # splits a single agent's reasoning + pre-tool text + post-tool answer into
+        # separate bubbles with NO per-page change.
+        return {"type": "agent_start", "author": author}
+    if event == "reasoning":
+        # F-E: extended-thinking tokens → the bubble's rationale slot (accumulated by
+        # attachRationale). Without this the SDK's separate reasoning stream would vanish
+        # on these surfaces (the old runner flattened it into text_delta).
+        return {"type": "rationale", "author": author, "content": payload.get("content", "")}
     if event == "text_delta":
         return {"type": "token", "author": author, "content": payload.get("content", "")}
     if event == "tool_call_start":

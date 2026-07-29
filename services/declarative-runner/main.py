@@ -466,6 +466,12 @@ async def _load_memory_context(
             "scope": scope,
             "limit": 20,
         }
+        # DECOUPLE recall gate: mark the AGENT-recall load so the registry-api returns
+        # empty when the agent has memory disabled (the transcript is still SAVED for the
+        # user's history — just not injected as the agent's working memory). Never set for
+        # scope='workflow_run' (the shared transcript is a separate feature).
+        if scope == "agent":
+            params["for_agent_context"] = "true"
         if user_id:
             params["user_id"] = user_id
         if deployment_id:

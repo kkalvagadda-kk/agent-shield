@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -14,6 +14,7 @@ import ConversationSidebar from "../components/conversations/ConversationSidebar
 import { CheckCircle, Database, History, Loader2, Send, ShieldCheck } from "lucide-react";
 import {
   getAgent,
+  listConversations,
   listMemory,
   listTriggers,
   patchVersion,
@@ -57,9 +58,11 @@ export default function PlaygroundPage() {
   // thread's transcript read back from the backend (listMemory); New mints a fresh
   // chat. `chatRunning` (reported by ChatPane) plus the parent-owned HITL/resume
   // state gate select/New so a remount never drops a live stream.
-  // NOTE: the playground POST is single-turn (PlaygroundRunCreate has no session_id),
-  // so this resumes the VIEW of a past thread; continuing it as ONE backend thread
-  // needs a backend session_id (see the manual-e2e gap ledger).
+  // F-F (Issue 1): `chatKey` IS the backend session_id — it is forwarded to ChatPane
+  // as `sessionId` and sent on every startPlaygroundRun, so all turns of a chat thread
+  // into ONE reloadable conversation (was single-turn before: a fresh thread per turn,
+  // lost on leaving the screen). On agent-select we auto-rehydrate that agent's latest
+  // thread so a returning user resumes where they left off (effect below).
   const [historyOpen, setHistoryOpen] = useState(true);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [seedMessages, setSeedMessages] = useState<ChatMessage[]>([]);
@@ -121,11 +124,42 @@ export default function PlaygroundPage() {
     []
   );
 
-  const startNewConversation = () => {
+  const startNewConversation = useCallback(() => {
     setActiveThreadId(null);
     setSeedMessages([]);
     setChatKey(crypto.randomUUID());
-  };
+  }, []);
+
+  // F-F (Issue 1): auto-rehydrate the agent's most recent conversation when a
+  // reactive agent is selected, so a user returning to the Playground resumes where
+  // they left off instead of a blank pane. Only for the ChatPane surface (durable /
+  // triggered agents own their own runs). No thread yet → a fresh session. This is
+  // the mount/return counterpart to the manual History-sidebar click; both read the
+  // transcript back from the backend (never client state).
+  useEffect(() => {
+    if (!chatSurfaceActive || !selectedAgent) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const convos = await listConversations(selectedAgent, {
+          deployment_id: agentSelection?.deploymentId,
+        });
+        if (cancelled) return;
+        if (convos.length > 0) {
+          // Newest first (server orders by max(created_at) DESC).
+          await seedFromThread(selectedAgent, convos[0].thread_id, agentSelection?.deploymentId);
+        } else {
+          startNewConversation();
+        }
+      } catch {
+        if (!cancelled) startNewConversation();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // deploymentId is read via agentSelection; seedFromThread/startNewConversation are stable.
+  }, [selectedAgent, agentSelection?.deploymentId, chatSurfaceActive, seedFromThread, startNewConversation]);
 
   const handleApprovalRequested = (
     approvalId: string,
@@ -444,6 +478,7 @@ export default function PlaygroundPage() {
               <ChatPane
                 key={chatKey}
                 agentName={selectedAgent}
+                sessionId={chatKey}
                 initialMessages={seedMessages}
                 onRunningChange={setChatRunning}
                 resumeStreamUrl={resumeStreamUrl}

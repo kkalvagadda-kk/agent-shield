@@ -138,6 +138,10 @@ api|mcp,governance|suite-86-credential-provider.sh|Pluggable CredentialProvider 
 api|mcp,governance|suite-87-mcp-oauth.sh|MCP external OAuth 2.1 (Phase 4 WS-2)
 api|tools|suite-88-tool-description-metadata.sh|Tool description (multi-line) + picker tile metadata
 api|eval,rbac|suite-89-publish-queue-verdict.sh|Publish-queue verdict per pinned version + deny-by-default reads
+api|health|suite-90-durable-trace-fallback.sh|Durable run_steps trace fallback when Langfuse has no spans (F-B) + tenant isolation
+api|memory|suite-91-memory-save-recall-decouple.sh|Decouple conversation-save from memory_enabled (save always; recall gated)
+api|hitl,chat|suite-92-playground-hitl-resume-session-id.sh|Playground HITL resume-stream resolves run by session_id OR PK (F-F regression; resume-after-approve 404'd)
+api|hitl,rbac|suite-93-hitl-admin-approve-authority.sh|HITL decide honors platform-admin role (special case) + no 500 on multiple grants
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
@@ -183,3 +187,4 @@ browser|eval,workflow|e2e/eval-v2-workflow.spec.ts|Eval v2 workflow
 browser|debug|e2e/zz-debug.spec.ts|Scratch — debug probe
 browser|debug|e2e/zzprobe.spec.ts|Scratch — probe
 browser|eval|e2e/eval-verdict-publish-queue.spec.ts|Publish-queue verdict against the run's own threshold + reload
+browser|agent,workflow,deploy,chat,eval,memory|e2e/lifecycle-journey.spec.ts|Full lifecycle journey — create→workflow→deploy→chat+memory→eval+trace→publish→catalog→observability

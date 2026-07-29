@@ -147,6 +147,45 @@ describe("AgentListPage", () => {
     expect(screen.getByRole("button", { name: /delete/i })).toBeInTheDocument();
   });
 
+  // Delete uses an in-app modal (NOT native window.confirm — that blocks browser
+  // automation and is inconsistent with Deploy/Edit). Row Delete → modal → confirm →
+  // deleteAgent(name). Guards the fix for the Claude-in-Chrome journey leg 22.
+  it("row Delete opens an in-app confirm modal that calls deleteAgent on confirm", async () => {
+    (listAgents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [makeAgent()],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AgentListPage />);
+    await screen.findByText("my-agent");
+
+    // No modal until the row Delete is clicked.
+    expect(screen.queryByTestId("delete-agent-modal")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /delete/i }));
+
+    const modal = await screen.findByTestId("delete-agent-modal");
+    expect(deleteAgent).not.toHaveBeenCalled(); // opening the modal must not delete
+    await user.click(within(modal).getByRole("button", { name: /delete/i }));
+    await waitFor(() => expect(deleteAgent).toHaveBeenCalledWith("my-agent"));
+  });
+
+  it("Delete modal Cancel dismisses without deleting", async () => {
+    (listAgents as ReturnType<typeof vi.fn>).mockResolvedValue({
+      items: [makeAgent()],
+      total: 1,
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<AgentListPage />);
+    await screen.findByText("my-agent");
+    await user.click(screen.getByRole("button", { name: /delete/i }));
+    const modal = await screen.findByTestId("delete-agent-modal");
+    await user.click(within(modal).getByRole("button", { name: /cancel/i }));
+    await waitFor(() =>
+      expect(screen.queryByTestId("delete-agent-modal")).not.toBeInTheDocument()
+    );
+    expect(deleteAgent).not.toHaveBeenCalled();
+  });
+
   it("shows agent count in the stats row", async () => {
     (listAgents as ReturnType<typeof vi.fn>).mockResolvedValue({
       items: [makeAgent(), makeAgent({ id: "a2", name: "bot2" })],

@@ -70,7 +70,9 @@ Field remapping also happens here: `tool` → `tool_name`, `risk` → `risk_leve
 
 | Event | Payload fields | UI effect |
 |---|---|---|
-| `text_delta` | `content` (string) | Appended to the last assistant message bubble in real time |
+| `message_start` | `index` | **F-E (Issue 2):** a new LLM turn began → ChatPane opens a NEW assistant bubble (via the shared `openAuthorBubble`), so reasoning + pre-tool text + post-tool answer each land in their own bubble instead of one merged blob. One per model invocation. No-ops on an empty open bubble (no blank stacking). |
+| `reasoning` | `content` (string) | **F-E (Issue 2):** extended-thinking/reasoning tokens (Bedrock/Claude) — accumulated on the current bubble's distinct **Reasoning** block, separate from the answer. Previously these blocks were silently dropped (flattened via `block.get("text")`). |
+| `text_delta` | `content` (string) | Appended to the current (open) assistant message bubble in real time |
 | `tool_call_start` | `tool_name` | Blue chip appears in the message bubble: `Calling <tool>…` |
 | `tool_call_end` | `tool_name`, `result` | Blue chip replaced with green chip: `<tool>: <result[:40]>` |
 | `approval_requested` | `approval_id`, `tool_name`, `risk_level`, `args` | HITL overlay appears (see below); trace panel logs the event |
@@ -114,7 +116,7 @@ There are two distinct evaluation paths, designed to work together. Path 1 is ex
 
 This reuses the chat mechanics documented in *Step-by-step user flow* above; the evaluation-specific parts are the automatic judge, the feedback signal, and promoting runs into a golden set.
 
-**Select agent → send message → watch stream.** Same as steps 1–3. Picking an agent scopes the whole session to it; the purple "Sandbox mode" badge confirms no production state is touched. `POST /api/v1/playground/runs` creates a `PlaygroundRun` (`context="playground"`, `sandbox=True`) and a Langfuse root trace, then streams `text_delta` / `tool_call_start` / `tool_call_end` / `approval_requested` / `done` back to the ChatPane.
+**Select agent → send message → watch stream.** Same as steps 1–3. Picking an agent scopes the whole session to it; the purple "Sandbox mode" badge confirms no production state is touched. `POST /api/v1/playground/runs` creates a `PlaygroundRun` (`context="playground"`, `sandbox=True`) and a Langfuse root trace, then streams `message_start` / `reasoning` / `text_delta` / `tool_call_start` / `tool_call_end` / `approval_requested` / `done` back to the ChatPane.
 
 **Automatic LLM-as-Judge score.** After the stream ends, `_complete_run()` fires as a background task: it marks the run `completed`, then fire-and-forgets `judge.score_run()` (`judge.py`). The judge:
 - Formats input + output into a 0.0–1.0 rubric prompt (truncated to 800 chars each)
@@ -592,6 +594,15 @@ prior turns from the `agent_memory` transcript and injects them as leading messa
 runs. This is per-`(deployment, user, session)`: a second user replaying someone else's
 `session_id` is rejected (not-your-session), so one user never reads another's conversation.
 Because the transcript lives in Postgres (not pod RAM), the memory survives a pod restart.
+
+**The Playground carries a `session_id` too (Issue 1 / F-F).** `startPlaygroundRun` now sends a
+stable per-chat `session_id` (`ChatPane` forwards `PlaygroundPage`'s `chatKey`), which the shared
+run builder stamps on `PlaygroundRun` — so a Playground chat threads into ONE conversation and the
+agent remembers prior turns, exactly like AgentChatPage. On selecting a reactive agent the
+Playground **auto-rehydrates that agent's most recent thread** (transcript read back from the
+backend), so leaving and returning resumes where you left off rather than showing a blank pane;
+"New" (in the docked History sidebar) mints a fresh session. Before this the Playground was
+single-turn — no `session_id`, a fresh `thread_id = run_id` per message, history lost on leaving.
 
 ### Shared workflow transcript (multiple agents, one run)
 

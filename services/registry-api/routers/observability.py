@@ -19,9 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
 from db import get_db
-from models import Agent, AgentRun, PlaygroundRun
+from models import Agent, AgentRun, PlaygroundRun, RunStep
 from observability_backend import (
     CostByModel,
+    NormalizedSpan,
+    NormalizedTrace,
     ToolCallStat,
     get_observability_backend,
 )
@@ -263,17 +265,97 @@ async def list_traces(
 # GET /observability/traces/{trace_id} — fetch full trace via the backend
 # ---------------------------------------------------------------------------
 
+async def _trace_from_run_steps(
+    db: AsyncSession, trace_id: str, claims: dict
+) -> NormalizedTrace | None:
+    """F-B (Issue 3): build a NormalizedTrace from the DURABLE `run_steps` we own.
+
+    The trace drawer read `obs.get_trace` (Langfuse) ONLY, so when Langfuse is down /
+    hasn't ingested (e.g. its ClickHouse store crash-loops), the drawer showed nothing
+    even though the run happened. This renders the trace from Postgres `run_steps`
+    instead — a source we always own. Access-scoped: an AgentRun by team, a PlaygroundRun
+    by owner, so it never leaks another tenant's trajectory. Returns None when there is no
+    matching run or no durable steps (e.g. a reactive run — those don't persist steps yet;
+    gap-ledgered), so the caller keeps whatever Langfuse gave.
+    """
+    # Resolve the run behind this trace: by langfuse_trace_id, else by run id itself.
+    run = (await db.execute(
+        select(AgentRun).where(AgentRun.langfuse_trace_id == trace_id)
+    )).scalars().first()
+    kind = "agent"
+    if run is None:
+        run = (await db.execute(
+            select(PlaygroundRun).where(PlaygroundRun.langfuse_trace_id == trace_id)
+        )).scalars().first()
+        kind = "playground" if run is not None else kind
+    if run is None:
+        import uuid as _uuid
+        try:
+            rid = _uuid.UUID(trace_id)
+        except (ValueError, AttributeError):
+            return None
+        run = (await db.execute(select(AgentRun).where(AgentRun.id == rid))).scalars().first()
+        kind = "agent"
+        if run is None:
+            run = (await db.execute(select(PlaygroundRun).where(PlaygroundRun.id == rid))).scalars().first()
+            kind = "playground" if run is not None else kind
+    if run is None:
+        return None
+
+    # Access control — never surface a run the caller doesn't own.
+    if kind == "agent":
+        if run.team != await _resolve_team(claims, db):
+            return None
+    else:  # playground
+        if run.user_id != claims.get("sub"):
+            return None
+
+    steps = (await db.execute(
+        select(RunStep).where(RunStep.run_id == run.id).order_by(RunStep.step_number)
+    )).scalars().all()
+    if not steps:
+        return None
+
+    spans = [
+        NormalizedSpan(
+            id=str(s.id),
+            name=s.name,
+            type="SPAN",
+            start_time=s.started_at.isoformat() if s.started_at else None,
+            end_time=s.completed_at.isoformat() if s.completed_at else None,
+            output=s.output,
+            status_message=s.error_message,
+            level="ERROR" if s.status == "failed" else None,
+        )
+        for s in steps
+    ]
+    return NormalizedTrace(
+        trace_id=trace_id,
+        name=run.agent_name,
+        started_at=run.started_at.isoformat() if run.started_at else None,
+        spans=spans,
+        warning="Rendered from durable run steps (Langfuse spans unavailable).",
+    )
+
+
 @router.get("/traces/{trace_id}")
 async def get_trace_detail(
     trace_id: str,
     claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Fetch a full trace (spans/scores) as the provider-neutral NormalizedTrace.
 
-    Reads go through the observability backend — no direct Langfuse REST here.
+    Langfuse-first, then a DURABLE Postgres `run_steps` fallback (F-B): if Langfuse is
+    unreachable / hasn't ingested spans, the trace still renders from data we own instead
+    of showing an empty drawer.
     """
     obs = get_observability_backend()
     trace = obs.get_trace(trace_id)
+    if trace is None or not trace.spans:
+        durable = await _trace_from_run_steps(db, trace_id, claims)
+        if durable is not None and durable.spans:
+            trace = durable
     return {
         "trace_id": trace_id,
         "trace_url": obs.build_trace_url(trace_id),

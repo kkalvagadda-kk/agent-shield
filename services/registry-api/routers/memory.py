@@ -56,11 +56,11 @@ async def save_turn(
     db: AsyncSession = Depends(get_db),
 ) -> list[AgentMemoryResponse]:
     agent = await _get_agent_or_404(name, db)
-    if not agent.memory_enabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Memory is not enabled for agent '{name}'.",
-        )
+    # DECOUPLE (memory-save ≠ agent-recall): the conversation TRANSCRIPT is ALWAYS
+    # persisted so the user's History / rehydrate works for every agent. `memory_enabled`
+    # no longer gates the SAVE — it now gates only whether the AGENT RECALLS prior turns
+    # (the `for_agent_context` read in list_memory below). Saving a conversation for the
+    # user to see is a different concern from the agent using it as working memory.
 
     # All transcript access goes through the ConversationStore seam (§4.1) — the
     # router never touches the transcript ORM model directly. A workflow member
@@ -130,6 +130,11 @@ async def list_memory(
     deployment_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    # DECOUPLE recall gate: the runner's _load_memory_context sets this on the
+    # AGENT-recall read. When true and the agent has memory disabled, return empty so
+    # the agent does NOT recall prior turns. The user's History reads never set it, so
+    # the transcript is always visible regardless of memory_enabled.
+    for_agent_context: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ) -> list[AgentMemoryResponse]:
     """Load a transcript through the ConversationStore, oldest-first by
@@ -138,7 +143,12 @@ async def list_memory(
       scope='workflow_run' → shared transcript, the agent_name filter is dropped so
                              every member's tagged rows come back in index order.
     """
-    await _get_agent_or_404(name, db)
+    agent = await _get_agent_or_404(name, db)
+    # Recall gate (see param): only the single-agent recall load is gated on
+    # memory_enabled. The shared workflow transcript (scope='workflow_run') is a
+    # separate feature and stays ungated so members still see peers' turns.
+    if for_agent_context and scope == "agent" and not agent.memory_enabled:
+        return []
     store = get_conversation_store()
 
     if not thread_id:

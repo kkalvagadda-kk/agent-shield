@@ -1225,6 +1225,12 @@ class PlaygroundRunCreate(BaseModel):
     agent_name: str
     agent_version_id: Optional[uuid.UUID] = None
     input_message: Optional[str] = None
+    # F-F (Issue 1): a stable per-chat session so reactive turns thread into ONE
+    # backend conversation (stream keys thread_id = run.session_id or run_id,
+    # playground.py). Without it every turn was its own one-turn thread and the
+    # conversation was lost on leaving the screen. Mirrors AgentChatPage's session_id.
+    # String (not UUID) to match PlaygroundRun.session_id (String(256)).
+    session_id: Optional[str] = None
     execution_shape: str = Field("reactive", pattern="^(reactive|durable)$")
     input_payload: Optional[dict[str, Any]] = None
     trigger_type: Optional[str] = None

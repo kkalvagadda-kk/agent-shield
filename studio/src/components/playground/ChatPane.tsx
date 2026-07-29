@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import TraceDrawer from "./TraceDrawer";
 import SafetyDetails, { SafetyResult } from "./SafetyDetails";
 import AttributedBubble from "../chat/AttributedBubble";
-import { type Citation, parseKnowledgeCitations } from "../../lib/chatStream";
+import { type Citation, parseKnowledgeCitations, openAuthorBubble } from "../../lib/chatStream";
 
 export interface Message {
   role: "user" | "assistant";
@@ -15,7 +15,19 @@ export interface Message {
   safetyBlock?: SafetyResult;
   // POC-4: {source, kb}[] parsed from a knowledge_search tool_call_end result.
   citations?: Citation[];
+  // F-E (Issue 2): extended-thinking/reasoning text for THIS turn's bubble, rendered
+  // as a distinct block separate from the answer content.
+  reasoning?: string;
 }
+
+// F-E: factory for a fresh assistant bubble (used by openAuthorBubble on a
+// `message_start` boundary so each LLM turn opens its own bubble).
+const makeAssistant = (author?: string): Message => ({
+  role: "assistant",
+  content: "",
+  author,
+  chips: [],
+});
 
 interface Props {
   agentName: string | null;
@@ -39,6 +51,10 @@ interface Props {
   // Reports the in-flight run state up to the parent so it can block History
   // select/New while streaming (a remount mid-stream would drop the SSE connection).
   onRunningChange?: (running: boolean) => void;
+  // F-F (Issue 1): stable per-chat session id (parent-owned). Forwarded to
+  // startPlaygroundRun so every turn threads into ONE reloadable backend
+  // conversation. Omitted/undefined → single-turn (pre-fix) behavior.
+  sessionId?: string | null;
 }
 
 function coerceToString(val: unknown): string {
@@ -53,7 +69,7 @@ function coerceToString(val: unknown): string {
   return String(val);
 }
 
-export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequested, onResumeComplete, onTraceEvent, initialMessages, onRunningChange }: Props) {
+export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequested, onResumeComplete, onTraceEvent, initialMessages, onRunningChange, sessionId }: Props) {
   const [messages, setMessages] = useState<Message[]>(() => initialMessages ?? []);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
@@ -100,14 +116,33 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
         const event = payload.event as string;
         const ts = new Date().toISOString();
 
-        if (event && event !== "message" && event !== "text_delta") {
+        // message_start / reasoning are chat-render boundaries, not trace rows.
+        if (event && event !== "message" && event !== "text_delta" && event !== "message_start" && event !== "reasoning") {
           const traceContent = payload.content != null ? coerceToString(payload.content) : undefined;
           const traceTool = payload.tool_name != null ? String(payload.tool_name) : undefined;
           const traceResult = payload.result != null ? coerceToString(payload.result) : undefined;
           onTraceEvent({ ts, event, content: traceContent, tool_name: traceTool, result: traceResult });
         }
 
-        if (event === "text_delta") {
+        if (event === "message_start") {
+          // F-E (Issue 2): a new LLM turn → open a NEW assistant bubble so reasoning +
+          // pre-tool text + post-tool answer no longer collapse into one. openAuthorBubble
+          // no-ops when the last bubble is already an empty assistant bubble (the one
+          // pre-seeded on send / a back-to-back boundary), so no blank bubbles stack.
+          setMessages((prev) => openAuthorBubble(prev, agentName ?? undefined, makeAssistant));
+        } else if (event === "reasoning") {
+          // Extended-thinking tokens for the current turn — accumulate on the open
+          // bubble's reasoning slot (rendered distinct from the answer).
+          const content = coerceToString(payload.content);
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last && last.role === "assistant") {
+              updated[updated.length - 1] = { ...last, reasoning: (last.reasoning ?? "") + content, author: agentName ?? undefined };
+            }
+            return updated;
+          });
+        } else if (event === "text_delta") {
           const content = coerceToString(payload.content);
           setMessages((prev) => {
             const updated = [...prev];
@@ -260,6 +295,10 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
       const { run_id, stream_url } = await startPlaygroundRun({
         agent_name: agentName,
         input_message: userMsg,
+        // F-F: thread every turn of this chat into one reloadable backend
+        // conversation. Only sent when the parent supplies a session (so the
+        // no-session path stays byte-identical to the pre-fix single-turn call).
+        ...(sessionId ? { session_id: sessionId } : {}),
       });
 
       setCurrentRunId(run_id);
@@ -299,6 +338,15 @@ export default function ChatPane({ agentName, resumeStreamUrl, onApprovalRequest
             showLabel={false}
             citations={msg.citations}
           >
+            {msg.reasoning && (
+              <div
+                data-testid="reasoning-block"
+                className="mb-2 text-xs text-slate-500 bg-slate-50 border-l-2 border-slate-300 rounded-r px-2 py-1 whitespace-pre-wrap"
+              >
+                <span className="font-medium text-slate-400 mr-1 uppercase tracking-wide">Reasoning</span>
+                {msg.reasoning}
+              </div>
+            )}
             {msg.chips && msg.chips.length > 0 && (
               <div className="flex flex-wrap gap-1 mt-2">
                 {msg.chips.map((chip, ci) => (

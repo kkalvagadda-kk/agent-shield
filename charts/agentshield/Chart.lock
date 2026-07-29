@@ -1,13 +1,13 @@
 dependencies:
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.8.0
+  version: 18.8.1
 - name: pgbouncer
   repository: file://charts/pgbouncer
   version: 0.1.0
 - name: redis
   repository: https://charts.bitnami.com/bitnami
-  version: 27.0.15
+  version: 27.0.18
 - name: minio
   repository: https://charts.bitnami.com/bitnami
   version: 17.0.21
@@ -16,7 +16,7 @@ dependencies:
   version: 25.2.0
 - name: langfuse
   repository: https://langfuse.github.io/langfuse-k8s
-  version: 1.5.40
+  version: 1.5.41
 - name: clickhouse
   repository: https://charts.bitnami.com/bitnami
   version: 9.4.4
@@ -65,5 +65,5 @@ dependencies:
 - name: event-gateway
   repository: file://charts/event-gateway
   version: 0.1.0
-digest: sha256:565e5fbab83aa90f6b9889efdf1670247f597d8456badb196ec2d9a9d0745b09
-generated: "2026-07-23T17:02:34.4155-07:00"
+digest: sha256:d92ef20f0941653fa13b471d566d8738368208387458934552f1132f368358cd
+generated: "2026-07-28T09:11:34.942213-05:00"
