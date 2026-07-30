@@ -100,9 +100,18 @@ e2e_install_pyauth() {
 }
 
 # e2e_require_token <namespace> <pod> [container]
-# Same, but aborts the suite with a message that NAMES THE CAUSE. Use this in
-# any suite whose assertions depend on trigger CRUD — a missing token must read
-# as "could not authenticate", never as "the feature is broken".
+# Aborts the suite with a message that NAMES THE CAUSE. Use this in any suite whose
+# assertions depend on trigger CRUD — a missing token must read as "could not
+# authenticate", never as "the feature is broken".
+#
+# CALL IT BARE, NOT IN A COMMAND SUBSTITUTION, when you rely on the abort:
+#
+#     e2e_set_token "$NAMESPACE" "$API_POD"     # good: exit propagates
+#     TOK="$(e2e_require_token ...)"            # the `exit 1` below only kills the
+#                                               # SUBSHELL; the suite carries on with
+#                                               # TOK empty and every later call 401s
+#
+# That subshell subtlety is why `e2e_set_token` exists and is what the suites use.
 e2e_require_token() {
   local tok
   tok=$(e2e_token "$@") || {
@@ -112,4 +121,21 @@ e2e_require_token() {
     exit 1
   }
   printf '%s' "$tok"
+}
+
+# e2e_set_token <namespace> <pod> [container]
+# Sets E2E_TOKEN in the CALLER'S shell and aborts the suite if it cannot.
+#
+# Assigns rather than echoes precisely so the failure path works: `exit 1` inside a
+# command substitution exits only that subshell, so `E2E_TOKEN="$(e2e_require_token
+# ...)"` silently yields an EMPTY token and the suite then fails later with a wall of
+# 401s — the misdirected-failure mode this whole helper exists to end.
+e2e_set_token() {
+  E2E_TOKEN="$(e2e_token "$@")" || true
+  if [ -z "${E2E_TOKEN:-}" ]; then
+    echo "FATAL: could not obtain a Keycloak token for ${E2E_KC_USER} (client ${E2E_KC_CLIENT})." >&2
+    echo "       Trigger CRUD requires a real JWT since 76b3570 — X-User-Sub alone returns 401." >&2
+    echo "       Check the realm-init Job seeded ${E2E_KC_USER}, and that Keycloak is reachable in-cluster." >&2
+    exit 1
+  fi
 }

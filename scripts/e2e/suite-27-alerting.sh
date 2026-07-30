@@ -27,7 +27,7 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-E2E_TOKEN="$(e2e_require_token "$NAMESPACE" "$API_POD")"
+e2e_set_token "$NAMESPACE" "$API_POD"   # sets E2E_TOKEN; aborts loudly if it cannot
 
 
 cleanup() {

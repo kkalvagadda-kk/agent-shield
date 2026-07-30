@@ -186,15 +186,15 @@ echo ""
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then
+
+  echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
+  exit 1
+fi
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
 e2e_install_pyauth "$NAMESPACE" "$API_POD"
-
-  echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
-  exit 1
-fi
 echo "  Pod: $API_POD"
 echo ""
 
