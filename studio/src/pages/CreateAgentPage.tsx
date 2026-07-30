@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft, Code2, Loader2, MousePointerClick, MessageSquare, ListChecks,
-  Clock, Webhook, Copy, Check, Plus, Trash2,
+  Clock, Webhook, Copy, Check, Plus, Trash2, AlertTriangle,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -123,6 +123,30 @@ function ScheduleFields({
   const payloadError = jsonError(payload);
   return (
     <div className="rounded-lg border border-slate-200 p-4 space-y-3 bg-slate-50/50">
+      {/* ARM-TIME WARNING. Schedules dispatch to PRODUCTION, and an agent being
+          created is by definition not there yet — so this schedule cannot fire until
+          the agent is published. Unconditional here for exactly that reason: there is
+          no state to query.
+
+          Without it the product accepted a schedule that could never run and said
+          nothing, so the operator found out only after the first failure. Reported as
+          "the scheduled run failed and the UX does not show any information why", then
+          again as "I still see this when deploying an agent that has a schedule" —
+          because Deploy targets sandbox, which a schedule never reads. Explaining a
+          failure after the fact is worth less than not setting it up. */}
+      <div
+        data-testid="schedule-not-in-production-notice"
+        className="flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2.5"
+      >
+        <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
+        <p className="text-xs text-amber-800">
+          <span className="font-medium">This schedule will not fire yet.</span>{" "}
+          Schedules dispatch to <strong>production</strong>, and a new agent starts in
+          sandbox. Publish the agent (needs a passing eval) to make it run — the
+          schedule is saved either way, and you can check its status on the agent's
+          deployment Overview.
+        </p>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
           <span className="text-xs text-slate-500 uppercase">Cron expression</span>

@@ -735,6 +735,9 @@ export const updateWorkflowTrigger = async (
     input_payload?: Record<string, unknown> | null;
     alert_email?: string | null;
     alert_on_failure?: boolean;
+    // Decision 34 — see the note on `updateTrigger`. A workflow arm is refused
+    // unless the workflow is published (R8).
+    armed?: boolean;
   },
 ): Promise<AgentTrigger> => {
   const { data } = await http.patch<AgentTrigger>(
@@ -743,6 +746,12 @@ export const updateWorkflowTrigger = async (
   );
   return data;
 };
+
+export const armWorkflowTrigger = (workflowId: string, triggerId: string) =>
+  updateWorkflowTrigger(workflowId, triggerId, { armed: true });
+
+export const disarmWorkflowTrigger = (workflowId: string, triggerId: string) =>
+  updateWorkflowTrigger(workflowId, triggerId, { armed: false });
 
 export const deleteWorkflowTrigger = async (
   workflowId: string,
@@ -1312,7 +1321,20 @@ export interface AgentTrigger {
   // routes to. Only meaningful for daemon (scheduled) triggers; null = default scope.
   approver_role?: string | null;
   // WS-2 T014 — the human (Keycloak `sub`) who armed/created this trigger (audit).
+  // NOTE: read by the backend, not decoration — `identity.py` turns this into
+  // `principal.run_by`/`user_id` for a `user_delegated` trigger, and fails closed
+  // when it is missing.
   armed_by?: string | null;
+  // Arm state (Decision 34) — SEPARATE from `enabled`. `enabled` is the author's
+  // pause switch ("I want this cron"); `armed_at` is the operator's production
+  // gesture ("this cron is live"). Both must be true for a trigger to fire, and
+  // neither implies the other. `armed_at != null` IS the armed predicate — there is
+  // deliberately no server-sent `armed` boolean, because that would be a second
+  // representation of one fact. See lib/triggerArm.ts.
+  armed_at?: string | null;
+  disarmed_at?: string | null;
+  // Operator-readable prose, rendered verbatim. Not a machine code.
+  disarm_reason?: string | null;
   // WS-4 — how the event-gateway authenticates a hook call on this trigger.
   // "token" = the coarse per-trigger bearer token (pre-WS-4 posture, kept for
   // existing senders); "client_signed" = per-application client-id + HMAC.
@@ -1365,6 +1387,11 @@ export const updateTrigger = async (
     alert_on_failure?: boolean;
     // WS-2 T014 — daemon approver-role config, persisted on update.
     approver_role?: string | null;
+    // Decision 34 — the arming gesture rides the PATCH that already exists rather
+    // than a new endpoint, so the artifact-scoped router stays the single writer.
+    // A refused arm (no running production deployment) comes back 409 with the
+    // dispatch door's own message as `detail`.
+    armed?: boolean;
   }
 ): Promise<AgentTrigger> => {
   const { data } = await http.patch<AgentTrigger>(
@@ -1380,11 +1407,65 @@ export const enableTrigger = (agentName: string, triggerId: string) =>
 export const disableTrigger = (agentName: string, triggerId: string) =>
   updateTrigger(agentName, triggerId, { enabled: false });
 
+export const armTrigger = (agentName: string, triggerId: string) =>
+  updateTrigger(agentName, triggerId, { armed: true });
+
+export const disarmTrigger = (agentName: string, triggerId: string) =>
+  updateTrigger(agentName, triggerId, { armed: false });
+
 export const deleteTrigger = async (
   agentName: string,
   triggerId: string
 ): Promise<void> => {
   await http.delete(`/agents/${agentName}/triggers/${triggerId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Schedules — the cross-artifact operations read (R5)
+// ---------------------------------------------------------------------------
+// One row per trigger across BOTH agents and workflows. Read-only by design:
+// every write from the Schedules page routes back to the artifact-scoped
+// endpoints above (branching on `artifact_kind`), so there is still exactly one
+// writer per artifact kind.
+export type ScheduleArtifactKind = "agent" | "workflow";
+
+export interface ScheduleListItem {
+  trigger_id: string;
+  trigger_type: "schedule" | "webhook";
+  artifact_kind: ScheduleArtifactKind;
+  artifact_id: string;
+  artifact_name: string;
+  artifact_team: string | null;
+  // agents: active|archived|deprecated|quarantined · workflows: draft|published|archived
+  artifact_status: string;
+  cron_expression: string | null;
+  timezone: string | null;
+  next_fire_at: string | null;
+  input_payload: Record<string, unknown> | null;
+  enabled: boolean;
+  armed_at: string | null;
+  armed_by: string | null;
+  disarmed_at: string | null;
+  disarm_reason: string | null;
+  // Computed server-side from the SAME predicate the scheduler reads, so this page
+  // cannot disagree with what actually runs. `why_not` is prose for an operator.
+  will_fire: boolean;
+  why_not: string | null;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_run_at: string | null;
+  last_run_error: string | null;
+  alert_email: string | null;
+  alert_on_failure: boolean;
+}
+
+export const listSchedules = async (params?: {
+  trigger_type?: "schedule" | "webhook";
+}): Promise<ScheduleListItem[]> => {
+  const { data } = await http.get<ScheduleListItem[]>("/schedules", {
+    params: { trigger_type: params?.trigger_type ?? "schedule" },
+  });
+  return data;
 };
 
 // ---------------------------------------------------------------------------

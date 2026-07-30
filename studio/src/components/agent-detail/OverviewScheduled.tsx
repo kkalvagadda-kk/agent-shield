@@ -17,25 +17,14 @@ import {
   AgentHealthStatus,
   DeploymentContext,
 } from "../../api/registryApi";
+// Moved out of this file so the Schedules page renders the identical hint —
+// two copies is how two surfaces start describing the same cron differently.
+import { describeCron } from "../../lib/cron";
 
 interface Props {
   agentName: string;
   deploymentId: string;
   context: DeploymentContext;
-}
-
-// Lightweight human hint for the common cron shapes (no external dep).
-function describeCron(expr: string | null): string {
-  if (!expr) return "—";
-  const parts = expr.trim().split(/\s+/);
-  if (parts.length !== 5) return expr;
-  const [min, hr, dom, mon, dow] = parts;
-  if (expr === "* * * * *") return "every minute";
-  if (min !== "*" && hr !== "*" && dom === "*" && mon === "*" && dow === "*")
-    return `daily at ${hr.padStart(2, "0")}:${min.padStart(2, "0")}`;
-  if (min.startsWith("*/")) return `every ${min.slice(2)} minutes`;
-  if (hr.startsWith("*/")) return `every ${hr.slice(2)} hours`;
-  return expr;
 }
 
 // Rolled-up schedule-health badge styling (matches the last-run badge palette).

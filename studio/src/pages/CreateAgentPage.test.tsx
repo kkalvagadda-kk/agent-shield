@@ -223,4 +223,24 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
     // knowledge_search is never written into the hand-picked tools metadata.
     expect(mock(createAgent).mock.calls[0][0].metadata.tools).not.toContain("knowledge_search");
   });
+
+  it("warns at ARM TIME that a new agent's schedule will not fire yet", async () => {
+    // Prevention beats explanation. The wizard used to accept a schedule that could
+    // never run and say nothing, so the operator learned only after the first failure
+    // — reported as "the scheduled run failed and the UX does not show why", then
+    // again after clicking Deploy (which targets SANDBOX, a schedule never reads it).
+    // Unconditional here because an agent being created is definitionally not in
+    // production: there is no state to query.
+    await openNoCode();
+    expect(screen.queryByTestId("schedule-not-in-production-notice")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+
+    const notice = await screen.findByTestId("schedule-not-in-production-notice");
+    expect(notice).toHaveTextContent(/will not fire yet/i);
+    expect(notice).toHaveTextContent(/production/i);
+    // It must say what to DO, not merely that something is wrong.
+    expect(notice).toHaveTextContent(/publish/i);
+  });
+
 });

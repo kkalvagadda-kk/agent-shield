@@ -2,6 +2,7 @@ import {
   Activity,
   Bot,
   Boxes,
+  CalendarClock,
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
@@ -29,7 +30,8 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { listAgents, listPendingApprovals } from "../api/registryApi";
+import { listAgents, listPendingApprovals, listSchedules } from "../api/registryApi";
+import { needsAttention } from "../lib/triggerArm";
 import { DEMO } from "../demo/demo";
 import { STUDIO_BUILD } from "../lib/build";
 import type { LucideIcon } from "lucide-react";
@@ -40,7 +42,7 @@ import type { LucideIcon } from "lucide-react";
 // module constants, and the count is per-render state. The key names WHICH live count
 // the item wants; `Sidebar` resolves keys → counts in exactly one place. Matching on
 // `to === "/approvals"` instead would couple the badge to a route string.
-type BadgeKey = "approvals";
+type BadgeKey = "approvals" | "schedules";
 
 interface NavItem {
   label: string;
@@ -75,6 +77,19 @@ const CATALOG_ITEMS: NavItem[] = [
   { label: "Marketplace",  to: "/catalog",     icon: Store },
   { label: "Approvals",    to: "/approvals",   icon: ClipboardCheck, badgeKey: "approvals", badgeTestId: "approvals-badge" },
   { label: "Deployments",  to: "/deployments", icon: Rocket },
+  // Schedules sits next to Deployments because it is the same kind of thing: a
+  // fleet-wide operations view, not an authoring surface. DEMO-gated in lockstep
+  // with its route in App.tsx — a nav entry pointing at an unregistered route is a
+  // dead link, so the two cannot be gated separately.
+  ...(DEMO
+    ? [{
+        label: "Schedules",
+        to: "/schedules",
+        icon: CalendarClock,
+        badgeKey: "schedules" as BadgeKey,
+        badgeTestId: "schedules-badge",
+      }]
+    : []),
 ];
 
 const OBSERVE_ITEMS: NavItem[] = [
@@ -118,7 +133,8 @@ function detectSections(pathname: string): SectionKey[] {
   if (
     pathname.startsWith("/catalog") ||
     pathname.startsWith("/approvals") ||
-    pathname.startsWith("/deployments")
+    pathname.startsWith("/deployments") ||
+    pathname.startsWith("/schedules")
   ) active.push("catalog");
   if (pathname.startsWith("/observability")) active.push("observe");
   if (pathname.startsWith("/providers") || pathname.startsWith("/credentials") || pathname.startsWith("/applications") || pathname.startsWith("/mcp-servers")) active.push("settings");
@@ -238,8 +254,20 @@ export default function Sidebar() {
     refetchInterval: 30_000,
   });
 
+  // Schedules that are switched on but will not fire. Reads the SAME producer the
+  // Schedules page reads and counts with the SAME predicate (`needsAttention`) —
+  // per the note above, a second path to one fact is exactly the drift this badge
+  // pattern exists to delete. Gated with the nav item: no item, no query.
+  const { data: schedules } = useQuery({
+    queryKey: ["schedules"],
+    queryFn: () => listSchedules({ trigger_type: "schedule" }),
+    enabled: DEMO,
+    refetchInterval: 60_000,
+  });
+
   const badgeCounts: Record<BadgeKey, number> = {
     approvals: pendingApprovals?.length ?? 0,
+    schedules: (schedules ?? []).filter(needsAttention).length,
   };
 
   const myTeamGrants = useMemo(() => {

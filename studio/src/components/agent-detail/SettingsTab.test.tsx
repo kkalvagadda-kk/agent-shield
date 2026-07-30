@@ -16,6 +16,7 @@ vi.mock("../../api/registryApi", () => ({
   rotateToken: vi.fn(),
   createTrigger: vi.fn(),
   updateAgent: vi.fn(),
+  getAgentHealth: vi.fn(),
   listApplications: vi.fn(),
   listArtifactGrants: vi.fn(),
   createArtifactGrant: vi.fn(),
@@ -26,7 +27,7 @@ vi.mock("../../api/registryApi", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import {
-  listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
+  listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent, getAgentHealth,
   listApplications, listArtifactGrants, createArtifactGrant, revokeArtifactGrant,
   listUsers, listTeams,
 } from "../../api/registryApi";
@@ -96,6 +97,15 @@ const invokerGrant: ArtifactRoleGrant = {
 describe("SettingsTab", () => {
   beforeEach(() => {
     mock(listTriggers).mockResolvedValue([]);
+    // Default: dispatchable. Cases that want the arm-time warning override this.
+    mock(getAgentHealth).mockResolvedValue({
+      agent_name: "my-agent", mode: "scheduled", health: "healthy",
+      p95_latency_ms: null, error_rate: null, runs_24h: null, cost_24h: null,
+      awaiting_approval_count: null, failed_24h: null, avg_duration_ms: null,
+      last_run_status: null, next_fire_at: null, missed_fires: 0,
+      last_error: null, dispatch_error: null,
+      match_rate_24h: null, rejected_count_24h: null,
+    });
     mock(updateTrigger).mockResolvedValue(scheduleTrigger);
     mock(rotateToken).mockResolvedValue({
       trigger_id: "t2",
@@ -405,4 +415,41 @@ describe("SettingsTab", () => {
       );
     });
   });
+
+  it("warns that schedules cannot fire when the agent has no production deployment", async () => {
+    // Prevention, not post-hoc explanation. Reported twice: first as "the scheduled
+    // run failed and the UX does not show why", then as "I still see this when
+    // deploying an agent that has a schedule" — because Deploy targets sandbox, which
+    // a schedule never reads. `dispatch_error` is the live answer from the same
+    // resolver the dispatch door uses, so this panel cannot disagree with a real fire.
+    mock(listTriggers).mockResolvedValue([scheduleTrigger]);
+    mock(getAgentHealth).mockResolvedValue({
+      agent_name: "my-agent", mode: "scheduled", health: "failing",
+      p95_latency_ms: null, error_rate: null, runs_24h: null, cost_24h: null,
+      awaiting_approval_count: null, failed_24h: null, avg_duration_ms: null,
+      last_run_status: null, next_fire_at: null, missed_fires: 0, last_error: null,
+      dispatch_error:
+        "agent 'my-agent' has no running production deployment — it is deployed to sandbox.",
+      match_rate_24h: null, rejected_count_24h: null,
+    });
+    renderWithProviders(
+      <SettingsTab agentName="my-agent" agentId="ag1" agentTeam="platform" />
+    );
+
+    const warn = await screen.findByTestId("settings-schedule-cannot-run");
+    expect(warn).toHaveTextContent(/cannot fire yet/i);
+    expect(warn).toHaveTextContent(/no running production deployment/i);
+  });
+
+  it("does NOT warn when the agent can dispatch", async () => {
+    // The warning must be driven by real state, not shown unconditionally — a banner
+    // that is always there is ignored, which defeats the point of adding it.
+    mock(listTriggers).mockResolvedValue([scheduleTrigger]);
+    renderWithProviders(
+      <SettingsTab agentName="my-agent" agentId="ag1" agentTeam="platform" />
+    );
+    await waitFor(() => expect(screen.getByText(/schedule triggers/i)).toBeInTheDocument());
+    expect(screen.queryByTestId("settings-schedule-cannot-run")).not.toBeInTheDocument();
+  });
+
 });
