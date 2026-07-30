@@ -59,6 +59,21 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    -- The artifact-status predicates are DEFENCE IN DEPTH, not the
+                    -- primary control. The primary control is the write side
+                    -- (registry-api trigger_lifecycle.disarm_triggers, called from
+                    -- delete/archive/quarantine). This filter is what protects us from
+                    -- the NEXT lifecycle path that forgets to call it.
+                    --
+                    -- It is needed because `enabled` alone was the only gate: 37
+                    -- triggers were armed on dead artifacts, including a never-published
+                    -- DRAFT workflow firing every 15 minutes for days. Draft is excluded
+                    -- deliberately — an unpublished workflow has never passed the eval
+                    -- gate (Decision 20), so firing it unattended is the defect.
+                    --
+                    -- `_sync_jobs` removes any job whose trigger stops appearing here, so
+                    -- an artifact archived mid-flight is unregistered within one reload
+                    -- interval (RELOAD_INTERVAL_SECONDS, default 60) — the accepted bound.
                     SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
                            a.name AS agent_name, NULL::text AS workflow_id
                     FROM agent_triggers t
@@ -66,6 +81,7 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
                     WHERE t.trigger_type = 'schedule'
                       AND t.enabled = true
                       AND t.cron_expression IS NOT NULL
+                      AND a.status = 'active'
                     UNION ALL
                     SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
                            NULL::text AS agent_name, t.workflow_id::text
@@ -74,6 +90,7 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
                     WHERE t.trigger_type = 'schedule'
                       AND t.enabled = true
                       AND t.cron_expression IS NOT NULL
+                      AND w.status = 'published'
                     """
                 )
                 rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]

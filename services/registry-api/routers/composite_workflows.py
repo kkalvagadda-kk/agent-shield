@@ -347,8 +347,17 @@ async def update_workflow(
 async def archive_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
     wf = await _get_workflow(workflow_id, db)
     wf.status = "archived"
+    # Disarm in the SAME transaction as the status change. Archiving used to leave
+    # triggers armed: 8 archived workflows were still firing daily on the cluster, and
+    # the e2e suites' own cleanup (which archives) was manufacturing them. Same rule as
+    # delete_agent — see trigger_lifecycle for why this is a write-side gate and why
+    # undeploy is deliberately excluded.
+    from trigger_lifecycle import disarm_triggers
+
+    disarmed = await disarm_triggers(db, workflow_id=wf.id, reason="workflow archived")
     wf.updated_at = datetime.now(timezone.utc)
     await db.commit()
+    logger.info("archive_workflow: '%s' archived, disarmed %d trigger(s)", wf.name, disarmed)
 
 
 @router.post("/{workflow_id}/members", response_model=WorkflowMemberResponse, status_code=status.HTTP_201_CREATED)

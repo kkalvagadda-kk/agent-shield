@@ -143,6 +143,7 @@ api|memory|suite-91-memory-save-recall-decouple.sh|Decouple conversation-save fr
 api|hitl,chat|suite-92-playground-hitl-resume-session-id.sh|Playground HITL resume-stream resolves run by session_id OR PK (F-F regression; resume-after-approve 404'd)
 api|hitl,rbac|suite-93-hitl-admin-approve-authority.sh|HITL decide honors platform-admin role (special case) + no 500 on multiple grants
 api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves ONE environment (admission+address agree); refusal is a legible run row, not a DNS error
+api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving/quarantining an artifact disarms its triggers (write gate + scheduler read filter)
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes

@@ -1,7 +1,7 @@
 dependencies:
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.8.1
+  version: 18.8.2
 - name: pgbouncer
   repository: file://charts/pgbouncer
   version: 0.1.0
@@ -65,5 +65,5 @@ dependencies:
 - name: event-gateway
   repository: file://charts/event-gateway
   version: 0.1.0
-digest: sha256:d92ef20f0941653fa13b471d566d8738368208387458934552f1132f368358cd
-generated: "2026-07-28T09:11:34.942213-05:00"
+digest: sha256:df3b4595c129abde6f24363ed8886f39e13fbee37ff169cdc40e888f5e97f1bf
+generated: "2026-07-29T07:10:09.335115-05:00"

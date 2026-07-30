@@ -155,6 +155,15 @@ def _deny(reason: str, **ctx: object) -> WebhookAuthResult:
 # already distinguishes "agent"/"workflow" one-to-one with
 # `artifact_role_grants.artifact_type`'s own CHECK values, so `lookup_triggers`
 # carries it through into the row dict instead of selecting it redundantly.
+# The artifact-status predicates are DEFENCE IN DEPTH behind the write-side disarm
+# (registry-api `trigger_lifecycle.disarm_triggers`, called from delete / archive /
+# quarantine). They matter here because THIS IS A SEPARATE SERVICE from the scheduler:
+# filtering only the scheduler's query would have left the webhook door armed on
+# deleted artifacts, which is the bandaid the No-Bandaid rule names. 37 triggers were
+# live on dead artifacts before the write-side gate existed.
+#
+# A filtered-out trigger simply is not found, so the caller's existing `_DENY` path
+# returns the uniform 401 — no new branch, and no enumeration oracle introduced.
 _TRIGGER_SQL = {
     "agent": """
         SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, NULL,
@@ -164,6 +173,7 @@ _TRIGGER_SQL = {
         WHERE a.name = %s
           AND t.trigger_type = 'webhook'
           AND t.enabled = true
+          AND a.status = 'active'
     """,
     "workflow": """
         SELECT t.id::text, t.token_hash, t.filter_conditions, t.auth_mode, w.id::text,
@@ -173,6 +183,7 @@ _TRIGGER_SQL = {
         WHERE w.name = %s
           AND t.trigger_type = 'webhook'
           AND t.enabled = true
+          AND w.status = 'published'
     """,
 }
 

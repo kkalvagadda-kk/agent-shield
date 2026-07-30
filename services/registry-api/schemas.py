@@ -1999,6 +1999,12 @@ class AgentTriggerResponse(BaseModel):
     cron_expression: str | None = None
     timezone: str | None = None
     enabled: bool
+    # Why a DISABLED trigger is disabled, when the system did it (migration 0076).
+    # Without this a lifecycle disarm looks identical to a colleague flipping the
+    # toggle, and the operator cannot tell whether re-enabling is safe. Cleared when
+    # a human re-enables, so it never describes an armed trigger.
+    disabled_reason: str | None = None
+    disabled_at: datetime | None = None
     filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = None

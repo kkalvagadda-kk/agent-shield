@@ -390,13 +390,23 @@ async def delete_agent(
         )
         .values(status="terminating")
     )
+    # Disarm the agent's triggers in THIS transaction. A soft-delete used to leave
+    # them armed, so a deleted agent's cron kept firing forever — demonstrated in one
+    # click by the Chrome journey's leg 8 (delete produced `deprecated` agent +
+    # `enabled=True` hourly schedule). Same transaction as the status change, or the
+    # two can disagree. Re-activating does NOT re-arm: turning a schedule back on is
+    # a deliberate act. See trigger_lifecycle for why not undeploy/suspend.
+    from trigger_lifecycle import disarm_triggers
+
+    disarmed = await disarm_triggers(db, agent_id=agent.id, reason="agent deleted")
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
     logger.info(
-        "delete_agent: soft-deleted agent '%s' (id=%s) → status=deprecated",
+        "delete_agent: soft-deleted agent '%s' (id=%s) → status=deprecated, disarmed %d trigger(s)",
         name,
         agent.id,
+        disarmed,
     )
 
 
@@ -430,6 +440,13 @@ async def quarantine_agent(
         )
 
     agent.status = "quarantined"
+    # Quarantine is a SECURITY action — a quarantined agent must not be woken by its
+    # own cron while the incident is being reviewed. The pod is deliberately left
+    # running for forensics (see the docstring), which makes disarming the triggers
+    # the only thing standing between "quarantined" and "still executing on a timer".
+    from trigger_lifecycle import disarm_triggers
+
+    await disarm_triggers(db, agent_id=agent.id, reason="agent quarantined")
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
