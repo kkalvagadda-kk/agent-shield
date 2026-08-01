@@ -183,7 +183,7 @@ _TRIGGER_SQL = {
         WHERE w.name = %s
           AND t.trigger_type = 'webhook'
           AND t.enabled = true
-          AND w.status = 'published'
+          AND w.status <> 'archived'
     """,
 }
 

@@ -70,10 +70,18 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCHED_SRC="$REPO_ROOT/services/scheduler/main.py"
 GW_SRC="$REPO_ROOT/services/event-gateway/webhook_auth.py"
 _missing=""
-grep -q "a.status = 'active'" "$SCHED_SRC" || _missing="$_missing scheduler:agent-status"
-grep -q "w.status = 'published'" "$SCHED_SRC" || _missing="$_missing scheduler:workflow-status"
-grep -q "a.status = 'active'" "$GW_SRC" || _missing="$_missing gateway:agent-status"
-grep -q "w.status = 'published'" "$GW_SRC" || _missing="$_missing gateway:workflow-status"
+# Strip comment lines before grepping. The explanation of WHY the old predicates were
+# wrong necessarily quotes them, and a naive grep then flags the very file that fixed
+# it — a check that cannot tell code from prose about the code is worse than none.
+_code() { grep -vE "^[[:space:]]*(--|#)" "$1"; }
+for _src in "$SCHED_SRC" "$GW_SRC"; do
+  _n=$(basename "$_src")
+  _code "$_src" | grep -q "a.status = 'active'"    || _missing="$_missing $_n:agent-status"
+  _code "$_src" | grep -q "w.status <> 'archived'" || _missing="$_missing $_n:workflow-not-archived"
+  # Both previously-wrong predicates must be ABSENT, not merely joined by a right one.
+  _code "$_src" | grep -q "w.status = 'published'"         && _missing="$_missing $_n:DEAD-status-eq-published"
+  _code "$_src" | grep -q "w.publish_status = 'published'" && _missing="$_missing $_n:TOO-STRICT-publish_status"
+done
 if [ -z "$_missing" ]; then
   echo "PASS  T-S95-000 read-side status filter present in BOTH consumers (scheduler + gateway)"
   PASS=$((PASS+1))
@@ -151,7 +159,8 @@ async def scheduler_sees(trigger_id):
             UNION ALL
             SELECT t.id::text FROM agent_triggers t JOIN workflows w ON t.workflow_id = w.id
              WHERE t.trigger_type='schedule' AND t.enabled = true
-               AND t.cron_expression IS NOT NULL AND w.status = 'published'
+               AND t.cron_expression IS NOT NULL
+               AND w.status <> 'archived'
         """))).all()
     return str(trigger_id) in {row[0] for row in r}
 
@@ -164,6 +173,7 @@ async def main():
 
     c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=60.0, auth=BearerAuth())
     wid = None
+    wid_pub = None
     try:
         pid = (await c.get("/llm-providers/", params={"team": "platform"})).json()["items"][0]["id"]
 
@@ -260,6 +270,32 @@ async def main():
                f"after_reactivate enabled={reactivated_en} reason={reactivated_reason!r} | "
                f"patch={pr.status_code} enabled={final_en} reason={final_reason!r} (want None)")
 
+        # ── T-S95-007: POSITIVE CONTROL for the WORKFLOW leg ────────────────────
+        # The missing half. Every other case asserts a DEAD artifact does not fire —
+        # which is equally satisfied by NOTHING firing, and that is exactly what
+        # happened: gating on `w.status='published'` (a value nothing writes) killed
+        # every workflow schedule while suite-95 stayed green. A liveness filter needs
+        # a positive control or it cannot tell success from total failure.
+        wr2 = await c.post("/workflows", json={
+            "name": f"{WF_NAME}-pub", "team": "platform", "orchestration": "sequential",
+            "execution_shape": "durable", "agent_class": "daemon"})
+        assert wr2.status_code in (200, 201), f"create pub wf: {wr2.status_code} {wr2.text[:160]}"
+        wid_pub = wr2.json()["id"]
+        # Deliberately left DRAFT/private — that is the shape a real production
+        # workflow has (suite-66 puts one in production by deploying its MEMBER AGENTS;
+        # the workflow row never changes). Requiring publication here would have hidden
+        # exactly the over-strict predicate this case now guards against.
+        wt2 = await c.post(f"/workflows/{wid_pub}/triggers", json={
+            "trigger_type": "schedule", "cron_expression": "0 0 * * *", "alert_on_failure": False})
+        assert wt2.status_code in (200, 201), f"arm pub wf: {wt2.status_code} {wt2.text[:160]}"
+        t_pub = wt2.json()["id"]
+        pub_en, _ = await trig_state(t_pub)
+        pub_seen = await scheduler_sees(t_pub)
+        record("T-S95-007 POSITIVE CONTROL: a LIVE (non-archived) workflow's schedule IS visible to the scheduler",
+               pub_en is True and pub_seen is True,
+               f"enabled={pub_en} scheduler_sees={pub_seen} (want True) "
+               f"— gating on workflows.status (nothing writes it) or on publish_status (too strict) both broke this")
+
         # ── T-S95-006: NEGATIVE CONTROL ──────────────────────────────────────────
         t_live = await arm(LIVE_AGENT)
         l_en, l_reason = await trig_state(t_live)
@@ -284,8 +320,15 @@ async def main():
                 await c.delete(f"/agents/{n}")
             except Exception:
                 pass
-        # No workflow cleanup call: T-S95-002's DELETE already archived it, which is
-        # this product's "delete" for a workflow.
+        # T-S95-002's DELETE already archived the first workflow. The POSITIVE-CONTROL
+        # workflow is PUBLISHED with an ARMED daily schedule — leave it and the suite
+        # becomes the very thing it tests, a fixture firing forever. Archiving it also
+        # re-exercises the write gate, so the teardown is itself an assertion.
+        if wid_pub:
+            try:
+                await c.delete(f"/workflows/{wid_pub}")
+            except Exception:
+                pass
         await c.aclose()
 
 asyncio.run(main())
@@ -320,7 +363,7 @@ while IFS= read -r line; do
 done <<< "$RES"
 
 # Completeness gate: FAIL=0 is only a pass if every gate assertion actually RAN.
-REQUIRED_IDS="000 001 002 003 004 005 006"
+REQUIRED_IDS="000 001 002 003 004 005 006 007"
 MISSING=""
 for id in $REQUIRED_IDS; do
   [ "$id" = "000" ] && continue   # 000 runs in bash above, not in the driver result file
@@ -331,7 +374,7 @@ if [ -n "$MISSING" ]; then
   FAIL=$((FAIL+1))
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S95-COMPLETE every gate assertion ran (000-006 — none skipped)"
+  echo "PASS  T-S95-COMPLETE every gate assertion ran (000-007 — none skipped)"
   PASS=$((PASS+1))
 fi
 

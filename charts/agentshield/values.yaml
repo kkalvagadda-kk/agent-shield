@@ -167,7 +167,7 @@ event-gateway:
     #   webhook_clients for client_signed verification.
     # 0.1.5: read-side status filter in _TRIGGER_SQL — a deleted agent's webhook must
     #   not stay live (defence in depth behind registry-api's write-side disarm).
-    tag: "0.1.5"
+    tag: "0.1.7"
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
@@ -731,7 +731,7 @@ registry-api:
     #          browser decide 403 fix + console scoping (suite-93 T-S93-004).
     # 0.2.242: resolve caller from the JWT Bearer (get_optional_user) — no Envoy SecurityPolicy
     #          injects claim headers, so the browser decide fell back to "studio-user" -> 403.
-    tag: "0.2.247"
+    tag: "0.2.249"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

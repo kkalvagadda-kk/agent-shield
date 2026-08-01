@@ -67,9 +67,26 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
                     --
                     -- It is needed because `enabled` alone was the only gate: 37
                     -- triggers were armed on dead artifacts, including a never-published
-                    -- DRAFT workflow firing every 15 minutes for days. Draft is excluded
-                    -- deliberately — an unpublished workflow has never passed the eval
-                    -- gate (Decision 20), so firing it unattended is the defect.
+                    -- DRAFT workflow firing every 15 minutes for days. Unpublished is
+                    -- excluded deliberately — a workflow that has never been published
+                    -- has never passed the eval gate (Decision 20), so firing it
+                    -- unattended is the defect.
+                    --
+                    -- WHAT "LIVE" MEANS FOR A WORKFLOW: not archived. Two earlier
+                    -- attempts got this wrong, in opposite directions:
+                    --   `w.status = 'published'`         -> matched 0 of 140 rows; the
+                    --       only writer of workflows.status sets 'archived'. Killed
+                    --       every workflow schedule silently.
+                    --   `w.publish_status = 'published'` -> reachable (admin.py:318) but
+                    --       TOO STRICT: a workflow reaches production by deploying its
+                    --       MEMBER AGENTS (suite-66), and the workflow row stays
+                    --       draft/private throughout. Requiring publication excluded
+                    --       workflows that genuinely run.
+                    -- `status <> 'archived'` is what `internal.py`'s run door already
+                    -- enforces, so the trigger filter and the door now share ONE
+                    -- definition of runnable instead of disagreeing — the two-places
+                    -- drift this whole workstream exists to remove.
+                    -- See docs/bugs/workflow-schedules-gated-on-a-status-nothing-sets.md.
                     --
                     -- `_sync_jobs` removes any job whose trigger stops appearing here, so
                     -- an artifact archived mid-flight is unregistered within one reload
@@ -90,7 +107,7 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
                     WHERE t.trigger_type = 'schedule'
                       AND t.enabled = true
                       AND t.cron_expression IS NOT NULL
-                      AND w.status = 'published'
+                      AND w.status <> 'archived'
                     """
                 )
                 rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
