@@ -2639,3 +2639,45 @@ __all__ = [
 
 # Resolve the forward reference WorkflowRunTreeResponse → AgentRunResponse.
 WorkflowRunTreeResponse.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Schedules (R5) — cross-artifact operations view
+# ---------------------------------------------------------------------------
+class ScheduleListItem(BaseModel):
+    """One trigger, joined to its artifact and its most recent run.
+
+    Mirrors `studio/src/api/registryApi.ts::ScheduleListItem` field-for-field; the
+    page is written against this shape.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    trigger_id: str
+    trigger_type: str
+    artifact_kind: str          # "agent" | "workflow"
+    artifact_id: str
+    artifact_name: str
+    artifact_team: str | None = None
+    artifact_status: str
+    cron_expression: str | None = None
+    timezone: str | None = None
+    next_fire_at: datetime | None = None
+    input_payload: dict[str, Any] | None = None
+    enabled: bool
+    armed_at: datetime | None = None
+    armed_by: str | None = None
+    disarmed_at: datetime | None = None
+    disarm_reason: str | None = None
+    # Computed from the SAME inputs dispatch uses — the `trigger_liveness` view for
+    # artifact liveness and `resolve_dispatch_target` for reachability — so this page
+    # cannot claim a schedule will run when a fire would refuse it. `why_not` is prose
+    # for an operator, and answers ONE question: the first blocking reason in the order
+    # they would act on it (disarmed -> artifact dead -> nowhere to dispatch).
+    will_fire: bool
+    why_not: str | None = None
+    last_run_id: str | None = None
+    last_run_status: str | None = None
+    last_run_at: datetime | None = None
+    last_run_error: str | None = None
+    alert_email: str | None = None
+    alert_on_failure: bool = True

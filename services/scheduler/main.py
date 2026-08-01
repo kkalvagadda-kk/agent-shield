@@ -59,55 +59,27 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    -- The artifact-status predicates are DEFENCE IN DEPTH, not the
-                    -- primary control. The primary control is the write side
-                    -- (registry-api trigger_lifecycle.disarm_triggers, called from
-                    -- delete/archive/quarantine). This filter is what protects us from
-                    -- the NEXT lifecycle path that forgets to call it.
-                    --
-                    -- It is needed because `enabled` alone was the only gate: 37
-                    -- triggers were armed on dead artifacts, including a never-published
-                    -- DRAFT workflow firing every 15 minutes for days. Unpublished is
-                    -- excluded deliberately — a workflow that has never been published
-                    -- has never passed the eval gate (Decision 20), so firing it
-                    -- unattended is the defect.
-                    --
-                    -- WHAT "LIVE" MEANS FOR A WORKFLOW: not archived. Two earlier
-                    -- attempts got this wrong, in opposite directions:
-                    --   `w.status = 'published'`         -> matched 0 of 140 rows; the
-                    --       only writer of workflows.status sets 'archived'. Killed
-                    --       every workflow schedule silently.
-                    --   `w.publish_status = 'published'` -> reachable (admin.py:318) but
-                    --       TOO STRICT: a workflow reaches production by deploying its
-                    --       MEMBER AGENTS (suite-66), and the workflow row stays
-                    --       draft/private throughout. Requiring publication excluded
-                    --       workflows that genuinely run.
-                    -- `status <> 'archived'` is what `internal.py`'s run door already
-                    -- enforces, so the trigger filter and the door now share ONE
-                    -- definition of runnable instead of disagreeing — the two-places
-                    -- drift this whole workstream exists to remove.
-                    -- See docs/bugs/workflow-schedules-gated-on-a-status-nothing-sets.md.
+                    -- Liveness comes from the `trigger_liveness` VIEW (migration 0077),
+                    -- the ONE definition shared with the event-gateway and registry-api.
+                    -- It is not restated here on purpose: stating it independently is
+                    -- how this filter was wrong twice in one day —
+                    -- `w.status='published'` matched nothing, then
+                    -- `w.publish_status='published'` was too strict. Three images, one
+                    -- rule, in the only place all three already reach.
                     --
                     -- `_sync_jobs` removes any job whose trigger stops appearing here, so
                     -- an artifact archived mid-flight is unregistered within one reload
                     -- interval (RELOAD_INTERVAL_SECONDS, default 60) — the accepted bound.
-                    SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
-                           a.name AS agent_name, NULL::text AS workflow_id
-                    FROM agent_triggers t
-                    JOIN agents a ON t.agent_id = a.id
-                    WHERE t.trigger_type = 'schedule'
-                      AND t.enabled = true
-                      AND t.cron_expression IS NOT NULL
-                      AND a.status = 'active'
-                    UNION ALL
-                    SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
-                           NULL::text AS agent_name, t.workflow_id::text
-                    FROM agent_triggers t
-                    JOIN workflows w ON t.workflow_id = w.id
-                    WHERE t.trigger_type = 'schedule'
-                      AND t.enabled = true
-                      AND t.cron_expression IS NOT NULL
-                      AND w.status <> 'archived'
+                    SELECT id::text,
+                           cron_expression,
+                           COALESCE(timezone, 'UTC'),
+                           CASE WHEN artifact_kind = 'agent'    THEN artifact_name END,
+                           CASE WHEN artifact_kind = 'workflow' THEN artifact_id::text END
+                    FROM trigger_liveness
+                    WHERE trigger_type = 'schedule'
+                      AND enabled
+                      AND artifact_is_live
+                      AND cron_expression IS NOT NULL
                     """
                 )
                 rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]

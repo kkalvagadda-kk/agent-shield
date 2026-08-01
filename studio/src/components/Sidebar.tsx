@@ -78,18 +78,16 @@ const CATALOG_ITEMS: NavItem[] = [
   { label: "Approvals",    to: "/approvals",   icon: ClipboardCheck, badgeKey: "approvals", badgeTestId: "approvals-badge" },
   { label: "Deployments",  to: "/deployments", icon: Rocket },
   // Schedules sits next to Deployments because it is the same kind of thing: a
-  // fleet-wide operations view, not an authoring surface. DEMO-gated in lockstep
-  // with its route in App.tsx — a nav entry pointing at an unregistered route is a
-  // dead link, so the two cannot be gated separately.
-  ...(DEMO
-    ? [{
-        label: "Schedules",
-        to: "/schedules",
-        icon: CalendarClock,
-        badgeKey: "schedules" as BadgeKey,
-        badgeTestId: "schedules-badge",
-      }]
-    : []),
+  // fleet-wide operations view, not an authoring surface. Un-gated in lockstep with
+  // its route in App.tsx — a nav entry pointing at an unregistered route is a dead
+  // link, so the two are never gated separately.
+  {
+    label: "Schedules",
+    to: "/schedules",
+    icon: CalendarClock,
+    badgeKey: "schedules" as BadgeKey,
+    badgeTestId: "schedules-badge",
+  },
 ];
 
 const OBSERVE_ITEMS: NavItem[] = [

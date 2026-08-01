@@ -144,6 +144,7 @@ api|hitl,chat|suite-92-playground-hitl-resume-session-id.sh|Playground HITL resu
 api|hitl,rbac|suite-93-hitl-admin-approve-authority.sh|HITL decide honors platform-admin role (special case) + no 500 on multiple grants
 api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves ONE environment (admission+address agree); refusal is a legible run row, not a DNS error
 api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving/quarantining an artifact disarms its triggers (write gate + scheduler read filter)
+api|execution,rbac|suite-96-schedules-endpoint.sh|GET /api/v1/schedules — cross-artifact read, deny-by-default, will_fire from the same predicate dispatch uses
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
