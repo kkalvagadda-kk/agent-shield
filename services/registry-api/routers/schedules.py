@@ -77,7 +77,18 @@ SELECT
     tl.timezone,
     tl.input_payload,
     tl.enabled,
-    tl.created_at              AS armed_at,
+    -- ARM STATE, not creation time. The page derives "is this armed?" as
+    -- `armed_at != null` (lib/triggerArm.ts::isArmed), so mapping this straight from
+    -- created_at made EVERY row render "Armed" — including deleted agents whose
+    -- triggers the lifecycle gate had just disarmed. Caught by looking at the real
+    -- page: three deprecated artifacts showed an "Armed" pill directly beside
+    -- "this schedule is disabled".
+    --
+    -- The underlying model has ONE arm concept (`enabled` + `disabled_reason`); the
+    -- page was written against a richer one where arm state and the author's pause
+    -- switch are independent. Until that exists, arm state IS enabled — so say so
+    -- rather than emit a timestamp that means something else.
+    CASE WHEN tl.enabled THEN tl.created_at END AS armed_at,
     tl.armed_by,
     tl.disabled_at             AS disarmed_at,
     tl.disabled_reason         AS disarm_reason,
