@@ -51,10 +51,6 @@ import MultiAgentChatPage from "./pages/preview/MultiAgentChatPage";
 import PreviewConversationsPage from "./pages/preview/ConversationsPage";
 import ConversationsPage from "./pages/ConversationsPage";
 import SchedulesPage from "./pages/SchedulesPage";
-import SchedulePreviewIndex from "./pages/preview/SchedulePreviewIndex";
-import ArmDisarmSettingsPreview from "./pages/preview/ArmDisarmSettingsPreview";
-import ArmAtPublishPreview from "./pages/preview/ArmAtPublishPreview";
-import CreateScheduleDisarmedPreview from "./pages/preview/CreateScheduleDisarmedPreview";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -115,20 +111,9 @@ export default function App() {
               <Route path="/deployments" element={<DeploymentsPage />} />
               {/* Schedule lifecycle (R5). DEMO-gated until `GET /api/v1/schedules`
                   exists — an ungated route would ship a page whose only possible
-                  state in the real Studio is an error. Flip these unconditional in
+                  state in the real Studio is an error. Flip this unconditional in
                   the same change that lands routers/schedules.py. */}
-              {DEMO && (
-                <>
-                  <Route path="/schedules" element={<SchedulesPage />} />
-                  <Route path="/preview/schedules" element={<SchedulePreviewIndex />} />
-                  <Route path="/preview/schedule-settings" element={<ArmDisarmSettingsPreview />} />
-                  <Route path="/preview/schedule-arm-at-publish" element={<ArmAtPublishPreview />} />
-                  <Route
-                    path="/preview/schedule-create-disarmed"
-                    element={<CreateScheduleDisarmedPreview />}
-                  />
-                </>
-              )}
+              {DEMO && <Route path="/schedules" element={<SchedulesPage />} />}
               <Route path="/approvals" element={<ApprovalsInboxPage />} />
               <Route path="/hitl" element={<HITLDashboardPage />} />
               <Route path="/playground" element={<PlaygroundPage />} />

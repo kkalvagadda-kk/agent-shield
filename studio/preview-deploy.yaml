@@ -1,13 +1,5 @@
-# Isolated UX-preview deployment for the CONVERSATION / CHAT / KNOWLEDGE preview.
-# Namespace studio-ux-preview — no references to any platform service.
-#
-# Entry points once port-forwarded: / (demo home), /preview/chat (multi-agent
-# transcript), /preview/conversations, /conversations, /knowledge, /preferences.
-#
-# Sibling of preview-schedule-deploy.yaml (namespace studio-schedule-preview).
-# `vite build --mode demo` emits ONE bundle with every preview screen, so both
-# namespaces run identical bytes and the tag below must match its sibling's —
-# they are two entry points, not two builds.
+# Isolated UX-preview deployment. Namespace studio-ux-preview — no references to
+# any platform service.
 #
 # Image loading: this is a kind-backed cluster (nodes desktop-control-plane /
 # desktop-worker run their own containerd), so a host `docker build` is NOT
@@ -39,7 +31,7 @@ spec:
     spec:
       containers:
         - name: studio
-          image: studio:ux-preview-5
+          image: studio:ux-preview-2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 80
