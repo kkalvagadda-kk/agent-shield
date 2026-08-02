@@ -88,7 +88,8 @@ SELECT
     r.id::text                 AS last_run_id,
     r.status                   AS last_run_status,
     r.started_at               AS last_run_at,
-    r.error_message            AS last_run_error
+    r.error_message            AS last_run_error,
+    h.recent AS recent_runs
 FROM trigger_liveness tl
 LEFT JOIN LATERAL (
     -- Keyed on trigger_id, the same key routers/triggers.py::list_trigger_runs uses.
@@ -100,6 +101,24 @@ LEFT JOIN LATERAL (
     ORDER BY ar.started_at DESC
     LIMIT 1
 ) r ON TRUE
+LEFT JOIN LATERAL (
+    -- The last 10 outcomes, newest first, as a plain text[]. One query for the whole
+    -- page rather than a request per row: the page is scoped to hundreds of schedules
+    -- (brief: "hundreds, not tens of thousands"), and a sparkline per row fetched
+    -- client-side would be N+1 against an endpoint that already has the rows joined.
+    --
+    -- Ten because that is what the eye can read as a pattern. One "last run" cannot
+    -- distinguish FLAKY from BROKEN from FINE, which is the question an operator
+    -- actually has when a schedule misbehaves.
+    SELECT array_agg(x.status ORDER BY x.started_at DESC) AS recent
+    FROM (
+        SELECT ar.status, ar.started_at
+        FROM agent_runs ar
+        WHERE ar.trigger_id = tl.id
+        ORDER BY ar.started_at DESC
+        LIMIT 10
+    ) x
+) h ON TRUE
 WHERE tl.trigger_type = :trigger_type
   AND (:all_teams OR tl.artifact_team = :team)
 ORDER BY tl.artifact_name, tl.created_at
@@ -227,6 +246,7 @@ async def list_schedules(
             last_run_status=row["last_run_status"],
             last_run_at=row["last_run_at"],
             last_run_error=row["last_run_error"],
+            recent_runs=list(row["recent_runs"] or []),
             alert_email=row["alert_email"],
             alert_on_failure=row["alert_on_failure"],
         ))

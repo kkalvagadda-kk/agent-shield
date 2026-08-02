@@ -62,6 +62,9 @@ const zombieWorkflows: ScheduleFacts[] = ARCHIVED_WORKFLOWS.map(([name, cron], i
   // The brief's Open Question 2: the workflow run path records an EMPTY
   // error_message, so these rows are less debuggable than the agent ones.
   last_run_error: "",
+  // Archived: every fire since has failed. An all-red strip is what makes "this has
+  // been broken the whole time" legible at a glance, versus a one-off failure.
+  recent_runs: ["failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed"],
   alert_email: null,
   alert_on_failure: false,
 }));
@@ -89,6 +92,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "failed",
     last_run_at: iso(-12),
     last_run_error: "",
+    recent_runs: ["failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed"],  // draft workflow: never once succeeded
     alert_email: null,
     alert_on_failure: false,
   },
@@ -114,6 +118,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "failed",
     last_run_at: iso(-12),
     last_run_error: "dispatch failed: [Errno -2] Name or service not known",
+    recent_runs: ["failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed", "failed"],  // the hourly DNS failure from the brief — 1,197 of these
     alert_email: "oncall@acme.com",
     alert_on_failure: true,
   },
@@ -139,6 +144,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "completed",
     last_run_at: iso(-60 * 30),
     last_run_error: null,
+    recent_runs: ["completed", "completed", "failed", "completed", "completed", "completed", "failed", "completed", "completed", "completed"],  // healthy but occasionally flaky — the case one status cannot show
     alert_email: "oncall@acme.com",
     alert_on_failure: true,
   },
@@ -162,6 +168,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "completed",
     last_run_at: iso(-12),
     last_run_error: null,
+    recent_runs: ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed"],
     alert_email: null,
     alert_on_failure: false,
   },
@@ -185,6 +192,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "completed",
     last_run_at: iso(-60 * 3),
     last_run_error: null,
+    recent_runs: ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed"],
     alert_email: null,
     alert_on_failure: false,
   },
@@ -211,6 +219,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "completed",
     last_run_at: iso(-60 * 55),
     last_run_error: null,
+    recent_runs: ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed"],  // disarmed by hand while perfectly healthy
     alert_email: null,
     alert_on_failure: false,
   },
@@ -236,6 +245,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: "completed",
     last_run_at: "2026-07-27T07:00:00Z",
     last_run_error: null,
+    recent_runs: ["completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed", "completed"],  // ran fine right up until the workflow was archived
     alert_email: null,
     alert_on_failure: false,
   },
@@ -261,6 +271,7 @@ const otherRows: ScheduleFacts[] = [
     last_run_status: null,
     last_run_at: null,
     last_run_error: null,
+    recent_runs: [],  // never fired — NOT the same as all-failed
     alert_email: "oncall@acme.com",
     alert_on_failure: true,
   },

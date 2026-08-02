@@ -2684,5 +2684,10 @@ class ScheduleListItem(BaseModel):
     last_run_status: str | None = None
     last_run_at: datetime | None = None
     last_run_error: str | None = None
+    # Up to 10 run statuses, NEWEST FIRST — the sparkline. Computed in the same query
+    # as the rest of the row: a per-row fetch would be N+1 against an endpoint that
+    # already has the joins. A single "last run" cannot tell FLAKY from BROKEN from
+    # FINE, which is the question an operator has when a schedule misbehaves.
+    recent_runs: list[str] = Field(default_factory=list)
     alert_email: str | None = None
     alert_on_failure: bool = True

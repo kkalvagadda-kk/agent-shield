@@ -32,6 +32,7 @@ function row(over: Partial<ScheduleListItem> = {}): ScheduleListItem {
     last_run_status: "completed",
     last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
     last_run_error: null,
+    recent_runs: [],
     alert_email: null,
     alert_on_failure: false,
     ...over,

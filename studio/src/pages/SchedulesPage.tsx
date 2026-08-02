@@ -9,6 +9,7 @@ import {
   Loader2,
   Pause,
   Play,
+  Pencil,
   Trash2,
   Workflow as WorkflowIcon,
   X,
@@ -24,6 +25,8 @@ import {
   type ScheduleListItem,
 } from "../api/registryApi";
 import { cronHint } from "../lib/cron";
+import RunSparkline from "../components/schedules/RunSparkline";
+import EditScheduleModal from "../components/schedules/EditScheduleModal";
 import {
   ARM_PILL_STYLES,
   armDetail,
@@ -95,6 +98,7 @@ export default function SchedulesPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<FilterValue>("all");
   const [pendingDelete, setPendingDelete] = useState<ScheduleListItem | null>(null);
+  const [editing, setEditing] = useState<ScheduleListItem | null>(null);
 
   const { data: schedules = [], isLoading } = useQuery({
     queryKey: ["schedules"],
@@ -230,6 +234,7 @@ export default function SchedulesPage() {
                     "",
                     "Will fire",
                     "Last run",
+                    "Recent",
                     "Actions",
                   ].map((h) => (
                     <th
@@ -386,11 +391,25 @@ export default function SchedulesPage() {
                       )}
                     </td>
 
-                    {/* Actions — delete only. Arm/disarm is the toggle column; a
+                    {/* Recent — ten outcomes, oldest to newest. One "last run" cannot
+                        tell FLAKY from BROKEN from FINE. */}
+                    <td className="px-4 py-3">
+                      <RunSparkline statuses={s.recent_runs ?? []} />
+                    </td>
+
+                    {/* Actions — edit + delete. Arm/disarm is the toggle column; a
                         second control writing the same field is what shipped a
                         silently-dead Disarm button. */}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
+                        <button
+                          data-testid="schedule-edit-btn"
+                          onClick={() => setEditing(s)}
+                          title="Edit cron, timezone, or input payload"
+                          className="text-slate-400 hover:text-slate-700"
+                        >
+                          <Pencil size={14} />
+                        </button>
                         <button
                           data-testid="schedule-delete-btn"
                           onClick={() => setPendingDelete(s)}
@@ -407,6 +426,10 @@ export default function SchedulesPage() {
             </table>
           )}
         </div>
+      )}
+
+      {editing && (
+        <EditScheduleModal schedule={editing} onClose={() => setEditing(null)} />
       )}
 
       {pendingDelete && (

@@ -1432,6 +1432,13 @@ export interface ScheduleListItem {
   last_run_status: string | null;
   last_run_at: string | null;
   last_run_error: string | null;
+  /**
+   * Up to 10 run statuses, NEWEST FIRST — the sparkline. Computed server-side in the
+   * same query as the rest of the row; fetching per row would be N+1 against an
+   * endpoint that already has the joins. A single last-run status cannot tell FLAKY
+   * from BROKEN from FINE.
+   */
+  recent_runs: string[];
   alert_email: string | null;
   alert_on_failure: boolean;
 }
