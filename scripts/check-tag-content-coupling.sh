@@ -332,6 +332,46 @@ else
   ok "studio: STUDIO_BUILD marker == STUDIO_TAG" "both $marker — the served bundle can name itself honestly"
 fi
 
+# ---------------------------------------------------------------------------
+# 5. THE SECOND DEPLOY SCRIPT. scripts/deploy-eks.sh keeps its OWN copy of every tag
+#    variable, so the same service has two declared versions and nothing compared them.
+#    EKS sat on registry-api 0.2.251 / studio 0.1.175 while this file said 0.2.252 /
+#    0.1.177 — a cluster nine studio versions behind, with every check green, because
+#    each script was internally consistent.
+#
+#    That is not hypothetical: an EKS incident here was caused by the cluster running
+#    deploy-controller 0.1.0 while the repo had 0.1.7 — agents CrashLooped for a reason
+#    no source file could explain (docs/bugs/, deploy-controller SA gap).
+#
+#    Compared, not merged: the two scripts legitimately differ (EKS builds pgvector and
+#    skips the embedding sidecar), so only tags DECLARED IN BOTH must agree.
+# ---------------------------------------------------------------------------
+EKS_SH="scripts/deploy-eks.sh"
+if [ ! -f "$EKS_SH" ]; then
+  bad "the EKS deploy script is present" "$EKS_SH missing — cross-script tag parity cannot be checked"
+else
+  drift=""
+  shared=0
+  while IFS= read -r line; do
+    var="${line%%=*}"
+    local_val=$(printf '%s' "$line" | cut -d'"' -f2)
+    eks_val=$(grep -E "^${var}=" "$EKS_SH" | head -1 | cut -d'"' -f2)
+    [ -z "$eks_val" ] && continue          # declared here only — legitimately not shared
+    shared=$((shared+1))
+    [ "$local_val" = "$eks_val" ] || drift="$drift ${var}(local=$local_val eks=$eks_val)"
+  done < <(grep -E '^[A-Z_]+_TAG="' scripts/deploy-cpe2e.sh)
+
+  if [ -n "$drift" ]; then
+    bad "deploy-cpe2e.sh and deploy-eks.sh agree on every shared tag" \
+        "DRIFT:$drift
+        Each script is internally consistent, so nothing else can catch this — the
+        cloud cluster silently runs different code from the local one. Bump both."
+  else
+    ok "deploy-cpe2e.sh and deploy-eks.sh agree on every shared tag" \
+       "$shared shared tag(s) — local and EKS declare the same versions"
+  fi
+fi
+
 echo ""
 echo "=== tag⇄content coupling: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -ne 0 ]; then
