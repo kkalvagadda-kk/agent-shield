@@ -20,8 +20,10 @@ Running `claude-in-chrome-schedule-lifecycle-journey.md` end to end (13/13 legs,
 - **not-yet-wired (debt) — `Publish` gives no feedback.** `POST /agents/{name}/publish` answers 202
   and creates the request, but the page shows no toast, no navigation, no button state change. The
   only signal is the "Pending Review" badge, which renders on the NEXT load — so an operator who
-  stays on the page sees nothing and the natural recovery is to click again. **Whether a second
-  click enqueues a duplicate request is untested and should be answered before this is fixed.**
+  stays on the page sees nothing and the natural recovery is to click again. **That second click
+  DOES enqueue a duplicate** — `publish_agent` adds a PublishRequest with no check for an existing
+  pending row, and the live cluster already holds two agents with 2 pending requests each (2 of 12).
+  Fix the server side first (idempotent or 409); the toast is the cosmetic half.
   Postmortem: `docs/bugs/publish-click-gives-no-feedback.md`.
 
 - **deferred (intentional) — the create wizard accepts an agent with no model.**

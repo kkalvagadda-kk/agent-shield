@@ -31,29 +31,54 @@ that is collapsed by default and invisible to non-admins.
 The asymmetry is what makes it costly: cheap, instantly-visible actions announce themselves; the
 one that starts a multi-party workflow does not.
 
-## Impact
+## Impact — and the duplicate is real, not hypothetical
 
 - An operator cannot tell success from failure without navigating away and back.
-- The natural recovery is to click Publish again. Whether that creates a second `publish_requests`
-  row is **untested** — worth checking before this is fixed.
+- The natural recovery is to click Publish again, and **that enqueues a duplicate.**
+  `routers/agents.py::publish_agent` runs its checks (agent exists, no critical-risk tool, eval
+  gate) and then constructs `PublishRequest(...)` + `db.add(pr)` unconditionally — there is no
+  query for an existing `pending_review` row and no uniqueness constraint behind it.
+
+  Confirmed against the live EKS cluster, read-only:
+
+  ```
+  agents with MULTIPLE pending publish requests:
+      ('s89-1785209863-agent', 2)
+      ('s89-1785211853-agent', 2)
+  total pending: 12
+  ```
+
+  Two of twelve pending requests are duplicates. This has already happened, unprompted, in normal
+  use — which is the strongest evidence that the silence drives the retry.
+
+- The duplicates then land on a **reviewer**: approving one leaves its twin sitting in the queue
+  pointing at the same artifact and version, and nothing marks it superseded.
 - It compounds
   [`publish-does-not-create-a-production-deployment`](publish-does-not-create-a-production-deployment.md):
   that bug sends the operator to Publish, and this one denies them confirmation that they did it.
 
-## Suggested fix (not implemented)
+## Suggested fix (not implemented) — in this order
 
-1. Toast on 202: *"Publish requested — pending review in Admin → Publish Queue."* Name where it
+1. **Server first: make the duplicate impossible.** `publish_agent` should return the EXISTING
+   pending request (200/202, idempotent) rather than adding a second one, or refuse with 409. This
+   is the half that corrupts state, and it is correct regardless of what the UI does — a silent
+   toast is a UI defect, a duplicated queue row is a data defect that a human then has to
+   adjudicate. A partial unique index on `(asset_id) WHERE status = 'pending_review'` would make it
+   structurally impossible rather than merely guarded.
+2. Toast on 202: *"Publish requested — pending review in Admin → Publish Queue."* Name where it
    went; the queue is not somewhere the operator would think to look.
-2. Flip the button to a disabled **"Pending review"** state immediately, without waiting for a
+3. Flip the button to a disabled **"Pending review"** state immediately, without waiting for a
    reload, so the button itself carries the state.
-3. Confirm the double-click behaviour before shipping either — if a second click enqueues a
-   duplicate, that is the more urgent half.
+
+Existing duplicates need a decision too — dedupe them, or teach the queue to collapse/supersede
+requests for the same artifact+version. Not obviously safe to do automatically.
 
 ## Why it is documented and not fixed here
 
-Out of scope for the change that found it (the schedules workstream), and the right fix needs the
-double-click question answered first — which is a behavioural investigation, not a UI tweak.
-Recorded so it is a known gap rather than a surprise. Listed in the gap ledger at the head of
+Out of scope for the change that found it (the schedules workstream): step 1 changes publish
+semantics and touches the reviewer workflow, which deserves its own change and its own regression
+test rather than riding along with a dispatch-message fix. Recorded so it is a known gap rather
+than a surprise. Listed in the gap ledger at the head of
 `docs/testing/manual-ui-e2e-test-plan.md`.
 
 ## Lessons
