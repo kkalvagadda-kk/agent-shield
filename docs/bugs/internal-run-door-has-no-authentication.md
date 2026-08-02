@@ -1,6 +1,19 @@
 # `POST /api/v1/internal/runs/start` requires no authentication
 
-**Found** 2026-08-02 (scoping a "Run now" control for the Schedules page) · **Status: OPEN — reported, not fixed**
+**Found** 2026-08-02 (scoping a "Run now" control for the Schedules page) · **Status: OPEN — already designed, not yet built**
+
+> **This was a rediscovery, not a discovery.** `docs/design/identity-propagation-architecture.md`
+> has documented this since it was written: **Drop point 7** names it exactly ("`POST
+> /internal/runs/start` has **no auth**, takes `run_by` verbatim from the body"), §4.1 lists the
+> edge as needing a verified service JWT, §4.5 specifies the mechanism, and **Phase 3** schedules
+> the work with a non-negotiable negative test for a forged `run_by`. I wrote this up as a new
+> finding without checking the design docs first.
+>
+> What this doc adds that the design did not have: **measured evidence** (below) rather than
+> source reading, and the **manual-fire use case** — a human-initiated "Run now" is a third
+> caller shape that §4.5's service-identity model does not cover. Both are now folded back into
+> the identity doc (Drop point 7a, §4.2's manual-fire row, Phase 3a). **That doc owns the fix;
+> this one is the evidence and the reason the button was not built.**
 
 ## What
 
@@ -61,24 +74,32 @@ and would normalise calling an unauthenticated internal door from the front end.
 control is worth having — it is how an operator verifies a fix without waiting for the
 next tick — but it needs an authenticated route first.
 
-## Suggested fix
+## Fix — owned by identity-propagation Phase 3 / 3a
 
 Not applied here: the scheduler and the event-gateway both call this endpoint
 service-to-service, so adding `require_user` breaks them, and ~15 suites POST to it
 without a token. That is a change with its own blast radius and its own regression pass,
 not a rider on a UI feature.
 
-Two directions, probably both:
+The design already specifies it — **identity-propagation §4.5 / Phase 3**: Keycloak confidential
+clients for `scheduler` / `event-gateway` / `eval-runner`, an `is_trusted_service()` check reusing
+the same JWKS verification as `require_user`, callers switching to `Authorization: Bearer`, and the
+receiver deriving `service_name` from the token instead of the body. Two measured facts to carry
+into that phase:
 
-1. **Authenticate the caller as a service.** The platform already mints service identities
-   (`resolve_principal`, the `serviceaccount:scheduler` convention this endpoint's own
-   `run_by` values use). Require one, and stop trusting `run_by` to be self-declared.
-2. **Stop routing `/api/v1/internal/*` from the gateway listener.** Defence in depth: the
-   path is only meant to be reachable in-cluster, and nothing outside needs it. Cheap, and
-   independent of (1).
+- **Neither caller has any credential today**, and `auth_middleware` has no service-identity
+  validator — only Keycloak *user* JWT verification. So this cannot be a one-line
+  `Depends(require_user)`: the callers must gain an identity first or every scheduled and webhook
+  run stops. Sequence: mint → send → verify → then tighten.
+- **~15 e2e suites POST to this endpoint with no token** and must be updated in the same change.
 
-A user-facing manual fire should be a *separate, authenticated* endpoint that checks team
-scope and then calls this one internally — not the same door with a different caller.
+Worth adding as cheap defence in depth, independent of the above: **stop routing
+`/api/v1/internal/*` from the gateway listener.** The path is only meant to be reachable
+in-cluster and nothing outside needs it.
+
+A user-facing manual fire is **Phase 3a** — a *separate*, authenticated, team-scoped route that
+resolves the caller with `require_user`, checks they may act on that trigger (the same predicate
+R7's read uses), and calls this door in-process. Not the same endpoint with a different caller.
 
 ## Related
 

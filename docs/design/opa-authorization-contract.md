@@ -251,7 +251,33 @@ caller may decide ANY approval, any context, without a per-tool grant), correcte
 to include the hyphenated `platform-admin`, and switched the authority existence checks from
 `scalar_one_or_none()` to `.limit(1)/.first()`. See `docs/bugs/production-hitl-decide-403-authority.md`.
 
-### 10.3 Sandbox/playground auto-approve note
+### 10.3 Run INITIATION is not an OPA concern — stated so nobody looks for it here (2026-08-02)
+
+This contract governs **tool calls inside a run**: given that a run is happening, may this agent
+call this tool. It says nothing about **who may start a run in the first place**, and it should
+not — the decision needs a Keycloak identity and a team lookup, neither of which reaches the OPA
+sidecar (see §3's input shape: `sa_subject`, `tool_name`, `agent_class`, `user_id`, `user_team` —
+no notion of a trigger, a schedule, or a caller asking to fire one).
+
+Recording it because the boundary is easy to misread. The schedules workstream found that
+`POST /api/v1/internal/runs/start` has **no authentication at all** — an unauthenticated POST
+reaches the handler (422 on body shape) while the read endpoint beside it correctly 401s. That is
+a real hole, but fixing it here would be wrong: OPA would be asked a question it has no inputs
+for, and a `default_deny` on run initiation would stop the scheduler itself.
+
+It belongs to `identity-propagation-architecture.md` — Drop point 7 and 7a, §4.2's manual-fire
+row, and Phase 3/3a, which own both the service-identity fix and the authenticated, team-scoped
+route a Studio "Run now" control would need. Evidence and the reason the control was NOT built:
+`docs/bugs/internal-run-door-has-no-authentication.md`.
+
+**One thing that IS this contract's business,** once those runs are properly attributed: §4's
+decision logic has no gate on *who authorized a scheduled run*. A daemon fires on `sa_subject` +
+granted scopes with `user_id=""` by design (§4 / identity-propagation §4.6 Gate 5). If a future
+requirement says a high-risk tool call in an autonomous run needs a named human authorizer, that
+is a new gate here, fed by `AgentTrigger.created_by` from identity-propagation's migration `0052`.
+It is an open question in that doc (§10), not a decision this contract has taken.
+
+### 10.4 Sandbox/playground auto-approve note
 The journey confirmed §4's "future improvement" note is now real behavior on the **sandbox**
 side: a high-risk tool call in the playground/sandbox parks as an **inline self-service** approval
 (resumable in place), while the SAME call in **production** routes to the reviewer console

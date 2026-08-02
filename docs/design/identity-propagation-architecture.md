@@ -41,6 +41,7 @@ Verified against source (file:line current as of this writing). Latest Alembic m
 | 5 | OPA → HITL record | OPA sometimes gets `user_id` (user_delegated only); HITL POST omits it; `Approval` has no requester column; `opa_decisions` table exists for this but is never written | `opa_client.py:130-140`; `hitl.py:73-89`; `models.py:714-791`; `opa_decisions.py` |
 | 6 | HITL pause → resume | Resume is a fresh `POST /resume/{thread_id}` carrying only `{decision, reviewer_id, reason}`; ContextVar not re-set; post-approval OPA re-check sees `user_id=""`. Approvals live 30 min–24 h, so no short-lived in-flight token can bridge this | `approvals.py:434`; `declarative-runner/main.py:166-169,469-500`; `approvals.py:37` |
 | 7 | scheduler / event-gateway → registry-api | `POST /internal/runs/start` has **no auth**, takes `run_by` verbatim from the body; both services send a static `serviceaccount:*` string; `AgentTrigger` has no `created_by` to attribute a schedule to a human | `internal.py:194-196`; `scheduler/main.py:113,121`; `event-gateway/main.py:293,395`; `models.py:1558` |
+| 7a | **(evidence, 2026-08-02)** the same hop, measured rather than read | Probed from OUTSIDE the cluster: unauthenticated `POST /api/v1/internal/runs/start {}` → **422** (reached the handler; only the body shape was rejected), while `GET /api/v1/schedules` with no token → **401**. So the hole is inside one service, not a property of the deployment. Reachability is **VPC-internal only** — the gateway NLB carries `aws-load-balancer-scheme=internal` — which bounds the blast radius but is not a control. | live EKS `test-cluster-964-10086`, registry-api 0.2.256 |
 
 > Drop point 7 is the concrete form of the future improvement already tracked in `spec.md` ("Internal-auth on `/api/v1/internal/*` … NetworkPolicy only … adding a shared internal token / mTLS is a tracked future improvement") and `event-gateway-threat-model.md` T-8. This design resolves it with a verified Keycloak service JWT rather than a shared secret.
 
@@ -89,6 +90,35 @@ The platform already splits agents by `agent_class ∈ {user_delegated, daemon}`
 | External event / webhook | `event-gateway` | trigger creator (`AgentTrigger.created_by`) | true |
 | Batch eval | `eval-runner` | eval launcher (`EvalRun.user_id`) | true |
 | Standing long-running daemon | agent's own SA (`sa_subject`) | deployment creator (or "" if none) | true |
+| **Manual fire of a schedule** (Studio "Run now") | **the live human** | the same human (JWT `sub`) | **false** |
+
+**The manual-fire row is the one this design did not anticipate,** and it breaks an assumption
+the rest of §4.5 rests on. Every other route into `/internal/runs/start` is a *service*, so
+"verify a service JWT" is a complete answer there. A Studio **Run now** control is a THIRD
+caller shape: an authenticated **human** asking to fire a **daemon** schedule immediately.
+
+That combination is not in the table above and is not covered by §4.5:
+
+- The **acting principal is a person**, so `is_service_call=false` — even though the agent is a
+  daemon and every scheduled fire of the same trigger is `is_service_call=true`. The same
+  trigger therefore produces runs of two different principal shapes depending on who started
+  them, and the audit trail must say which.
+- **`origin`** is neither `"schedule"` (no cron tick caused it) nor `"production"`. It needs its
+  own value — `"manual"` — or the run history cannot distinguish "the cron fired at 09:00" from
+  "someone pressed the button at 09:04 to test the fix".
+- **Authorization is a different question from authentication.** `is_trusted_service` answers
+  "is this a known service?". For a human it must also answer "may THIS person fire THIS
+  schedule?" — R7 already made the schedules *read* deny-by-default and team-scoped
+  (`routers/schedules.py`), and a fire that skipped the same check would let one team trigger
+  another team's production agent. Nothing in §4.5 covers this because no human-initiated
+  caller existed when it was written.
+
+**Consequence for Phase 3:** verifying a service JWT is necessary but NOT sufficient to unblock
+a Run-now button. The button needs a separate authenticated, team-scoped route that resolves
+the caller with `require_user`, checks team scope on the trigger, and then calls the internal
+door in-process. Building it against the raw internal endpoint would mean the product's only
+manual-fire path performs no authorization check at all — see
+`docs/bugs/internal-run-door-has-no-authentication.md`.
 
 Governance rules that follow from this split:
 - **OPA must not demand a live `user_id` for daemons** — there is none. They are authorized on `sa_subject` + `agent_class` + granted tool scopes. Enforcement (§4.6) applies only to `user_delegated`.
@@ -179,6 +209,21 @@ Each phase is a real vertical slice with its own bash e2e suite (`suite-45` onwa
 
 **Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0052` + wire schedule owner as `user_sub`. *e2e:* `suite-48` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
 
+> **Blast radius, measured (2026-08-02):** ~15 e2e suites POST to `/internal/runs/start`
+> without any token, and neither `services/scheduler/main.py` nor
+> `services/event-gateway/main.py` sends a credential today — `auth_middleware` has no
+> service-identity validator at all, only Keycloak *user* JWT verification. So this phase
+> cannot be a one-line `Depends(require_user)`: the callers must gain an identity first, or
+> every scheduled and webhook run on the platform stops. Sequence: mint → send → verify →
+> then tighten, with the suites updated in the same change.
+>
+> **Phase 3a — user-initiated manual fire (new, from the schedules workstream).** A Studio
+> "Run now" control needs an authenticated, **team-scoped** route that resolves the caller
+> with `require_user`, checks the caller may act on that trigger (the same predicate R7's
+> read uses), stamps `origin="manual"` and `is_service_call=false`, and calls the internal
+> door in-process. It is deliberately NOT the same endpoint with a different caller. Blocked
+> on Phase 3; tracked in `docs/bugs/internal-run-door-has-no-authentication.md`.
+
 **Phase 4 — Handoff / supervisor lineage.** `_dispatch`/`dispatch_to_orchestrator_pod`/`_run_step`/`orchestrate_*` gain `rct` and send the header (extended per hop); `internal.py` dispatch too; SDK `handoff.py` sends the RCT + docstring fix; close the unauthenticated `composite_workflows` edge. *e2e:* `suite-49` 3-hop A→B→C, assert C carries the original human + `actor_chain==["A","B"]`.
 
 **Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0053`; writer + reader wiring; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-50` approval requester + non-null `opa_decision_id`.
@@ -203,6 +248,10 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 - **deferred (intentional):** pre-existing `agent_triggers` get `created_by=NULL`; no backfill.
 - **not-yet-wired (debt):** `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` — separate approver-identity bug, fixed in Phase 6.
 - **infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service — needed for the secret mount.
+- **blocked on Phase 3 (2026-08-02):** the Schedules page's **Run now** control. Built as far
+  as the design and stopped: `/internal/runs/start` has no authentication, so a button there
+  would give the product a manual-fire path with no authorization check. See §4.2 (manual-fire
+  row) and Phase 3a.
 
 ## 10. Open questions
 
