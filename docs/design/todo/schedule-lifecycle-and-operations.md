@@ -1,6 +1,32 @@
 # Schedule lifecycle & operations
 
-**Status:** requirements brief — input to `/arch-design`
+**Status:** IMPLEMENTED with exceptions — see the audit below. Originally a requirements
+brief; kept as written so the record shows what was asked for versus what shipped.
+
+## Implementation audit — 2026-08-02 (registry-api 0.2.256 / studio 0.1.179)
+
+| Req | State | Where |
+|---|---|---|
+| **R1** armed trigger on a dead artifact unrepresentable | **done** | `trigger_lifecycle.disarm_triggers` at delete/archive/quarantine + the `trigger_liveness` view (0077) read by BOTH the scheduler and the gateway; 0076 reaped the 37 existing zombies. suite-95 |
+| **R2** disarm reversible only by explicit operator action | **done** | reactivating does not re-arm; re-enable clears the reason. T-S95-005 |
+| **R3** one owner for "dispatchable" + "where" | **done** | `resolve_dispatch_target` — both production legs, address from the validated row. suite-94 |
+| **R4** a failed run states why, in the UI | **done** | trigger-scoped run reads, `dispatch_error` (current) split from `last_error` (historical), `error_message` rendered |
+| **R5** one page to see and manage every schedule | **partial** | list / toggle / delete / last-run reason shipped. **No create, no edit, no run-history drilldown** |
+| **R6** regression tests red against the old code + `T-S71-005` rewritten | **done** | suites 94/95/96; `T-S71-005` no longer uses the dispatch bug as its fixture (f0c8163) |
+| **R7** schedules read is deny-by-default + team-scoped | **done** | `routers/schedules.py`. **Its noted sub-gap is NOT fixed**: `list_triggers` still has no auth at all |
+| **R8** "live" for a workflow means `published` | **superseded** | shipped as `w.status <> 'archived'` — `status='published'` matched 0 of 140 rows and `publish_status='published'` broke suite-66. **A draft workflow's schedule fires.** |
+| **R9** disarm propagation ≤60s | **done** | unchanged `_sync_jobs` stale-removal |
+
+Beyond the brief: the Schedules page, the `RouteToProduction` strip, publish idempotency,
+agent-delete now REMOVING schedule triggers (0078), and eight bug postmortems in
+`docs/bugs/`. Open items are in the gap ledger at the head of
+`docs/testing/manual-ui-e2e-test-plan.md`.
+
+---
+
+**Original brief follows, unedited.**
+
+**Status (as written):** requirements brief — input to `/arch-design`
 **Written:** 2026-07-28 (Kalyan + Claude)
 **Trigger:** a scheduled run for `deamon-agent-test` failed hourly; the UI showed a red **Failing** badge directly above **"Last Run: No runs yet."**
 
