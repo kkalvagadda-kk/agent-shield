@@ -200,7 +200,13 @@ except urllib.error.HTTPError as e:
     else:
         print('agent_create_err:' + str(e.code)); sys.exit(0)
 
-# 2. Create a Tool record with high risk (no AssetGrant will exist for it)
+# 2. Create a Tool record with high risk (no AssetGrant will exist for it).
+#
+# owner_team must NOT be the deploying team. `tool_access.team_may_use_tool` returns
+# True when owner_team == team — a team implicitly may use its own tools — so a
+# 'platform'-owned tool deployed by 'platform' sails through the grant gate, the
+# ADVERSARIAL gate rejects a few lines later instead, and this test reported
+# \"422 but wrong error body\" while the gate under test was never reached.
 import time
 tool_name = 'restricted-tool-${TS}'
 try:
@@ -208,7 +214,7 @@ try:
         base + '/api/v1/tools/',
         data=json.dumps({
             'name': tool_name, 'type': 'native',
-            'risk_level': 'high', 'owner_team': 'platform'
+            'risk_level': 'high', 'owner_team': 'other-team-${TS}'
         }).encode(),
         headers={'Content-Type': 'application/json'}, method='POST'
     ), timeout=10)
