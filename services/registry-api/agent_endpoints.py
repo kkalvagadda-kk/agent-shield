@@ -245,8 +245,18 @@ async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTar
         if environment == "production"
         else f"deploy the agent to {environment}"
     )
+    # NO "then re-enable the trigger". That clause was appended unconditionally and
+    # is wrong in the ordinary case: a trigger armed on a sandbox-only agent was
+    # never disabled, so there is nothing to re-enable — it starts firing the moment
+    # production exists. Verified end to end: the schedule-lifecycle journey never
+    # touched the toggle, and will_fire flipped false -> true on the deploy alone.
+    #
+    # This function receives an AGENT, not a trigger, so it cannot know whether any
+    # trigger is disabled — and advice that sends an operator hunting for a control
+    # that does not apply costs more than saying nothing. Arm state already has two
+    # honest surfaces (the Settings panel and the Schedules row) that read the actual
+    # column.
     raise DispatchTargetError(
         f"agent '{agent.name}' has no running {environment} deployment — {detail}. "
-        f"Schedule and webhook triggers dispatch to {environment}. {remedy}, "
-        f"then re-enable the trigger."
+        f"Schedule and webhook triggers dispatch to {environment}. {remedy}."
     )

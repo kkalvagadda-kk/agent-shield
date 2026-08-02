@@ -12,6 +12,35 @@
 
 ---
 
+## Scheduled-agent UX pass — 2026-08-02 (registry-api 0.2.254 / studio 0.1.178)
+
+Walking the journey end to end showed the recurring problem was not any single message
+being wrong — it was that **reaching production takes six steps across five screens** and
+the product described one of them per warning, with no sense of sequence. An operator who
+did the named thing, watched it succeed, and returned to an unchanged screen had no way to
+tell whether they were finished, half-way, or had misunderstood.
+
+**Shipped:**
+
+- **`RouteToProduction` strip** on the agent page — the whole path (Sandbox → Eval passed →
+  Published → Deployed to production) with the operator's position on it, and exactly ONE
+  hint: the step they are on. Renders only for agents that HAVE a trigger, since a reactive
+  chat agent has no route to production and an unfinished checklist would misstate what
+  "done" means for it. **Its final step reads `health.dispatch_error`** — the same resolver
+  the run door uses — so the strip cannot claim a schedule will fire when a fire would refuse.
+- **The create wizard names the full route** instead of "Publish the agent", including that
+  publishing alone only creates the catalog listing.
+- **Model is required**, with the consequence stated.
+- **The Publish tooltip names WHERE** to clear the eval gate (Eval Runs), not just that a gate exists.
+- **The Model select gets an `aria-label`.** `Field` renders its label as a *sibling* of the
+  control, so nothing associated the two and the field had no accessible name — a screen
+  reader announced an unlabelled combobox. Found because a test could not query it by its
+  visible label, which is the same thing a user of assistive tech experiences.
+
+**Still open:** the Publish feedback/duplicate defect below. It is the last piece of this
+flow that is wrong, and the strip makes it *more* visible rather than less — a user who
+clicks Publish now watches the strip not move.
+
 ## Known gaps — schedule-lifecycle journey on EKS — 2026-08-02
 
 Running `claude-in-chrome-schedule-lifecycle-journey.md` end to end (13/13 legs, registry-api
@@ -26,10 +55,10 @@ Running `claude-in-chrome-schedule-lifecycle-journey.md` end to end (13/13 legs,
   Fix the server side first (idempotent or 409); the toast is the cosmetic half.
   Postmortem: `docs/bugs/publish-click-gives-no-feedback.md`.
 
-- **deferred (intentional) — the create wizard accepts an agent with no model.**
-  `llm_provider_id` is optional in the form and an agent without one can never run, while the same
-  form warns carefully about production. Not fixed here because the right answer (require it, vs
-  warn, vs default to the team's only provider) is a product call, not a bug fix.
+- ~~**deferred — the create wizard accepts an agent with no model.**~~ **CLOSED in studio 0.1.178**:
+  `llm_provider_id` is now required, with the reason in the error text ("an agent without one cannot
+  run"). Four Playwright specs and six Vitest cases created agents without one and were updated —
+  they had been asserting a state a user can no longer reach.
 
 **Closed by 0.2.253:**
 

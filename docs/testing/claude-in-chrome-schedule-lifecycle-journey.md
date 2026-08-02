@@ -28,7 +28,7 @@ Every row is a bug that actually shipped here.
 |---|---|---|
 | 1 | **Dispatch environment mismatch.** Admission asked "is ANY deployment running?"; dispatch hardcoded `-production`. A sandbox-only agent passed the door, then DNS-failed. 1,197 runs. | `Errno -2` / "Name or service not known" anywhere |
 | 2 | **Health derived from history, not config.** A schedule that can never fire read *healthy* until something failed; after a fix, the badge stayed red for up to an hour. | badge disagrees with current config |
-| 3 | **A remedy the operator cannot reach.** The refusal said "deploy to production" — Studio has no such control; the route is **Publish**. | advice naming a control that does not exist |
+| 3 | **A remedy that does not resolve the cause.** Twice: "deploy to production" was unreachable from the UI, then "Publish" was reachable but INSUFFICIENT (it creates a catalog listing, not a running deployment) — so the operator completed it and got the same message back. | advice naming a control that does not exist, or one that completes and changes nothing |
 | 4 | **Zombie schedules.** Deleting an artifact left its cron armed. 37 were live, one firing every 15 min for days. | a deleted agent's schedule still counting down |
 | 5 | **A write that writes nothing.** Disarm PATCHed an undeclared field: 200 OK, success toast, no change. | state reverts after reload |
 | 6 | **A fabricated field.** `armed_at` was synthesised from `created_at`, so every row read *Armed* — including ones the lifecycle gate had just disarmed. | "Armed" beside "this schedule is disabled" |
@@ -71,10 +71,14 @@ label; the plugin locates them by text/vision.
 ### Leg 1 — Create a daemon agent, through the UI
 - Do: `/agents/new` → **No-code**.
 - Do: name it `cip-lc-<timestamp>`; class **daemon** (runs autonomously), shape **durable**.
+- Do: pick a **Model**. It is required — an agent with no provider can never complete a
+  run, and the wizard used to accept one silently.
 - Do: **Create Agent**.
 - Assert: the agent appears in the agents list.
-- Assert (**class 3**): if the create wizard warns about scheduling, the warning names **Publish** —
-  not a "deploy to production" control that does not exist in this UI.
+- Assert (**class 3**): the wizard's schedule notice names the **whole** route —
+  Publish · **Publish Queue** · **Deploy Latest** — and says publishing alone only creates
+  the catalog listing. Naming just "Publish" is reachable but insufficient, which is the
+  worse failure: the operator completes it and is told to do it again.
 
 ### Leg 2 — Deploy to SANDBOX only ⭐
 The fixture. The whole point is the gap between "deployed somewhere" and "deployed *where triggers
@@ -134,21 +138,40 @@ The scheduler fires on the hour; we don't wait for the clock. Same endpoint it c
   *(`alerting.py` returns at `if not trigger.alert_email`, so a green "On" claimed coverage that did
   not exist.)*
 
-### Leg 8 — Publish to production, and watch the verdict flip ⭐⭐⭐ (headline)
-The load-bearing leg. Everything above is satisfied by a platform where nothing works; **this** is
-the one that fails if `will_fire` has quietly become "always false".
-- Do: agent page → **Publish** (eval-gated per Decision 20 — a passing eval is required).
-- Do: wait for the production deployment to reach **running**.
+### Leg 8 — Reach production, and watch the verdict flip ⭐⭐⭐ (headline)
+The load-bearing leg. Everything above is satisfied by a platform where nothing works;
+**this** is the one that fails if `will_fire` has quietly become "always false".
+
+**It is THREE steps, not one.** Publishing produces a catalog listing; the running
+deployment is a separate action on a different page. The first run of this journey
+assumed Publish was the whole thing and got a schedule that still would not fire —
+see `docs/bugs/publish-does-not-create-a-production-deployment.md`.
+
+- Do: agent page → **Publish** (eval-gated per Decision 20; the tooltip names where to
+  run the eval). No toast fires — the only signal is the **Pending Review** badge on the
+  next load. That silence is itself a known defect
+  (`docs/bugs/publish-click-gives-no-feedback.md`) and a second click enqueues a
+  **duplicate**, so click once.
+- Do: **Admin ▸ Publish Queue** → **Promote to Catalog** → confirm.
+- Assert: the queue reports eval provenance honestly — a version marked passed without a
+  scored run shows **"No eval"**, not a fabricated score.
+- Do: **Marketplace** → the artifact → **Deploy Latest**. ← the step everyone misses
+- Do: wait for the production pod to reach **Running** (its own namespace,
+  `production-{artifact}-{id8}`).
 - Assert: `/schedules` now shows **WILL FIRE = Yes** for this row, `why_not` empty.
 - Assert: **NEXT FIRE** shows a real countdown rather than `—`.
 - Assert: the attention banner count returns to its leg-0 value.
-- Assert (**class 2**): the health badge clears **without waiting for another run** — no new run row
-  appeared. Health is answered from config, not from history.
+- Assert (**class 2**): the health badge clears **without waiting for another run** — no
+  new run row appeared, and it reads `degraded` (dispatchable, last run failed) rather
+  than `failing` (cannot dispatch). Health is answered from config, not from history.
+- Assert: the **Route to production** strip on the agent page shows all four steps done.
+  Its last step reads `dispatch_error`, the same resolver the run door uses, so it cannot
+  claim a schedule will fire when a fire would refuse.
 - Do: fire the schedule again (as leg 5).
-- Assert: the run is **not** refused for the environment reason — admitted and addressed. *(Whether
-  the pod then completes the work is the few-pods boundary every suite here accepts.)*
-- **Tolerance:** if the eval gate cannot pass (no working LLM credential) or there is no pod
-  capacity, **stop and record it** — do not fake a pass. Legs 0-7 plus 9-12 still stand on their own.
+- Assert: the run is **not** refused for the environment reason.
+- **Tolerance:** if the eval gate cannot pass (no working LLM credential) or there is no
+  pod capacity, **stop and record it** — do not fake a pass. Legs 0-7 plus 9-12 still
+  stand on their own.
 
 ### Leg 9 — Operate it from the Schedules screen: disarm, and prove it stuck ⭐⭐
 **Class 5.** The old Disarm button PATCHed a field the API does not declare — 200 OK, success toast,

@@ -7,6 +7,7 @@ import { deleteAgentVersion, getAgent, getDeployments, listAllTools, listProvide
 import { listKBs, getAgentKnowledgeBases, bindAgent, unbindAgent } from "../api/knowledgeApi";
 import DeployModal from "../components/DeployModal";
 import DeploymentActions from "../components/agent-detail/DeploymentActions";
+import RouteToProduction from "../components/agent-detail/RouteToProduction";
 import SettingsTab from "../components/agent-detail/SettingsTab";
 import { shapeLabel } from "../lib/utils";
 import ToolsPicker, { KNOWLEDGE_SEARCH_TOOL } from "../components/agent/ToolsPicker";
@@ -163,13 +164,19 @@ export default function AgentDetailPage() {
             {!evalGatePassed && agent.publish_status !== "published" && (
               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10">
                 <div className="bg-slate-800 text-white text-xs rounded px-2 py-1 whitespace-nowrap">
-                  Run an eval that passes before publishing
+                  {/* Name WHERE. "Run an eval" states the gate without saying how
+                      to clear it — Eval Runs is a different page, and the control
+                      only appears once a deployment is picked there. */}
+                  Run an eval in Eval Runs, then mark the version passed
                 </div>
               </div>
             )}
           </div>
         </div>
       </div>
+
+      {/* The whole path, not just the current blocker — see RouteToProduction. */}
+      <RouteToProduction agent={agent} />
 
       {/* Tabs */}
       <div className="border-b border-slate-200 mb-6">

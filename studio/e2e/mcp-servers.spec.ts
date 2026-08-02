@@ -5,6 +5,18 @@ import {
   type APIRequestContext,
 } from "@playwright/test";
 
+/**
+ * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
+ * every wizard submit must choose one — the same step a user now takes. Selects
+ * the first real provider rather than a fixed id, since seeded providers differ
+ * per cluster.
+ */
+async function pickModel(page: import("@playwright/test").Page) {
+  const select = page.getByLabel("Model", { exact: true });
+  const value = await select.locator("option").nth(1).getAttribute("value");
+  if (value) await select.selectOption(value);
+}
+
 // ---------------------------------------------------------------------------
 // mcp-servers.spec.ts  (MCP-as-a-tool-source — Studio UI, Phases 12-14)
 //
@@ -248,6 +260,7 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
         !r.url().includes("/runs"),
       { timeout: 30_000 }
     );
+    await pickModel(page);
     await page.getByRole("button", { name: /^Create Agent$/i }).click();
     expect((await createResp).status()).toBe(201);
 

@@ -142,9 +142,11 @@ function ScheduleFields({
         <p className="text-xs text-amber-800">
           <span className="font-medium">This schedule will not fire yet.</span>{" "}
           Schedules dispatch to <strong>production</strong>, and a new agent starts in
-          sandbox. Publish the agent (needs a passing eval) to make it run — the
-          schedule is saved either way, and you can check its status on the agent's
-          deployment Overview.
+          sandbox. Getting there takes three more steps after the eval passes:{" "}
+          <strong>Publish</strong> the agent, have it <strong>approved</strong> in
+          Admin&nbsp;▸&nbsp;Publish&nbsp;Queue, then <strong>Deploy Latest</strong> from
+          Marketplace — publishing alone only creates the catalog listing. The schedule is
+          saved either way, and the agent page tracks where it has got to.
         </p>
       </div>
       <div className="grid grid-cols-2 gap-3">
@@ -655,7 +657,11 @@ const noCodeSchema = z.object({
     .regex(/^[a-z0-9-]+$/, "Lowercase letters, numbers, and hyphens only"),
   description: z.string().max(512).optional(),
   instructions: z.string().min(1, "Instructions are required"),
-  llm_provider_id: z.string().optional(),
+  // Required. An agent with no provider cannot call an LLM, so it can never
+  // complete a run — and it used to be accepted silently by a form that warns
+  // carefully about production. A scheduled agent created this way fails on every
+  // fire with a message about the model, long after the person who made it moved on.
+  llm_provider_id: z.string().min(1, "Pick a model — an agent without one cannot run."),
   tools: z.array(z.string()).optional(),
 });
 
@@ -897,8 +903,8 @@ function NoCodeForm({ team }: { team: string | null }) {
       </Field>
 
       {/* LLM Provider */}
-      <Field label="Model">
-        <select {...register("llm_provider_id")} className="input">
+      <Field label="Model" required error={errors.llm_provider_id?.message}>
+        <select {...register("llm_provider_id")} aria-label="Model" className="input">
           <option value="">— select LLM provider —</option>
           {providersData?.items.map((p) => (
             <option key={p.id} value={p.id}>
