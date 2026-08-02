@@ -9,6 +9,12 @@ screenshot at each **Assert**.
 Companion to `claude-in-chrome-journey.md` (the 22-leg lifecycle run). This one is short and
 targeted: 7 legs, ~5 minutes, one defect class.
 
+**See also `claude-in-chrome-schedule-lifecycle-journey.md`** — the other half. This doc proves
+*when a schedule cannot work, the screen says so*; that one carries a schedule from sandbox through
+**Publish** into production, asserts the verdict actually FLIPS, and adds the Schedules-screen
+operations (arm/disarm round-trip, filter partitioning, lifecycle disarm on delete). Negative-only
+asserts cannot tell "correct" from "nothing works", so run both.
+
 ---
 
 ## The defect this exists to catch
@@ -38,8 +44,10 @@ Plus: alerts configured `on` with no email address rendered as a reassuring gree
 ---
 
 ## How it runs (when you say go)
-1. **Target Studio URL** — the deployed gateway
-   (`https://k8s-envoygat-envoyage-6676b8bb93-7541836717beafbe.elb.us-west-2.amazonaws.com`).
+1. **Target Studio URL** — an INPUT, not a constant. Local:
+   `https://agentshield.127.0.0.1.nip.io:8443` (needs `bash scripts/gateway-proxy.sh` running).
+   EKS: the ELB gateway host. The EKS URL hardcoded here previously went stale the moment the
+   cluster changed — ask for the target rather than assuming one.
    I open a NEW tab (never reuse yours) and navigate there.
 2. **Login** — if it redirects to Keycloak I sign in as `platform-admin` (password via the
    credential flow — I never type it myself), or you're already logged in.
@@ -154,7 +162,7 @@ regression signature, not a vague quality bar.
 - [ ] **Webhook twin.** The event-gateway shares this door and returns **202 to the sender** before
       dispatch is attempted, so a webhook against a sandbox-only agent tells the caller it
       succeeded. Worth a leg once we decide whether the gateway should 503 instead.
-- [ ] **Zombie schedules.** Archived and draft workflows still have armed schedules firing (see
-      `docs/design/todo/schedule-lifecycle-and-operations.md`, Finding 1). Not fixed here; a leg
-      belongs with that work.
+- [x] **Zombie schedules.** FIXED — `trigger_lifecycle.disarm_triggers` disarms on
+      delete/archive/quarantine (migration 0076 reaped the 37 already armed), and the Schedules
+      screen lists them. Covered by leg 11 of the lifecycle journey and `suite-95`.
 - [ ] _add your own …_
