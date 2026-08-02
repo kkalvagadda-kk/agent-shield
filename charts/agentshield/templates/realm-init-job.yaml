@@ -34,9 +34,20 @@ metadata:
   annotations:
     # Run after the main Helm resources are applied (on both install and upgrade).
     "helm.sh/hook": post-install,post-upgrade
-    # Clean up the Job pod once it completes successfully to keep the namespace tidy.
-    # On failure the Job is retained so operators can inspect logs.
-    "helm.sh/hook-delete-policy": hook-succeeded
+    # before-hook-creation: delete any Job left over from a PREVIOUS run before
+    # creating this one. Without it, `hook-succeeded` alone is a one-shot: a helm
+    # upgrade that is interrupted (timed out, Ctrl-C, CI cancellation) never reaches
+    # its cleanup, the completed Job survives, and EVERY subsequent upgrade dies with
+    #   post-upgrade hooks failed: jobs.batch "agentshield-realm-init" already exists
+    # — a deploy path that permanently blocks itself on a transient interruption. That
+    # is exactly how it broke: a run killed at a 10-minute cap left the Job behind, and
+    # the retry could not create it. Every other hook in this chart (see
+    # postgres-pv-retain-hook.yaml) already carries both policies; this one did not.
+    #
+    # hook-succeeded still keeps the namespace tidy on success. A FAILED Job is still
+    # retained for inspection — until the next deploy, which is the window that matters
+    # and is strictly better than blocking that deploy outright.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
     # Weight 10 ensures this job runs after any lower-weight hooks (e.g. DB migrations).
     "helm.sh/hook-weight": "10"
 spec:
