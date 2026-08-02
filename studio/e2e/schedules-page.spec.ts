@@ -159,3 +159,90 @@ test.describe("schedules page", () => {
     }
   });
 });
+
+// ── R5 second pass: run history + edit in place ──────────────────────────────
+// Both are UX-facing writes/reads the Vitest suite can only see through mocks. The
+// sparkline in particular is derived server-side (`recent_runs`), so a mock proves
+// the component renders an array — not that the endpoint sends one.
+test.describe("schedules page — history and editing", () => {
+  test("shows a run-history strip, and an edit survives a reload", async ({ page }) => {
+    const H = await captureAuthHeaders(page);
+    const api = page.request;
+    const providers = await (
+      await api.get(`/api/v1/llm-providers/?team=platform`, { headers: H })
+    ).json();
+    const providerId = (providers.items ?? providers)?.[0]?.id;
+    test.skip(!providerId, "no LLM provider seeded in this environment");
+
+    const NAME = `sp-edit-${Date.now().toString(36)}`;
+    expect(
+      (await api.post(`/api/v1/agents/`, {
+        headers: H,
+        data: {
+          name: NAME, team: "platform", agent_type: "declarative",
+          execution_shape: "durable", agent_class: "daemon",
+          metadata: { instructions: "Edit probe.", llm_provider_id: providerId, tools: [] },
+        },
+      })).ok(),
+    ).toBeTruthy();
+    const trig = await (
+      await api.post(`/api/v1/agents/${NAME}/triggers`, {
+        headers: H,
+        data: { trigger_type: "schedule", cron_expression: "0 9 * * 1", timezone: "UTC", alert_on_failure: false },
+      })
+    ).json();
+
+    try {
+      const listed = page.waitForResponse(
+        (r) => SCHEDULES_RE.test(r.url()) && r.request().method() === "GET",
+        { timeout: 30_000 },
+      );
+      await page.goto("/schedules");
+      await listed;
+
+      const row = page.getByTestId(`schedules-row-${trig.id}`);
+      await expect(row).toBeVisible({ timeout: 20_000 });
+
+      // ── History ────────────────────────────────────────────────────────────
+      // A brand-new schedule has never run. It must say so, NOT render ten grey
+      // bars — a newly armed schedule looking like ten failures is the specific
+      // misread this component was written to avoid.
+      await expect(row.getByTestId("run-sparkline-empty")).toBeVisible();
+      await expect(row.getByTestId("run-sparkline")).toHaveCount(0);
+
+      // ── Edit, then RELOAD ──────────────────────────────────────────────────
+      // The assertion is the reload. An in-place edit that only updates the React
+      // Query cache looks identical until the page is re-fetched.
+      await row.getByTestId("schedule-edit-btn").click();
+      const modal = page.getByTestId("edit-schedule-modal");
+      await expect(modal).toBeVisible();
+
+      const cron = modal.getByTestId("edit-schedule-cron");
+      await expect(cron).toHaveValue("0 9 * * 1");
+      await cron.fill("0 9 *");
+      // Five fields or nothing — save must be blocked and say what it counted.
+      await expect(modal.getByTestId("edit-schedule-save")).toBeDisabled();
+      await expect(modal).toContainText(/3 fields/i);
+
+      await cron.fill("30 6 * * *");
+      const patched = page.waitForResponse(
+        (r) => r.url().includes(`/triggers/${trig.id}`) && r.request().method() === "PATCH",
+      );
+      await modal.getByTestId("edit-schedule-save").click();
+      expect((await patched).ok(), "PATCH trigger").toBeTruthy();
+      await expect(page.getByTestId("edit-schedule-modal")).toHaveCount(0);
+
+      const reListed = page.waitForResponse(
+        (r) => SCHEDULES_RE.test(r.url()) && r.request().method() === "GET",
+        { timeout: 30_000 },
+      );
+      await page.reload();
+      await reListed;
+      await expect(page.getByTestId(`schedules-row-${trig.id}`)).toContainText("30 6 * * *", {
+        timeout: 20_000,
+      });
+    } finally {
+      await api.delete(`/api/v1/agents/${NAME}`, { headers: H }).catch(() => undefined);
+    }
+  });
+});
