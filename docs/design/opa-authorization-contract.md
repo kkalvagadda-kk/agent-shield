@@ -371,5 +371,18 @@ across the three authorization docs leaves this one with none.
 | `debugging/001` (HITL not triggering), `003` (OPA bundle 5-min cold start), `008` (production OPA identity parity) | referenced as the operational record behind §2 and §10 | the investigations themselves |
 
 **Not consolidated here, deliberately:** run-initiation auth (§10.3 → identity doc), control-plane
-RBAC (→ `rbac-and-artifact-authorization.md`), and credentials handed *to* a tool (MCP OAuth /
-on-behalf-of exchange → `mcp-tool-source-architecture.md` §7a + identity doc §2).
+RBAC (→ `rbac-and-artifact-authorization.md`), and credentials handed *to* a tool
+(→ `identity-propagation-architecture.md` **§4.8**).
+
+**Where this contract sits for an MCP tool call.** An `mcp_tool` invocation passes three
+independent gates; OPA is the **first**, and the only one this document owns:
+
+1. **OPA (here)** — may this agent call this tool at all? Decided in the pod before dispatch
+   (`graph_builder.py:303` deny → `:369` dispatch).
+2. **MCP proxy team floor** — may this agent's team reach this server/tool? (`mcp-proxy/authz.py`,
+   caller authenticated by K8s TokenReview.)
+3. **The upstream MCP server** — may this end user do this thing, per the credential the proxy
+   presents? (identity doc §4.8.)
+
+A deny at gate 1 means the call never reaches the proxy. An allow at gate 1 says nothing about
+gates 2 and 3 — OPA has no input describing the upstream server's own authorization.

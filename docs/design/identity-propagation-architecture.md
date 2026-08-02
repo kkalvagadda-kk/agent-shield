@@ -34,7 +34,7 @@ The consequence is that tool governance — OPA policy + human-in-the-loop (HITL
 - The HITL approval record and Studio surface the real requesting/authorizing human.
 
 **Non-goals**
-- Full RFC 8693 token exchange / per-tool scoped-down tokens **as a general internal delegation model**. Deferred; the actor-chain model here is the minimal real chain-of-custody. **Narrower exception (2026-07-19):** MCP's on-behalf-of identity mode for internal MCP servers (`mcp-tool-source-architecture.md` §7a) is a concrete, specific consumer of `RunContext.user_sub` that does need token exchange — confirmed as **impersonation-based** exchange (a confidential client with an impersonation grant, minting a token for a `user_sub` string), not classic subject_token exchange, precisely because this doc never propagates a re-presentable access token internally (see Decision 29, `docs/decisions.md`). This doesn't change `RunContext`'s design — it's an additive downstream use of the `user_sub` field once it exists, not a new propagation requirement on this doc.
+- **RFC 8693 *delegation* (`subject_token`) and per-tool scoped-down tokens, as a general internal model.** Deferred; the actor-chain model here is the minimal real chain-of-custody. Note the precision (§4.8.5): the chosen MCP mechanism **is** RFC 8693 token exchange — what is excluded is the *delegation* flavour that presents the user's live token as `subject_token`, in favour of the *impersonation* flavour that passes `requested_subject=<user_sub>`. **Narrower exception (2026-07-19):** MCP's on-behalf-of mode for internal MCP servers is a concrete consumer of `RunContext.user_sub` that does need an exchange (Decision 29). Delegation is ruled out structurally — this doc never propagates a re-presentable access token internally, by choice, for reasons that survive its own implementation (§4.8.5). This doesn't change `RunContext`'s design; it's an additive downstream use of `user_sub` once it exists.
 - Replacing Keycloak or the OPA/HITL governance model. This threads identity *into* them.
 
 **Delegated tool-call credentials — where this doc's authority ends (added 2026-08-02).**
@@ -43,14 +43,18 @@ from everything above and is **not** owned here. Current platform-wide truth:
 
 | Tool kind | Credential the tool receives | Who validates | Status |
 |---|---|---|---|
-| External MCP server w/ OAuth 2.1 | the end user's **own stored OAuth token**, resolved per-request from `user_sub` | the external server (e.g. GitHub) | **BUILT** — `mcp_oauth_grants` (`0074`), `routers/mcp_oauth.py`, `suite-87`; per-request-user fix in SDK `0.2.7` (`docs/bugs/mcp-oauth-tool-call-used-static-not-per-request-user.md`) |
-| Internal MCP server, `identity_mode=on_behalf_of` | a Keycloak token **minted for** `user_sub`, audienced to that server (impersonation exchange) | the internal server — **assumed, not contracted** | **DESIGNED, BLOCKED on this doc's Phase 0–2** — Decision 29, `mcp-tool-source-architecture.md` §7a |
-| HTTP / Python platform tools, `service-identity` MCP | none | n/a — governance is OPA-side only | by design |
+| External MCP server, `external_auth_mode="oauth"` | the end user's **own upstream OAuth access token**, resolved per-request from `user_sub` | the external server (e.g. GitHub), against that user's scopes | **BUILT** — `mcp_oauth_grants` (`0074`), `routers/internal_mcp.py`, `suite-87`; per-request-user fix in SDK `0.2.7` |
+| Internal MCP server, `identity_mode="service_identity"` | a **Keycloak client-credentials token, audienced to that server** — asserts *the platform*, not any human | the internal server (a real, validatable JWT) | **BUILT** — `mcp-proxy/keycloak_client.py:80` |
+| Internal MCP server, `identity_mode="on_behalf_of"` | a token minted **for** `user_sub`, audienced to that server (impersonation exchange) | the internal server — **assumed, not contracted** | **STUB THAT FAILS CLOSED**, blocked on this doc's Phase 0–2 — Decision 29 |
+| Internal MCP server, `identity_mode="none"` | static per-server credentials | the server, if it bothers | **BUILT** (Phase 1) |
+| HTTP / Python platform tools | none | n/a — governance is OPA-side only | by design |
 
 This doc supplies the `user_sub` those flows consume; it does not mint, scope, or validate
-tool-facing credentials. Two properties are **absent by design and worth an explicit decision**
-before anyone assumes otherwise — see §10 OQ-4/OQ-5: tokens are scoped **per server, not per
-tool**, and **no contract obliges an MCP server to validate the token it is handed**.
+tool-facing credentials. **Full treatment — the implemented matrix, the three-gate model, the
+RFC 8693 delegation-vs-impersonation analysis, and the fail-closed invariants — is §4.8.** Two
+properties are absent by design and want an explicit decision before anyone assumes otherwise
+(§10 **OQ-4**/**OQ-5**): credentials are scoped **per server, not per tool**, and **no contract
+obliges an MCP server to validate the token it is handed**.
 - Reworking the agent runtime or LangGraph checkpointer beyond reading/writing identity.
 
 ## 3. Current state — where identity drops today
@@ -257,6 +261,175 @@ implementing D-1.
 - Wire up the existing-but-dead `opa_decisions`: `opa_client.check_tool` fire-and-forget POSTs the already-built OPA input (with `user_id`/`sa_subject`) to `/api/v1/opa-decisions/`; the returned id flows into `require_approval` so `Approval.opa_decision_id` (FK already exists) is populated.
 - Studio `HITLDashboardPage.tsx` renders "Requested by {user}" / "service:{name} on behalf of {user}".
 
+### 4.8 Identity for MCP tool calls — internal and external servers
+
+The rest of this document threads identity so *AgentShield's own* governance can see it. An MCP
+tool call goes one step further: a credential leaves the platform and is presented to a **server
+that does its own authorization**. That is a different mechanism with its own matrix, and it is
+already substantially built — more than any design doc previously recorded. `services/mcp-proxy/`
+is the implementation of record; this section documents it and marks the one hole.
+
+#### 4.8.1 Three independent authorizations, not one
+
+An `mcp_tool` call passes three gates in order. None substitutes for another:
+
+| # | Gate | Where | Principal it judges | Status |
+|---|---|---|---|---|
+| 1 | **OPA** — may this agent call this tool at all? | in the agent pod, before dispatch (`graph_builder.py:303` deny, `:369` dispatch) | the agent's K8s SA (`sa_subject`) + `user_id` | live |
+| 2 | **Proxy team floor** — may this agent's team reach this server/tool? | `mcp-proxy/authz.py:84-115`; caller authenticated by **K8s TokenReview** (`authn.py`), not a header | the calling pod's SA, own-team fast path + cross-team consult | live |
+| 3 | **Upstream server** — may this *end user* do this thing? | the MCP server itself, using the credential §4.8.2–4.8.4 hands it | whatever the credential asserts | varies — see 4.8.7 |
+
+Gate 1 is this platform's governance. Gate 3 is the *other* system's. Gate 2 exists because the
+proxy is a shared egress point and must not become a confused deputy.
+
+#### 4.8.2 The implemented credential matrix
+
+`mcp-proxy/identity.py::resolve_headers` is the single seam that decides which credential goes
+upstream. Reproduced from the implementation (`identity.py:104-167`):
+
+| Selector | Plane | Credential presented upstream | Status |
+|---|---|---|---|
+| `external_auth_mode="oauth"`, no `user_sub` | any | **raises `OAuthUserRequired`** — never downgrades | live |
+| `external_auth_mode="oauth"`, `user_sub` set | any | **the end user's own upstream OAuth access token** | **live** |
+| `identity_mode="none"` | any | static per-server credentials, unchanged (Phase 1) | live |
+| `identity_mode="service_identity"` | any | **a Keycloak token minted for the platform, audienced to that server** | **live** |
+| `identity_mode="on_behalf_of"` | admin (discover/health) | the platform's service token — *discovery never impersonates a user* | live |
+| `identity_mode="on_behalf_of"` | data, no `user_sub` | **raises `OnBehalfOfIdentityRequired`** | live |
+| `identity_mode="on_behalf_of"` | data, `user_sub` set | **raises `OnBehalfOfNotAvailable`** — the one stub | **BLOCKED** |
+| unknown mode | any | static creds; never mints or leaks a platform identity | live |
+
+The OAuth branch is checked **first** and is orthogonal: external servers are always
+`identity_mode="none"`, so without that ordering they would fall through to the static path and
+never authenticate.
+
+#### 4.8.3 External servers (OAuth 2.1) — built, and it is per-user
+
+This is the case that already behaves the way "the tool validates the token and applies its own
+authorization" implies — GitHub, for instance, enforces the user's own scopes.
+
+```
+agent pod                     mcp-proxy                    registry-api                 upstream
+─────────                     ─────────                    ────────────                 ────────
+governed_tool (OPA ok)
+  McpToolExecutor
+    x-user-sub: <per-request acting user>   ─────────►
+    Authorization: <pod SA token>                TokenReview(authn.py)
+                                                 team floor (authz.py)
+                                                 resolve_headers → oauth branch
+                                                   POST /internal/mcp/oauth/access-token
+                                                   {server_id, user_sub}      ─────────►
+                                                                        TokenReview + subject-pin
+                                                                        the mcp-proxy SA
+                                                                        grant FOR UPDATE (row lock)
+                                                                        refresh live via provider,
+                                                                        re-store rotated RT first
+                                                   ◄───────── access token
+                                                 cache in memory
+                                                 Authorization: Bearer <user's token> ────────►
+                                                                                        validates,
+                                                                                        applies its
+                                                                                        own authz
+```
+
+Load-bearing details, each verified:
+- **The user is per-request, not per-pod.** `tool_executor.py:409-416` reads the request-scoped
+  `_current_user_context` — the same ContextVar `governed_tool` reads for OPA — and falls back to
+  the static `config.USER_SUB` only for a daemon. Forwarding the pod's static user instead was a
+  real outage (`docs/bugs/mcp-oauth-tool-call-used-static-not-per-request-user.md`, fixed SDK
+  `0.2.7`). **This is the one place today where identity propagation already visibly matters at
+  the tool boundary** — and it is exactly the ContextVar that `sdk`-type agents never populate
+  (Drop point 2), so an `sdk` agent on an OAuth server falls back to the daemon path.
+- **registry-api never stores an access token** — only the refresh token, behind a
+  `CredentialRef`. Every pull performs a live refresh; the proxy caches the result in memory only.
+- **Rotation is serialized** — the grant row is taken `FOR UPDATE` so two concurrent refreshes
+  cannot double-rotate and permanently lock the user out (RFC 9700).
+- **Failure is fail-closed and legible** — no grant, un-authorized grant, or `invalid_grant` on
+  refresh yields `needs_auth`/`error`, never a downgrade to static credentials or a service token.
+
+#### 4.8.4 Internal servers — `service_identity` built, `on_behalf_of` is the hole
+
+**`service_identity` works today.** `keycloak_client.mint_service_account_token(audience)`
+performs an OAuth2 **client-credentials** grant with the `audience` form parameter, caches with an
+expiry skew, and re-reads the client secret from its file mount on every real mint
+(`keycloak_client.py:80-125`). The upstream server receives a genuine, audienced Keycloak JWT it
+can validate. What it *cannot* tell from that token is which human is behind the call — the token
+asserts "the platform", by design.
+
+**`on_behalf_of` is a deliberate, loud stub.** `identity.mint_on_behalf_of_token` always raises
+`OnBehalfOfNotAvailable` (`identity.py:77-93`). Its docstring states the rule this design cares
+about most: it must **never** substitute a service token for a user's, because the platform acting
+*as* a user without that user's verified identity is a privilege escalation. Same for the
+no-`user_sub` case on the data plane. Both fail closed rather than silently degrading — which is
+the correct behaviour for an unbuilt feature and the reason this gap has never produced a security
+incident, only an error message.
+
+What lands in that function when it is unblocked, per Decision 29 and the stub's own note: the
+proxy's confidential Keycloak client performs a token exchange with `requested_subject=user_sub`
+and the server's `audience`, minting fresh per call (no caching). The `audience` mechanics are
+already proven by `service_identity` on the same code path, so the delta is the grant type and the
+subject parameter — not new infrastructure.
+
+**Dependency chain, precisely:** on-behalf-of needs a *verified* `user_sub` to reach
+`governed_tool`'s MCP branch. For `declarative` agents that already happens via
+`_bind_user_context`; for `sdk` agents it does not (Drop point 2). So FR-MCP-21 is blocked on this
+document's **Phase 0–2**, not on MCP work. Phases 3–5 are irrelevant to it.
+
+#### 4.8.5 RFC 8693 — the precise position, since this gets misread
+
+Both candidate mechanisms are **RFC 8693 Token Exchange** (`grant_type=urn:ietf:params:oauth:
+grant-type:token-exchange`). The choice is *which parameter carries the subject*, and therefore
+what is being proven:
+
+| | **Delegation / "classic"** | **Impersonation** (chosen) |
+|---|---|---|
+| Subject parameter | `subject_token` — the user's real, still-valid access token | `requested_subject` — the user's subject *string* |
+| What is proven | Keycloak validates a live token: cryptographic proof a real session authorized this | The proxy's own impersonation grant. Trust rests on the proxy's credential, not the user's session |
+| Blast radius if the proxy is compromised | bounded — can only exchange tokens actually in flight | broader — can mint for any subject inside the grant's scope |
+| Expiry | inherits the user's session | independent of it |
+| **Viable here?** | **No** | **Yes** |
+
+Classic is ruled out by a property this document chose deliberately and independently: **no
+re-presentable access token exists anywhere in the internal chain.** §4.3 propagates a verified
+*subject string* in an HMAC-signed RCT, not a JWT, because (a) verifying a Keycloak JWT at every
+hop needs JWKS infrastructure that does not exist outside registry-api, and (b) identity must
+survive HITL pauses of up to 24 hours, by which point any original access token is long expired.
+Both reasons hold *after* this design ships in full — so this is not a limitation of today's
+plumbing that implementation will lift.
+
+**What would reopen it:** only a decision to carry a live, re-presentable token internally — which
+means JWKS verification in every SDK pod and the declarative-runner, plus an answer for the
+24-hour-pause case (a re-authentication prompt, or accepting that resumed runs lose delegation).
+That is a strictly larger change than this document, and it is the same decision as OQ-4.
+
+#### 4.8.6 Invariants — never weaken these
+
+These are the properties that make the stub safe. Any change to `identity.py` must preserve them:
+1. An OAuth server with no `user_sub` **raises**; it never falls back to static headers or a
+   service token.
+2. `external_auth_mode="static"` skips the OAuth branch entirely — a pre-WS-2 server behaves
+   byte-identically.
+3. `identity_mode="none"` returns the static headers **unchanged**.
+4. On-behalf-of on the **data** plane never resolves to a service token — not when `user_sub` is
+   missing, not when the exchange is unavailable.
+5. On-behalf-of on the **admin** plane (discovery, health) deliberately *does* use the service
+   token: listing a server's tools is the platform acting as itself, not as any user.
+6. An unrecognized `identity_mode` falls back to static credentials — never mints a platform
+   identity for a mode it does not understand.
+
+#### 4.8.7 What this does NOT give you
+
+Two properties are absent by design. Both are decisions, not oversights, and both are open:
+
+- **Scope is per *server*, not per *tool*.** The credential is audienced to the MCP server; nothing
+  narrows it to the single tool being invoked. A token minted to call `search_repositories` is
+  equally usable for `delete_repo` if the upstream authorizes it. Per-tool scope-down is where
+  classic delegation earns its complexity — **OQ-4**.
+- **No contract obliges the server to validate what it is handed.** For external servers this is
+  moot (GitHub validates because it is GitHub). For an **internal** MCP server the platform mints
+  an audienced token and trusts the receiver to check audience, expiry, and subject — with no
+  documented obligation and no conformance test. An internal server that ignores the token is
+  indistinguishable from one that enforces on it — **OQ-5**.
+
 ## 5. Data model changes (contiguous migrations)
 
 Renumbered 2026-08-02 — the head on disk is `0078`, and `0079` is reserved for RBAC phase R5
@@ -327,6 +500,18 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 - **deferred (intentional):** pre-existing `agent_triggers` get `created_by=NULL`; no backfill.
 - **not-yet-wired (debt):** `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` — separate approver-identity bug, fixed in Phase 6.
 - **infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service — needed for the secret mount.
+- **not-yet-wired (debt), blocked on Phase 0–2 (§4.8.4):** internal MCP `on_behalf_of` — the
+  `mint_on_behalf_of_token` stub (`mcp-proxy/identity.py:77`) raises on every data-plane call.
+  Fails closed and loud, so it is an unavailable feature rather than a security hole. Unblocked by
+  Phases 0–2 only; Phases 3–5 are irrelevant to it.
+- **deferred (intentional), §4.8.7:** credentials are audienced per **server**, never per tool
+  (**OQ-4**).
+- **not-yet-wired (debt), §4.8.7:** no validation contract or conformance test obliges an internal
+  MCP server to check the token it is handed (**OQ-5**).
+- **not-yet-wired (debt), §4.8.3:** an `sdk`-type agent bound to an **external OAuth** MCP server
+  falls back to the pod's static `config.USER_SUB`, because `_current_user_context` is never
+  populated for that runtime (Drop point 2). Today's most concrete user-visible consequence of the
+  identity gap: the OAuth lookup either misses or resolves to the wrong user.
 - **blocked on Phase 3 (2026-08-02):** the Schedules page's **Run now** control. Built as far
   as the design and stopped: `/internal/runs/start` has no authentication, so a button there
   would give the product a manual-fire path with no authorization check. See §4.2 (manual-fire
@@ -336,18 +521,19 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 
 - Should scheduled/event runs whose trigger `created_by` is NULL be *denied* HITL-gated tools outright (no one can approve), or allowed to autonomously proceed on `sa_subject` scopes? Current design: allow on scopes; revisit if audit requires a named human for every high-risk action.
 - Long-term: is per-tool scoped-down delegation (RFC 8693 token exchange) worth it over the `actor_chain` model as a *general* pattern? Narrower now than when this was written — MCP's on-behalf-of mode (`mcp-tool-source-architecture.md` §7a) already needed a concrete answer and got one (impersonation-based exchange, layered on top of `RunContext.user_sub`, not a change to this doc's model). Remaining question is only whether other future integrations need the same treatment, or whether the anchor + actor_chain model stays sufficient everywhere else.
-- **OQ-4 — per-tool scope-down.** Today's design scopes a delegated token to the **MCP server**
-  (`mcp-tool-source-architecture.md` §7a step 3), and §2 lists per-tool scoped-down tokens as a
-  non-goal. If a tool call should carry a token narrowed to *that tool*, this non-goal has to be
-  reopened — and it forces a re-litigation of Decision 29, because per-tool scope-down is where
-  classic RFC 8693 exchange earns its complexity. **Not a doc edit; a design decision.**
-- **OQ-5 — is the receiving server obliged to validate?** Nothing today requires an internal MCP
-  server to check the audience, expiry, or subject of the token it is handed. The platform mints a
-  credential and trusts the receiver to enforce with it. If "the tool validates and applies its own
-  authorization" is a platform requirement rather than a hope, it needs to become a **contract**
-  (a documented validation obligation + a conformance test in `suite-87`'s successor), not an
-  assumption. Until then, an internal MCP server that ignores the token is indistinguishable from
-  one that enforces on it.
+- **OQ-4 — per-tool scope-down** (detail: §4.8.7). Credentials are audienced to the **server**, not
+  the tool. If a call should carry a token narrowed to *that tool*, the §2 non-goal reopens — and
+  it re-litigates Decision 29, because per-tool narrowing is where RFC 8693 **delegation** earns
+  its complexity, and delegation needs a re-presentable token this design deliberately does not
+  carry (§4.8.5). Cost of saying yes: JWKS verification in every SDK pod + the declarative-runner,
+  plus an answer for resumed runs after a 24-hour HITL pause. **A design decision, not a doc edit.**
+- **OQ-5 — is the receiving server obliged to validate?** (detail: §4.8.7). Nothing requires an
+  internal MCP server to check audience, expiry, or subject on the token it is handed. The platform
+  mints a credential and trusts the receiver. If "the tool validates and applies its own
+  authorization" is a platform **requirement** rather than a hope, it needs to become a contract: a
+  documented validation obligation for internal servers, plus a conformance test that registers a
+  deliberately non-validating server and asserts the platform's behaviour. External servers are
+  unaffected — they validate because they are somebody else's product.
 - **D-2 (from §4.6):** should `playground`/`sandbox` exempt a call from the identity floor at all? Both inputs already reach OPA and are ignored. The sandbox auto-approves HITL *above* OPA, so an exemption may be redundant. Decide before Phase 2 rather than implementing the original text by default.
 
 ---
