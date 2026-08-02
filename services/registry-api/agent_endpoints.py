@@ -226,9 +226,22 @@ async def resolve_dispatch_target(db, agent, *, environment: str) -> DispatchTar
     # looking for a button that does not exist is only marginally better than the
     # DNS error this message replaced. Caught by driving the real screen
     # (docs/testing/claude-in-chrome-schedule-failure-journey.md, leg 7).
+    #
+    # It then named "Publish" alone, which is REACHABLE but INSUFFICIENT — the
+    # second and worse failure, because the operator does the named thing, watches
+    # it succeed, and gets this identical message again. Publishing produces a
+    # `published_artifacts` row (a CATALOG LISTING). It does not produce a
+    # `production_deployments` row: `routers/admin.py::approve_publish_request`
+    # never touches ProductionDeployment, and `ProductionDeployment.artifact_id`
+    # FKs to `published_artifacts.id` — so the row that makes an agent reachable is
+    # only created by the SEPARATE catalog deploy. Three steps, and naming step one
+    # as if it were the remedy is how an operator ends up in a loop.
+    # Found by driving the real screens: claude-in-chrome-schedule-lifecycle-journey
+    # leg 8, and docs/bugs/publish-does-not-create-a-production-deployment.md.
     remedy = (
-        "Publish the agent (Studio: agent page → Publish; requires a passing eval) "
-        f"or deploy it to {environment} via the API"
+        "publish it, approve it in Admin → Publish Queue, then deploy it from "
+        "Marketplace → the artifact → Deploy Latest (all three are required — "
+        "publishing alone only creates the catalog listing)"
         if environment == "production"
         else f"deploy the agent to {environment}"
     )

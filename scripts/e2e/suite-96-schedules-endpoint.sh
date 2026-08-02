@@ -231,6 +231,26 @@ async def main():
                f"status={r_on.status_code} enabled={n_.get('enabled')} "
                f"disarm_reason={n_.get('disarm_reason')!r} disarmed_at={n_.get('disarmed_at')!r}")
 
+        # ── The refusal must name a remedy that WORKS, not just one that exists ──
+        # 0.2.244 fixed "deploy to production" (unreachable from the UI) -> "Publish".
+        # Publish is reachable but INSUFFICIENT: it writes a published_artifacts row
+        # (catalog listing) and NOT a production_deployments row, so an operator does
+        # the named thing, watches it succeed, and gets this identical message back.
+        # Reaching production takes three steps; the message must say so.
+        # docs/bugs/publish-does-not-create-a-production-deployment.md
+        msg = (s_ or {}).get("why_not") or ""
+        low = msg.lower()
+        names_all_three = ("publish" in low
+                           and ("queue" in low or "approve" in low)
+                           and ("marketplace" in low or "deploy latest" in low))
+        record("T-S96-010 the production remedy names ALL THREE steps, not just publish",
+               names_all_three,
+               f"why_not={msg[:170]!r} — publish={'publish' in low} "
+               f"approve={'queue' in low or 'approve' in low} "
+               f"catalog_deploy={'marketplace' in low or 'deploy latest' in low}. "
+               f"Publishing alone only creates the catalog listing; naming it as THE "
+               f"remedy sends the operator round a loop.")
+
     except Exception as exc:
         import traceback
         record("T-S96-999 driver ran every case without crashing", False,
@@ -276,7 +296,7 @@ while IFS= read -r line; do
   esac
 done <<< "$RES"
 
-REQUIRED_IDS="001 002 003/006 004 005 007 008 009"
+REQUIRED_IDS="001 002 003/006 004 005 007 008 009 010"
 MISSING=""
 for id in $REQUIRED_IDS; do
   echo "$RES" | grep -q "T-S96-$id " || MISSING="$MISSING T-S96-$id"
@@ -286,7 +306,7 @@ if [ -n "$MISSING" ]; then
   FAIL=$((FAIL+1))
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S96-COMPLETE every gate assertion ran (001-009 — none skipped)"
+  echo "PASS  T-S96-COMPLETE every gate assertion ran (001-010 — none skipped)"
   PASS=$((PASS+1))
 fi
 

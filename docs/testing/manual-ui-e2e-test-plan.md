@@ -12,6 +12,35 @@
 
 ---
 
+## Known gaps — schedule-lifecycle journey on EKS — 2026-08-02
+
+Running `claude-in-chrome-schedule-lifecycle-journey.md` end to end (13/13 legs, registry-api
+0.2.252 / studio 0.1.177) found three defects. Two are fixed in 0.2.253; one is open.
+
+- **not-yet-wired (debt) — `Publish` gives no feedback.** `POST /agents/{name}/publish` answers 202
+  and creates the request, but the page shows no toast, no navigation, no button state change. The
+  only signal is the "Pending Review" badge, which renders on the NEXT load — so an operator who
+  stays on the page sees nothing and the natural recovery is to click again. **Whether a second
+  click enqueues a duplicate request is untested and should be answered before this is fixed.**
+  Postmortem: `docs/bugs/publish-click-gives-no-feedback.md`.
+
+- **deferred (intentional) — the create wizard accepts an agent with no model.**
+  `llm_provider_id` is optional in the form and an agent without one can never run, while the same
+  form warns carefully about production. Not fixed here because the right answer (require it, vs
+  warn, vs default to the team's only provider) is a product call, not a bug fix.
+
+**Closed by 0.2.253:**
+
+- The production remedy named only `Publish`, which is **reachable but insufficient** — publishing
+  writes a catalog listing, not a `production_deployments` row, so following the advice exactly
+  returned the identical message. Now names all three steps.
+  `docs/bugs/publish-does-not-create-a-production-deployment.md` · T-S96-010.
+- `PATCH /catalog/{id}/deployments/{did} {"action":"suspend"}` wrote `"suspending"`, which the
+  `production_deployments` CHECK forbids — **every production suspend answered 500 since the
+  endpoint shipped**. suite-39 covered the identically-named sandbox action, whose table admits the
+  value. `docs/bugs/production-deployment-suspend-500.md` · T-S39-007 asserts the whole status
+  vocabulary against the live constraint rather than replaying one verb.
+
 ## Known gaps — schedules page + local-cluster test infrastructure — 2026-08-01
 
 Rebuilding the platform on a wiped Docker Desktop cluster (registry-api 0.2.252 / studio

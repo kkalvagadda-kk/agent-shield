@@ -366,7 +366,19 @@ async def update_deployment(
         dep.status = "deploying"
         dep.updated_at = now
     elif body.action == "suspend":
-        dep.status = "suspending"
+        # "suspended", NOT "suspending". The table's CHECK constraint
+        # (production_deployments_status_check) admits
+        #   pending | deploying | running | suspended | failed
+        #   | terminating | terminated | rolled_back | gate_failed
+        # and "suspending" is not among them, so EVERY suspend raised
+        # CheckViolationError and answered 500 — the action has never once worked.
+        #
+        # The neighbouring branches hid it: `terminate` writes "terminating" and
+        # `resume`/`upgrade` write "deploying", all of which ARE admitted, so the
+        # gerund reads as the house style right up until the database refuses it.
+        # There is no in-flight state to represent here anyway — suspend takes
+        # effect on the next reconcile, and `suspended_at` already records when.
+        dep.status = "suspended"
         dep.suspended_at = now
         dep.updated_at = now
     elif body.action == "resume":
