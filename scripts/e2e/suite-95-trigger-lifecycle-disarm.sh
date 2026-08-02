@@ -36,7 +36,9 @@
 #   T-S95-004 — READ-SIDE defence: a trigger force-re-armed by raw SQL on a dead
 #               artifact is NOT returned by the scheduler's own query. Proves the
 #               filter, not just the write gate — they are separate services and
-#               fixing one alone was the bandaid.
+#               fixing one alone was the bandaid. Uses the ARCHIVED WORKFLOW's
+#               trigger: archive keeps the row, whereas agent delete now removes
+#               schedule triggers outright, which would make this pass vacuously.
 #   T-S95-005 — RE-ENABLE is explicit and CLEARS the reason: reactivating the agent
 #               does NOT re-arm (fail closed), and a human PATCH enabled=true clears
 #               `disabled_reason` so a stale explanation never sits on an armed row.
@@ -287,36 +289,38 @@ async def main():
                f"archive={ar.status_code} enabled={w_en} reason={w_reason!r}")
 
         # ── T-S95-004: READ-SIDE defence ─────────────────────────────────────────
-        # Force the deleted agent's trigger back on behind the API's back. The write
-        # gate cannot help here — this is exactly the "next lifecycle path that
+        # Force an ARCHIVED WORKFLOW's schedule back on behind the API's back. The
+        # write gate cannot help here — this is exactly the "next lifecycle path that
         # forgets" scenario, and the scheduler must still refuse to see it.
+        #
+        # FIXTURE NOTE: this used to force-re-arm the DELETED AGENT's schedule. That
+        # row no longer exists — agent delete now REMOVES schedule triggers — so the
+        # UPDATE hit zero rows and the scheduler "did not see it" for the trivial
+        # reason that there was nothing to see. A vacuous pass. The archived workflow
+        # is the right fixture now: archive DISARMS and KEEPS, so there is a real row
+        # on a real dead artifact to force back on.
         async with AsyncSessionLocal() as s:
             await s.execute(text(
-                "UPDATE agent_triggers SET enabled = true WHERE id = :i"), {"i": t_del})
+                "UPDATE agent_triggers SET enabled = true WHERE id = :i"), {"i": t_wf})
             await s.commit()
-        forced_en, _ = await trig_state(t_del)
-        seen = await scheduler_sees(t_del)
-        record("T-S95-004 READ-SIDE: a force-re-armed trigger on a dead agent is invisible to the scheduler",
+        forced_en, _ = await trig_state(t_wf)
+        seen = await scheduler_sees(t_wf)
+        record("T-S95-004 READ-SIDE: a force-re-armed trigger on a dead artifact is invisible to the scheduler",
                forced_en is True and seen is False,
-               f"row_enabled={forced_en} (forced on) scheduler_sees={seen} (want False)")
+               f"row_enabled={forced_en} (forced on — must be True or this passes vacuously) "
+               f"scheduler_sees={seen} (want False)")
 
         # ── T-S95-005: re-enable is explicit and clears the reason ───────────────
-        # Reactivate the agent. That alone must NOT re-arm (it is already forcibly on
-        # from 004, so first put it back to the disarmed state the product produces).
+        # Uses the QUARANTINED agent: quarantine disarms and KEEPS the row, so there
+        # is still a trigger to re-enable. (The deleted agent's schedule is gone, and
+        # a 404 would prove nothing about re-enable semantics.)
         async with AsyncSessionLocal() as s:
-            if await _has_reason_col():
-                await s.execute(text(
-                    "UPDATE agent_triggers SET enabled = false, "
-                    "disabled_reason = 'agent deleted' WHERE id = :i"), {"i": t_del})
-            else:
-                await s.execute(text(
-                    "UPDATE agent_triggers SET enabled = false WHERE id = :i"), {"i": t_del})
             await s.execute(text(
-                "UPDATE agents SET status = 'active' WHERE name = :n"), {"n": DEL_AGENT})
+                "UPDATE agents SET status = 'active' WHERE name = :n"), {"n": QUAR_AGENT})
             await s.commit()
-        reactivated_en, reactivated_reason = await trig_state(t_del)
-        pr = await c.patch(f"/agents/{DEL_AGENT}/triggers/{t_del}", json={"enabled": True})
-        final_en, final_reason = await trig_state(t_del)
+        reactivated_en, reactivated_reason = await trig_state(t_quar)
+        pr = await c.patch(f"/agents/{QUAR_AGENT}/triggers/{t_quar}", json={"enabled": True})
+        final_en, final_reason = await trig_state(t_quar)
         record("T-S95-005 reactivating does NOT re-arm; an explicit PATCH does and clears the reason",
                reactivated_en is False and bool(reactivated_reason)
                and pr.status_code == 200 and final_en is True and final_reason is None,

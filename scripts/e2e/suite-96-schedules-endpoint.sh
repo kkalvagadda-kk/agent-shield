@@ -41,7 +41,14 @@
 #   T-S96-008 — disarming via `enabled` PERSISTS and flips will_fire on re-read.
 #   T-S96-009 — re-enabling clears disarm_reason/disarmed_at, so no stale explanation
 #               survives beside a live schedule.
-#   T-S96-006 — a trigger on a DEAD artifact is still LISTED, with will_fire=false and
+#   T-S96-006 — CONTRACT CHANGE (2026-08-02): a deleted agent's SCHEDULE is no longer
+#               listed, because it is no longer stored — agent delete now REMOVES
+#               schedule triggers (trigger_lifecycle.delete_schedule_triggers). What
+#               is still guaranteed, and what this now asserts, is that a DISARMED
+#               trigger on a dead artifact that IS kept (a deleted agent's WEBHOOK,
+#               an archived workflow's schedule) remains LISTED with a reason — that
+#               is the zombie-visibility guarantee, and it is unchanged.
+#   (was)      — a trigger on a DEAD artifact is still LISTED, with will_fire=false and
 #               why_not naming the artifact state. Listing it is the feature; the 37
 #               zombies were invisible precisely because nothing listed them.
 #
@@ -129,6 +136,10 @@ async def main():
         await mk(PROD); await c.post(f"/agents/{PROD}/deploy", json={"environment": "sandbox"})
         await mk(DEAD)
         t_sbx, t_prod, t_dead = await arm(SBX), await arm(PROD), await arm(DEAD)
+        # A webhook on the SAME agent, so the asymmetry is proven on one artifact.
+        rh = await c.post(f"/agents/{DEAD}/triggers",
+                          json={"trigger_type": "webhook", "alert_on_failure": False})
+        t_dead_hook = rh.json()["id"] if rh.status_code in (200, 201) else None
         await wait_running(SBX, "sandbox"); await wait_running(PROD, "sandbox")
 
         # PROD -> production (eval gate satisfied as an explicit fixture step; the gate
@@ -148,6 +159,8 @@ async def main():
         r = await c.get("/schedules", params={"trigger_type": "schedule"})
         body = r.json() if r.status_code == 200 else []
         by_id = {x["trigger_id"]: x for x in body} if isinstance(body, list) else {}
+        rw = await c.get("/schedules", params={"trigger_type": "webhook"})
+        by_hook = {x["trigger_id"]: x for x in rw.json()} if rw.status_code == 200 else {}
         missing = REQUIRED_FIELDS - set(body[0]) if body else REQUIRED_FIELDS
         record("T-S96-001 GET /schedules returns 200 and the shape the page is written against",
                r.status_code == 200 and isinstance(body, list) and not missing,
@@ -179,11 +192,21 @@ async def main():
                f"team_rows_for_caller={assigned} (want 0) returned={len(denied)} rows (want 0) "
                f"— the platform has {len(body)} schedules, so an unfiltered read would return them all")
 
+        # The deleted agent's SCHEDULE must be GONE — not merely disarmed. Delete now
+        # removes schedule triggers outright; a disarmed schedule on a deleted agent
+        # is inert (T-S95-004) and was two-thirds of this page's rows.
         d = by_id.get(t_dead)
-        record("T-S96-003/006 a DEAD+disarmed artifact's trigger is LISTED with will_fire=false and a reason",
-               bool(d) and d["will_fire"] is False and bool(d["why_not"]) and d["enabled"] is False,
-               f"listed={bool(d)} will_fire={d and d['will_fire']} enabled={d and d['enabled']} "
-               f"why_not={(d or {}).get('why_not','')[:90]!r} artifact_status={(d or {}).get('artifact_status')}")
+        # ...and its WEBHOOK must SURVIVE, disarmed and listed. Deleting a webhook
+        # trigger cascades away `webhook_clients` and the credentials registered
+        # against it, so webhooks keep the disarm treatment — and a kept-but-disarmed
+        # trigger on a dead artifact is exactly the row this page exists to show.
+        h = by_hook.get(t_dead_hook) if t_dead_hook else None
+        record("T-S96-003/006 a deleted agent's SCHEDULE is removed; its WEBHOOK stays LISTED and disarmed",
+               d is None
+               and (t_dead_hook is None or (h is not None and h["enabled"] is False and bool(h["why_not"]))),
+               f"schedule_listed={d is not None} (want False — the row is deleted) | "
+               f"webhook_listed={h is not None} enabled={h and h['enabled']} "
+               f"why_not={(h or {}).get('why_not','')[:70]!r} (want listed + disarmed + a reason)")
 
         s_ = by_id.get(t_sbx)
         why = ((s_ or {}).get("why_not") or "").lower()
