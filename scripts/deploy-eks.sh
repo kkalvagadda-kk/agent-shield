@@ -72,6 +72,7 @@ STUDIO_TAG="0.1.180"   # 0.1.180: Schedules page R5 second pass — run-history 
 SCHEDULER_TAG="0.1.5"   # 0.1.5: reads the trigger_liveness view instead of restating the predicate.   # 0.1.4: status <> archived   # 0.1.4: workflow liveness = status <> 'archived', matching internal.py's run door. 0.1.2 used w.status='published' (nothing writes it -> every workflow schedule died); 0.1.3 used w.publish_status='published' (reachable but TOO STRICT -> a workflow reaches production by deploying its MEMBER AGENTS and its own row stays draft/private, so suite-66 broke). Door and filter now share ONE definition.   # 0.1.3: workflow liveness reads publish_status, NOT status. 0.1.2 gated on w.status='published' — a value NOTHING writes (only writer sets 'archived'; publication lives in publish_status). 0 of 140 workflows matched, so every workflow schedule silently died, and suite-95 stayed green because "dead things do not fire" is also true when nothing fires.   # 0.1.2: read-side defence — schedule query filters a.status=active / w.status=published. Defence in depth behind the write-side disarm; the scheduler and event-gateway are SEPARATE services, so filtering one leaves the other armed.
 EVENT_GATEWAY_TAG="0.1.8"   # 0.1.8: reads the trigger_liveness view instead of restating the predicate.   # 0.1.7: lockstep liveness fix   # 0.1.7: same workflow-liveness fix, in lockstep.   # 0.1.6: publish_status (too strict)   # 0.1.6: same publish_status fix, changed in lockstep — separate images with different definitions of runnable is the drift this filter guards.   # 0.1.5: read-side status filter in webhook_auth._TRIGGER_SQL   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"
+EMBEDDING_SIDECAR_TAG="0.1.0"   # mirrors deploy-cpe2e.sh; values-eks.yaml deploys it, so EKS must push it
 EVAL_RUNNER_TAG="0.1.14"   # 0.1.14: parity with deploy-cpe2e.sh.   # 0.1.10:
 MINIO_CP1_TAG="0.1.0"
 PGVECTOR_TAG="17.6.0-portable"
@@ -167,6 +168,11 @@ else
   b event-gateway       "$EVENT_GATEWAY_TAG"      services/event-gateway/
   b python-executor     "$PYTHON_EXECUTOR_TAG"    services/python-executor/
   b eval-runner         "$EVAL_RUNNER_TAG"        services/eval-runner/
+  # values-eks.yaml points embeddingSidecar at ECR, so it MUST be pushed there or the
+  # pod sits in ImagePullBackOff for the life of the deployment — which is exactly what
+  # it had been doing, unnoticed, because nothing checked that every image the chart
+  # references has a builder. The coupling gate now does.
+  b embedding-sidecar   "$EMBEDDING_SIDECAR_TAG"  services/embedding-sidecar/
   b minio-cp1           "$MINIO_CP1_TAG"          services/minio-cp1/
   b postgresql-pgvector "$PGVECTOR_TAG"           services/postgresql-pgvector/
 fi

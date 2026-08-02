@@ -130,7 +130,21 @@ NO_TAG_DIRS=("echo-agent" "minio-cp1" "nemo-guardrails" "postgresql-pgvector")
 # the Dockerfile is `COPY . .`, so almost everything in the dir IS image content.
 # tests/ IS in the image (and CP1c runs pytest off the real image), so tests/ counts.
 # Only docs are excluded.
-EXCLUDE_GLOBS=(":(exclude)*.md")
+# Playwright specs are excluded because they PROVABLY cannot reach the image, not as
+# a convenience: studio/Dockerfile is multi-stage and its final layer copies only
+# `/app/dist`, while `npm run build` runs `tsc` over tsconfig's `include: ["src"]`.
+# So a spec change can neither ship nor break the build. Without this, editing a
+# browser test forces a studio rebuild + redeploy and trains people to bump the tag
+# for a change that is not in the image — a lie in the opposite direction.
+#
+# The pathspec is ROOT-relative, so it must read `studio/e2e`, not `e2e/**` — the
+# latter silently matches nothing and the exclusion appears to work while doing
+# nothing at all.
+#
+# NOT excluded: src/**/*.test.tsx. Those ARE under tsconfig's include, so a broken one
+# fails `tsc` and therefore the build. They are image-relevant even though they do not
+# ship.
+EXCLUDE_GLOBS=(":(exclude)*.md" ":(exclude)studio/e2e")
 
 NOW=$(date +%s)
 
@@ -369,6 +383,42 @@ else
   else
     ok "deploy-cpe2e.sh and deploy-eks.sh agree on every shared tag" \
        "$shared shared tag(s) — local and EKS declare the same versions"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. EVERY IMAGE THE EKS CHART REFERENCES MUST HAVE A BUILDER.
+#    `values-eks.yaml` points image repositories at ECR. If deploy-eks.sh never
+#    builds and pushes one of them, the tag resolves to an image that has never
+#    existed and the pod sits in ImagePullBackOff forever — deployed, counted as
+#    part of the release, and permanently broken.
+#
+#    Found live: `embedding-sidecar` is referenced by values-eks.yaml and is NOT in
+#    deploy-eks.sh's build list. Its pod had been ImagePullBackOff on EKS for as long
+#    as the reference has existed; nothing failed, because nothing checked.
+#
+#    §5's cross-script check cannot catch this by design — it compares tags declared
+#    in BOTH scripts, and EMBEDDING_SIDECAR_TAG is declared only in deploy-cpe2e.sh.
+#    "Declared in one place only" is legitimate for a local-only service and fatal
+#    for one the cloud chart deploys anyway. This is the check that tells them apart.
+# ---------------------------------------------------------------------------
+EKS_VALUES="charts/agentshield/values-eks.yaml"
+if [ -f "$EKS_VALUES" ] && [ -f "$EKS_SH" ]; then
+  builders=$(grep -oE '^[[:space:]]+b[[:space:]]+[a-z0-9-]+' "$EKS_SH" | awk '{print $2}' | sort -u)
+  orphans=""
+  for img in $(grep -oE 'agentshield/[a-z0-9-]+"' "$EKS_VALUES" | sed 's|agentshield/||; s|"||' | sort -u); do
+    echo "$builders" | grep -qx "$img" || orphans="$orphans $img"
+  done
+  if [ -n "$orphans" ]; then
+    bad "every image values-eks.yaml references is built by deploy-eks.sh" \
+        "NO BUILDER:$orphans
+        values-eks.yaml points these at ECR but deploy-eks.sh never builds or pushes
+        them, so the tag names an image that does not exist -> ImagePullBackOff for
+        the life of the deployment. Either add it to the build list or stop deploying
+        it on EKS."
+  else
+    ok "every image values-eks.yaml references is built by deploy-eks.sh" \
+       "$(echo "$builders" | wc -w | tr -d ' ') builder(s) cover every ECR reference"
   fi
 fi
 
