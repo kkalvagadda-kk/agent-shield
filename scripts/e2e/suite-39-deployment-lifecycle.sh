@@ -132,24 +132,30 @@ import asyncio, re, sys
 from sqlalchemy import text
 from db import AsyncSessionLocal
 
+# Scan the WHOLE router, not one handler: catalog.py has TWO status writers
+# (update_deployment and patch_production_deployment_status) plus the initial
+# ProductionDeployment(status=...) at deploy time, and every one of them is
+# bound by the same constraint. An earlier version of this check pinned a single
+# function name, could not find it, and failed — correctly, but for the wrong
+# reason. Every ProductionDeployment status literal in this file must be legal.
 src = open('/app/routers/catalog.py').read()
-fn = src[src.index('async def update_catalog_deployment'):]
-fn = fn[:fn.index('@router', 1)] if '@router' in fn[1:] else fn
-written = sorted(set(re.findall(r'dep\.status\s*=\s*[\"\x27]([a-z_]+)[\"\x27]', fn)))
+written = sorted(set(re.findall(r'status\s*=\s*[\"\x27]([a-z_]+)[\"\x27]', src)))
 
 async def m():
     async with AsyncSessionLocal() as s:
         d = (await s.execute(text(
             \"SELECT pg_get_constraintdef(oid) FROM pg_constraint \"
             \"WHERE conname='production_deployments_status_check'\"))).scalar()
-    allowed = set(re.findall(r\"'([a-z_]+)'\", d or ''))
+    if not d:
+        print('FAIL constraint production_deployments_status_check not found'); sys.exit(1)
+    allowed = set(re.findall(r\"'([a-z_]+)'\", d))
     bad = [w for w in written if w not in allowed]
     print(f'writes={written}')
     print(f'allowed={sorted(allowed)}')
     if not written:
-        print('FAIL could not parse any status writes — the check would pass vacuously'); sys.exit(1)
+        print('FAIL parsed zero status literals — this check would pass vacuously'); sys.exit(1)
     if bad:
-        print(f'FAIL these statuses are written but REJECTED by the constraint: {bad}'); sys.exit(1)
+        print(f'FAIL written but REJECTED by the constraint: {bad}'); sys.exit(1)
     print('OK')
 asyncio.run(m())
 " && pass "T-S39-007 — catalog deployment statuses all satisfy the production CHECK" || fail "T-S39-007"
