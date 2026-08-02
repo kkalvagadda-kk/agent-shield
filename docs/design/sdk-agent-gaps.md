@@ -12,6 +12,13 @@ No pre-existing "gap ledger" convention fit this document's scope — `docs/test
 
 ## Gap 1 — `sdk`-type agents never bind end-user identity, so OPA sees `user_id=""` for every tool call
 
+> **Ownership moved (2026-08-02).** Gap 1 is **Drop point 2** in
+> [`identity-propagation-architecture.md`](identity-propagation-architecture.md); its fix is that
+> doc's **Phase 2**. Re-verified still-open on `main` @ `b73989f` — `sdk/agentshield_sdk/server.py`
+> reads only `x-agentshield-trace-id` (`:203,222,265,304`), no identity header on any route.
+> Track the fix there; this section stays as the independent runtime-parity evidence.
+> Gaps 2–3 below are unaffected and still owned by this doc.
+
 **One-line summary:** The declarative-runner binds the caller's identity (from `x-user-sub`/`x-agent-team` headers) into the `_current_user_context` ContextVar that `governed_tool` reads before calling OPA; the plain-SDK runtime never does this anywhere, on any route.
 
 **Verified, not speculative.** I read `sdk/agentshield_sdk/server.py` in full (336 lines, every route handler and the one `@app.middleware("http")` — a request-timing counter, nothing identity-related) and grepped `runner.py` and `graph_builder.py`: there is no dependency, no middleware, no decorator, no header read of `x-user-sub`/`x-agent-team` anywhere in the sdk package. The only thing that touches `_current_user_context` is `graph_builder.py:272` (`governed_tool` reading it) and its own default-`{}` declaration at `graph_builder.py:407-409`, whose own comment says it is "Set by the declarative-runner before streaming; read by governed_tool" — the sdk side was never wired to set it.

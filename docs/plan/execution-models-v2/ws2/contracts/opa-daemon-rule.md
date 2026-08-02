@@ -1,5 +1,13 @@
 # WS-2 Contract — OPA `user_identity_ok` daemon rule
 
+> **SHIPPED, and folded into the consolidated docs (2026-08-02).** This rule is live at
+> `opa_policy/agentshield.rego:101-108`. It is documented as "Gate 6" in
+> [`opa-authorization-contract.md`](../../../../design/opa-authorization-contract.md) §11, and its
+> three open deltas (registry-side `agent_class`, playground/sandbox exemption, `require_approval`
+> gating) are tracked in
+> [`identity-propagation-architecture.md`](../../../../design/identity-propagation-architecture.md)
+> §4.6. Kept as the WS-2 implementation record.
+
 Extends `services/registry-api/opa_policy/agentshield.rego` (package `agentshield`; decision surface
 `{allow, require_approval, reason, deny_reason}`, `default allow := false`, `agent :=
 data.agents[input.sa_subject]`). WS-2 adds an **identity floor** to `allow` without touching the existing

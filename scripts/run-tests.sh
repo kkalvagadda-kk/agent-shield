@@ -154,12 +154,14 @@ fi
 
 # ── run ─────────────────────────────────────────────────────────────────────
 API_PASS=0; API_FAIL=0; API_FAILED=()
+API_SELECTED=0; API_INCOMPLETE=0
 BROWSER_STATUS="skipped"
 
 run_api_layer() {
   local rows; rows="$(select_rows api)"
   if [ -z "$rows" ]; then echo "No API suites match the filter."; return 0; fi
   local n; n=$(echo "$rows" | wc -l | tr -d ' ')
+  API_SELECTED=$n
   echo ""
   echo "═══════════════════════════════════════════════════════"
   echo "  API layer — ${n} suite(s)   namespace=${NAMESPACE}"
@@ -174,12 +176,38 @@ run_api_layer() {
       echo "  SKIP: $file not found"
       continue
     fi
-    if NAMESPACE="$NAMESPACE" bash "$path" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}; then
+    # </dev/null is LOAD-BEARING. This loop is fed by `<<< "$rows"`, so the suite
+    # inherits the here-string as its stdin — and 45 of the 101 suites run
+    # `kubectl exec -i`, which FORWARDS stdin to the pod. The first such suite
+    # swallowed every remaining manifest row, the loop ended, and the summary
+    # printed as though the run were complete.
+    #
+    # Measured: a full `--layer api` run reported "49 passed, 18 failed" — 67 of
+    # 101 — and named no skips. suite-67 (which uses `kubectl exec -i`) was the
+    # last to execute. A runner that silently drops a third of the registry while
+    # reporting success is the same class of failing-open gate this branch has
+    # already fixed twice.
+    if NAMESPACE="$NAMESPACE" bash "$path" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} </dev/null; then
       API_PASS=$((API_PASS + 1))
     else
       API_FAIL=$((API_FAIL + 1)); API_FAILED+=("$title ($file)")
     fi
   done <<< "$rows"
+
+  # COMPLETENESS. The bug this guards against did not make anything red — it made
+  # the run STOP, silently, two thirds through, and print a summary that read like
+  # success. A runner that can quietly execute less than it selected is worth less
+  # than one that fails loudly, because every green it reports is unbounded.
+  local ran=$((API_PASS + API_FAIL))
+  if [ "$ran" -ne "$API_SELECTED" ]; then
+    echo ""
+    echo "  ❌ INCOMPLETE RUN: selected ${API_SELECTED} suite(s), executed ${ran}."
+    echo "     The loop stopped early. Most likely a suite consumed stdin —"
+    echo "     45 of them run 'kubectl exec -i', which forwards it — and ate the"
+    echo "     remaining manifest rows. The invocation redirects </dev/null for"
+    echo "     exactly this reason; check it is still there."
+    API_INCOMPLETE=1
+  fi
 }
 
 run_browser_layer() {
@@ -207,7 +235,8 @@ echo "════════════════════════�
 echo "  Summary   layer=${LAYER}   groups=${FILTER_GROUPS:-<all>}"
 echo "═══════════════════════════════════════════════════════"
 if [ "$LAYER" = "api" ] || [ "$LAYER" = "all" ]; then
-  echo "  API layer:     ${API_PASS} passed, ${API_FAIL} failed"
+  echo "  API layer:     ${API_PASS} passed, ${API_FAIL} failed  (of ${API_SELECTED} selected)"
+  [ "$API_INCOMPLETE" -eq 1 ] && echo "  ⚠️  RUN WAS INCOMPLETE — see above. Treat every result as partial."
   for s in ${API_FAILED[@]+"${API_FAILED[@]}"}; do echo "    FAILED: $s"; done
 fi
 if [ "$LAYER" = "browser" ] || [ "$LAYER" = "all" ]; then
@@ -215,5 +244,7 @@ if [ "$LAYER" = "browser" ] || [ "$LAYER" = "all" ]; then
 fi
 echo ""
 
-[ "$API_FAIL" -eq 0 ] && [ "$BROWSER_STATUS" != "FAIL" ] && exit 0
+# An incomplete run is a FAILED run. It reported 49/18 across 67 of 101 suites and
+# exited as though that were the whole registry.
+[ "$API_FAIL" -eq 0 ] && [ "$API_INCOMPLETE" -eq 0 ] && [ "$BROWSER_STATUS" != "FAIL" ] && exit 0
 exit 1

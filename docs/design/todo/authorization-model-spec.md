@@ -1,6 +1,20 @@
 # AgentShield Authorization Model — Architecture Spec
 
-**Status**: Draft — Implementation source of truth  
+> **CARVED UP (2026-08-02) — no longer the implementation source of truth.** This spec covered all
+> three authorization layers at once, which is why its pieces drifted at different rates. Each
+> part now has an owner that is code-verified:
+>
+> | This doc's sections | Now owned by |
+> |---|---|
+> | §8 publish/grant workflow, §11 revocation cascade, §13 data model, §14 API contracts | [`rbac-and-artifact-authorization.md`](../rbac-and-artifact-authorization.md) |
+> | §Phase 3 (user identity threading), §10 (handoff scope attenuation) | [`identity-propagation-architecture.md`](../identity-propagation-architecture.md) |
+> | §12 (OPA bundle lifecycle), §15 (OPA policy structure + input shape) | [`opa-authorization-contract.md`](../opa-authorization-contract.md) — note the per-agent `package agentshield.agent.{name}` scheme in §15 was **retired** by the unified-policy change |
+>
+> **Still authoritative here:** §2–§7 (agent machine identity — K8s bound SA tokens, Istio
+> Ambient, SPIFFE), §9 (deploy gate), §16–§18 (infrastructure, migration path, the Option B
+> future). Read those; plan from the three docs above.
+
+**Status**: Draft — ~~Implementation source of truth~~ superseded in parts (see banner)  
 **Date**: 2026-06-27  
 **Author**: Kalyan + Claude  
 **Version**: 2.0.0  

@@ -36,6 +36,21 @@ The consequence is that tool governance — OPA policy + human-in-the-loop (HITL
 **Non-goals**
 - Full RFC 8693 token exchange / per-tool scoped-down tokens **as a general internal delegation model**. Deferred; the actor-chain model here is the minimal real chain-of-custody. **Narrower exception (2026-07-19):** MCP's on-behalf-of identity mode for internal MCP servers (`mcp-tool-source-architecture.md` §7a) is a concrete, specific consumer of `RunContext.user_sub` that does need token exchange — confirmed as **impersonation-based** exchange (a confidential client with an impersonation grant, minting a token for a `user_sub` string), not classic subject_token exchange, precisely because this doc never propagates a re-presentable access token internally (see Decision 29, `docs/decisions.md`). This doesn't change `RunContext`'s design — it's an additive downstream use of the `user_sub` field once it exists, not a new propagation requirement on this doc.
 - Replacing Keycloak or the OPA/HITL governance model. This threads identity *into* them.
+
+**Delegated tool-call credentials — where this doc's authority ends (added 2026-08-02).**
+A tool call can carry a *credential the tool itself validates*, which is a different mechanism
+from everything above and is **not** owned here. Current platform-wide truth:
+
+| Tool kind | Credential the tool receives | Who validates | Status |
+|---|---|---|---|
+| External MCP server w/ OAuth 2.1 | the end user's **own stored OAuth token**, resolved per-request from `user_sub` | the external server (e.g. GitHub) | **BUILT** — `mcp_oauth_grants` (`0074`), `routers/mcp_oauth.py`, `suite-87`; per-request-user fix in SDK `0.2.7` (`docs/bugs/mcp-oauth-tool-call-used-static-not-per-request-user.md`) |
+| Internal MCP server, `identity_mode=on_behalf_of` | a Keycloak token **minted for** `user_sub`, audienced to that server (impersonation exchange) | the internal server — **assumed, not contracted** | **DESIGNED, BLOCKED on this doc's Phase 0–2** — Decision 29, `mcp-tool-source-architecture.md` §7a |
+| HTTP / Python platform tools, `service-identity` MCP | none | n/a — governance is OPA-side only | by design |
+
+This doc supplies the `user_sub` those flows consume; it does not mint, scope, or validate
+tool-facing credentials. Two properties are **absent by design and worth an explicit decision**
+before anyone assumes otherwise — see §10 OQ-4/OQ-5: tokens are scoped **per server, not per
+tool**, and **no contract obliges an MCP server to validate the token it is handed**.
 - Reworking the agent runtime or LangGraph checkpointer beyond reading/writing identity.
 
 ## 3. Current state — where identity drops today
@@ -296,14 +311,14 @@ its own; verify with `bash scripts/run-tests.sh --audit`), and bumps the touched
 
 ## 7. Security considerations
 
-- **Two forgeable identities are the priority fixes** (Drop points 3, 7); their negative-path 403 tests in `suite-48` are non-negotiable regression guards.
+- **Two forgeable identities are the priority fixes** (Drop points 3, 7); their negative-path 403 tests in `suite-103` are non-negotiable regression guards.
 - **RCT is HMAC, internal-only.** It is never accepted at a public ingress; the raw Keycloak JWT remains the only edge credential. Compromise of the signing key is equivalent to intra-cluster compromise, which the mesh trust model already assumes; the key rotates via the existing secret mechanism.
 - **Anti-relabel:** Gate 5 reads registry-side `agent_class`, not the pod's self-report.
 - **`actor_chain` cap (20)** is a second circuit-breaker beside the orchestrator's `_MAX_STEPS=50` against a runaway handoff loop growing an unbounded token.
 
 ## 8. Verification
 
-Definition-of-Done per phase: (a) real journey proven — bash suite for backend phases, Playwright for Phase 5; (b) Phase 5's HITL write is a save→reload→assert; (c) grep each new symbol (`RunContext`, `mint`/`verify`/`extend`, `is_trusted_service`, `run_context` column, new `Approval` columns) for a live caller/reader before calling a phase done; (d) gap ledger current. Two security assertions must never be skipped: forged-service-identity 403s (`suite-48`) and resume-after-TTL identity (`suite-46b`).
+Definition-of-Done per phase: (a) real journey proven — bash suite for backend phases, Playwright for Phase 5; (b) Phase 5's HITL write is a save→reload→assert; (c) grep each new symbol (`RunContext`, `mint`/`verify`/`extend`, `is_trusted_service`, `run_context` column, new `Approval` columns) for a live caller/reader before calling a phase done; (d) gap ledger current. Two security assertions must never be skipped: forged-service-identity 403s (`suite-103`) and resume-after-TTL identity (`suite-101`).
 
 ## 9. Gap ledger (carry into `docs/testing/manual-ui-e2e-test-plan.md`)
 
@@ -321,3 +336,31 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 
 - Should scheduled/event runs whose trigger `created_by` is NULL be *denied* HITL-gated tools outright (no one can approve), or allowed to autonomously proceed on `sa_subject` scopes? Current design: allow on scopes; revisit if audit requires a named human for every high-risk action.
 - Long-term: is per-tool scoped-down delegation (RFC 8693 token exchange) worth it over the `actor_chain` model as a *general* pattern? Narrower now than when this was written — MCP's on-behalf-of mode (`mcp-tool-source-architecture.md` §7a) already needed a concrete answer and got one (impersonation-based exchange, layered on top of `RunContext.user_sub`, not a change to this doc's model). Remaining question is only whether other future integrations need the same treatment, or whether the anchor + actor_chain model stays sufficient everywhere else.
+- **OQ-4 — per-tool scope-down.** Today's design scopes a delegated token to the **MCP server**
+  (`mcp-tool-source-architecture.md` §7a step 3), and §2 lists per-tool scoped-down tokens as a
+  non-goal. If a tool call should carry a token narrowed to *that tool*, this non-goal has to be
+  reopened — and it forces a re-litigation of Decision 29, because per-tool scope-down is where
+  classic RFC 8693 exchange earns its complexity. **Not a doc edit; a design decision.**
+- **OQ-5 — is the receiving server obliged to validate?** Nothing today requires an internal MCP
+  server to check the audience, expiry, or subject of the token it is handed. The platform mints a
+  credential and trusts the receiver to enforce with it. If "the tool validates and applies its own
+  authorization" is a platform requirement rather than a hope, it needs to become a **contract**
+  (a documented validation obligation + a conformance test in `suite-87`'s successor), not an
+  assumption. Until then, an internal MCP server that ignores the token is indistinguishable from
+  one that enforces on it.
+- **D-2 (from §4.6):** should `playground`/`sandbox` exempt a call from the identity floor at all? Both inputs already reach OPA and are ignored. The sandbox auto-approves HITL *above* OPA, so an exemption may be redundant. Decide before Phase 2 rather than implementing the original text by default.
+
+---
+
+## 11. Consolidated sources — what this doc absorbed
+
+Each source keeps a `SUPERSEDED BY` / status banner and stays in place.
+
+| Source | What moved here | What stays there |
+|---|---|---|
+| `sdk-agent-gaps.md` **Gap 1** (`sdk` agents never bind end-user identity → OPA sees `user_id=""`) | The finding itself — it is **Drop point 2** in §3, and Phase 2 is its fix. Independently confirmed from the SDK-runtime-parity angle, which is why the two agreed | Gaps 2–3 and the full declarative-runner ↔ SDK parity comparison |
+| `authorization-model-spec.md` **§Phase 3** "User Identity Threading (Class B)" | Superseded outright — that phase is this document, at implementation grade | — |
+| `authorization-model-spec.md` **§10** "Agent-to-Agent Handoff (Scope Attenuation)" | The handoff lineage problem → §4.3 `actor_chain` + Phase 4. **Note the deliberate divergence:** §10 proposed *scope attenuation* (each hop narrows permissions); this design proposes *lineage recording* (each hop appends to an audit chain). Attenuation is not implemented and is not planned here | The attenuation design, if that stronger property is ever wanted |
+| `event-gateway-threat-model.md` **T-8** (internal-auth) | Same hole as Drop point 7; the fix (verified Keycloak service JWT, §4.5) is owned here | The whole public-ingress threat model — untouched and still authoritative |
+| `docs/bugs/internal-run-door-has-no-authentication.md` | Measured evidence (Drop point 7a) + the manual-fire caller shape (§4.2, Phase 3a) | Remains the authoritative postmortem and the record of why "Run now" was not built |
+| `docs/bugs/opa-user-identity-floor-denies-tools-missing-x-user-sub.md` | The Gate-5-before-propagation ordering finding (§4.6 banner) | Remains the authoritative postmortem, incl. the 2026-07-20 deploy-lag recurrence |
