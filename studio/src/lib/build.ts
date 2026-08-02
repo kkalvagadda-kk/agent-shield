@@ -2,7 +2,11 @@
  * The bundle's identity — ONE definition, read by everything that reports it.
  *
  * MUST equal `STUDIO_TAG` in `scripts/deploy-cpe2e.sh` and `studio.image.tag` in
- * `charts/agentshield/values.yaml`. Bump all three together.
+ * `charts/agentshield/values.yaml`. Bump all three together — and `scripts/
+ * check-tag-content-coupling.sh` now FAILS THE DEPLOY if they disagree, because
+ * "bump all three together" written in a comment is not a control. This sat at
+ * 0.1.167 while the cluster served 0.1.176 and told a human reading the Sidebar that
+ * a deploy had not landed when it had.
  *
  * WHY THIS FILE EXISTS: `window.__STUDIO_BUILD` was assigned in `main.tsx` and read by
  * NOTHING — `grep -rn "__STUDIO_BUILD" studio/src studio/e2e scripts charts` returned
@@ -17,4 +21,4 @@
  * every check stayed green. Only an assertion against what was actually served catches
  * that class — and that needs a reader.
  */
-export const STUDIO_BUILD = "0.1.167";
+export const STUDIO_BUILD = "0.1.177";

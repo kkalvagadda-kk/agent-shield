@@ -302,6 +302,36 @@ for row in "${SERVICES[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# 4. The IN-BUNDLE build marker. studio/src/lib/build.ts hardcodes STUDIO_BUILD, which
+#    Sidebar renders and suite-79 asserts against the SERVED bytes — that is the only
+#    check that can catch a cluster running old code, so the marker being right is what
+#    makes it meaningful.
+#
+#    But it is a hand-maintained MIRROR of STUDIO_TAG, and mirrors drift. This one sat
+#    at 0.1.167 while the cluster served 0.1.176 — it reported the deploy had not landed
+#    when it had. Its predecessor (`window.__STUDIO_BUILD`) drifted 67 tags. The
+#    five-way check in suite-79 covers this, but suite-79 is not part of any deploy, so
+#    nothing failed at the moment the claim became false.
+#
+#    Checked HERE because this file already runs before every build and already owns
+#    "a tag is a claim about content". Same claim, third mirror.
+# ---------------------------------------------------------------------------
+marker=$(grep -E '^export const STUDIO_BUILD' studio/src/lib/build.ts | head -1 | cut -d'"' -f2)
+studio_tag=$(grep -E '^STUDIO_TAG=' scripts/deploy-cpe2e.sh | head -1 | cut -d'"' -f2)
+if [ -z "$marker" ] || [ -z "$studio_tag" ]; then
+  bad "in-bundle build marker is readable" \
+      "STUDIO_BUILD='$marker' STUDIO_TAG='$studio_tag' — one of them could not be parsed, so the check cannot run"
+elif [ "$marker" != "$studio_tag" ]; then
+  bad "studio: STUDIO_BUILD marker == STUDIO_TAG" \
+      "build.ts says '$marker' but the image will be tagged '$studio_tag'.
+        The Sidebar and suite-79 both report the marker, so the running build would
+        MISREPORT ITSELF — the one signal that says which code is live. Bump
+        studio/src/lib/build.ts with the tag."
+else
+  ok "studio: STUDIO_BUILD marker == STUDIO_TAG" "both $marker — the served bundle can name itself honestly"
+fi
+
 echo ""
 echo "=== tag⇄content coupling: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -ne 0 ]; then
