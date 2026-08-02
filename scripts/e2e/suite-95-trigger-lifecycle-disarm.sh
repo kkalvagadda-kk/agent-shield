@@ -55,38 +55,75 @@ echo "  Pod: $API_POD"; echo ""
 PASS=0; FAIL=0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T-S95-000 — PARITY grep for the READ-side filter (repo source, not the cluster).
+# T-S95-000 — PARITY grep: ONE liveness definition, and both consumers read IT.
 #
 # WHY THIS EXISTS: T-S95-004 below asserts the filter using a COPY of the
 # scheduler's query embedded in the driver. A copy passes whether or not the real
 # scheduler has the predicate — it would be testing the test. This grep pins the
 # actual source, so 004 cannot go green against a scheduler that lost the filter.
-# Same guard shape as suite-71's T-S95-000 parity grep.
 #
-# Both consumers are checked: they are SEPARATE SERVICES, and filtering only one
-# is the bandaid (a deleted agent's webhook would stay live).
+# WHAT IT PINS, AND WHY IT CHANGED SHAPE: it used to grep each service for the
+# literal predicates (`a.status = 'active'`, `w.status <> 'archived'`). That check
+# started FAILING the moment the predicate was correctly centralised into the
+# `trigger_liveness` view (migration 0077) and both services switched to reading it
+# — the very improvement it should have been protecting. A check that hardcodes
+# WHERE a definition lives breaks exactly when the definition stops being duplicated.
+#
+# So it now asserts the property that actually matters, across three images that
+# share no Python:
+#   (a) the view carries the liveness predicates — one definition, in SQL;
+#   (b) each consumer READS it (`trigger_liveness` + `artifact_is_live`);
+#   (c) neither consumer RESTATES it. A restated predicate is the drift the view
+#       exists to delete, and it was wrong twice in one day when stated
+#       independently: `w.status='published'` matched 0 of 140 rows, and
+#       `w.publish_status='published'` was too strict.
 # ─────────────────────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCHED_SRC="$REPO_ROOT/services/scheduler/main.py"
 GW_SRC="$REPO_ROOT/services/event-gateway/webhook_auth.py"
+VIEW_SRC="$REPO_ROOT/services/registry-api/alembic/versions/0077_trigger_liveness_view.py"
 _missing=""
 # Strip comment lines before grepping. The explanation of WHY the old predicates were
 # wrong necessarily quotes them, and a naive grep then flags the very file that fixed
 # it — a check that cannot tell code from prose about the code is worse than none.
 _code() { grep -vE "^[[:space:]]*(--|#)" "$1"; }
+# The migration's MODULE DOCSTRING quotes both wrong predicates verbatim to explain
+# why they were wrong — that is the doc doing its job, and grepping it as if it were
+# SQL flags the very file that fixed the bug. Drop the docstring, then read the code.
+_view_code() {
+  python3 - "$1" <<'PYEOF' | grep -vE "^[[:space:]]*(--|#)"
+import ast, sys
+src = open(sys.argv[1]).read()
+tree = ast.parse(src)
+doc = ast.get_docstring(tree)
+lines = src.splitlines()
+if doc is not None and tree.body and isinstance(tree.body[0], ast.Expr):
+    node = tree.body[0]
+    del lines[node.lineno - 1 : node.end_lineno]
+print("\n".join(lines))
+PYEOF
+}
+
+# (a) the single definition
+_view_code "$VIEW_SRC" | grep -q "a.status = 'active'"     || _missing="$_missing view:agent-status"
+_view_code "$VIEW_SRC" | grep -q "w.status <> 'archived'"  || _missing="$_missing view:workflow-not-archived"
+_view_code "$VIEW_SRC" | grep -q "w.status = 'published'"         && _missing="$_missing view:DEAD-status-eq-published"
+_view_code "$VIEW_SRC" | grep -q "w.publish_status = 'published'" && _missing="$_missing view:TOO-STRICT-publish_status"
+
 for _src in "$SCHED_SRC" "$GW_SRC"; do
   _n=$(basename "$_src")
-  _code "$_src" | grep -q "a.status = 'active'"    || _missing="$_missing $_n:agent-status"
-  _code "$_src" | grep -q "w.status <> 'archived'" || _missing="$_missing $_n:workflow-not-archived"
-  # Both previously-wrong predicates must be ABSENT, not merely joined by a right one.
-  _code "$_src" | grep -q "w.status = 'published'"         && _missing="$_missing $_n:DEAD-status-eq-published"
-  _code "$_src" | grep -q "w.publish_status = 'published'" && _missing="$_missing $_n:TOO-STRICT-publish_status"
+  # (b) reads the shared definition
+  _code "$_src" | grep -q "trigger_liveness"  || _missing="$_missing $_n:does-not-read-the-view"
+  _code "$_src" | grep -q "artifact_is_live"  || _missing="$_missing $_n:does-not-gate-on-liveness"
+  # (c) and does not restate it
+  _code "$_src" | grep -qE "(a|w)\.(publish_)?status[[:space:]]*(=|<>)" \
+    && _missing="$_missing $_n:RESTATES-liveness-instead-of-reading-the-view"
 done
 if [ -z "$_missing" ]; then
-  echo "PASS  T-S95-000 read-side status filter present in BOTH consumers (scheduler + gateway)"
+  echo "PASS  T-S95-000 ONE liveness definition (the view); both consumers read it, neither restates it"
   PASS=$((PASS+1))
 else
-  echo "FAIL  T-S95-000 read-side status filter present in BOTH consumers  |  MISSING:$_missing"
+  echo "FAIL  T-S95-000 read-side liveness parity  |  PROBLEMS:$_missing"
   FAIL=$((FAIL+1))
 fi
 echo ""

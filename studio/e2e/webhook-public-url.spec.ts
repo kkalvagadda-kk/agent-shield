@@ -1,4 +1,5 @@
 import { test, expect, request as pwRequest } from "@playwright/test";
+import { captureAuthHeaders } from "./lib/apiAuth";
 
 // ---------------------------------------------------------------------------
 // webhook-public-url.spec.ts
@@ -30,11 +31,19 @@ const GATEWAY_HOST = new URL(BASE_URL).host;
 const AGENT = `whurl-${Date.now().toString().slice(-7)}`;
 
 test.describe("public webhook URL routes through the gateway", () => {
-  test("trigger URL uses the gateway host AND /hooks/ reaches the event-gateway", async () => {
+  test("trigger URL uses the gateway host AND /hooks/ reaches the event-gateway", async ({
+    page,
+  }) => {
+    // The X-User-* headers below identify the caller for routes that accept them,
+    // but POST /triggers is `require_user` and wants a real Bearer — so this spec
+    // created its agent fine and then died on the trigger with a 401 that reads as
+    // a product failure. Same class as the bash suites that went dead when trigger
+    // routes gained require_user; same fix, from the shared helper.
+    const H = await captureAuthHeaders(page);
     const api = await pwRequest.newContext({
       baseURL: BASE_URL,
       ignoreHTTPSErrors: true,
-      extraHTTPHeaders: ADMIN,
+      extraHTTPHeaders: { ...ADMIN, ...H },
     });
 
     // An agent to hang a webhook trigger on (no deploy needed for the routing proof).

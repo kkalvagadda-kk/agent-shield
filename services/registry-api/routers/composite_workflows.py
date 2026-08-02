@@ -59,6 +59,7 @@ from schemas import (
     WorkflowTriggerResponse,
 )
 from store_factory import get_conversation_store
+from trigger_lifecycle import apply_trigger_update
 from trigger_utils import _new_token, workflow_webhook_url
 from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, orchestrate_stream, resolve_member_names
 
@@ -878,9 +879,9 @@ async def update_workflow_trigger(
     if not trigger:
         raise HTTPException(status_code=404, detail="Trigger not found")
 
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(trigger, field, value)
-    trigger.updated_at = datetime.now(timezone.utc)
+    # Same helper the agent PATCH uses — same table, same body model, so the
+    # re-enable-clears-the-disarm-record rule cannot exist on only one of them.
+    apply_trigger_update(trigger, body)
 
     await db.commit()
     await db.refresh(trigger)

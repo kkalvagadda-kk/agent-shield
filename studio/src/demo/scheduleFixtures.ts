@@ -53,7 +53,6 @@ const zombieWorkflows: ScheduleFacts[] = ARCHIVED_WORKFLOWS.map(([name, cron], i
   next_fire_at: cron === "0 9 * * 1" ? iso(60 * 24 * 3) : iso(60 * 14),
   input_payload: null,
   enabled: true,
-  armed_at: "2026-07-08T11:04:00Z",
   armed_by: "e2e:suite-runner",
   disarmed_at: null,
   disarm_reason: null,
@@ -83,7 +82,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(3),
     input_payload: { task: "demo" },
     enabled: true,
-    armed_at: "2026-07-21T16:30:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -109,7 +107,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(48),
     input_payload: { task: "hourly-digest" },
     enabled: true,
-    armed_at: "2026-07-26T08:00:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -135,7 +132,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(60 * 24 * 3),
     input_payload: { task: "weekly-report", recipients: ["oncall@acme.com"] },
     enabled: true,
-    armed_at: "2026-07-14T09:00:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -159,7 +155,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(18),
     input_payload: null,
     enabled: true,
-    armed_at: "2026-07-14T09:02:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -183,7 +178,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(60 * 21),
     input_payload: null,
     enabled: true,
-    armed_at: "2026-07-02T06:00:00Z",
     armed_by: "priya",
     disarmed_at: null,
     disarm_reason: null,
@@ -194,9 +188,9 @@ const otherRows: ScheduleFacts[] = [
     alert_email: null,
     alert_on_failure: false,
   },
-  // An author-paused schedule: intent is still on the artifact, the operator's
-  // arming still stands, but the author flipped `enabled` off. This row exists to
-  // show `enabled` and `armed_at` are orthogonal — the whole point of the split.
+  // Disarmed by hand on a perfectly healthy agent, with no reason recorded. The
+  // useful contrast against the rows below: not firing, but nobody needs to be told
+  // about it, so it must stay out of the attention count.
   {
     trigger_id: "ag-05",
     trigger_type: "schedule",
@@ -210,7 +204,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: iso(60 * 17),
     input_payload: null,
     enabled: false,
-    armed_at: "2026-07-11T02:00:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -236,7 +229,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: null,
     input_payload: null,
     enabled: true,
-    armed_at: null,
     armed_by: "kalyan",
     disarmed_at: "2026-07-27T14:22:00Z",
     disarm_reason: "workflow archived",
@@ -262,7 +254,6 @@ const otherRows: ScheduleFacts[] = [
     next_fire_at: null,
     input_payload: { task: "weekly-report" },
     enabled: true,
-    armed_at: null,
     armed_by: null,
     disarmed_at: null,
     disarm_reason: null,
@@ -292,8 +283,7 @@ export function deriveFireState(row: ScheduleFacts): ScheduleListItem {
 
   let why_not: string | null = null;
   if (row.disarm_reason) why_not = row.disarm_reason;
-  else if (!row.enabled) why_not = "paused (disabled)";
-  else if (!row.armed_at) why_not = "never armed — arm it after it reaches production";
+  else if (!row.enabled) why_not = "this schedule is disabled";
   else if (!artifactLive)
     why_not =
       row.artifact_kind === "agent"

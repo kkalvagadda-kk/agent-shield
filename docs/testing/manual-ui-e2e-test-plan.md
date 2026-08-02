@@ -12,6 +12,61 @@
 
 ---
 
+## Known gaps — schedules page + local-cluster test infrastructure — 2026-08-01
+
+Rebuilding the platform on a wiped Docker Desktop cluster (registry-api 0.2.252 / studio
+0.1.176) exposed gaps that only appear on a FRESH cluster — i.e. exactly the ones a
+long-lived dev cluster hides.
+
+- **not-yet-wired (debt) — `seed-defaults.sh` seeds no LLM provider.** A fresh cluster has
+  zero `llm_providers` rows, and every suite that opens with
+  `(await c.get("/llm-providers/")).json()["items"][0]["id"]` dies on an `IndexError`
+  before its first assertion. suite-96 hit this immediately. The seed cannot mint one
+  unhelped (it needs a real credential), so the honest fix is either a documented
+  first-run step or a seed that creates a provider from an env var when present and says
+  so loudly when absent.
+
+- **not-yet-wired (debt) — `deployments`-dependent specs assume fixtures the seed does not
+  create.** `e2e/scheduled-overview.spec.ts` opens `/agents/refund-processor`, an agent
+  no seed produces; on a fresh cluster it fails at "no deployment link visible", which
+  reads as a broken screen rather than a missing fixture. Specs that depend on seeded
+  state should assert that state exists and skip with a named reason otherwise.
+
+- **not-yet-wired (debt) — `GET /api/v1/teams/{team}/applications` 307s without a trailing
+  slash**, and `e2e/webhook-applications.spec.ts` calls it that way. Through the https
+  gateway the redirect surfaces to Playwright as `socket hang up`, so two specs fail for
+  a routing reason with no relationship to what they test. Worth confirming where the
+  307's `Location` points before deciding whether the fix is the spec or the route.
+
+- **deferred (intentional) — `e2e/durable-stream.spec.ts` needs a working LLM.** It drives
+  a real playground run, so it cannot pass against a placeholder provider credential.
+  Not a defect; recorded so a red result is not mistaken for one.
+
+- **not-yet-wired (debt) — the Bearer-sniff is still duplicated in 8 specs.** `require_user`
+  routes need the app's access token (the storage state carries only Keycloak's session
+  cookie), and ten specs had each pasted their own copy — the same duplication that left
+  15 bash suites silently dead when trigger routes gained `require_user`.
+  `e2e/lib/apiAuth.ts::captureAuthHeaders` is now the shared implementation and
+  `schedules-page` / `webhook-public-url` use it; the other eight still carry their copies
+  and should be migrated.
+
+**Closed by this change** (listed so the ledger records the fix, not just the gap):
+
+- `studio/e2e/` was **not type-checked at all** — `tsconfig.json` includes only `src`, and
+  Playwright transpiles per file without checking types, so a missing import reached a
+  browser run as a `ReferenceError`. `npm run typecheck` now runs `tsconfig.e2e.json`
+  too; verified by deleting an import and confirming it fails.
+- `scripts/check-suite-guards.sh`'s registration census grepped `run-all.sh` for the suite
+  list. The registry had moved to `test-manifest.txt`, so the census read "0 registered"
+  and reported all 104 suites unregistered — a control that fails open the moment the
+  thing it guards is refactored. It now delegates to `run-tests.sh --audit`.
+- `deploy-cpe2e.sh` never created the `gateway-tls` Secret (only `deploy-eks.sh` did), so
+  on a fresh local cluster the Gateway's HTTPS listener never programmed, the Service came
+  up with port 80 only, and both `gateway-proxy.sh` and the Playwright gateway mode failed
+  against a cluster that otherwise looked healthy.
+- `services/mcp-proxy` was in neither the tag-coupling gate's service table nor its
+  tag-free list, so its image tag was outside the gate entirely.
+
 ## Known gaps found in the Claude-in-Chrome lifecycle journey — 2026-07-28
 
 Driving the real product on EKS (registry-api 0.2.242 / studio 0.1.171 / declarative-runner 0.1.67)
@@ -1378,6 +1433,8 @@ These are deferred-by-design per the docs/memory. The plan works around them exp
 | G-12 | **Production deploy parity (2026-07-10).** Production agent pods now register their machine identity + enter the OPA bundle (migration 0055; shared `deploy-controller/identity.py`) and receive tool-credential `envFrom` (shared `tool_secrets.py`), so OPA governance + HITL + external-API tools work in production. **Still out of scope (documented, not regressions):** (a) **workflow-production member tool credentials** — `resolve_and_copy_tool_secrets` resolves via `/agents/{name}/tools`; a workflow name isn't an agent so it no-ops — **sandbox workflows have the identical limitation**, needs a member-aware resolver; (b) **Envoy HTTPRoute in production** — sandbox builds one, production doesn't; no impact until Envoy Gateway is installed. See `docs/design/sandbox-production-parity-architecture.md` + debugging 006/007/008. | Parity architecture doc |
 | ~~G-14~~ | ✅ **RESOLVED (registry-api 0.2.149).** The M2 dashboard tool-call frequency/latency panel is shipped. It became feasible once OTEL `type=TOOL` spans ingested into Langfuse; the no-team-filter blocker is solved by fetching `type=TOOL` observations and keeping only those whose `traceId` is in the dashboard's own AgentRun population (team+env+window) — one paginated fetch + set-membership, no per-trace calls. `get_dashboard` returns `tool_calls[{tool_name,count,avg_latency_ms}]`; `ObservabilityDashboardPage` renders the panel. The dashboard is also now env-scoped (separate Production/Sandbox views). Verified live (sandbox: web_search 1×@1075ms). | routers/observability.py `_tool_call_stats` |
 | G-13 | **Chat deployment pinning (2026-07-11) — wrong-deployment routing RESOLVED; parallel-prod deferred.** Consumer chat re-resolved the "most recent running" deployment at **stream** time instead of the deployment the run was pinned to at **POST** time, so a redeploy or a 2nd running deployment routed an in-flight chat (and HITL resume, whose thread checkpoint lives on the original pod) to the **wrong pod**. Fix: `_deployment_for_run` resolves the pod from the id stored on the run (`production_deployment_id`/`deployment_id`) — `stream_chat` + `resume_stream_chat` never re-resolve; `stream_deployment_chat` rejects a path `dep_id` that doesn't match the run (cross-agent guard); `start_chat` honors an optional `deployment_id` so a chat launched from a specific fleet row pins to exactly that deployment (Studio `DeploymentsPage` passes `?dep=`, `CatalogChatPage` forwards it). The **DeploymentOverviewPage "API Endpoint" card** also rendered the agent-scoped path for a *sandbox* deployment (real parallel pods) — now shows the deployment-pinned `/agents/{name}/deployments/{depId}/chat`; production stays agent-scoped (stable contract, one prod pod). Coverage: suite-46 (pin helper vs re-resolve + cross-agent reject), `CatalogChatPage.test.tsx` "pins the run to the ?dep deployment", `DeploymentOverviewPage.test.tsx` (sandbox endpoint card asserts the pinned path). **Deferred(intentional):** production runs **one** k8s Service per agent (`{agent}-production`, rolling updates — not parallel pods), so a deployment-scoped **URL** in prod resolves to the same pod; true blue/green parallel-prod Services are out of scope and would change the deploy model. | routers/chat.py; production_reconciler.py:108 |
+| G-15 | **The Schedules page + arm/disarm UX is a DEMO-ONLY MOCK (2026-07-29). The zombie schedules on the real cluster are still firing.** A UX-preview pass for `docs/design/todo/schedule-lifecycle-and-operations.md` shipped `studio/src/pages/SchedulesPage.tsx`, `lib/cron.ts`, `lib/triggerArm.ts`, `registryApi.listSchedules`/`armTrigger`/`disarmTrigger`(+workflow variants), and four screens under `pages/preview/schedule-*`. **No backend exists behind any of it**: there is no `GET /api/v1/schedules`, and the mock's `armed_at`/`disarmed_at`/`disarm_reason` fields on `AgentTrigger`/`ScheduleListItem` **do not exist in the database**. Data is served from `src/demo/scheduleFixtures.ts` by the DEMO `mockAdapter`. **The mock and the shipped backend now encode two different designs and must be reconciled before either is extended:** the mock proposes splitting arm state from `enabled` (a trigger is born disarmed and an operator arms it at the production moment), whereas migration `0076_trigger_disarm_columns.py` + `trigger_lifecycle.py` (landed in `0c9ef6f`, concurrently) keep `enabled` as the single flag and add only `disabled_reason` / `disabled_at` to record why a lifecycle event switched it off. Lifecycle disarm, the scheduler filter and the event-gateway filter are therefore **real and shipped**; the arm gesture is **mock-only**. **The `/schedules` route and its Sidebar entry are `DEMO`-gated on purpose** (`App.tsx`, `Sidebar.tsx` `CATALOG_ITEMS`) — un-gating them before the endpoint lands ships a page whose only possible state is an error. Deployed for review only, via `Dockerfile.demo` → `studio:ux-preview-5` → namespaces `studio-schedule-preview` (schedules) and `studio-ux-preview` (conversation/chat), reachable by port-forward. **This is a design artifact, not a feature** — it satisfies no DoD gate for schedule arming, and the platform Studio image (`values.yaml` `0.1.172`) was NOT rebuilt or bumped. Phase B (arm-state split, `v_live_triggers`, `suite-95` with `T-S95-000` red-first) is designed and queued. — **deferred(intentional)** | `docs/design/todo/schedule-lifecycle-and-operations.md`; plan `where-will-schedule-menu-humble-aurora.md` |
+| G-16 | **`describeCron` mis-renders an on-the-hour step-hours cron (pre-existing, cosmetic).** `0 */6 * * *` renders as `daily at */6:00`. The daily-at branch tests `min !== "*" && hr !== "*"` and runs before the step-hours branch, so a `*/6` hour field falls into it. Found while extracting the helper from `OverviewScheduled.tsx` into `lib/cron.ts` (verbatim move), so **the agent overview has always rendered it this way** — not a new regression. Pinned as-is by `lib/cron.test.ts` ("mis-renders an on-the-hour step-hours cron") so the extraction is provably behaviour-preserving; fixing the branch order changes a live production screen and was deliberately left out of a mock-only pass. `cronHint()` (the new wrapper) is unaffected — it only suppresses the echo case. — **deferred(intentional)** | `studio/src/lib/cron.ts` |
 | G-9 | **Pausable workflow-HITL orchestrator — sequential pause/resume implemented (WS-B); non-sequential and organic OPA deferred.** Backend: `agent_runs.orchestrator_state` JSONB checkpoint (migration 0032); authoritative pause-detection via pending `Approval` by child `thread_id`; `resume_orchestration` re-entry for sequential mode; parent run set to `awaiting_approval` with an amber badge in the WorkflowBuilderPage run tree and RunsTab. Deterministic coverage: suite-36. Organic OPA coverage: suite-37 — **gated on the OPA bundle/identity allow-path being green** (env fix applied in `manifest_builder.py`; bundle load + projected SA token identity must be canary-verified first). Prior notes said "Safety Orchestrator disabled" — that was a misdiagnosis; the Safety Orchestrator is a PII scanner and was never the approval origin (see Decision 26). Remaining deferred items: non-sequential auto-advance (conditional/supervisor/handoff modes halt at `awaiting_approval` but do not auto-resume-advance) — **deferred(intentional)**; organic OPA canary verification — **not-yet-wired(debt)**. | Decision 26 / WS-B — partially resolved |
 
 ### 0.4 Conventions

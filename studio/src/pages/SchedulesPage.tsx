@@ -16,8 +16,6 @@ import {
 import { toast } from "sonner";
 import {
   listSchedules,
-  disarmTrigger,
-  disarmWorkflowTrigger,
   enableTrigger,
   disableTrigger,
   updateWorkflowTrigger,
@@ -107,19 +105,14 @@ export default function SchedulesPage() {
 
   // Every mutation branches on `artifact_kind` and calls the existing
   // artifact-scoped endpoint. No schedule-specific write path exists.
-  const disarmMut = useMutation({
-    mutationFn: (s: ScheduleListItem) =>
-      s.artifact_kind === "agent"
-        ? disarmTrigger(s.artifact_name, s.trigger_id)
-        : disarmWorkflowTrigger(s.artifact_id, s.trigger_id),
-    onSuccess: (_d, s) => {
-      toast.success(`Disarmed ${s.artifact_name} — it will not fire again until re-armed.`);
-      invalidate();
-    },
-    onError: (e: Error) => toast.error(e.message),
-  });
-
-  const toggleMut = useMutation({
+  //
+  // ONE arm control, because there is one field. This page briefly had two — a
+  // Disarm button alongside this toggle — and the Disarm button PATCHed
+  // `{ armed: false }`, a field `AgentTriggerUpdate` does not declare. FastAPI
+  // dropped it, the handler's `exclude_none` loop saw an empty body, and the write
+  // answered 200 having changed nothing while the toast said "Disarmed". Two
+  // controls for one column is how that goes unnoticed.
+  const armMut = useMutation({
     mutationFn: (s: ScheduleListItem) => {
       const next = !s.enabled;
       if (s.artifact_kind === "agent") {
@@ -129,7 +122,14 @@ export default function SchedulesPage() {
       }
       return updateWorkflowTrigger(s.artifact_id, s.trigger_id, { enabled: next });
     },
-    onSuccess: () => invalidate(),
+    onSuccess: (_d, s) => {
+      toast.success(
+        s.enabled
+          ? `Disarmed ${s.artifact_name} — it will not fire again until re-armed.`
+          : `Armed ${s.artifact_name}.`,
+      );
+      invalidate();
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -227,7 +227,7 @@ export default function SchedulesPage() {
                     "Cron",
                     "Next fire",
                     "Arm state",
-                    "On",
+                    "",
                     "Will fire",
                     "Last run",
                     "Actions",
@@ -319,17 +319,21 @@ export default function SchedulesPage() {
                       )}
                     </td>
 
-                    {/* Enabled — the AUTHOR's switch, deliberately a separate column
-                        from arm state so the two are visibly not the same thing. */}
+                    {/* The arm switch. Same column the pill to the left reads, shown
+                        as a control rather than a second piece of state. */}
                     <td className="px-4 py-3">
                       <button
-                        data-testid="schedule-enabled-toggle"
-                        onClick={() => toggleMut.mutate(s)}
-                        disabled={toggleMut.isPending}
-                        title={s.enabled ? "Pause this schedule" : "Un-pause this schedule"}
+                        data-testid="schedule-arm-toggle"
+                        onClick={() => armMut.mutate(s)}
+                        disabled={armMut.isPending}
+                        title={
+                          s.enabled
+                            ? "Disarm — stops firing until someone re-arms it"
+                            : "Arm — let this schedule fire again"
+                        }
                         className="text-slate-400 hover:text-slate-700 disabled:opacity-40"
                       >
-                        {s.enabled ? <Play size={15} /> : <Pause size={15} />}
+                        {s.enabled ? <Pause size={15} /> : <Play size={15} />}
                       </button>
                     </td>
 
@@ -382,24 +386,11 @@ export default function SchedulesPage() {
                       )}
                     </td>
 
-                    {/* Actions — no Arm button here on purpose. Arming is refused
-                        unless the artifact is live in production, so the useful thing
-                        this page can do is name the blocker and link to the artifact,
-                        where the arm control sits next to the deploy control that
-                        unblocks it. */}
+                    {/* Actions — delete only. Arm/disarm is the toggle column; a
+                        second control writing the same field is what shipped a
+                        silently-dead Disarm button. */}
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
-                        {isArmed(s) && (
-                          <button
-                            data-testid="schedule-disarm-btn"
-                            onClick={() => disarmMut.mutate(s)}
-                            disabled={disarmMut.isPending}
-                            title="Disarm — stops firing until an operator re-arms it"
-                            className="text-xs text-slate-500 hover:text-slate-800 disabled:opacity-40"
-                          >
-                            Disarm
-                          </button>
-                        )}
                         <button
                           data-testid="schedule-delete-btn"
                           onClick={() => setPendingDelete(s)}

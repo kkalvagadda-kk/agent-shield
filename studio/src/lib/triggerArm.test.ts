@@ -2,47 +2,57 @@ import { describe, expect, it } from "vitest";
 import { armDetail, armLabel, armTone, isArmed, needsAttention } from "./triggerArm";
 
 describe("isArmed / armTone / armLabel", () => {
-  it("treats a present armed_at as armed", () => {
-    expect(isArmed({ armed_at: "2026-07-14T09:00:00Z" })).toBe(true);
-    expect(armTone({ armed_at: "2026-07-14T09:00:00Z" })).toBe("armed");
-    expect(armLabel({ armed_at: "2026-07-14T09:00:00Z" })).toBe("Armed");
+  it("reads arm state off `enabled` — the only column that exists", () => {
+    expect(isArmed({ enabled: true })).toBe(true);
+    expect(armTone({ enabled: true })).toBe("armed");
+    expect(armLabel({ enabled: true })).toBe("Armed");
   });
 
-  it("treats null and undefined armed_at as disarmed", () => {
-    expect(isArmed({ armed_at: null })).toBe(false);
-    expect(isArmed({})).toBe(false);
-    expect(armTone({})).toBe("disarmed");
-    expect(armLabel({})).toBe("Disarmed");
+  it("calls a disabled trigger disarmed", () => {
+    expect(isArmed({ enabled: false })).toBe(false);
+    expect(armTone({ enabled: false })).toBe("disarmed");
+    expect(armLabel({ enabled: false })).toBe("Disarmed");
   });
 
-  it("does not read `enabled` — arm state and the pause switch are orthogonal", () => {
-    // A trigger the author paused keeps its arming. If this ever starts depending
-    // on `enabled`, the two-jobs-one-boolean bug has been reintroduced.
-    const paused = { armed_at: "2026-07-14T09:00:00Z" };
-    expect(isArmed({ ...paused, ...({ enabled: false } as object) })).toBe(true);
+  it("does not consult any other field", () => {
+    // Regression: this derived from `armed_at`, which the server synthesised from
+    // `created_at` — non-null on every row, so deleted agents the lifecycle gate had
+    // just disarmed rendered an "Armed" pill beside "this schedule is disabled".
+    // If a second field ever creeps back in here, that bug is back with it.
+    expect(
+      isArmed({ enabled: false, ...({ armed_at: "2026-07-14T09:00:00Z" } as object) }),
+    ).toBe(false);
   });
 });
 
 describe("armDetail", () => {
-  it("names who armed it and when", () => {
-    const d = armDetail({ armed_at: "2026-07-14T09:00:00Z", armed_by: "kalyan" });
-    expect(d).toContain("by kalyan");
-    expect(d).toContain("on ");
+  it("names who authorized an armed schedule", () => {
+    expect(armDetail({ enabled: true, armed_by: "kalyan" })).toBe("by kalyan");
   });
 
-  it("falls back to the armer alone when there is no timestamp", () => {
-    expect(armDetail({ armed_at: null, armed_by: "kalyan", disarm_reason: null })).toBeNull();
+  it("gives an armed schedule with no recorded authorizer no story at all", () => {
+    expect(armDetail({ enabled: true, armed_by: null })).toBeNull();
   });
 
-  it("surfaces the disarm reason verbatim when disarmed", () => {
-    expect(armDetail({ armed_at: null, disarm_reason: "workflow archived" })).toBe(
+  it("surfaces the disarm reason, dated, when disarmed", () => {
+    const d = armDetail({
+      enabled: false,
+      disarm_reason: "workflow archived",
+      disarmed_at: "2026-07-14T09:00:00Z",
+    });
+    expect(d).toContain("workflow archived");
+    expect(d).toContain("·");
+  });
+
+  it("shows an undated reason verbatim rather than inventing a date", () => {
+    expect(armDetail({ enabled: false, disarm_reason: "workflow archived" })).toBe(
       "workflow archived",
     );
   });
 
-  it("invents nothing for a never-armed trigger with no reason", () => {
+  it("invents nothing for a disarmed trigger with no reason", () => {
     // A fabricated story here would read as a recorded fact on the page.
-    expect(armDetail({ armed_at: null, armed_by: null, disarm_reason: null })).toBeNull();
+    expect(armDetail({ enabled: false, armed_by: null, disarm_reason: null })).toBeNull();
   });
 });
 
@@ -51,7 +61,7 @@ describe("needsAttention", () => {
     expect(needsAttention({ enabled: true, will_fire: false })).toBe(true);
   });
 
-  it("flags a never-armed schedule the author left switched on", () => {
+  it("flags a schedule the author left switched on that cannot dispatch", () => {
     expect(needsAttention({ enabled: true, will_fire: false, disarm_reason: null })).toBe(true);
   });
 
@@ -59,23 +69,17 @@ describe("needsAttention", () => {
     expect(needsAttention({ enabled: true, will_fire: true })).toBe(false);
   });
 
-  it("does not flag a deliberately paused schedule", () => {
+  it("does not flag a disarmed schedule", () => {
     // Not firing on purpose. Counting it would make the badge cry wolf, which
     // trains operators to stop reading it.
     expect(needsAttention({ enabled: false, will_fire: false })).toBe(false);
   });
 
-  it("does not flag a schedule an operator disarmed", () => {
-    // Regression: the badge stayed at 11 after disarming a row, because a disarmed
-    // trigger is still `enabled` and still not firing. Alarming about a state the
-    // operator just chose is the badge complaining about its own success.
-    expect(
-      needsAttention({ enabled: true, will_fire: false, disarm_reason: "disarmed by operator" }),
-    ).toBe(false);
-  });
-
-  it("does not flag a schedule lifecycle disarmed on archive", () => {
-    // This is the Phase-B fix working. It must not read as a problem.
+  it("still refuses to flag an enabled row carrying a stale disarm reason", () => {
+    // Both PATCH handlers now clear the reason on re-enable via one shared helper
+    // (trigger_lifecycle.apply_trigger_update), so this pairing should be
+    // unreachable — the workflow handler used to skip that clearing, which is
+    // precisely why the guard stays rather than being deleted as dead.
     expect(
       needsAttention({ enabled: true, will_fire: false, disarm_reason: "workflow archived" }),
     ).toBe(false);

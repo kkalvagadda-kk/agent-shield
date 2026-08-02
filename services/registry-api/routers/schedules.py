@@ -77,18 +77,9 @@ SELECT
     tl.timezone,
     tl.input_payload,
     tl.enabled,
-    -- ARM STATE, not creation time. The page derives "is this armed?" as
-    -- `armed_at != null` (lib/triggerArm.ts::isArmed), so mapping this straight from
-    -- created_at made EVERY row render "Armed" — including deleted agents whose
-    -- triggers the lifecycle gate had just disarmed. Caught by looking at the real
-    -- page: three deprecated artifacts showed an "Armed" pill directly beside
-    -- "this schedule is disabled".
-    --
-    -- The underlying model has ONE arm concept (`enabled` + `disabled_reason`); the
-    -- page was written against a richer one where arm state and the author's pause
-    -- switch are independent. Until that exists, arm state IS enabled — so say so
-    -- rather than emit a timestamp that means something else.
-    CASE WHEN tl.enabled THEN tl.created_at END AS armed_at,
+    -- No `armed_at`. Arm state is `enabled` (above) and nothing else — see the note
+    -- on ScheduleListItem. `armed_by` IS real: it records the human whose authority a
+    -- daemon run carries, stamped at create time by routers/triggers.py.
     tl.armed_by,
     tl.disabled_at             AS disarmed_at,
     tl.disabled_reason         AS disarm_reason,
@@ -227,7 +218,6 @@ async def list_schedules(
             next_fire_at=_next_fire(row["cron_expression"], row["timezone"]),
             input_payload=row["input_payload"],
             enabled=row["enabled"],
-            armed_at=row["armed_at"],
             armed_by=row["armed_by"],
             disarmed_at=row["disarmed_at"],
             disarm_reason=row["disarm_reason"],

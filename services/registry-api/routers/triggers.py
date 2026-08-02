@@ -26,6 +26,7 @@ from schemas import (
     AgentTriggerUpdate,
     RotateTokenResponse,
 )
+from trigger_lifecycle import apply_trigger_update
 from trigger_utils import _new_token, _webhook_url
 
 logger = logging.getLogger(__name__)
@@ -245,18 +246,7 @@ async def update_trigger(
     if not trigger:
         raise HTTPException(status_code=404, detail="Trigger not found")
 
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(trigger, field, value)
-
-    # Re-enabling is a HUMAN's deliberate act, so it clears the system disarm record.
-    # Leaving `disabled_reason` populated on an enabled trigger would leave the UI
-    # showing "disabled because the agent was deleted" next to an armed schedule —
-    # a stale explanation is worse than none, because it is read as current.
-    if getattr(body, "enabled", None) is True:
-        trigger.disabled_reason = None
-        trigger.disabled_at = None
-
-    trigger.updated_at = datetime.now(timezone.utc)
+    apply_trigger_update(trigger, body)
 
     await db.commit()
     await db.refresh(trigger)

@@ -179,6 +179,7 @@ browser|deploy|e2e/deployment-overview.spec.ts|Deployment overview
 browser|deploy|e2e/catalog-overview-parity.spec.ts|Catalog/overview parity
 browser|execution|e2e/scheduled-overview.spec.ts|Scheduled overview
 browser|execution|e2e/schedule-failure-reason.spec.ts|A failed scheduled run shows WHY on the overview (no "Failing" over "No runs yet")
+browser|execution,rbac|e2e/schedules-page.spec.ts|Schedules page — real endpoint to real render, per-row will_fire verdict
 browser|execution,governance|e2e/webhook-applications.spec.ts|Webhook applications
 browser|execution|e2e/webhook-public-url.spec.ts|Webhook public URL
 browser|cost|e2e/cost-console.spec.ts|Cost console

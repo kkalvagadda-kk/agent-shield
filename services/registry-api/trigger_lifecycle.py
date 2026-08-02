@@ -88,3 +88,32 @@ async def disarm_triggers(
             "disarmed %d trigger(s) on %s=%s — %s", count, column, target, reason
         )
     return count
+
+
+def apply_trigger_update(trigger, body) -> None:
+    """Apply a PATCH body to a trigger row — the ONE place an update is interpreted.
+
+    Both `routers/triggers.py` (agent) and `routers/composite_workflows.py` (workflow)
+    PATCH the SAME table with the SAME `AgentTriggerUpdate` body, and each had its own
+    copy of the setattr loop. The copies had already drifted: the agent handler cleared
+    the disarm record on re-enable, the workflow handler did not — so re-enabling a
+    workflow schedule left `disabled_reason` populated and the Schedules page rendered
+    "disabled because the workflow was archived" beside a live, enabled schedule. A
+    stale explanation reads as a current one.
+
+    Arm state and `enabled` are the SAME field. There is no `armed` column, so a body
+    carrying `armed` would be silently dropped by `exclude_none` and answer 200 for a
+    write that never happened — which is exactly what the Schedules page's Disarm
+    button did until this change. Callers disarm by setting `enabled=False`.
+    """
+    for field, value in body.model_dump(exclude_none=True).items():
+        setattr(trigger, field, value)
+
+    # Re-enabling is a HUMAN's deliberate act, so it clears the system disarm record.
+    # A lifecycle disarm (`disarm_triggers` above) and an author's pause are the same
+    # column; the reason is what tells them apart, and it must not outlive the disarm.
+    if getattr(body, "enabled", None) is True:
+        trigger.disabled_reason = None
+        trigger.disabled_at = None
+
+    trigger.updated_at = datetime.now(timezone.utc)

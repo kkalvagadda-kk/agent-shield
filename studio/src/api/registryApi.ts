@@ -735,9 +735,6 @@ export const updateWorkflowTrigger = async (
     input_payload?: Record<string, unknown> | null;
     alert_email?: string | null;
     alert_on_failure?: boolean;
-    // Decision 34 — see the note on `updateTrigger`. A workflow arm is refused
-    // unless the workflow is published (R8).
-    armed?: boolean;
   },
 ): Promise<AgentTrigger> => {
   const { data } = await http.patch<AgentTrigger>(
@@ -746,12 +743,6 @@ export const updateWorkflowTrigger = async (
   );
   return data;
 };
-
-export const armWorkflowTrigger = (workflowId: string, triggerId: string) =>
-  updateWorkflowTrigger(workflowId, triggerId, { armed: true });
-
-export const disarmWorkflowTrigger = (workflowId: string, triggerId: string) =>
-  updateWorkflowTrigger(workflowId, triggerId, { armed: false });
 
 export const deleteWorkflowTrigger = async (
   workflowId: string,
@@ -1325,13 +1316,10 @@ export interface AgentTrigger {
   // `principal.run_by`/`user_id` for a `user_delegated` trigger, and fails closed
   // when it is missing.
   armed_by?: string | null;
-  // Arm state (Decision 34) — SEPARATE from `enabled`. `enabled` is the author's
-  // pause switch ("I want this cron"); `armed_at` is the operator's production
-  // gesture ("this cron is live"). Both must be true for a trigger to fire, and
-  // neither implies the other. `armed_at != null` IS the armed predicate — there is
-  // deliberately no server-sent `armed` boolean, because that would be a second
-  // representation of one fact. See lib/triggerArm.ts.
-  armed_at?: string | null;
+  // Arm state IS `enabled` — there is no `armed`/`armed_at` column and no `armed`
+  // field on the PATCH body. Disarming is `{ enabled: false }`; `disarm_reason` says
+  // who did it and why (an author's pause and a lifecycle disarm share the switch).
+  // See lib/triggerArm.ts for the derivation and why the split was withdrawn.
   disarmed_at?: string | null;
   // Operator-readable prose, rendered verbatim. Not a machine code.
   disarm_reason?: string | null;
@@ -1387,11 +1375,6 @@ export const updateTrigger = async (
     alert_on_failure?: boolean;
     // WS-2 T014 — daemon approver-role config, persisted on update.
     approver_role?: string | null;
-    // Decision 34 — the arming gesture rides the PATCH that already exists rather
-    // than a new endpoint, so the artifact-scoped router stays the single writer.
-    // A refused arm (no running production deployment) comes back 409 with the
-    // dispatch door's own message as `detail`.
-    armed?: boolean;
   }
 ): Promise<AgentTrigger> => {
   const { data } = await http.patch<AgentTrigger>(
@@ -1406,12 +1389,6 @@ export const enableTrigger = (agentName: string, triggerId: string) =>
 
 export const disableTrigger = (agentName: string, triggerId: string) =>
   updateTrigger(agentName, triggerId, { enabled: false });
-
-export const armTrigger = (agentName: string, triggerId: string) =>
-  updateTrigger(agentName, triggerId, { armed: true });
-
-export const disarmTrigger = (agentName: string, triggerId: string) =>
-  updateTrigger(agentName, triggerId, { armed: false });
 
 export const deleteTrigger = async (
   agentName: string,
@@ -1442,8 +1419,8 @@ export interface ScheduleListItem {
   timezone: string | null;
   next_fire_at: string | null;
   input_payload: Record<string, unknown> | null;
+  // Arm state — `enabled` and nothing else. See lib/triggerArm.ts.
   enabled: boolean;
-  armed_at: string | null;
   armed_by: string | null;
   disarmed_at: string | null;
   disarm_reason: string | null;

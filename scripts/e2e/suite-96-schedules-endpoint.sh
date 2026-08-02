@@ -35,6 +35,12 @@
 #               will_fire=true. Without it, 003/004 are equally satisfied by
 #               "everything reports false", which is how the liveness predicate stayed
 #               green while it was matching nothing.
+#   T-S96-007 — an undeclared PATCH field ({"armed": false}) cannot masquerade as a
+#               write: the row is re-read and must be unchanged. This is the defect the
+#               page shipped with — 200 OK, "Disarmed" toast, nothing written.
+#   T-S96-008 — disarming via `enabled` PERSISTS and flips will_fire on re-read.
+#   T-S96-009 — re-enabling clears disarm_reason/disarmed_at, so no stale explanation
+#               survives beside a live schedule.
 #   T-S96-006 — a trigger on a DEAD artifact is still LISTED, with will_fire=false and
 #               why_not naming the artifact state. Listing it is the feature; the 37
 #               zombies were invisible precisely because nothing listed them.
@@ -191,6 +197,40 @@ async def main():
                f"prod_running={prod_up} will_fire={p_ and p_['will_fire']} why_not={(p_ or {}).get('why_not')!r} "
                f"— without this, 003/004 pass equally well when EVERYTHING reports false")
 
+        # ── The write the page performs, read back ──────────────────────────────
+        # The Schedules page's Disarm button PATCHed `{"armed": false}`. There is no
+        # `armed` field on AgentTriggerUpdate, so FastAPI dropped it, the handler's
+        # `exclude_none` loop saw an EMPTY body, and the request answered 200 having
+        # written nothing — while the UI toasted "Disarmed". A status-code assertion
+        # cannot catch that; only re-reading the row can.
+        r_ghost = await c.patch(f"/agents/{PROD}/triggers/{t_prod}", json={"armed": False})
+        after_ghost = await c.get("/schedules", params={"trigger_type": "schedule"})
+        g = {x["trigger_id"]: x for x in after_ghost.json()}.get(t_prod) or {}
+        record("T-S96-007 an undeclared field cannot masquerade as a write (armed= is not a column)",
+               g.get("enabled") is True,
+               f"PATCH armed=false -> {r_ghost.status_code}; enabled is still {g.get('enabled')} "
+               f"(want True — the field does not exist, so nothing may change). Arm state is `enabled`.")
+
+        r_off = await c.patch(f"/agents/{PROD}/triggers/{t_prod}", json={"enabled": False})
+        after_off = await c.get("/schedules", params={"trigger_type": "schedule"})
+        o = {x["trigger_id"]: x for x in after_off.json()}.get(t_prod) or {}
+        record("T-S96-008 disarming via `enabled` PERSISTS and flips will_fire on re-read",
+               r_off.status_code == 200 and o.get("enabled") is False and o.get("will_fire") is False,
+               f"status={r_off.status_code} enabled={o.get('enabled')} will_fire={o.get('will_fire')} "
+               f"why_not={(o.get('why_not') or '')[:70]!r}")
+
+        # Re-enabling must clear the disarm record. It is one column shared by an
+        # author's pause and a lifecycle disarm, so a reason that outlives the disarm
+        # renders as "disabled because the agent was deleted" beside a LIVE schedule.
+        r_on = await c.patch(f"/agents/{PROD}/triggers/{t_prod}", json={"enabled": True})
+        after_on = await c.get("/schedules", params={"trigger_type": "schedule"})
+        n_ = {x["trigger_id"]: x for x in after_on.json()}.get(t_prod) or {}
+        record("T-S96-009 re-enabling clears the disarm record — no stale reason on a live row",
+               r_on.status_code == 200 and n_.get("enabled") is True
+               and n_.get("disarm_reason") is None and n_.get("disarmed_at") is None,
+               f"status={r_on.status_code} enabled={n_.get('enabled')} "
+               f"disarm_reason={n_.get('disarm_reason')!r} disarmed_at={n_.get('disarmed_at')!r}")
+
     except Exception as exc:
         import traceback
         record("T-S96-999 driver ran every case without crashing", False,
@@ -236,7 +276,7 @@ while IFS= read -r line; do
   esac
 done <<< "$RES"
 
-REQUIRED_IDS="001 002 003/006 004 005"
+REQUIRED_IDS="001 002 003/006 004 005 007 008 009"
 MISSING=""
 for id in $REQUIRED_IDS; do
   echo "$RES" | grep -q "T-S96-$id " || MISSING="$MISSING T-S96-$id"
@@ -246,7 +286,7 @@ if [ -n "$MISSING" ]; then
   FAIL=$((FAIL+1))
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null | sed 's/^/    /' || true
 else
-  echo "PASS  T-S96-COMPLETE every gate assertion ran (001-006 — none skipped)"
+  echo "PASS  T-S96-COMPLETE every gate assertion ran (001-009 — none skipped)"
   PASS=$((PASS+1))
 fi
 

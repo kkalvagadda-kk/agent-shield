@@ -29,12 +29,9 @@ export const MOCK_USER = {
 // have to actually mutate something — a read-only fixture would demo a dead page.
 // State is module-level and resets on reload; that is called out on the preview
 // index so it doesn't read as a persistence bug.
+// Not exported with a reset helper: Vitest builds its own rows and mocks the api client
+// directly, so a `resetScheduleStore` export would have no caller.
 let scheduleStore: ScheduleListItem[] = buildScheduleFleet();
-
-/** Test seam — Vitest resets the store between cases. */
-export function resetScheduleStore() {
-  scheduleStore = buildScheduleFleet();
-}
 
 // Mirrors the Phase-B server refusal: arming is gated on the artifact actually
 // being live, and the refusal text is the operator-readable one the dispatch door
@@ -57,18 +54,22 @@ function applyTriggerPatch(triggerId: string, body: Record<string, unknown>): Sc
   if (idx === -1) throw new Error(`trigger ${triggerId} not found`);
   const row = scheduleStore[idx];
 
+  // `enabled` IS arm state — the shim models the real PATCH body, which has no
+  // `armed` field. It briefly accepted one, which let the demo show an arm working
+  // that the real API silently dropped.
   let next = { ...row };
-  if (typeof body.enabled === "boolean") next.enabled = body.enabled;
-  if (body.armed === true) {
+  if (body.enabled === true) {
     const refusal = refuseArm(row);
     if (refusal) throw new Error(refusal);
-    next.armed_at = new Date().toISOString();
+    next.enabled = true;
     next.armed_by = "demo";
+    // Re-enabling clears the disarm record, matching
+    // trigger_lifecycle.apply_trigger_update on the server.
     next.disarmed_at = null;
     next.disarm_reason = null;
   }
-  if (body.armed === false) {
-    next.armed_at = null;
+  if (body.enabled === false) {
+    next.enabled = false;
     next.disarmed_at = new Date().toISOString();
     next.disarm_reason = "disarmed by operator";
   }

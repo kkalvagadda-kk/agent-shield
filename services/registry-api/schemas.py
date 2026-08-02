@@ -2663,8 +2663,13 @@ class ScheduleListItem(BaseModel):
     timezone: str | None = None
     next_fire_at: datetime | None = None
     input_payload: dict[str, Any] | None = None
+    # ARM STATE IS `enabled`. There is no `armed_at` column and no `armed` field on
+    # AgentTriggerUpdate — the model has one switch, and a schedule fires iff it is on.
+    # This field briefly existed, mapped server-side from `created_at`, which made every
+    # row render an "Armed" pill including deleted agents the lifecycle gate had just
+    # disarmed. Synthesising a timestamp to satisfy a richer model that does not exist is
+    # how a field acquires two meanings; the consumers derive arm state from `enabled`.
     enabled: bool
-    armed_at: datetime | None = None
     armed_by: str | None = None
     disarmed_at: datetime | None = None
     disarm_reason: str | None = None

@@ -116,6 +116,7 @@ SERVICES=(
   "python-executor|PYTHON_EXECUTOR_TAG|services/python-executor|subchart:python-executor"
   "scheduler|SCHEDULER_TAG|services/scheduler|subchart:scheduler"
   "embedding-sidecar|EMBEDDING_SIDECAR_TAG|services/embedding-sidecar|yaml:embeddingSidecar.image.tag"
+  "mcp-proxy|MCP_PROXY_TAG|services/mcp-proxy|yaml:mcp-proxy.image.tag"
 )
 
 # Dirs under services/ that intentionally have NO image tag. EXPLICIT, never a silent

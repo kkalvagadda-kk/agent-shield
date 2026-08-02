@@ -1,18 +1,25 @@
-// Arm-state derivation (Decision 34).
+// Arm-state derivation — one place, one field.
 //
-// `armed` is NOT a field. It is `armed_at != null`, derived in exactly one place.
-// The server deliberately does not send a boolean alongside the timestamp: that
-// would be two representations of one fact, and the two can disagree — the drift
-// class this whole slice exists to delete.
+// ARM STATE IS `enabled`. There is no `armed` column, no `armed_at` column, and no
+// `armed` field on the PATCH body (`AgentTriggerUpdate`). A schedule fires iff its
+// trigger row is enabled, and `disabled_reason` records who turned it off and why —
+// an author's pause and a lifecycle disarm are the same switch, distinguished by the
+// reason rather than by a second boolean.
 //
-// Why arm state is separate from `enabled` at all: `enabled` is the AUTHOR's pause
-// switch ("I want this cron"), `armed_at` is the OPERATOR's production gesture
-// ("this cron is live"). Conflating them is what let a trigger created on a draft
-// agent fire immediately and fail 1,197 times.
+// This file previously derived arm state from `armed_at`, on the theory that the
+// author's pause switch and the operator's production gesture are independent. They
+// are not, in the schema that exists: the server had to synthesise `armed_at` from
+// `created_at` to feed it, which made every row — including agents the lifecycle gate
+// had just disarmed — render an "Armed" pill next to "this schedule is disabled".
+// Two booleans over one observable behaviour is the same defect as one field with two
+// meanings, just inverted. If arm and enable ever become genuinely separate, they need
+// separate COLUMNS and an arm endpoint that can refuse (409 when nothing is deployed
+// to dispatch to) — not a derived timestamp.
 
 /** The minimum shape both `AgentTrigger` and `ScheduleListItem` satisfy. */
 export interface ArmStateFields {
-  armed_at?: string | null;
+  enabled: boolean;
+  /** The human whose authority a daemon run carries — stamped at create time. */
   armed_by?: string | null;
   disarmed_at?: string | null;
   disarm_reason?: string | null;
@@ -21,7 +28,7 @@ export interface ArmStateFields {
 export type ArmTone = "armed" | "disarmed";
 
 export function isArmed(t: ArmStateFields): boolean {
-  return t.armed_at != null;
+  return t.enabled;
 }
 
 export function armTone(t: ArmStateFields): ArmTone {
@@ -35,18 +42,18 @@ export function armLabel(t: ArmStateFields): string {
 
 /**
  * The one-line explanation under the pill. Returns null when there is nothing
- * honest to say — a never-armed trigger with no recorded reason gets no invented
- * story, which is why `disarm_reason` being absent is a distinct case from it
- * being set.
+ * honest to say — a trigger with no recorded authorizer and no recorded reason gets
+ * no invented story, which is why `disarm_reason` being absent is a distinct case
+ * from it being set.
  */
 export function armDetail(t: ArmStateFields): string | null {
   if (isArmed(t)) {
-    const when = t.armed_at ? new Date(t.armed_at).toLocaleDateString() : null;
-    if (t.armed_by && when) return `by ${t.armed_by} on ${when}`;
-    if (t.armed_by) return `by ${t.armed_by}`;
-    return when;
+    return t.armed_by ? `by ${t.armed_by}` : null;
   }
-  if (t.disarm_reason) return t.disarm_reason;
+  if (t.disarm_reason) {
+    const when = t.disarmed_at ? new Date(t.disarmed_at).toLocaleDateString() : null;
+    return when ? `${t.disarm_reason} · ${when}` : t.disarm_reason;
+  }
   return null;
 }
 

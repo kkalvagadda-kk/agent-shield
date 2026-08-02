@@ -23,7 +23,6 @@ function row(over: Partial<ScheduleListItem> = {}): ScheduleListItem {
     next_fire_at: new Date(Date.now() + 3_600_000).toISOString(),
     input_payload: null,
     enabled: true,
-    armed_at: "2026-07-14T09:00:00Z",
     armed_by: "kalyan",
     disarmed_at: null,
     disarm_reason: null,
@@ -61,7 +60,7 @@ const DISARMED = row({
   artifact_id: "wf-10",
   artifact_name: "legacy-digest-flow",
   artifact_status: "archived",
-  armed_at: null,
+  enabled: false,
   disarmed_at: "2026-07-27T14:22:00Z",
   disarm_reason: "workflow archived",
   will_fire: false,
@@ -76,7 +75,14 @@ const SANDBOX_FAIL = row({
   last_run_error: "dispatch failed: [Errno -2] Name or service not known",
 });
 
-const PAUSED = row({ trigger_id: "ag-05", artifact_name: "nightly-reconcile", enabled: false });
+// Disarmed by hand, no recorded reason — off on purpose, so not an alarm.
+const PAUSED = row({
+  trigger_id: "ag-05",
+  artifact_name: "nightly-reconcile",
+  enabled: false,
+  will_fire: false,
+  why_not: "this schedule is disabled",
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -142,15 +148,15 @@ describe("SchedulesPage", () => {
     // trigger is still `enabled` and still not firing.
     vi.mocked(api.listSchedules)
       .mockResolvedValueOnce([ZOMBIE])
-      .mockResolvedValue([{ ...ZOMBIE, armed_at: null, disarm_reason: "disarmed by operator" }]);
-    vi.mocked(api.disarmWorkflowTrigger).mockResolvedValue({} as never);
+      .mockResolvedValue([{ ...ZOMBIE, enabled: false, disarm_reason: "disarmed by operator" }]);
+    vi.mocked(api.updateWorkflowTrigger).mockResolvedValue({} as never);
     renderWithProviders(<SchedulesPage />);
     const user = userEvent.setup();
 
     expect(await screen.findByTestId("schedules-attention-banner")).toHaveTextContent(
       "1 schedule will not fire",
     );
-    await user.click(screen.getByTestId("schedule-disarm-btn"));
+    await user.click(screen.getByTestId("schedule-arm-toggle"));
     await waitFor(() =>
       expect(screen.queryByTestId("schedules-attention-banner")).not.toBeInTheDocument(),
     );
@@ -201,47 +207,58 @@ describe("SchedulesPage", () => {
     expect(screen.queryByTestId("schedules-row-zw-01")).not.toBeInTheDocument();
   });
 
-  it("offers Disarm only on armed rows", async () => {
+  it("shows one arm control per row, labelled for the direction it moves", async () => {
+    // ONE control, not two. The page shipped with a separate Disarm button beside
+    // this toggle; it PATCHed `{ armed: false }`, a field the API does not declare,
+    // so it answered 200 having written nothing while the toast claimed success.
     vi.mocked(api.listSchedules).mockResolvedValue([row(), DISARMED]);
     renderWithProviders(<SchedulesPage />);
     const armed = within(await screen.findByTestId("schedules-row-t-1"));
-    expect(armed.getByTestId("schedule-disarm-btn")).toBeInTheDocument();
+    expect(armed.getByTestId("schedule-arm-toggle")).toHaveAttribute(
+      "title",
+      expect.stringContaining("Disarm"),
+    );
+    expect(armed.queryByTestId("schedule-disarm-btn")).not.toBeInTheDocument();
+
     const disarmed = within(screen.getByTestId("schedules-row-zw-10"));
-    expect(disarmed.queryByTestId("schedule-disarm-btn")).not.toBeInTheDocument();
-  });
-
-  it("routes a disarm to the agent trigger endpoint", async () => {
-    vi.mocked(api.listSchedules).mockResolvedValue([row()]);
-    vi.mocked(api.disarmTrigger).mockResolvedValue({} as never);
-    renderWithProviders(<SchedulesPage />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByTestId("schedule-disarm-btn"));
-    await waitFor(() =>
-      expect(api.disarmTrigger).toHaveBeenCalledWith("healthy-agent", "t-1"),
+    expect(disarmed.getByTestId("schedule-arm-toggle")).toHaveAttribute(
+      "title",
+      expect.stringContaining("Arm"),
     );
-    expect(api.disarmWorkflowTrigger).not.toHaveBeenCalled();
   });
 
-  it("routes a disarm on a workflow row to the workflow trigger endpoint", async () => {
-    vi.mocked(api.listSchedules).mockResolvedValue([ZOMBIE]);
-    vi.mocked(api.disarmWorkflowTrigger).mockResolvedValue({} as never);
-    renderWithProviders(<SchedulesPage />);
-    const user = userEvent.setup();
-    await user.click(await screen.findByTestId("schedule-disarm-btn"));
-    // Keyed on artifact_id, not the display name — the workflow router takes an id.
-    await waitFor(() =>
-      expect(api.disarmWorkflowTrigger).toHaveBeenCalledWith("wf-01", "zw-01"),
-    );
-    expect(api.disarmTrigger).not.toHaveBeenCalled();
-  });
-
-  it("toggles the author's pause switch through the enable/disable endpoints", async () => {
+  it("disarms an agent row through the trigger enable/disable endpoint", async () => {
+    // `enabled` IS arm state — there is no `armed` field on AgentTriggerUpdate, so a
+    // disarm that does not move this column does not move anything.
     vi.mocked(api.listSchedules).mockResolvedValue([row()]);
     vi.mocked(api.disableTrigger).mockResolvedValue({} as never);
     renderWithProviders(<SchedulesPage />);
     const user = userEvent.setup();
-    await user.click(await screen.findByTestId("schedule-enabled-toggle"));
+    await user.click(await screen.findByTestId("schedule-arm-toggle"));
     await waitFor(() => expect(api.disableTrigger).toHaveBeenCalledWith("healthy-agent", "t-1"));
+    expect(api.updateWorkflowTrigger).not.toHaveBeenCalled();
+  });
+
+  it("re-arms a disarmed row through the enable endpoint", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([row({ enabled: false, will_fire: false })]);
+    vi.mocked(api.enableTrigger).mockResolvedValue({} as never);
+    renderWithProviders(<SchedulesPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("schedule-arm-toggle"));
+    await waitFor(() => expect(api.enableTrigger).toHaveBeenCalledWith("healthy-agent", "t-1"));
+  });
+
+  it("routes a workflow row to the workflow trigger endpoint, keyed on id", async () => {
+    vi.mocked(api.listSchedules).mockResolvedValue([ZOMBIE]);
+    vi.mocked(api.updateWorkflowTrigger).mockResolvedValue({} as never);
+    renderWithProviders(<SchedulesPage />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByTestId("schedule-arm-toggle"));
+    // Keyed on artifact_id, not the display name — the workflow router takes an id.
+    await waitFor(() =>
+      expect(api.updateWorkflowTrigger).toHaveBeenCalledWith("wf-01", "zw-01", { enabled: false }),
+    );
+    expect(api.disableTrigger).not.toHaveBeenCalled();
   });
 
   it("requires confirmation before deleting, and then calls deleteTrigger", async () => {
