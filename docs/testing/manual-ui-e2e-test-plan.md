@@ -37,9 +37,13 @@ tell whether they were finished, half-way, or had misunderstood.
   reader announced an unlabelled combobox. Found because a test could not query it by its
   visible label, which is the same thing a user of assistive tech experiences.
 
-**Still open:** the Publish feedback/duplicate defect below. It is the last piece of this
-flow that is wrong, and the strip makes it *more* visible rather than less — a user who
-clicks Publish now watches the strip not move.
+**Publish duplicate/feedback — fixed in 0.2.255 / 0.1.179.** Publish is now idempotent
+(returns the existing pending request rather than enqueuing a second) and the button
+latches to "Awaiting review". **Still open, structural:** a partial unique index on
+`(asset_id) WHERE status='pending_review'` would make the duplicate impossible rather than
+guarded, but creating it needs the two existing duplicate pairs resolved first — and they
+are not losslessly mergeable (within each pair one row pins a version and the other does
+not). Deleting rows from a live queue is an operator decision, not a migration's.
 
 ## Known gaps — schedule-lifecycle journey on EKS — 2026-08-02
 

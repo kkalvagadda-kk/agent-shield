@@ -21,8 +21,14 @@
 # the CLEANUP step: UI delete produced `deprecated` agent + `enabled=True` hourly
 # schedule. The step meant to tidy up was manufacturing the defect.
 #
-#   T-S95-001 — DELETE an agent -> its triggers are disarmed, with a reason recorded.
-#               RED before fix (enabled stayed true, no reason column).
+#   T-S95-001 — DELETE an agent -> its SCHEDULE trigger is REMOVED, and its WEBHOOK
+#               trigger is disarmed-but-kept. Deletion ends the artifact's life and a
+#               disarmed schedule on a deleted agent is inert, so it is only noise on
+#               an operations page (63 of 100 live rows were exactly that). Webhooks
+#               are exempt because webhook_clients.trigger_id is ON DELETE CASCADE —
+#               removing one would destroy the applications registered against it.
+#               Originally asserted disarm-and-keep; RED before the disarm fix
+#               (enabled stayed true, no reason column) and again before the reap.
 #   T-S95-002 — ARCHIVE a workflow -> same. RED before fix.
 #   T-S95-003 — QUARANTINE an agent -> same. A quarantined agent must not be woken
 #               by its own cron mid-incident; the pod is deliberately left running
@@ -229,16 +235,26 @@ async def main():
             return r.json()["id"]
 
         # ── T-S95-001: DELETE an agent ───────────────────────────────────────────
+        # Both trigger kinds on ONE agent, so the asymmetry is proven rather than
+        # assumed: the schedule goes, the webhook stays (disarmed).
         await mk_agent(DEL_AGENT)
         t_del = await arm(DEL_AGENT)
+        rh = await c.post(f"/agents/{DEL_AGENT}/triggers",
+                          json={"trigger_type": "webhook", "alert_on_failure": False})
+        t_hook = rh.json()["id"] if rh.status_code in (200, 201) else None
         before = await trig_state(t_del)
         dr = await c.delete(f"/agents/{DEL_AGENT}")
-        after_en, after_reason = await trig_state(t_del)
-        record("T-S95-001 DELETE agent disarms its triggers and records a reason",
+        sched_en, _sched_reason = await trig_state(t_del)
+        hook_en, hook_reason = await trig_state(t_hook) if t_hook else (None, None)
+
+        record("T-S95-001 DELETE agent REMOVES its schedule trigger, KEEPS the webhook disarmed",
                dr.status_code == 204 and before[0] is True
-               and after_en is False and bool(after_reason),
+               and sched_en is None                      # row gone entirely
+               and (t_hook is None or (hook_en is False and bool(hook_reason))),
                f"delete={dr.status_code} before_enabled={before[0]} "
-               f"after_enabled={after_en} reason={after_reason!r}")
+               f"schedule_row_after={sched_en!r} (want None — deleted) "
+               f"webhook_enabled={hook_en!r} webhook_reason={hook_reason!r} "
+               f"(want False + a reason — deleting it would cascade away its webhook_clients)")
 
         # ── T-S95-003: QUARANTINE an agent ───────────────────────────────────────
         await mk_agent(QUAR_AGENT)

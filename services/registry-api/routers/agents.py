@@ -396,9 +396,15 @@ async def delete_agent(
     # `enabled=True` hourly schedule). Same transaction as the status change, or the
     # two can disagree. Re-activating does NOT re-arm: turning a schedule back on is
     # a deliberate act. See trigger_lifecycle for why not undeploy/suspend.
-    from trigger_lifecycle import disarm_triggers
+    from trigger_lifecycle import delete_schedule_triggers, disarm_triggers
 
+    # Two named operations, each doing one thing, rather than one call with a flag.
+    # Webhook triggers are DISARMED (deleting them cascades away their registered
+    # webhook_clients and credentials); schedule triggers are REMOVED, because a
+    # disarmed schedule on a deleted agent is inert and only clutters the operations
+    # page. See trigger_lifecycle.delete_schedule_triggers.
     disarmed = await disarm_triggers(db, agent_id=agent.id, reason="agent deleted")
+    await delete_schedule_triggers(db, agent_id=agent.id)
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
@@ -578,6 +584,52 @@ async def publish_agent(
     for t in tools:
         if risk_order.get(t.risk_level, 0) > risk_order.get(highest, 0):
             highest = t.risk_level
+
+    # ONE pending request per asset. This endpoint used to `db.add` unconditionally,
+    # so every call created another row: no query for an existing pending request, no
+    # uniqueness constraint behind it. The live cluster holds two agents with two
+    # pending requests each — submitted three seconds apart by two different callers,
+    # one pinning a version and one not.
+    #
+    # A second submission is not a second request. It is the same intent, restated —
+    # "publish this agent" — and answering it with another queue row pushes the
+    # ambiguity onto a reviewer, who then has two rows for one artifact with nothing
+    # saying which supersedes which. Approving one leaves its twin behind.
+    #
+    # Idempotent rather than 409: there is no withdraw endpoint and `status` admits
+    # only pending_review/approved/rejected, so a refusal would leave the operator
+    # with no way forward. Re-pointing the existing request at the version they are
+    # asking for keeps ONE row that always reflects the latest intent, which is what
+    # the reviewer needs to see. docs/bugs/publish-click-gives-no-feedback.md
+    existing = (await db.execute(
+        select(PublishRequest).where(
+            PublishRequest.asset_id == agent.id,
+            PublishRequest.status == "pending_review",
+        ).order_by(PublishRequest.submitted_at.desc())
+    )).scalars().first()
+
+    if existing is not None:
+        if existing.source_version_id != target_version.id:
+            logger.info(
+                "publish_agent: agent=%r already pending (request=%s) — re-pointing "
+                "from version %s to %s",
+                name, existing.id, existing.source_version_id, target_version.id,
+            )
+            existing.source_version_id = target_version.id
+            existing.highest_risk_level = highest
+        else:
+            logger.info(
+                "publish_agent: agent=%r already pending (request=%s) — returning it "
+                "unchanged rather than enqueuing a duplicate",
+                name, existing.id,
+            )
+        agent.publish_status = "pending_review"
+        agent.updated_at = datetime.now(tz=timezone.utc)
+        await db.flush()
+        await db.refresh(existing)
+        # Same shape as the create path — the caller cannot tell the two apart, which
+        # is the point of idempotency: "publish this" succeeded either way.
+        return {"publish_request_id": str(existing.id)}
 
     # Create the publish request record, pinning the evaluated version
     pr = PublishRequest(

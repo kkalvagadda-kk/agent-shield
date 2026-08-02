@@ -443,6 +443,60 @@ for user in ('smoke-user', 'dev'):
 " 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# T-S17-010: publishing twice does not enqueue two requests
+#
+# `publish_agent` used to db.add() a PublishRequest unconditionally — no query for
+# an existing pending row, no uniqueness constraint. Two agents on the live cluster
+# ended up with two pending requests each (submitted 3s apart by two different
+# callers). A second submission is the SAME intent restated; answering it with
+# another queue row pushes the ambiguity onto a reviewer, who then has two rows for
+# one artifact with nothing saying which supersedes which.
+# docs/bugs/publish-click-gives-no-feedback.md
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S17-010: double publish is idempotent ---"
+run_test "T-S17-010 publishing twice returns the SAME request id and leaves ONE pending row" "
+import urllib.request, json, urllib.error
+base = 'http://localhost:8000/api/v1'
+name = 's17-dup-publish'
+try:
+    urllib.request.urlopen(urllib.request.Request(base + '/agents/' + name, method='DELETE'))
+except urllib.error.HTTPError:
+    pass
+req = urllib.request.Request(base + '/agents/',
+    data=json.dumps({'name': name, 'team': 'platform', 'description': 'double publish'}).encode(),
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+try:
+    urllib.request.urlopen(req)
+except urllib.error.HTTPError as e:
+    if e.code != 409: raise
+req = urllib.request.Request(base + '/agents/' + name + '/versions',
+    data=json.dumps({'image_tag': 'registry.internal/s17dup:v1'}).encode(),
+    headers={'Content-Type': 'application/json'}, method='POST')
+ver = json.loads(urllib.request.urlopen(req).read())
+# Clear the eval gate so publish is admissible at all.
+req = urllib.request.Request(base + '/agents/' + name + '/versions/' + ver['id'],
+    data=json.dumps({'eval_passed': True}).encode(),
+    headers={'Content-Type': 'application/json'}, method='PATCH')
+urllib.request.urlopen(req)
+
+def publish():
+    r = urllib.request.Request(base + '/agents/' + name + '/publish',
+        data=json.dumps({}).encode(),
+        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    return json.loads(urllib.request.urlopen(r).read())
+
+first = publish()
+second = publish()
+assert first['publish_request_id'] == second['publish_request_id'], (
+    f'two publishes produced DIFFERENT request ids: {first} vs {second} — a duplicate was enqueued')
+
+# And the caller cannot tell the two apart: idempotent means 'publish this' succeeded
+# either way, not that the second call errored.
+print('OK same request id: ' + first['publish_request_id'][:8])
+"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

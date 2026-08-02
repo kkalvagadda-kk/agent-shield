@@ -243,7 +243,7 @@ export default function PlaygroundPage() {
       return publishAgent(agentSelection!.agentName, { version_id: agentSelection?.versionId ?? undefined });
     },
     onSuccess: () => {
-      toast.success("Publish request submitted");
+      toast.success("Publish request submitted — an admin reviews it in Admin ▸ Publish Queue.");
       qc.invalidateQueries({ queryKey: ["agent", selectedAgent] });
     },
     onError: (err: unknown) => {
@@ -354,13 +354,35 @@ export default function PlaygroundPage() {
               {markAgentAdversarialPassedMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
               {markAgentAdversarialPassedMutation.isSuccess ? "Adversarial Passed" : "Mark Adversarial Passed"}
             </button>
+            {/* Latches once submitted. Its two siblings above already do this, and
+                Publish did not — it returned to looking un-clicked, so the only way
+                to tell whether the request had landed was to navigate to the agent
+                page and read the badge. That is what invites a second click, and a
+                second click used to enqueue a duplicate queue row for a reviewer to
+                untangle. docs/bugs/publish-click-gives-no-feedback.md */}
             <button
               onClick={() => publishAgentMutation.mutate()}
-              disabled={publishAgentMutation.isPending}
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 w-full"
+              disabled={publishAgentMutation.isPending || publishAgentMutation.isSuccess}
+              data-testid="playground-publish-agent"
+              title={
+                publishAgentMutation.isSuccess
+                  ? "Submitted — an admin approves it in Admin ▸ Publish Queue, then it still needs Deploy Latest from Marketplace"
+                  : "Submit this agent for publish review"
+              }
+              className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md disabled:opacity-50 w-full ${
+                publishAgentMutation.isSuccess
+                  ? "bg-green-600 text-white"
+                  : "bg-blue-600 text-white hover:bg-blue-700"
+              }`}
             >
-              {publishAgentMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
-              Publish Agent
+              {publishAgentMutation.isPending ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : publishAgentMutation.isSuccess ? (
+                <CheckCircle size={12} />
+              ) : (
+                <Send size={12} />
+              )}
+              {publishAgentMutation.isSuccess ? "Awaiting review" : "Publish Agent"}
             </button>
           </div>
         )}

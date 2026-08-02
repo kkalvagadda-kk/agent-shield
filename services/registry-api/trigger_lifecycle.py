@@ -20,11 +20,21 @@ defence-in-depth for the next lifecycle path that forgets to call this. Patching
 the read side would have been the bandaid: the gateway and the scheduler are separate
 services, and fixing one leaves the other armed.
 
-DISARM, NEVER DELETE
---------------------
-`enabled = false` plus a reason. Reversible, and it keeps the record of what was armed.
-Re-arming is an explicit human act — reactivating an artifact does NOT restore its
-triggers. A revoke must lock the door, not leave it ajar pending an un-delete.
+DISARM FOR REVERSIBLE TRANSITIONS; DELETE SCHEDULES ON AGENT DELETE
+------------------------------------------------------------------
+`enabled = false` plus a reason is the default: reversible, and it keeps the record of
+what was armed. Re-arming is an explicit human act — reactivating an artifact does NOT
+restore its triggers. A revoke must lock the door, not leave it ajar pending an
+un-delete. Archive and quarantine use this and nothing else.
+
+Agent DELETE additionally REMOVES the agent's `schedule` triggers
+(`delete_schedule_triggers`). Deletion ends the artifact's life, and a disarmed
+schedule on a deleted agent is inert — it cannot fire (disarmed in this same
+transaction, and T-S95-004 proves the scheduler ignores it regardless) — so keeping it
+only adds noise to an operations page that exists to surface schedules that MATTER.
+63 of 100 schedule rows on the live cluster were this. Webhook triggers are exempt:
+`webhook_clients.trigger_id` is ON DELETE CASCADE, so removing one would silently
+destroy the applications registered against it.
 
 NOT CALLED FROM UNDEPLOY/SUSPEND, on purpose. Undeploy is reversible infrastructure,
 not artifact death; disarming there would silently lose schedules across a redeploy.
@@ -87,6 +97,50 @@ async def disarm_triggers(
         logger.info(
             "disarmed %d trigger(s) on %s=%s — %s", count, column, target, reason
         )
+    return count
+
+
+async def delete_schedule_triggers(db: AsyncSession, *, agent_id) -> int:
+    """Remove an agent's SCHEDULE triggers outright. Returns how many were deleted.
+
+    WHY DELETE HERE WHEN THE MODULE RULE IS "DISARM, NEVER DELETE"
+    -------------------------------------------------------------
+    Disarming is right for *reversible* transitions — archive, quarantine — where the
+    artifact may come back and the operator needs to know what was armed. Deletion is
+    the end of the artifact's life, and a disarmed schedule on a deleted agent is not
+    an operations concern: `delete_agent` disarms in the same transaction and
+    T-S95-004 proves the scheduler ignores the row even if someone force-re-arms it.
+    So it is inert, and inert rows on an operations page are noise — 63 of the 100
+    schedule rows on the live cluster were exactly this.
+
+    SCHEDULES ONLY, DELIBERATELY. `webhook_clients.trigger_id` is
+    `ON DELETE CASCADE`, so deleting a webhook trigger silently destroys the
+    applications registered against it and their credentials. Webhook triggers keep
+    the disarm treatment; this function will not touch them.
+
+    RUN LINKAGE IS LEFT ALONE. `agent_runs.trigger_id` is an unconstrained column,
+    not a foreign key, so deleting the trigger strands the value rather than
+    cascading. That is the better trade: the run row still records WHICH trigger
+    fired it, which is the forensic question worth answering, and nulling it would
+    destroy that to tidy a reference nothing enforces. A future migration adding an
+    FK here must reckon with these orphans — that is the cost, stated.
+
+    Not called from archive or quarantine. Quarantine is incident response, and
+    destroying a schedule's configuration mid-incident removes evidence.
+    """
+    result = await db.execute(
+        text(
+            """
+            DELETE FROM agent_triggers
+             WHERE agent_id = :agent_id
+               AND trigger_type = 'schedule'
+            """
+        ),
+        {"agent_id": agent_id},
+    )
+    count = result.rowcount or 0
+    if count:
+        logger.info("deleted %d schedule trigger(s) on agent_id=%s", count, agent_id)
     return count
 
 
