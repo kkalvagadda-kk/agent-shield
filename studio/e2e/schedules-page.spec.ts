@@ -95,6 +95,7 @@ test.describe("schedules page", () => {
       const sbxRow = page.getByTestId(`schedules-row-${tSbx}`);
       const deadRow = page.getByTestId(`schedules-row-${tDead}`);
       await expect(sbxRow).toBeVisible({ timeout: 20_000 });
+      void tDead;
 
       // ── Armed, but blocked, and the reason names the CAUSE ───────────────────
       await expect(sbxRow.getByTestId("schedule-armed-badge")).toHaveText("Armed");
@@ -106,13 +107,19 @@ test.describe("schedules page", () => {
       // dispatch after the fact — the exact regression this page was built to end.
       await expect(sbxRow).not.toContainText(/name or service not known|errno -2/i);
 
-      // ── Disarmed by the lifecycle gate, and LISTED rather than hidden ────────
-      // Listing it is the feature: 37 zombie triggers were invisible precisely
-      // because nothing listed them.
-      await expect(deadRow).toBeVisible();
-      // REGRESSION (armed_at from created_at): this row rendered "Armed".
-      await expect(deadRow.getByTestId("schedule-armed-badge")).toHaveText("Disarmed");
-      await expect(deadRow.getByTestId("schedule-disarm-reason")).toContainText(/deleted|deprecated/i);
+      // ── Deleted agent: its SCHEDULE is gone from the page ────────────────────
+      // CONTRACT CHANGE (2026-08-02). This used to assert the row was still LISTED
+      // and Disarmed — the zombie-visibility guarantee. Agent delete now REMOVES
+      // schedule triggers outright (trigger_lifecycle.delete_schedule_triggers +
+      // migration 0078), because a disarmed schedule on a deleted agent is inert
+      // (T-S95-004) and was two thirds of this page's rows.
+      //
+      // The guarantee is narrowed, not dropped: a kept-but-disarmed trigger on a
+      // dead artifact must still be listed with a reason. Webhooks are the kept
+      // case (deleting one cascades away its webhook_clients), and suite-96's
+      // T-S96-003/006 asserts it on the same agent. Asserted there rather than
+      // here because this page is scoped to trigger_type=schedule.
+      await expect(deadRow).toHaveCount(0);
 
       // ── The one write on this page, proven by reload ─────────────────────────
       // REGRESSION (Disarm -> `{armed:false}` -> 200, no-op): the toast and the
