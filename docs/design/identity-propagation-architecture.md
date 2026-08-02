@@ -1,7 +1,17 @@
 # Identity Propagation & Chain-of-Custody — Architecture
 
-**Status:** Proposed.
+**Status:** CONSOLIDATED — the single source of truth for run identity / chain-of-custody.
+Design proposed; **implementation 0% (re-verified in code 2026-08-02, see §3.0).**
+Absorbs `sdk-agent-gaps.md` Gap 1 and `authorization-model-spec.md` §Phase 3 + §10 (see §11).
 **Scope:** registry-api, declarative-runner, SDK, scheduler, event-gateway, eval-runner, Studio, Helm chart, Keycloak realm.
+
+> **§0 — Boundary.** Three authorization layers, independent, failing differently:
+> **RBAC** ([`rbac-and-artifact-authorization.md`](rbac-and-artifact-authorization.md)) — may this
+> *person* press Deploy? · **This doc** — whose authority does the resulting *run* carry, at every
+> hop? · **OPA** ([`opa-authorization-contract.md`](opa-authorization-contract.md)) — may this
+> *agent pod* call this *tool*? This doc owns identity **transport and attribution**, never the
+> allow/deny decision itself: it delivers `user_id` to OPA and a requester to HITL; those layers
+> decide.
 **Related:** [`authorization-model-spec.md`](todo/authorization-model-spec.md) (machine identity + OPA), [`hitl-approval-system.md`](hitl-approval-system.md), [`opa-authorization-contract.md`](opa-authorization-contract.md), [`event-gateway-threat-model.md`](event-gateway-threat-model.md) (T-8 internal-auth), [`mcp-tool-source-architecture.md`](mcp-tool-source-architecture.md) §7a (a downstream consumer of `RunContext.user_sub` — MCP's on-behalf-of identity mode for internal MCP servers is blocked on this doc's Phase 0–2), [`sdk-agent-gaps.md`](sdk-agent-gaps.md) Gap 1 (independently confirms Drop point 2 below from the SDK-runtime-parity angle). Addresses `spec.md` §"Internal-auth on `/api/v1/internal/*`".
 
 ---
@@ -30,7 +40,35 @@ The consequence is that tool governance — OPA policy + human-in-the-loop (HITL
 
 ## 3. Current state — where identity drops today
 
-Verified against source (file:line current as of this writing). Latest Alembic migration is `0050`; latest e2e suite is `suite-44`.
+Verified against source (file:line current as of this writing).
+
+### 3.0 Re-verification, 2026-08-02 — nothing has been built
+
+Every drop point below was re-checked against `main` @ `b73989f`. **The design is 0% implemented**,
+so the table stands unchanged in substance; the deltas are locations, not status:
+
+| Check | Result |
+|---|---|
+| `run_context.py` in registry-api / declarative-runner / SDK | **absent in all three** |
+| `run_context` JSONB column on `playground_runs` / `agent_runs` | **absent** (`models.py`) |
+| `AgentTrigger.created_by` | **absent** |
+| `internal.py::start_internal_run` auth | still `Depends(_get_db)` only (`internal.py:448-451`) |
+| SDK `server.py` identity header read | reads only `x-agentshield-trace-id` (`:203,222,265,304`) — no user identity on any route |
+| eval-runner self-asserted identity | still sending `X-User-Sub: eval-runner` (`eval-runner/main.py:129,148,1667`); still accepted at `playground.py:184,261` |
+| `opa_decisions` writer | **none** — model (`models.py:711`) + router + mount exist, zero writers. FK `Approval.opa_decision_id` never populated |
+
+**Two corrections to this document's own numbers:** latest Alembic migration is **`0078`** (not
+`0050`) and the latest e2e suite is **`suite-96`** (not `suite-44`). §5 and §6 are renumbered
+accordingly; the allocation across the three authorization docs is RBAC `0079`/`suite-97-98`,
+this doc `0080-0082`/`suite-99+`, OPA none.
+
+**One material plan improvement,** found by reading the running code rather than the original
+survey: all three durable dispatch paths — sandbox playground (`playground.py:356`), workflow
+member (`workflow_orchestrator.py:224`), and production/internal (`internal.py:198`) — now funnel
+through **one shared helper**, `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`),
+which did not exist as a single choke point when this design was written. Threading the RCT
+through that one keyword-only signature covers every durable path in a single edit, instead of
+Phase 1 + Phase 4 patching three call sites separately. That helper is now the designated seam.
 
 | # | Hop | What happens today | Evidence |
 |---|---|---|---|
@@ -165,18 +203,37 @@ Three internal callers (eval-runner, scheduler, event-gateway) assert identity u
 - **Receivers** (`playground.py::create_playground_run`, `internal.py::start_internal_run`) verify the token and derive `service_name` from it — never from the body/header.
 - **Human authorizer for autonomous runs**: `AgentTrigger` gains `created_by`; trigger-create endpoints set it from `require_user`; scheduler/event-gateway pass it as `RunContext.user_sub`. Pre-existing triggers get `created_by=NULL` (honest service-only lineage; no false attribution).
 
-### 4.6 OPA identity enforcement (Gate 5)
+### 4.6 OPA identity enforcement (Gate 5) — **ALREADY SHIPPED; this section is now a delta list**
 
-Add to `opa_policy/agentshield.rego`, reading the **registry-side** `agent.agent_class` (not the self-reported `input.agent_class`, so a compromised pod can't relabel itself):
+> **Correction (2026-08-02).** This section read as unbuilt work. It is not. WS-2 shipped the
+> identity floor and it is live in `services/registry-api/opa_policy/agentshield.rego`:
+>
+> ```rego
+> default user_identity_ok := false                                              # :22
+> user_identity_ok if { input.agent_class == "daemon" }                           # :101-103
+> user_identity_ok if { input.agent_class == "user_delegated"; input.user_id != "" }  # :105-108
+> ```
+>
+> AND-ed into `allow` at `:116`. **The floor landed before propagation did — which is precisely
+> what caused `docs/bugs/opa-user-identity-floor-denies-tools-missing-x-user-sub.md`, a total,
+> silent outage of tool use on every `user_delegated` agent.** The work in this document is
+> therefore not "adding a new risk"; it is paying off debt Gate 5 already created. Phase 2's
+> original sequencing note ("add Gate 5 only after the suite shows identity arrives") is
+> retro­actively inverted and cannot be followed.
 
-```rego
-user_identity_ok if { agent.agent_class != "user_delegated" }        # daemon/autonomous: no live human required
-user_identity_ok if { agent.agent_class == "user_delegated"; input.user_id != "" }
-user_identity_ok if { input.playground == true }
-user_identity_ok if { input.sandbox == true }
-```
+Three deltas remain between the shipped rule and this design's intent. Each is a real change, and
+this doc is the only place they are recorded:
 
-`AND`ed into the existing `allow` and `require_approval` rules. Enforcement applies only to `user_delegated`; daemons remain authorized on `sa_subject` + scopes.
+| # | Delta | Why it matters |
+|---|---|---|
+| D-1 | Shipped reads **`input.agent_class`** (self-reported by the pod); design calls for registry-side **`agent.agent_class`** from `data.agents[input.sa_subject]` | A compromised pod can relabel itself `daemon` and skip the identity floor entirely. This is the anti-relabel property in §7 — currently absent |
+| D-2 | No `playground`/`sandbox` exemption | Both inputs are carried (`opa-authorization-contract.md` §3) but unused. Whether they *should* exempt is a live question — the sandbox already auto-approves HITL above OPA (OPA contract §10.4), so an exemption here may be redundant rather than missing. **Decide, don't assume** |
+| D-3 | `user_identity_ok` gates **`allow` only**, not `require_approval` (`:120-124`) | Design said both. Harmless today *only because* the SDK returns early on `not decision.allow` (`graph_builder.py:303-308`) before reading `require_approval`. Load-bearing on that ordering — if the SDK ever checks approval first, an unidentified high-risk call would park an approval for a call that is denied anyway |
+
+One place the shipped rule is **stricter** than this design, and should stay that way: the design's
+`agent.agent_class != "user_delegated"` passes an agent whose class is missing or unrecognized;
+the shipped `input.agent_class == "daemon"` denies it. Keep the shipped fail-closed shape when
+implementing D-1.
 
 ### 4.7 HITL / approval identity + wiring `opa_decisions`
 
@@ -187,27 +244,34 @@ user_identity_ok if { input.sandbox == true }
 
 ## 5. Data model changes (contiguous migrations)
 
+Renumbered 2026-08-02 — the head on disk is `0078`, and `0079` is reserved for RBAC phase R5
+(`rbac-and-artifact-authorization.md` §5).
+
 | Migration | Table | Change |
 |---|---|---|
-| `0051_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
-| `0052_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
-| `0053_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
+| `0080_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
+| `0081_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
+| `0082_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
 
 All idempotent (`IF NOT EXISTS`), data-preserving.
 
 ## 6. Implementation plan
 
-Each phase is a real vertical slice with its own bash e2e suite (`suite-45` onward), registered in `run-all.sh`, and bumps the touched image tags in **both** `scripts/deploy-cpe2e.sh` and `charts/agentshield/values.yaml`.
+Each phase is a real vertical slice with its own bash e2e suite (**`suite-99` onward** — renumbered
+2026-08-02; `suite-96` is the head on disk and `suite-97/98` are reserved for RBAC), registered in
+**`scripts/test-manifest.txt`** (not `run-all.sh` — that is now a thin wrapper with no registry of
+its own; verify with `bash scripts/run-tests.sh --audit`), and bumps the touched image tags in
+**both** `scripts/deploy-cpe2e.sh` and `charts/agentshield/values.yaml`.
 
-**Phase 0 — Shared token infra.** `run_context.py` ×3; `AGENTSHIELD_INTERNAL_SIGNING_KEY` secret + chart wiring; resolve the Deployment backing the shared `declarative-runner` Service (not found under any current chart template — must be located for the secret mount). *e2e:* `suite-45` mint/verify/expiry/tamper/cap. *Tags:* registry-api, declarative-runner, SDK version.
+**Phase 0 — Shared token infra.** `run_context.py` ×3; `AGENTSHIELD_INTERNAL_SIGNING_KEY` secret + chart wiring; resolve the Deployment backing the shared `declarative-runner` Service (not found under any current chart template — must be located for the secret mount). *e2e:* `suite-99` mint/verify/expiry/tamper/cap. *Tags:* registry-api, declarative-runner, SDK version.
 
-**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; `_dispatch_durable_run` sends the RCT header; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0051` + write the anchor at insert. *e2e:* `suite-46` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
+**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0080` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
 
-**Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-46b` approve after the token would have expired, assert identity still present.
+**Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-101` approve after the token would have expired, assert identity still present.
 
-**Phase 2 — SDK pod runtime + Rego Gate 5.** `server.py` reads/verifies the RCT header; `start_chat` mints on the production path; transition window accepts legacy `x-user-sub` (RCT wins). Add Gate 5 **only after** the suite shows user_delegated agents reliably carry `user_id`. *e2e:* `suite-47` user_delegated denied without identity; **daemons explicitly asserted unaffected**.
+**Phase 2 — SDK pod runtime + Gate 5 hardening.** `server.py` reads/verifies the RCT header (today it reads only `x-agentshield-trace-id`); `start_chat` mints on the production path; transition window accepts legacy `x-user-sub` (RCT wins). **Gate 5 already exists** — this phase does not add it; it closes the three deltas in §4.6 (D-1 registry-side `agent_class`, D-2 decide the playground/sandbox question, D-3 `require_approval` gating), and D-1 is the only one that changes a security property. *Sequencing note:* the original "add Gate 5 only after identity arrives" is moot — the gate has been live and denying since WS-2, so Phase 1's real acceptance test is that the *existing* floor stops denying legitimate `user_delegated` traffic. *e2e:* `suite-102` user_delegated denied without identity; **daemons explicitly asserted unaffected**; self-reported-`daemon` relabel attempt denied (D-1's regression guard).
 
-**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0052` + wire schedule owner as `user_sub`. *e2e:* `suite-48` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
+**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0081` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
 
 > **Blast radius, measured (2026-08-02):** ~15 e2e suites POST to `/internal/runs/start`
 > without any token, and neither `services/scheduler/main.py` nor
@@ -224,9 +288,9 @@ Each phase is a real vertical slice with its own bash e2e suite (`suite-45` onwa
 > door in-process. It is deliberately NOT the same endpoint with a different caller. Blocked
 > on Phase 3; tracked in `docs/bugs/internal-run-door-has-no-authentication.md`.
 
-**Phase 4 — Handoff / supervisor lineage.** `_dispatch`/`dispatch_to_orchestrator_pod`/`_run_step`/`orchestrate_*` gain `rct` and send the header (extended per hop); `internal.py` dispatch too; SDK `handoff.py` sends the RCT + docstring fix; close the unauthenticated `composite_workflows` edge. *e2e:* `suite-49` 3-hop A→B→C, assert C carries the original human + `actor_chain==["A","B"]`.
+**Phase 4 — Handoff / supervisor lineage.** Reduced by Phase 1: the durable dispatch seam is already threaded, so what remains is the *streaming* and in-pod hops — `_dispatch_stream` (`workflow_orchestrator.py:107`), `dispatch_to_orchestrator_pod`/`_run_step`/`orchestrate_*` gain `rct` and **extend** the chain per hop; SDK `handoff.py` sends the RCT + docstring fix; close the unauthenticated `composite_workflows` edge. *e2e:* `suite-104` 3-hop A→B→C, assert C carries the original human + `actor_chain==["A","B"]`.
 
-**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0053`; writer + reader wiring; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-50` approval requester + non-null `opa_decision_id`.
+**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0082`; writer + reader wiring — note `opa_decisions` is a fully-built table + router with **zero writers** today, so this phase is the one that makes `Approval.opa_decision_id` non-null for the first time; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-105` approval requester + non-null `opa_decision_id`.
 
 **Phase 6 — Cleanup.** Remove the legacy header shim; fix `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` (a separate approver-identity bug); revisit packaging the three `run_context.py` copies only if a 4th consumer appears.
 

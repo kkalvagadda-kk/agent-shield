@@ -1,5 +1,11 @@
 # RBAC Implementation Tasks
 
+> **SUPERSEDED (2026-08-02) BY [`docs/design/rbac-and-artifact-authorization.md`](../../design/rbac-and-artifact-authorization.md) §5.**
+> **The checkboxes below are wrong in both directions — do not trust them.** Every box is unticked,
+> yet T-1.1/T-1.2 (migration + table), T-2.1–T-2.4 (all helpers + `require_global_role`),
+> T-4.1/T-4.2 (creator auto-grant), T-4.6 (`/me` enrichment), and T-6.1–T-6.6 (Studio guards) all
+> shipped. What genuinely remains is re-cut as phases R1–R5 in the successor doc.
+
 **Plan**: `docs/plan/rbac/plan.md`  
 **Design doc**: `docs/design/rbac-design.md`  
 **Date**: 2026-07-06

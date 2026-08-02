@@ -1,6 +1,17 @@
 # Webhook Application Identity & Invoker Grants — Design Spec
 
-**Status**: Draft (design only — nothing in this doc is implemented yet)
+> **STATUS CORRECTED (2026-08-02): this is IMPLEMENTED, not a draft.** Migrations `0070`/`0071`
+> (applications table, `invoker` role, `application` grantee), `routers/applications.py`,
+> `routers/artifact_grants.py`, Studio `ArtifactGrantsList.tsx` / `InvokeAccessPanel.tsx`, and
+> `suite-83` all shipped; the `auth_mode` flip bug was fixed in `0.2.222`
+> (`docs/bugs/webhook-invoker-grant-auth-mode-flip.md`).
+>
+> **Still the reference** for the applications / HMAC / gateway-verification subsystem — not
+> superseded as a design. For the *platform-wide RBAC* picture (this doc's §2 gap list, which is
+> now partly closed), see
+> [`docs/design/rbac-and-artifact-authorization.md`](../rbac-and-artifact-authorization.md).
+
+**Status**: ~~Draft (design only — nothing in this doc is implemented yet)~~ → **IMPLEMENTED** (see banner)
 **Date**: 2026-07-19
 **Author**: Kalyan + Claude
 **Version**: 1.0.0
