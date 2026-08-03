@@ -783,13 +783,23 @@ registry-api:
     EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.14"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
+  # OOMKilled under the full 101-suite sweep on 2026-08-02, twice. It idles at
+  # ~404-412Mi — roughly 80% of the old 512Mi limit — so any real load crossed it.
+  # Every suite running during those two windows aborted with "ERROR: no running
+  # registry-api pod" rather than failing an assertion: suite-70 and suite-71 died
+  # that way with zero FAIL lines between them, which reads as a product regression
+  # and is not one.
+  #
+  # Requests raised with limits: leaving requests at 256Mi while the process idles
+  # above it tells the scheduler this pod is half the size it really is, which is how
+  # it lands on a node with no room to grow into.
   resources:
     requests:
       cpu: 100m
-      memory: 256Mi
+      memory: 512Mi
     limits:
       cpu: 500m
-      memory: 512Mi
+      memory: 1Gi
 
   livenessProbe:
     httpGet:
