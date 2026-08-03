@@ -484,7 +484,10 @@ def det(row):
 
 
 async def main():
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90, auth=BearerAuth())
+    # follow_redirects: a slashless collection path such as POST /teams/{t}/applications
+    # gets a 307 with an EMPTY body, which surfaced as 'app=307' with nothing to read.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90, auth=BearerAuth(),
+                          follow_redirects=True)
     # NO auth=BearerAuth() here. This client talks to the EVENT GATEWAY, which
     # authenticates a webhook by its own token/HMAC — and webhook_auth.presented_token()
     # resolves X-Webhook-Token -> Authorization: Bearer -> URL path token IN THAT ORDER,
@@ -846,7 +849,11 @@ async def main():
                 for label, payload in (("match", PAY_MATCH), ("miss", PAY_MISS)):
                     body = json.dumps(payload).encode()
                     hdrs = sign_webhook(secret, body)   # the PRODUCT'S signer
-                    hdrs["X-Client-Id"] = app_id   # the application id is the sender identity now
+                    # X-Client-Id carries the application NAME, not its uuid: the gateway
+                    # resolves the sender with lookup_application(team, name). Sending the
+                    # id produced a uniform 401 whose only explanation was server-side --
+                    # "no application matches this team/client_id" in the gateway log.
+                    hdrs["X-Client-Id"] = f"s77-app-{SFX}"
                     # content=body, NOT json= — the signature covers these exact bytes.
                     gr = await gw.post(f"{GW}/hooks/{AGENT}/{token}",
                                        content=body, headers=hdrs)
