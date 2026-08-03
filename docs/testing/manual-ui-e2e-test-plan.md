@@ -45,6 +45,25 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — intermittent agent-identity denial — 2026-08-03
+
+- **debt (intermittent, seen once in three consecutive runs) — a legitimate tool call
+  denied with `deny_agent_unauthenticated` during agent warm-up.** suite-77 T-S77-006
+  expects the write tool's `run_step` to carry the eval mock sentinel. On one of three
+  back-to-back runs it instead carried:
+
+  ```
+  Tool 's77_notify_oncall_...' denied by policy: deny_agent_unauthenticated
+  ```
+
+  with `recorded_side_effects` empty. The other two runs passed with the sentinel and no
+  code changed between them, so this is a **race in agent identity being ready before
+  the first tool call**, not a scoring defect. Recorded rather than left buried under a
+  passing rerun: an intermittent governance denial of a legitimate call is worth more
+  attention than a flaky assertion, because in production it would deny real work and
+  look like correct policy enforcement. Not yet root-caused — the reproducing run's pod
+  was cleaned up before its logs were read.
+
 ## Known gaps — e2e suites requiring deployed agent pods — 2026-08-03
 
 Working the backlog of suites that had never completed a run (registry-api 0.2.258).
