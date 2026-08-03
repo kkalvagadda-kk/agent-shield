@@ -73,6 +73,7 @@ SCHEDULER_TAG="0.1.5"   # 0.1.5: reads the trigger_liveness view instead of rest
 EVENT_GATEWAY_TAG="0.1.8"   # 0.1.8: reads the trigger_liveness view instead of restating the predicate.   # 0.1.7: lockstep liveness fix   # 0.1.7: same workflow-liveness fix, in lockstep.   # 0.1.6: publish_status (too strict)   # 0.1.6: same publish_status fix, changed in lockstep — separate images with different definitions of runnable is the drift this filter guards.   # 0.1.5: read-side status filter in webhook_auth._TRIGGER_SQL   # 0.1.4: Decision 30 gateway cutover — webhook_auth.py resolves applications+artifact_role_grants (not webhook_clients) — matches values.yaml
 PYTHON_EXECUTOR_TAG="0.1.0"
 EMBEDDING_SIDECAR_TAG="0.1.0"   # mirrors deploy-cpe2e.sh; values-eks.yaml deploys it, so EKS must push it
+ECHO_AGENT_TAG="0.1.0"   # 0.1.0: e2e fixture image for suite-2 SDK-agent leg. It existed only on the local Docker Desktop cluster from a hand-run docker build, so on EKS the pod sat in ImagePullBackOff ("registry.internal ... no such host") and T-S2-005 timed out. Built by both deploy scripts now, so the fixture follows the platform instead of one machine.
 EVAL_RUNNER_TAG="0.1.14"   # 0.1.14: parity with deploy-cpe2e.sh.   # 0.1.10:
 MINIO_CP1_TAG="0.1.0"
 PGVECTOR_TAG="17.6.0-portable"
@@ -181,6 +182,7 @@ else
   b event-gateway       "$EVENT_GATEWAY_TAG"      services/event-gateway/
   b python-executor     "$PYTHON_EXECUTOR_TAG"    services/python-executor/
   b eval-runner         "$EVAL_RUNNER_TAG"        services/eval-runner/
+  b echo-agent          "$ECHO_AGENT_TAG"         services/echo-agent/
   # values-eks.yaml points embeddingSidecar at ECR, so it MUST be pushed there or the
   # pod sits in ImagePullBackOff for the life of the deployment — which is exactly what
   # it had been doing, unnoticed, because nothing checked that every image the chart

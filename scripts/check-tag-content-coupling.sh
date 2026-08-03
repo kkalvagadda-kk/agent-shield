@@ -94,6 +94,7 @@ echo ""
 #   yaml:<dotted.path.in.values.yaml>            (a bare tag string)
 #   yamlimg:<dotted.path>                        (a full image ref — tag is after the ':')
 #   subchart:<chart dir name>                    (no top-level pin; sub-chart is authoritative)
+#   fileref:<path>@<image-name>                  (tag pinned in a plain file, e.g. an e2e fixture)
 # Multiple pins are separated by ','  — ALL of them must agree with the tag var.
 #
 # NOTE the two non-obvious ones:
@@ -117,6 +118,8 @@ SERVICES=(
   "scheduler|SCHEDULER_TAG|services/scheduler|subchart:scheduler"
   "embedding-sidecar|EMBEDDING_SIDECAR_TAG|services/embedding-sidecar|yaml:embeddingSidecar.image.tag"
   "mcp-proxy|MCP_PROXY_TAG|services/mcp-proxy|yaml:mcp-proxy.image.tag"
+  # Fixture image: no chart pin -- its only consumer is the suite that deploys it.
+  "echo-agent|ECHO_AGENT_TAG|services/echo-agent|fileref:scripts/e2e/suite-2-lifecycle.sh@echo-agent"
 )
 
 # Dirs under services/ that intentionally have NO image tag. EXPLICIT, never a silent
@@ -222,6 +225,21 @@ except Exception:
     print("<MISSING>"); sys.exit(0)
 print(str(((d or {}).get("image") or {}).get("tag", "<MISSING>")))
 PY
+      ;;
+    fileref)
+      # <path>@<image-name>: the tag a plain file pins for that image. Used for fixture
+      # images whose only consumer is an e2e suite rather than the Helm chart -- the
+      # coupling matters just as much: suite-2 pinned echo-agent:0.1.0 while nothing
+      # built it, so the reference silently described an image that did not exist.
+      python3 - "${arg%%@*}" "${arg##*@}" <<'FREF' 2>/dev/null
+import re, sys
+try:
+    txt = open(sys.argv[1]).read()
+except Exception:
+    print("<MISSING>"); sys.exit(0)
+m = re.search(r"/" + re.escape(sys.argv[2]) + r":([A-Za-z0-9._-]+)", txt)
+print(m.group(1) if m else "<MISSING>")
+FREF
       ;;
     *) echo "<BAD-SPEC>" ;;
   esac

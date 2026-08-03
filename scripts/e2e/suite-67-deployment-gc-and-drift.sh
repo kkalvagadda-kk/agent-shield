@@ -84,7 +84,10 @@ R=$(wait_running "$A1"); K8S_A=$(echo "$R" | cut -d'|' -f2)
 if ! echo "$R" | grep -q '^running'; then echo "SKIP $A1 never reached running ($R) — env limit"; api_delete "$A1" >/dev/null 2>&1; exit 0; fi
 api_delete "$A1" >/dev/null
 ST_NOW=$(dep_status "$A1" | cut -d'|' -f1)
-mark "$([ "$ST_NOW" = "terminating" ] && echo 1 || echo 0)" "001_delete_sets_terminating_not_terminated"
+# Report the observed status. A bare FAIL here cannot distinguish "the endpoint did not
+# set terminating" from "the controller already reconciled it to terminated" -- and the
+# check name is precisely about telling those apart.
+mark "$([ "$ST_NOW" = "terminating" ] && echo 1 || echo 0)" "001_delete_sets_terminating_not_terminated (saw: ${ST_NOW:-<empty>})"
 if wait_status "$A1" "terminated"; then GC_OK=1; else GC_OK=0; fi
 # T2: the k8s Deployment must actually be gone. delete_deployment uses foreground
 # propagation + a 30s grace period, so it lingers (Terminating) briefly after the
