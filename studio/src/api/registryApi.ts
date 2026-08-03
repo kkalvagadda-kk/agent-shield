@@ -1312,7 +1312,17 @@ export interface AgentTrigger {
   // routes to. Only meaningful for daemon (scheduled) triggers; null = default scope.
   approver_role?: string | null;
   // WS-2 T014 — the human (Keycloak `sub`) who armed/created this trigger (audit).
+  // NOTE: read by the backend, not decoration — `identity.py` turns this into
+  // `principal.run_by`/`user_id` for a `user_delegated` trigger, and fails closed
+  // when it is missing.
   armed_by?: string | null;
+  // Arm state IS `enabled` — there is no `armed`/`armed_at` column and no `armed`
+  // field on the PATCH body. Disarming is `{ enabled: false }`; `disarm_reason` says
+  // who did it and why (an author's pause and a lifecycle disarm share the switch).
+  // See lib/triggerArm.ts for the derivation and why the split was withdrawn.
+  disarmed_at?: string | null;
+  // Operator-readable prose, rendered verbatim. Not a machine code.
+  disarm_reason?: string | null;
   // WS-4 — how the event-gateway authenticates a hook call on this trigger.
   // "token" = the coarse per-trigger bearer token (pre-WS-4 posture, kept for
   // existing senders); "client_signed" = per-application client-id + HMAC.
@@ -1385,6 +1395,61 @@ export const deleteTrigger = async (
   triggerId: string
 ): Promise<void> => {
   await http.delete(`/agents/${agentName}/triggers/${triggerId}`);
+};
+
+// ---------------------------------------------------------------------------
+// Schedules — the cross-artifact operations read (R5)
+// ---------------------------------------------------------------------------
+// One row per trigger across BOTH agents and workflows. Read-only by design:
+// every write from the Schedules page routes back to the artifact-scoped
+// endpoints above (branching on `artifact_kind`), so there is still exactly one
+// writer per artifact kind.
+export type ScheduleArtifactKind = "agent" | "workflow";
+
+export interface ScheduleListItem {
+  trigger_id: string;
+  trigger_type: "schedule" | "webhook";
+  artifact_kind: ScheduleArtifactKind;
+  artifact_id: string;
+  artifact_name: string;
+  artifact_team: string | null;
+  // agents: active|archived|deprecated|quarantined · workflows: draft|published|archived
+  artifact_status: string;
+  cron_expression: string | null;
+  timezone: string | null;
+  next_fire_at: string | null;
+  input_payload: Record<string, unknown> | null;
+  // Arm state — `enabled` and nothing else. See lib/triggerArm.ts.
+  enabled: boolean;
+  armed_by: string | null;
+  disarmed_at: string | null;
+  disarm_reason: string | null;
+  // Computed server-side from the SAME predicate the scheduler reads, so this page
+  // cannot disagree with what actually runs. `why_not` is prose for an operator.
+  will_fire: boolean;
+  why_not: string | null;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  last_run_at: string | null;
+  last_run_error: string | null;
+  /**
+   * Up to 10 run statuses, NEWEST FIRST — the sparkline. Computed server-side in the
+   * same query as the rest of the row; fetching per row would be N+1 against an
+   * endpoint that already has the joins. A single last-run status cannot tell FLAKY
+   * from BROKEN from FINE.
+   */
+  recent_runs: string[];
+  alert_email: string | null;
+  alert_on_failure: boolean;
+}
+
+export const listSchedules = async (params?: {
+  trigger_type?: "schedule" | "webhook";
+}): Promise<ScheduleListItem[]> => {
+  const { data } = await http.get<ScheduleListItem[]>("/schedules", {
+    params: { trigger_type: params?.trigger_type ?? "schedule" },
+  });
+  return data;
 };
 
 // ---------------------------------------------------------------------------
@@ -1628,6 +1693,16 @@ export interface AgentHealth {
   last_run_status: string | null;
   next_fire_at: string | null;
   missed_fires: number | null;
+  // Why the badge is red, carried with the status that made it red. Without this
+  // the UI could show "Failing" and nothing else — which it did, directly above
+  // "Last Run: No runs yet".
+  //
+  // HISTORICAL: the most recent failed run's error. "What went wrong last time."
+  last_error: string | null;
+  // CURRENT: why this schedule cannot dispatch right now, independent of any run.
+  // "What is broken now" — the actionable one. Present ⇒ every fire will fail
+  // until it is fixed; absent ⇒ the config is sound whatever history says.
+  dispatch_error: string | null;
   // event-driven
   match_rate_24h: number | null;
   rejected_count_24h: number | null;
@@ -1635,6 +1710,27 @@ export interface AgentHealth {
 
 export const getAgentHealth = async (name: string): Promise<AgentHealth> => {
   const { data } = await http.get<AgentHealth>(`/agents/${name}/health`);
+  return data;
+};
+
+/**
+ * A schedule's own run history.
+ *
+ * Deliberately NOT `listDeploymentRuns`: every trigger-driven run has both
+ * deployment FK columns NULL, so a deployment-scoped read is always empty for a
+ * schedule, while the health badge reads across the whole agent — the two cards
+ * on the scheduled overview disagreed because they asked different questions.
+ * Keyed on `trigger_id`, both now answer from the same set.
+ */
+export const listTriggerRuns = async (
+  agentName: string,
+  triggerId: string,
+  params?: { limit?: number }
+): Promise<AgentRunItem[]> => {
+  const { data } = await http.get<AgentRunItem[]>(
+    `/agents/${agentName}/triggers/${triggerId}/runs`,
+    { params }
+  );
   return data;
 };
 

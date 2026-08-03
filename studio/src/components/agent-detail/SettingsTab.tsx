@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { KeyRound, Copy, Check, Plus, Trash2 } from "lucide-react";
+import { KeyRound, Copy, Check, Plus, Trash2, AlertTriangle } from "lucide-react";
 import {
-  listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent,
+  listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent, getAgentHealth,
 } from "../../api/registryApi";
 import InvokeAccessPanel from "../shared/InvokeAccessPanel";
 import ArtifactGrantsList from "../shared/ArtifactGrantsList";
@@ -25,6 +25,12 @@ interface FilterRow { field: string; op: string; value: string; }
 
 export default function SettingsTab({ agentName, agentId, agentTeam, memoryEnabled }: Props) {
   const qc = useQueryClient();
+  // Same producer the deployment Overview badge reads, so the two surfaces cannot
+  // give different answers about whether this agent's schedules can run.
+  const { data: health } = useQuery({
+    queryKey: ["agent-health", agentName],
+    queryFn: () => getAgentHealth(agentName),
+  });
   const { data: triggers = [] } = useQuery({
     queryKey: ["triggers", agentName],
     queryFn: () => listTriggers(agentName),
@@ -70,6 +76,28 @@ export default function SettingsTab({ agentName, agentId, agentTeam, memoryEnabl
             <Plus size={12} /> New schedule trigger
           </button>
         </div>
+        {/* ARM-TIME WARNING, conditional. `dispatch_error` is the live answer to "can a
+            schedule on this agent fire at all right now" — the same resolver the
+            dispatch door uses, so this panel cannot disagree with what a fire would do.
+            Shown whenever a schedule exists OR the operator is about to add one, since
+            both are moments where the answer changes their next action. Explaining the
+            failure afterwards is worth less than not arming a schedule that cannot run. */}
+        {health?.dispatch_error && (schedules.length > 0 || addSchedule) && (
+          <div
+            data-testid="settings-schedule-cannot-run"
+            className="mb-3 flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2.5"
+          >
+            <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-xs font-medium text-amber-800">
+                Schedules on this agent cannot fire yet
+              </p>
+              <p className="text-xs text-amber-700 mt-0.5 break-words">
+                {health.dispatch_error}
+              </p>
+            </div>
+          </div>
+        )}
         {addSchedule && (
           <NewScheduleForm
             agentName={agentName}

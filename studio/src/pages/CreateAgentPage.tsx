@@ -2,7 +2,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowLeft, Code2, Loader2, MousePointerClick, MessageSquare, ListChecks,
-  Clock, Webhook, Copy, Check, Plus, Trash2,
+  Clock, Webhook, Copy, Check, Plus, Trash2, AlertTriangle,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
@@ -123,6 +123,32 @@ function ScheduleFields({
   const payloadError = jsonError(payload);
   return (
     <div className="rounded-lg border border-slate-200 p-4 space-y-3 bg-slate-50/50">
+      {/* ARM-TIME WARNING. Schedules dispatch to PRODUCTION, and an agent being
+          created is by definition not there yet — so this schedule cannot fire until
+          the agent is published. Unconditional here for exactly that reason: there is
+          no state to query.
+
+          Without it the product accepted a schedule that could never run and said
+          nothing, so the operator found out only after the first failure. Reported as
+          "the scheduled run failed and the UX does not show any information why", then
+          again as "I still see this when deploying an agent that has a schedule" —
+          because Deploy targets sandbox, which a schedule never reads. Explaining a
+          failure after the fact is worth less than not setting it up. */}
+      <div
+        data-testid="schedule-not-in-production-notice"
+        className="flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2.5"
+      >
+        <AlertTriangle size={14} className="text-amber-500 shrink-0 mt-0.5" />
+        <p className="text-xs text-amber-800">
+          <span className="font-medium">This schedule will not fire yet.</span>{" "}
+          Schedules dispatch to <strong>production</strong>, and a new agent starts in
+          sandbox. Getting there takes three more steps after the eval passes:{" "}
+          <strong>Publish</strong> the agent, have it <strong>approved</strong> in
+          Admin&nbsp;▸&nbsp;Publish&nbsp;Queue, then <strong>Deploy Latest</strong> from
+          Marketplace — publishing alone only creates the catalog listing. The schedule is
+          saved either way, and the agent page tracks where it has got to.
+        </p>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         <label className="block">
           <span className="text-xs text-slate-500 uppercase">Cron expression</span>
@@ -631,7 +657,11 @@ const noCodeSchema = z.object({
     .regex(/^[a-z0-9-]+$/, "Lowercase letters, numbers, and hyphens only"),
   description: z.string().max(512).optional(),
   instructions: z.string().min(1, "Instructions are required"),
-  llm_provider_id: z.string().optional(),
+  // Required. An agent with no provider cannot call an LLM, so it can never
+  // complete a run — and it used to be accepted silently by a form that warns
+  // carefully about production. A scheduled agent created this way fails on every
+  // fire with a message about the model, long after the person who made it moved on.
+  llm_provider_id: z.string().min(1, "Pick a model — an agent without one cannot run."),
   tools: z.array(z.string()).optional(),
 });
 
@@ -873,8 +903,8 @@ function NoCodeForm({ team }: { team: string | null }) {
       </Field>
 
       {/* LLM Provider */}
-      <Field label="Model">
-        <select {...register("llm_provider_id")} className="input">
+      <Field label="Model" required error={errors.llm_provider_id?.message}>
+        <select {...register("llm_provider_id")} aria-label="Model" className="input">
           <option value="">— select LLM provider —</option>
           {providersData?.items.map((p) => (
             <option key={p.id} value={p.id}>

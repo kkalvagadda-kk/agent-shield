@@ -11,6 +11,17 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
+
+# The registry THIS cluster pulls from, read off the platform's own deployment rather
+# than hardcoded. The fixture image was pinned to registry.internal/... -- Docker
+# Desktop's local registry -- so on EKS the agent pod sat in ImagePullBackOff
+#   dial tcp: lookup registry.internal on 127.0.0.53:53: no such host
+# and T-S2-005 timed out after 180s reporting "no running pod", which reads as a
+# platform fault rather than an image that was never pushed to this cluster.
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-$(kubectl get deploy -n "$NAMESPACE" agentshield-registry-api \
+  -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's#/agentshield/.*##')}"
+: "${IMAGE_REGISTRY:?cannot determine the cluster image registry from agentshield-registry-api}"
+ECHO_AGENT_IMAGE="${IMAGE_REGISTRY}/agentshield/echo-agent:0.1.0"
 AGENTS_NS="${AGENTS_NS:-agents-platform}"
 PASS=0; FAIL=0; MANUAL=0
 
@@ -133,7 +144,7 @@ echo "--- T-S2-002: Create Agent Version with Tool Snapshot ---"
 VERSION_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 body = json.dumps({
-    'image_tag': 'registry.internal/agentshield/echo-agent:0.1.0',
+    'image_tag': '${ECHO_AGENT_IMAGE}',
     'tools': [
         {'name': 'lookup_order', 'risk': 'low'},
         {'name': 'issue_refund',  'risk': 'high'}
@@ -200,7 +211,13 @@ except urllib.error.HTTPError as e:
     else:
         print('agent_create_err:' + str(e.code)); sys.exit(0)
 
-# 2. Create a Tool record with high risk (no AssetGrant will exist for it)
+# 2. Create a Tool record with high risk (no AssetGrant will exist for it).
+#
+# owner_team must NOT be the deploying team. `tool_access.team_may_use_tool` returns
+# True when owner_team == team — a team implicitly may use its own tools — so a
+# 'platform'-owned tool deployed by 'platform' sails through the grant gate, the
+# ADVERSARIAL gate rejects a few lines later instead, and this test reported
+# \"422 but wrong error body\" while the gate under test was never reached.
 import time
 tool_name = 'restricted-tool-${TS}'
 try:
@@ -208,7 +225,7 @@ try:
         base + '/api/v1/tools/',
         data=json.dumps({
             'name': tool_name, 'type': 'native',
-            'risk_level': 'high', 'owner_team': 'platform'
+            'risk_level': 'high', 'owner_team': 'other-team-${TS}'
         }).encode(),
         headers={'Content-Type': 'application/json'}, method='POST'
     ), timeout=10)
@@ -231,7 +248,7 @@ try:
     r = urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/${GRANT_GATE_AGENT}/versions',
         data=json.dumps({
-            'image_tag': 'registry.internal/agentshield/echo-agent:0.1.0',
+            'image_tag': '${ECHO_AGENT_IMAGE}',
             'tools': [], 'eval_passed': True
         }).encode(),
         headers={'Content-Type': 'application/json'}, method='POST'

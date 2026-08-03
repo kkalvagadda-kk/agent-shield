@@ -65,7 +65,24 @@
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
-GATEWAY="${GATEWAY:-https://agentshield.127.0.0.1.nip.io:8443}"
+# The gateway is DERIVED from the cluster this run targets, not hardcoded to the
+# local one. It used to default to https://agentshield.127.0.0.1.nip.io:8443 — the
+# docker-desktop address — so running against EKS silently curled the LOCAL studio
+# and reported "served bundle does not contain 0.1.180" while EKS was serving exactly
+# that. A test that reads a different cluster than the one under test does not fail
+# loudly; it produces a confident, wrong answer about the right question.
+#
+# Falls back to the local address only when no Gateway is reachable, so a pure-local
+# run still works with no environment set.
+if [ -z "${GATEWAY:-}" ]; then
+  _elb=$(kubectl get gateway -n "${NAMESPACE:-agentshield-platform}" \
+           -o jsonpath='{.items[0].status.addresses[0].value}' 2>/dev/null || true)
+  case "$_elb" in
+    *.amazonaws.com) GATEWAY="https://${_elb}" ;;          # EKS: the real ELB hostname
+    *)               GATEWAY="https://agentshield.127.0.0.1.nip.io:8443" ;;
+  esac
+fi
+echo "    edge under test: ${GATEWAY}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 

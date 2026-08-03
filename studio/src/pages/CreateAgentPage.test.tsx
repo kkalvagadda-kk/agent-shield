@@ -21,6 +21,23 @@ import { listKBs, bindAgent } from "../api/knowledgeApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
+// Model is REQUIRED (an agent with no provider can never complete a run), so every
+// test that submits has to pick one — the same thing a user must now do.
+const PROVIDER = {
+  id: "prov-1",
+  name: "bedrock",
+  provider: "bedrock",
+  default_model: "us.anthropic.claude-sonnet-4-6",
+  team: "default",
+};
+
+async function pickModel() {
+  await userEvent.selectOptions(
+    await screen.findByRole("combobox", { name: /model/i }),
+    PROVIDER.id,
+  );
+}
+
 async function openNoCode() {
   renderWithProviders(<CreateAgentPage />);
   await userEvent.click(screen.getByRole("button", { name: /no-code/i }));
@@ -30,12 +47,43 @@ async function openNoCode() {
 // old flattened 4-way "Agent type" picker.
 describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
   beforeEach(() => {
-    mock(listProviders).mockResolvedValue({ items: [], total: 0 });
+    mock(listProviders).mockResolvedValue({ items: [PROVIDER], total: 1 });
     mock(listAllTools).mockResolvedValue([]);
     mock(listKBs).mockResolvedValue([]);
     mock(bindAgent).mockResolvedValue({});
     mock(createAgent).mockResolvedValue({ id: "agent-uuid-1", name: "wiz-agent", team: "default" });
     mock(createTrigger).mockResolvedValue({ token: "t", webhook_url: "https://x/hooks/wiz-agent/t" });
+  });
+
+  it("refuses to create an agent with no model, and says why", async () => {
+    // An agent without a provider cannot call an LLM, so it can never complete a
+    // run — and the wizard used to accept one silently while warning carefully
+    // about production. A SCHEDULED agent created that way fails on every fire,
+    // long after whoever made it has moved on. Found by creating exactly that
+    // agent during the schedule-lifecycle journey.
+    await openNoCode();
+    await userEvent.type(screen.getByPlaceholderText("my-agent"), "no-model-agent");
+    await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Pick a model — an agent without one cannot run\./i))
+        .toBeInTheDocument(),
+    );
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it("names the FULL three-step route to production on the schedule notice", async () => {
+    // "Publish the agent to make it run" was reachable but insufficient: publishing
+    // creates a catalog listing, not a production deployment, so an operator who
+    // followed it exactly got a schedule that still never fired.
+    // docs/bugs/publish-does-not-create-a-production-deployment.md
+    await openNoCode();
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+    const notice = await screen.findByTestId("schedule-not-in-production-notice");
+    expect(notice).toHaveTextContent(/Publish/i);
+    expect(notice).toHaveTextContent(/Publish Queue/i);
+    expect(notice).toHaveTextContent(/Deploy Latest/i);
+    expect(notice).toHaveTextContent(/only creates the catalog listing/i);
   });
 
   it("renders all three selectors: shape radios, trigger checkboxes, class radios", async () => {
@@ -73,6 +121,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
     await userEvent.click(screen.getByRole("radio", { name: /Durable/i }));
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     expect(mock(createAgent).mock.calls[0][0]).toEqual(
@@ -85,6 +134,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     await openNoCode();
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
     await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     expect(mock(createAgent).mock.calls[0][0]).toEqual(
@@ -103,6 +153,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
     await userEvent.click(screen.getByRole("radio", { name: /Durable/i }));
     await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     expect(mock(createAgent).mock.calls[0][0]).toEqual(
@@ -116,6 +167,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     await userEvent.type(screen.getByPlaceholderText("my-agent"), "wiz-agent");
     await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i })); // auto → daemon
     await userEvent.click(screen.getByRole("radio", { name: /User-delegated/i })); // user overrides back
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     expect(mock(createAgent).mock.calls[0][0]).toEqual(
@@ -162,6 +214,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
     fireEvent.change(screen.getByPlaceholderText(/weekly-report/), {
       target: { value: '{"task":"q3-report"}' },
     });
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() =>
       expect(createTrigger).toHaveBeenCalledWith(
@@ -177,7 +230,7 @@ describe("CreateAgentPage — Shape · Trigger · Class selectors (R1)", () => {
 // knowledge_search) after the agent is created.
 describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
   beforeEach(() => {
-    mock(listProviders).mockResolvedValue({ items: [], total: 0 });
+    mock(listProviders).mockResolvedValue({ items: [PROVIDER], total: 1 });
     // The tool list INCLUDES knowledge_search — the page must hide it.
     // listAllTools returns a flat, fully-paged array — not a page object.
     mock(listAllTools).mockResolvedValue([
@@ -217,10 +270,31 @@ describe("CreateAgentPage — Knowledge Bases picker (special config)", () => {
     await userEvent.click(within(picker).getByRole("button", { name: /add from catalog/i }));
     await userEvent.click(within(picker).getByRole("checkbox"));
     await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
+    await pickModel();
     await userEvent.click(screen.getByRole("button", { name: /^Create Agent$/i }));
     await waitFor(() => expect(createAgent).toHaveBeenCalled());
     await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
     // knowledge_search is never written into the hand-picked tools metadata.
     expect(mock(createAgent).mock.calls[0][0].metadata.tools).not.toContain("knowledge_search");
   });
+
+  it("warns at ARM TIME that a new agent's schedule will not fire yet", async () => {
+    // Prevention beats explanation. The wizard used to accept a schedule that could
+    // never run and say nothing, so the operator learned only after the first failure
+    // — reported as "the scheduled run failed and the UX does not show why", then
+    // again after clicking Deploy (which targets SANDBOX, a schedule never reads it).
+    // Unconditional here because an agent being created is definitionally not in
+    // production: there is no state to query.
+    await openNoCode();
+    expect(screen.queryByTestId("schedule-not-in-production-notice")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /Schedule/i }));
+
+    const notice = await screen.findByTestId("schedule-not-in-production-notice");
+    expect(notice).toHaveTextContent(/will not fire yet/i);
+    expect(notice).toHaveTextContent(/production/i);
+    // It must say what to DO, not merely that something is wrong.
+    expect(notice).toHaveTextContent(/publish/i);
+  });
+
 });

@@ -102,6 +102,11 @@ run_gate "tag⇄content coupling" "$ROOT/scripts/check-tag-content-coupling.sh"
 hdr "2. suite guards (no half-run may read green)"
 run_gate "suite guards + registration census" "$ROOT/scripts/check-suite-guards.sh"
 
+# A backtick in a driver body is command substitution, not punctuation. Cost two
+# misdiagnoses in one day ("line 565: decided: command not found"), both from comments
+# added while fixing something else.
+run_gate "e2e driver quoting" "$ROOT/scripts/check-e2e-driver-quoting.sh"
+
 hdr "3. filter-engine parity (the door E-4 scores == the door production runs)"
 # REUSED, not duplicated: this gate already exists and already runs inside
 # deploy-cpe2e.sh pre-build. The fast tier calls the same script.

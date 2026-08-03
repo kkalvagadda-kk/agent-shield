@@ -849,6 +849,123 @@ if caller:
 
 ---
 
+## Decision 34: Artifact liveness is ONE SQL view, not a predicate each service restates
+
+**Date:** 2026-08-01
+
+**Design doc:** `docs/design/todo/schedule-lifecycle-and-operations.md` R1.
+
+**Context:** Three images that share no Python each need to answer "is this artifact still runnable?" — the scheduler (`services/scheduler/main.py`), the event-gateway (`services/event-gateway/webhook_auth.py`), and registry-api. Stated independently it was wrong **twice in one day**: `w.status = 'published'` matched **0 of 140 rows** (nothing writes that value), and `w.publish_status = 'published'` was reachable but too strict — it disarmed schedules on workflows that legitimately run, turning suite-66 red.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: each service states it** | Every consumer writes the predicate in its own query | Zero coupling; but it was already wrong twice, and a fix to one consumer silently leaves the others armed |
+| **B: a shared Python helper** | One function imported everywhere | No — the three services vendor their own deps and share no package; a fourth copy is what this is trying to avoid |
+| **C: a SQL VIEW** | `trigger_liveness` (migration 0077) joins triggers to their artifact and exposes `artifact_is_live` | One definition, enforced at the layer all three already share (the database) |
+
+**Choice: C.** `artifact_is_live` is a **column, not a WHERE clause** — the Schedules page must be able to show dead rows, so the view exposes the fact and each consumer decides whether to filter on it.
+
+**Consequences / trade-offs:**
+- Changing liveness now means a migration, not a code edit. That is the point: it cannot be changed in one consumer and forgotten in another.
+- Columns are enumerated, not `SELECT *` — Postgres freezes `*` at view-creation time, so a later column addition would silently not appear.
+- `suite-95` T-S95-000 asserts the property structurally: the view carries the predicates, both consumers read it, **neither restates it**. It scans the whole router file, having once been pinned to a function name that did not exist.
+
+---
+
+## Decision 35: Lifecycle disarms triggers; re-arming is an explicit human act
+
+**Date:** 2026-08-01
+
+**Context:** No lifecycle path anywhere wrote to `agent_triggers`. A soft-deleted agent, an archived workflow, and a quarantined agent all kept firing. **37 triggers were live on dead artifacts**, including a never-published draft workflow firing every 15 minutes for days.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: read-side filter only** | Teach the scheduler to skip dead artifacts | Bandaid — the gateway is a separate service and would stay armed |
+| **B: write gate only** | Disarm at delete/archive/quarantine | Correct until the next lifecycle path forgets to call it |
+| **C: both** | Write gate + read-side filter as defence in depth | Two places to keep right — mitigated by Decision 34 making the read side one definition |
+
+**Choice: C**, plus: **reactivating an artifact does NOT re-arm its triggers.** A revoke must lock the door, not leave it ajar pending an un-delete.
+
+**Consequences / trade-offs:**
+- Re-enabling clears `disabled_reason`, so a stale explanation never sits beside an armed schedule. Both PATCH handlers share one interpreter (`apply_trigger_update`) — they had already drifted on exactly this.
+- **Undeploy and suspend deliberately do NOT disarm.** Reversible infrastructure is not artifact death; disarming there would silently lose schedules across a redeploy. "Armed but not deployed" is Decision 36's job.
+- Migration 0076 reaped the existing 37.
+
+---
+
+## Decision 36: One resolver owns "is it dispatchable" AND "where does it go"
+
+**Date:** 2026-07-29
+
+**Context:** Admission asked *"is ANY deployment running?"* (no environment filter) while dispatch hardcoded `-production` in the URL. A sandbox-only agent passed the door and then DNS-failed — **1,197 scheduled runs** died as `[Errno -2] Name or service not known`.
+
+**Choice:** `agent_endpoints.resolve_dispatch_target` answers both questions from the same row. The address is built from the row it just validated, never recomposed.
+
+**Consequences / trade-offs:**
+- It must check **both production legs**: `deployments(environment='production')` → `agents-{team}`, and Publish → `production_deployments` with its own minted `production-{artifact}-{id8}` namespace. The first version checked only the first and told a published agent it had no production deployment — advising the exact action that lands in the leg it could not see.
+- A refusal is **recorded as a failed run with a readable reason**, not raised as a 409 nobody reads.
+- The refusal text has been wrong twice: "deploy to production" was unreachable from the UI, then "Publish" was reachable but **insufficient** (it creates a catalog listing, not a running deployment). It now names all three steps. A remedy that completes and changes nothing is worse than one that visibly cannot be followed.
+
+---
+
+## Decision 37: The cross-artifact schedules read is deny-by-default and team-scoped
+
+**Date:** 2026-08-01
+
+**Context:** R7. A cross-artifact listing is exactly the shape Decision 33 was written about — and this endpoint was being written *after* that lesson, so it had no excuse to repeat it.
+
+**Choice:** `require_user` + team scoping applied **before the endpoint existed**, rather than after a leak. `platform-admin` sees all; a caller with no team assignment gets an **empty list**, never the unfiltered table.
+
+**Consequences / trade-offs:**
+- `suite-96` T-S96-002 asserts the `else` branch by calling the router function directly with a teamless sub — the HTTP hop is proven by every other case, and what needed proving was the branch.
+- **The sub-gap is still open:** `routers/triggers.py::list_triggers` has no auth dependency at all, so per-artifact trigger listing remains unauthenticated. Out of scope to retrofit (nine suites call it without a token) but recorded in the gap ledger. This endpoint was built deny-by-default specifically to avoid being the third instance of the class.
+
+---
+
+## Decision 38: A workflow is "live" when `status <> 'archived'` — so a DRAFT workflow's schedule fires
+
+**Date:** 2026-08-01 · **Supersedes R8 of the schedules brief**
+
+**Context:** The brief decided *"live for a workflow means `published`"*, consistent with Decision 20's eval gate. That decision was made on a false premise about the data.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: `status = 'published'`** | What the brief specified | **Matched 0 of 140 rows** — nothing writes that value. Would have disarmed every workflow schedule on the platform |
+| **B: `publish_status = 'published'`** | The column that is actually written | Reachable, but too strict — disarmed schedules on workflows that legitimately run; **suite-66 went red** |
+| **C: `status <> 'archived'`** | Anything not archived is live | Ships; keeps working schedules working |
+
+**Choice: C**, agreed under time pressure while unblocking the workstream.
+
+**Consequences / trade-offs — stated plainly because this is a live behavioural difference from the brief:**
+- **A draft workflow's schedule DOES fire.** Two are armed on the EKS cluster as of this writing.
+- Whether that is correct is **not settled** — it was chosen because A and B were both wrong, not because C was argued on merit. If drafts should not fire, that needs its own decision and its own predicate, not inheritance from a brief written against a column nobody sets.
+- `suite-95` T-S95-007 is the positive control that keeps this honest: a live workflow's schedule must be **visible** to the scheduler. Options A and B each broke it, and a negative-only test suite would have accepted both.
+
+---
+
+## Decision 39: Deleting an agent REMOVES its schedule triggers; webhooks are kept and disarmed
+
+**Date:** 2026-08-02 · **Narrows Decision 35 for one transition**
+
+**Context:** After Decision 35, deleted agents left disarmed schedule rows behind. On the live cluster **63 of 100** schedule rows belonged to agents deleted long ago, and 94 of 100 sat on dead artifacts — the Schedules page was two-thirds archaeology.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: keep disarming (status quo)** | Rows persist, disarmed, with a reason | Full forensics; but an operations page dominated by artifacts nobody can act on |
+| **B: hide dead rows in the UI** | Filter them out of the default view | Reversible, destroys nothing; but the row is still there and the page still has to explain it |
+| **C: delete schedule triggers on agent delete** | Remove the rows | Clean page; loses cron/payload config and strands run linkage |
+
+**Choice: C, scoped to `trigger_type='schedule'`.** Safe because such a row is **provably inert**: delete disarms in the same transaction, and T-S95-004 proves the scheduler ignores it even if force-re-armed by raw SQL.
+
+**Consequences / trade-offs:**
+- **Webhook triggers are exempt.** `webhook_clients.trigger_id` is `ON DELETE CASCADE` — deleting a webhook trigger silently destroys the applications registered against it and their credentials. They keep the Decision 35 treatment.
+- **Archive and quarantine are unchanged.** Quarantine is incident response; destroying a schedule's configuration mid-incident removes evidence.
+- **Run linkage is deliberately left dangling.** `agent_runs.trigger_id` is not a foreign key, so deletion strands the value rather than cascading. The run row keeps its record of which trigger fired it — the forensic question worth answering. A future migration adding an FK must reckon with these orphans.
+- Migration 0078 applied the rule to the backlog: 63 rows, scoped to schedule + agent + `status='deprecated'`. Irreversible, and the downgrade says so rather than raising.
+- **This invalidated five passing tests** — T-S95-001, T-S95-004, T-S95-005, T-S96-003/006, and `schedules-page.spec.ts`. Every one was *correct*, asserting the previous contract. T-S95-004 is the instructive case: it force-re-armed the deleted agent's trigger and asserted the scheduler could not see it — with the row gone it would have passed **vacuously**. Recorded here so the next person who writes "a deleted agent's schedule is still listed" finds the decision instead of a red test.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -886,3 +1003,9 @@ if caller:
 | 31 | Pluggable credential provider (external secret store) | Evolve credential storage from single-master-key Postgres-Fernet + K8s Secrets to a `CredentialProvider` interface (put/get/rotate/delete over a `CredentialRef` pointer); only the pointer lives in Postgres, the value moves to the backend. Backends: `FernetPgProvider` (dev/default = today), `K8sSecretProvider`, `VaultProvider`, `AwsSecretsManagerProvider`. Phase-4 (MCP OAuth 2.1) prerequisite — durably stores per-`(server,user)` refresh tokens + Decision 29 impersonation minting material (NOT short-lived minted access tokens, which stay ephemeral). Proxy containment improves: scoped IRSA/Vault path read replaces namespace-wide `secrets: get`. Recommended first external backend: AWS Secrets Manager via IRSA (platform already on EKS). Accepted; implementation deferred to Phase 4. Design: `docs/design/credential-provider-architecture.md`. |
 | 32 | Eval verdict has one owner, and provenance is explicit | The publish queue resolved a request's eval by `agent_name` only, so a reviewer could approve a release while reading **a different version's** score, rendered against a hardcoded `0.7`. Fix: server sends the verdict inputs, client only renders. Reuse the existing `effective_pass_threshold(run)` (`eval_runner.py:49`) — do **not** add a second resolver; that duplication IS the bug. Join the queue's eval on `PublishRequest.source_version_id`, falling back to `agent_name` only when the request pins no version — and carry an explicit **`eval_source: "version" \| "agent_latest" \| "none"`** discriminator so the fallback is visible rather than silent. Without it the fallback recreates the same bug quietly: one field, two meanings, reviewer can't tell which. Design: `docs/design/eval-ux-enrichment.md` Slice 0. |
 | 33 | Eval-run/dataset read visibility | **A now, B deferred.** `list_eval_runs` (`eval_runner.py:471`) and `list_datasets` (`datasets.py:72`) filter inside `if caller:` with **no `else:`**, and registry-api has no global auth middleware (`main.py:176` = CORS + trace-ID only) — so an **unauthenticated** caller gets an unfiltered full-table read of every eval run / every playground dataset. Same class `agents.py:167-170` already fixed and documented ("previously a missing caller skipped the filter entirely and leaked every agent"); `agents`/`tools`/`skills`/`composite_workflows` got the `else:`, these two did not because they have no `publish_status` to key the template on. **(A)** deny-by-default lands inside Slice 1, both routes, one commit, with a regression test that asserts the *unauthenticated* case is empty. **(B)** team-scoped reads — so an approver can see eval history for their team's agents — is deferred to its own slice: it changes the access model and collides with Decision 25's platform-wide `ENFORCE=False`. |
+| 34 | Artifact liveness | **ONE SQL view** (`trigger_liveness`, migration 0077) read by the scheduler, the event-gateway and registry-api — never restated per service. Stated independently it was wrong twice in one day (`w.status='published'` matched 0 of 140 rows; `publish_status='published'` was too strict and broke suite-66). `artifact_is_live` is a COLUMN not a WHERE, so the Schedules page can still show dead rows. |
+| 35 | Trigger lifecycle | Delete/archive/quarantine **disarm** an artifact's triggers in the same transaction as the status change, with a recorded reason; the read side filters too (defence in depth across two services). **Reactivating does NOT re-arm** — a revoke locks the door rather than leaving it ajar. Undeploy/suspend deliberately do not disarm: reversible infra is not artifact death. |
+| 36 | Trigger dispatch | **One resolver** (`resolve_dispatch_target`) answers admissibility AND address from the same row, across **both** production legs (`deployments(environment='production')` and Publish → `production_deployments`). Replaces an env-blind guard + a hardcoded `-production` URL that DNS-failed 1,197 scheduled runs. Refusal is a recorded failed run with a readable reason, not a 409. |
+| 37 | Schedules read | Deny-by-default + team-scoped, applied **before** the endpoint existed rather than after a leak (the Decision 33 shape). `platform-admin` sees all; no team ⇒ empty list. Sub-gap still open: `list_triggers` has no auth at all. |
+| 38 | Workflow liveness | `status <> 'archived'` — **supersedes R8's `published`**, which matched 0 rows, and `publish_status`, which was too strict. Consequence, unsettled: **a DRAFT workflow's schedule fires.** Chosen because the alternatives were both wrong, not argued on merit; revisit as its own decision. |
+| 39 | Agent delete | **Removes** schedule triggers (migration 0078 reaped 63); webhooks are kept-and-disarmed because `webhook_clients.trigger_id` is ON DELETE CASCADE. Archive/quarantine unchanged. Safe because such a row is provably inert (T-S95-004). Invalidated five correct tests — recorded so the next person finds the decision, not a red test. |

@@ -1925,6 +1925,13 @@ class AgentTrigger(Base):
     alert_on_failure: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true")
     )
+    # WHY a trigger is disabled, set by trigger_lifecycle.disarm_triggers when the
+    # artifact is deleted/archived/quarantined (migration 0076). Without it a
+    # system disarm is indistinguishable from a colleague flipping the toggle, and
+    # the operator cannot tell whether re-enabling is safe. Cleared when a human
+    # re-enables — a stale reason on an armed trigger reads as current.
+    disabled_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_at: Mapped[datetime | None] = mapped_column(_TSTZ, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )

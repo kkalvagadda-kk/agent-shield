@@ -1,5 +1,17 @@
 import { test, expect } from "@playwright/test";
 
+/**
+ * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
+ * every wizard submit must choose one — the same step a user now takes. Selects
+ * the first real provider rather than a fixed id, since seeded providers differ
+ * per cluster.
+ */
+async function pickModel(page: import("@playwright/test").Page) {
+  const select = page.getByLabel("Model", { exact: true });
+  const value = await select.locator("option").nth(1).getAttribute("value");
+  if (value) await select.selectOption(value);
+}
+
 // ---------------------------------------------------------------------------
 // create-agent-wizard.spec.ts
 //   Proves the create-agent wizard exposes the THREE independent axes (R1):
@@ -58,6 +70,7 @@ test.describe("create-agent wizard — Shape · Trigger · Class (R1)", () => {
     const createResp = page.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
     );
+    await pickModel(page);
     await page.getByRole("button", { name: /^Create Agent$/i }).click();
     const resp = await createResp;
     expect(resp.status()).toBe(201);
@@ -71,5 +84,57 @@ test.describe("create-agent wizard — Shape · Trigger · Class (R1)", () => {
     await page.reload();
     await page.getByRole("button", { name: "settings" }).click();
     await expect(page.getByLabel(/Authority/i)).toHaveValue("daemon");
+  });
+});
+
+// ── Route to production ──────────────────────────────────────────────────────
+// Added after the schedule-lifecycle journey. Reaching production takes six steps
+// across five screens, and the product used to describe ONE of them per warning,
+// with no sense of sequence — so an operator who published, watched it succeed,
+// and came back to an unchanged screen had no way to tell what remained.
+test.describe("route to production", () => {
+  test("a scheduled agent shows where it is on the path, and the last step is the real one", async ({
+    page,
+  }) => {
+    await openNoCode(page);
+    const name = `wsz-route-${Date.now()}`;
+    await page.getByPlaceholder("my-agent").fill(name);
+    await page.getByRole("checkbox", { name: "Schedule (cron)" }).check();
+
+    // The wizard's own notice must name the FULL path, not just "Publish".
+    // docs/bugs/publish-does-not-create-a-production-deployment.md
+    const notice = page.getByTestId("schedule-not-in-production-notice");
+    await expect(notice).toContainText(/Publish Queue/i);
+    await expect(notice).toContainText(/Deploy Latest/i);
+    await expect(notice).toContainText(/only creates the catalog listing/i);
+
+    await pickModel(page);
+    const created = page.waitForResponse(
+      (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
+    );
+    await page.getByRole("button", { name: /^Create Agent$/i }).click();
+    expect((await created).status()).toBe(201);
+
+    await page.goto(`/agents/${name}`);
+    const strip = page.getByTestId("route-to-production");
+    await expect(strip).toBeVisible({ timeout: 20_000 });
+
+    // Brand new agent: nothing done yet, and the strip says so rather than
+    // showing a single blocker.
+    await expect(page.getByTestId("route-step-sandbox")).toHaveAttribute("data-state", "current");
+    await expect(page.getByTestId("route-step-production")).toHaveAttribute("data-state", "todo");
+    await expect(page.getByTestId("route-to-production-summary")).toContainText(/steps left/i);
+
+    // Exactly ONE hint — the step they are on. Four simultaneous warnings is the
+    // state this replaces.
+    await expect(page.getByTestId("route-to-production-hint")).toHaveCount(1);
+
+    // Survives a reload: the strip is derived from server state, not local state.
+    await page.reload();
+    await expect(page.getByTestId("route-step-sandbox")).toHaveAttribute("data-state", "current", {
+      timeout: 20_000,
+    });
+
+    await page.request.delete(`/api/v1/agents/${name}`).catch(() => undefined);
   });
 });

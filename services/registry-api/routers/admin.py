@@ -396,15 +396,52 @@ async def approve_publish_request(
             art_desc = getattr(source_skill, "description", "") or ""
             art_team = getattr(source_skill, "team", "platform")
 
-        artifact = PublishedArtifact(
-            name=art_name or f"unnamed-{pr.asset_id}",
-            type=pr.asset_type,
-            description=art_desc,
-            source_id=pr.asset_id,
-            team=art_team or "platform",
-        )
-        db.add(artifact)
-        await db.flush()
+        final_name = art_name or f"unnamed-{pr.asset_id}"
+
+        # THE LOOKUP KEY MUST MATCH THE UNIQUENESS KEY.
+        # The select above dedupes on (source_id, type); the table's constraint is
+        # `published_artifacts_name_type_key` on (name, type). Those are different
+        # identities, so an artifact whose NAME is already published under a DIFFERENT
+        # source_id slips past the lookup and dies on the INSERT:
+        #
+        #   UniqueViolationError: duplicate key ... (name, type)=(s14-promote-test, agent)
+        #
+        # surfacing to the operator as a bare 500. It happens whenever an asset is
+        # deleted and recreated with the same name — the new row gets a new UUID, so
+        # source_id no longer matches, but the catalog still holds the old name.
+        # suite-14 has hit this on every run since 2026-07-11.
+        #
+        # Re-point rather than refuse: the catalog entry for a given name should
+        # describe whatever asset currently bears that name. A 409 would leave the
+        # operator with a publish they cannot complete and no way to release the name.
+        by_name = (await db.execute(
+            select(PublishedArtifact).where(
+                PublishedArtifact.name == final_name,
+                PublishedArtifact.type == pr.asset_type,
+            )
+        )).scalar_one_or_none()
+
+        if by_name is not None:
+            logger.info(
+                "approve_publish_request: catalog already holds %r (%s) under source_id=%s "
+                "— re-pointing to %s (the asset was most likely deleted and recreated)",
+                final_name, pr.asset_type, by_name.source_id, pr.asset_id,
+            )
+            by_name.source_id = pr.asset_id
+            by_name.description = art_desc
+            by_name.team = art_team or "platform"
+            artifact = by_name
+            await db.flush()
+        else:
+            artifact = PublishedArtifact(
+                name=final_name,
+                type=pr.asset_type,
+                description=art_desc,
+                source_id=pr.asset_id,
+                team=art_team or "platform",
+            )
+            db.add(artifact)
+            await db.flush()
 
     # Build config snapshot from the pinned version when available
     config_snapshot: dict = {}

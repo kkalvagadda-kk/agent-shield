@@ -1,0 +1,17 @@
+{
+  // Type-checks the Playwright specs, which tsconfig.json's `include: ["src"]`
+  // leaves out entirely. Playwright transpiles each spec with esbuild and does NOT
+  // type-check it, so an undefined import or a renamed export survives all the way
+  // to a runtime ReferenceError inside a browser run — which is how a spec fails for
+  // a reason that has nothing to do with the product it is testing.
+  //
+  // Separate file rather than adding "e2e" to the app config: the specs are Node +
+  // Playwright, the app is DOM + React, and merging the two lib sets makes each side
+  // accept globals the other does not have.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["e2e"]
+}

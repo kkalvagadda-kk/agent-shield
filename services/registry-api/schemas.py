@@ -1902,6 +1902,26 @@ class AgentHealthResponse(BaseModel):
     last_run_status: str | None = None
     next_fire_at: datetime | None = None
     missed_fires: int | None = None
+    # WHY this field exists: `health` went red purely from `last_run_status ==
+    # 'failed'`, and the reason lived only on a run row the scheduled overview
+    # never queried — so the UI showed a "Failing" badge directly above "No runs
+    # yet" and offered no way to learn why. A badge that cannot explain itself at
+    # its own source sends the operator to kubectl. Carried alongside the status
+    # it justifies, so the two can never be rendered apart.
+    #
+    # Strictly HISTORICAL: the error of the most recent failed run. It answers
+    # "what went wrong last time".
+    last_error: str | None = None
+    # Strictly CURRENT: why this schedule cannot dispatch AS OF NOW, independent of
+    # any run. It answers "what is broken right now", which is the actionable
+    # question and often has a different answer from `last_error` — after the
+    # operator fixes the cause, `dispatch_error` clears immediately while
+    # `last_error` still describes the fire that failed before the fix.
+    #
+    # Two fields, not one, deliberately. Decision 32's lesson was a single field
+    # carrying two meanings that the reader could not tell apart; overloading
+    # `last_error` with a live config problem would repeat it.
+    dispatch_error: str | None = None
 
     # event-driven
     match_rate_24h: float | None = None
@@ -1979,6 +1999,12 @@ class AgentTriggerResponse(BaseModel):
     cron_expression: str | None = None
     timezone: str | None = None
     enabled: bool
+    # Why a DISABLED trigger is disabled, when the system did it (migration 0076).
+    # Without this a lifecycle disarm looks identical to a colleague flipping the
+    # toggle, and the operator cannot tell whether re-enabling is safe. Cleared when
+    # a human re-enables, so it never describes an armed trigger.
+    disabled_reason: str | None = None
+    disabled_at: datetime | None = None
     filter_conditions: dict[str, Any] | list[dict[str, Any]] | None = None
     input_payload: dict[str, Any] | None = None
     alert_email: str | None = None
@@ -2613,3 +2639,55 @@ __all__ = [
 
 # Resolve the forward reference WorkflowRunTreeResponse → AgentRunResponse.
 WorkflowRunTreeResponse.model_rebuild()
+
+
+# ---------------------------------------------------------------------------
+# Schedules (R5) — cross-artifact operations view
+# ---------------------------------------------------------------------------
+class ScheduleListItem(BaseModel):
+    """One trigger, joined to its artifact and its most recent run.
+
+    Mirrors `studio/src/api/registryApi.ts::ScheduleListItem` field-for-field; the
+    page is written against this shape.
+    """
+    model_config = ConfigDict(from_attributes=True)
+
+    trigger_id: str
+    trigger_type: str
+    artifact_kind: str          # "agent" | "workflow"
+    artifact_id: str
+    artifact_name: str
+    artifact_team: str | None = None
+    artifact_status: str
+    cron_expression: str | None = None
+    timezone: str | None = None
+    next_fire_at: datetime | None = None
+    input_payload: dict[str, Any] | None = None
+    # ARM STATE IS `enabled`. There is no `armed_at` column and no `armed` field on
+    # AgentTriggerUpdate — the model has one switch, and a schedule fires iff it is on.
+    # This field briefly existed, mapped server-side from `created_at`, which made every
+    # row render an "Armed" pill including deleted agents the lifecycle gate had just
+    # disarmed. Synthesising a timestamp to satisfy a richer model that does not exist is
+    # how a field acquires two meanings; the consumers derive arm state from `enabled`.
+    enabled: bool
+    armed_by: str | None = None
+    disarmed_at: datetime | None = None
+    disarm_reason: str | None = None
+    # Computed from the SAME inputs dispatch uses — the `trigger_liveness` view for
+    # artifact liveness and `resolve_dispatch_target` for reachability — so this page
+    # cannot claim a schedule will run when a fire would refuse it. `why_not` is prose
+    # for an operator, and answers ONE question: the first blocking reason in the order
+    # they would act on it (disarmed -> artifact dead -> nowhere to dispatch).
+    will_fire: bool
+    why_not: str | None = None
+    last_run_id: str | None = None
+    last_run_status: str | None = None
+    last_run_at: datetime | None = None
+    last_run_error: str | None = None
+    # Up to 10 run statuses, NEWEST FIRST — the sparkline. Computed in the same query
+    # as the rest of the row: a per-row fetch would be N+1 against an endpoint that
+    # already has the joins. A single "last run" cannot tell FLAKY from BROKEN from
+    # FINE, which is the question an operator has when a schedule misbehaves.
+    recent_runs: list[str] = Field(default_factory=list)
+    alert_email: str | None = None
+    alert_on_failure: bool = True

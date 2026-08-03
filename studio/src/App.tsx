@@ -50,6 +50,7 @@ import PreferencesPage from "./pages/preview/PreferencesPage";
 import MultiAgentChatPage from "./pages/preview/MultiAgentChatPage";
 import PreviewConversationsPage from "./pages/preview/ConversationsPage";
 import ConversationsPage from "./pages/ConversationsPage";
+import SchedulesPage from "./pages/SchedulesPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -108,6 +109,12 @@ export default function App() {
               <Route path="/admin/grants" element={<RequireRole minRole="platform-admin"><AdminGrantsPage /></RequireRole>} />
               <Route path="/admin/approval-authority" element={<RequireRole minRole="platform-admin"><AdminApprovalAuthorityPage /></RequireRole>} />
               <Route path="/deployments" element={<DeploymentsPage />} />
+              {/* Schedule lifecycle (R5). Un-gated now that routers/schedules.py
+                  exists — the page's `will_fire` is computed from the SAME
+                  trigger_liveness view the scheduler reads and the SAME
+                  resolve_dispatch_target the run door uses, so it cannot claim a
+                  schedule will run when a fire would refuse it. */}
+              <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/approvals" element={<ApprovalsInboxPage />} />
               <Route path="/hitl" element={<HITLDashboardPage />} />
               <Route path="/playground" element={<PlaygroundPage />} />

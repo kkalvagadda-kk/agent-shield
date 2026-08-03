@@ -1,5 +1,10 @@
 # RBAC Implementation Plan
 
+> **SUPERSEDED (2026-08-02) BY [`docs/design/rbac-and-artifact-authorization.md`](../../design/rbac-and-artifact-authorization.md) §5.**
+> This plan's "Current state: Zero RBAC implementation" is no longer true — `rbac.py`, migration
+> `0044`, the delegation API, and the Studio guards all shipped. Plan from the successor doc's §5,
+> which is cut against verified state.
+
 **Design doc**: `docs/design/rbac-design.md`  
 **Decision**: `docs/decisions.md` §Decision 25  
 **Date**: 2026-07-06  

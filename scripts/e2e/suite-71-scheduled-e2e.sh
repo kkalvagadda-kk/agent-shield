@@ -38,8 +38,9 @@
 #               (same few-pods boundary suite-56/58/59 accept) — documented, never
 #               faked.
 #   T-S71-005 — ALERTING: a scheduled trigger with alert_on_failure=true + a known
-#               alert_email; a REAL scheduled run is forced to FAIL (durable
-#               dispatch to an undeployed production pod fails-closed) →
+#               alert_email; a REAL scheduled run is forced to FAIL (a sandbox-only
+#               agent cannot serve a production trigger, so resolve_dispatch_target
+#               REFUSES and the refusal is recorded fail-closed) →
 #               dispatch_failure_alert fires with THAT trigger's alert_email. The
 #               REAL observable in dev (SMTP_HOST unset) is the alerting log line
 #               `ALERT (log-only, SMTP_HOST unset) to=<email>` on the registry-api
@@ -78,6 +79,12 @@ echo ""
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: no running registry-api pod"; exit 1; fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "  driver pod: $API_POD"
 echo ""
 
@@ -106,6 +113,11 @@ from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
 HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 OUT = os.environ["S71_OUT"]
 SFX = uuid.uuid4().hex[:6]
@@ -211,7 +223,7 @@ async def main():
     sa_subject = None
     approval_id = None
     mode_results = {}   # hoisted: the finally-write references it even on an early crash
-    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0)
+    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0, auth=BearerAuth())
     try:
         pid = await prov(c)
 
@@ -461,12 +473,30 @@ async def main():
         record("T-S71-004 scheduled workflow modes park→async reviewer approve→resume (sequential gating; branching modes to strongest real state)", ok4, d4)
 
         # ═══ T-S71-005: alerting on a REAL forced scheduled FAILURE ══════════════
-        # A daemon+durable agent deployed to SANDBOX ONLY: it has a service identity
-        # + a running sandbox deployment (so /internal/runs/start passes its
-        # running-deployment check and resolve_principal succeeds), but the durable
-        # dispatch targets the UNDEPLOYED {agent}-production pod → dispatch_durable_run
-        # fails → _mark_agent_run_failed → dispatch_failure_alert with the trigger's
-        # alert_email. REAL failure path, no injected error.
+        # A daemon+durable agent deployed to SANDBOX ONLY. Trigger dispatch targets
+        # production, this agent has no production deployment, so
+        # `resolve_dispatch_target` REFUSES → `_record_denied_run` writes a failed
+        # AgentRun carrying the reason → `dispatch_failure_alert` fires with the
+        # trigger's alert_email. REAL failure path, no injected error.
+        #
+        # HISTORY — READ THIS BEFORE "SIMPLIFYING" THE FIXTURE. This case used to
+        # describe its own mechanism as: "it has a running sandbox deployment (so
+        # /internal/runs/start passes its running-deployment check) but the durable
+        # dispatch targets the UNDEPLOYED {agent}-production pod". That was not a
+        # fixture — that was a BUG, written down as if it were the design. The
+        # admission check ignored environment while dispatch hardcoded
+        # `-production`, so ANY sandbox-only agent DNS-failed on every fire; 1,197
+        # scheduled runs died that way, each reporting only
+        # `[Errno -2] Name or service not known`. This test was green throughout,
+        # because the defect was load-bearing on its fixture.
+        #
+        # The fixture is unchanged and still valid — a sandbox-only agent genuinely
+        # cannot serve a production trigger. What changed is that the refusal is now
+        # a deliberate, legible one instead of a DNS accident. If this case ever
+        # starts failing because the run does NOT fail, do not restore the old
+        # mechanism: the correct forced failure is to deploy to production and then
+        # scale that pod to zero. See suite-94 and
+        # docs/bugs/trigger-dispatch-environment-mismatch.md.
         pos_run = None; neg_run = None; d5 = ""
         try:
             await create_daemon_agent(c, FAILAGENT, pid, ["refund_action"])

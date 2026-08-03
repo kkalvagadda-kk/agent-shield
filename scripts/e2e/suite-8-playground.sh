@@ -562,7 +562,7 @@ fi
 # T-S8-018: POST /playground/approvals/{id}/decide → 200 decided=true
 # ---------------------------------------------------------------------------
 if [ -n "$PG_APPROVAL_ID" ]; then
-  run_test "T-S8-018 POST /playground/approvals/${PG_APPROVAL_ID:0:8}.../decide approved → 200 decided=true" "
+  run_test "T-S8-018 POST /playground/approvals/${PG_APPROVAL_ID:0:8}.../decide approved → 200 status=approved" "
 import urllib.request, json
 body = json.dumps({'decision': 'approved'}).encode()
 req = urllib.request.Request(
@@ -574,9 +574,17 @@ req = urllib.request.Request(
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'expected 200 got {r.status}'
 data = json.loads(r.read())
-assert data.get('decided') is True, f'decided should be True: {data}'
-assert data.get('decision') == 'approved', f'decision should be approved: {data}'
-print('self-approval succeeded: decided=True decision=approved')
+# The endpoint returns {approval_id, status, thread_id, agent_name, team}. It has NEVER
+# returned a 'decided' or 'decision' key -- git log -S on routers/playground.py finds no
+# commit -- so this asserted a contract that never shipped and failed on every run since
+# it was written. (No backticks anywhere in this file: these driver bodies sit inside a
+# double-quoted shell string, so backticked text is COMMAND SUBSTITUTED. That is how the
+# fix for this very assertion produced "line 565: decided: command not found".) The operation itself always
+# worked, which T-S8-018b (status=approved, read back) proves independently.
+assert data.get('status') == 'approved', f'status should be approved: {data}'
+assert data.get('approval_id') == '${PG_APPROVAL_ID}', f'approval_id echoed back: {data}'
+assert data.get('thread_id'), f'thread_id needed by the resume path: {data}'
+print('self-approval succeeded: status=approved, thread_id present')
 "
 
   run_test "T-S8-018b approval status=approved after decide" "

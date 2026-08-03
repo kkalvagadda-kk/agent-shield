@@ -1,6 +1,15 @@
 # AgentShield RBAC — Design Spec
 
-**Status**: Partially Implemented (foundation shipped, enforcement pending)  
+> **SUPERSEDED (2026-08-02) BY [`docs/design/rbac-and-artifact-authorization.md`](../rbac-and-artifact-authorization.md)**
+> — that doc is the state of record for control-plane authorization. Kept in place for history and
+> for the material not carried over (§9 Keycloak realm detail, §11 E2E walkthroughs).
+>
+> **§13.2 "TODO" is stale.** It was accurate on 2026-07-09; since then the delegation API
+> (`routers/artifact_grants.py`), the `invoker` role, and the applications model shipped, while
+> `ENFORCE=False` never flipped and `require_global_role` acquired zero callers. Do not plan from
+> §13 — the successor doc's §1 is code-verified with `file:line`.
+
+**Status**: SUPERSEDED — was "Partially Implemented (foundation shipped, enforcement pending)"  
 **Date**: 2026-07-06 (updated 2026-07-09)  
 **Author**: Kalyan + Claude  
 **Version**: 1.1.0  

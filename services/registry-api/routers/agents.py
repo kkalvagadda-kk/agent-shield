@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agent_endpoints import DispatchTargetError, resolve_dispatch_target
 from auth_middleware import get_optional_user
 from db import get_db
 from rbac import grant_creator_admin
@@ -389,13 +390,29 @@ async def delete_agent(
         )
         .values(status="terminating")
     )
+    # Disarm the agent's triggers in THIS transaction. A soft-delete used to leave
+    # them armed, so a deleted agent's cron kept firing forever — demonstrated in one
+    # click by the Chrome journey's leg 8 (delete produced `deprecated` agent +
+    # `enabled=True` hourly schedule). Same transaction as the status change, or the
+    # two can disagree. Re-activating does NOT re-arm: turning a schedule back on is
+    # a deliberate act. See trigger_lifecycle for why not undeploy/suspend.
+    from trigger_lifecycle import delete_schedule_triggers, disarm_triggers
+
+    # Two named operations, each doing one thing, rather than one call with a flag.
+    # Webhook triggers are DISARMED (deleting them cascades away their registered
+    # webhook_clients and credentials); schedule triggers are REMOVED, because a
+    # disarmed schedule on a deleted agent is inert and only clutters the operations
+    # page. See trigger_lifecycle.delete_schedule_triggers.
+    disarmed = await disarm_triggers(db, agent_id=agent.id, reason="agent deleted")
+    await delete_schedule_triggers(db, agent_id=agent.id)
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
     logger.info(
-        "delete_agent: soft-deleted agent '%s' (id=%s) → status=deprecated",
+        "delete_agent: soft-deleted agent '%s' (id=%s) → status=deprecated, disarmed %d trigger(s)",
         name,
         agent.id,
+        disarmed,
     )
 
 
@@ -429,6 +446,13 @@ async def quarantine_agent(
         )
 
     agent.status = "quarantined"
+    # Quarantine is a SECURITY action — a quarantined agent must not be woken by its
+    # own cron while the incident is being reviewed. The pod is deliberately left
+    # running for forensics (see the docstring), which makes disarming the triggers
+    # the only thing standing between "quarantined" and "still executing on a timer".
+    from trigger_lifecycle import disarm_triggers
+
+    await disarm_triggers(db, agent_id=agent.id, reason="agent quarantined")
     agent.updated_at = datetime.now(tz=timezone.utc)
     await db.flush()
 
@@ -560,6 +584,52 @@ async def publish_agent(
     for t in tools:
         if risk_order.get(t.risk_level, 0) > risk_order.get(highest, 0):
             highest = t.risk_level
+
+    # ONE pending request per asset. This endpoint used to `db.add` unconditionally,
+    # so every call created another row: no query for an existing pending request, no
+    # uniqueness constraint behind it. The live cluster holds two agents with two
+    # pending requests each — submitted three seconds apart by two different callers,
+    # one pinning a version and one not.
+    #
+    # A second submission is not a second request. It is the same intent, restated —
+    # "publish this agent" — and answering it with another queue row pushes the
+    # ambiguity onto a reviewer, who then has two rows for one artifact with nothing
+    # saying which supersedes which. Approving one leaves its twin behind.
+    #
+    # Idempotent rather than 409: there is no withdraw endpoint and `status` admits
+    # only pending_review/approved/rejected, so a refusal would leave the operator
+    # with no way forward. Re-pointing the existing request at the version they are
+    # asking for keeps ONE row that always reflects the latest intent, which is what
+    # the reviewer needs to see. docs/bugs/publish-click-gives-no-feedback.md
+    existing = (await db.execute(
+        select(PublishRequest).where(
+            PublishRequest.asset_id == agent.id,
+            PublishRequest.status == "pending_review",
+        ).order_by(PublishRequest.submitted_at.desc())
+    )).scalars().first()
+
+    if existing is not None:
+        if existing.source_version_id != target_version.id:
+            logger.info(
+                "publish_agent: agent=%r already pending (request=%s) — re-pointing "
+                "from version %s to %s",
+                name, existing.id, existing.source_version_id, target_version.id,
+            )
+            existing.source_version_id = target_version.id
+            existing.highest_risk_level = highest
+        else:
+            logger.info(
+                "publish_agent: agent=%r already pending (request=%s) — returning it "
+                "unchanged rather than enqueuing a duplicate",
+                name, existing.id,
+            )
+        agent.publish_status = "pending_review"
+        agent.updated_at = datetime.now(tz=timezone.utc)
+        await db.flush()
+        await db.refresh(existing)
+        # Same shape as the create path — the caller cannot tell the two apart, which
+        # is the point of idempotency: "publish this" succeeded either way.
+        return {"publish_request_id": str(existing.id)}
 
     # Create the publish request record, pinning the evaluated version
     pr = PublishRequest(
@@ -819,11 +889,17 @@ async def get_agent_health(
         resp.health = "failing" if failed > 0 else ("degraded" if awaiting > 0 else "healthy")
 
     elif mode == "scheduled":
-        last = (await db.execute(
-            select(AgentRun.status).where(AgentRun.agent_name == name)
+        # Select the status AND its reason in ONE query over ONE row. Fetching the
+        # reason separately would let the badge and the explanation come from
+        # different runs — a smaller copy of the bug this field exists to fix.
+        last_row = (await db.execute(
+            select(AgentRun.status, AgentRun.error_message)
+            .where(AgentRun.agent_name == name)
             .order_by(AgentRun.started_at.desc()).limit(1)
-        )).scalar_one_or_none()
+        )).first()
+        last = last_row.status if last_row else None
         resp.last_run_status = last
+        resp.last_error = (last_row.error_message if last_row else None) if last == "failed" else None
         resp.missed_fires = 0
         # Next fire time from the first enabled schedule trigger's cron.
         cron = (await db.execute(
@@ -840,7 +916,41 @@ async def get_agent_health(
                 resp.next_fire_at = croniter(cron, base).get_next(datetime)
             except Exception:  # bad cron / lib missing — leave null
                 resp.next_fire_at = None
-        resp.health = "failing" if last == "failed" else "healthy"
+
+        # CONFIG FIRST, HISTORY SECOND.
+        #
+        # This used to be `"failing" if last == "failed" else "healthy"` — health
+        # derived purely from the most recent run. That answered "did the last run
+        # fail?" when the operator is asking "is this schedule OK now?", and the two
+        # come apart in both directions:
+        #
+        #   * Fix the cause (deploy to production) and the badge stayed RED until the
+        #     next fire — up to an hour of "I fixed it and nothing changed". Reported
+        #     from the UI with a screenshot; this is that fix.
+        #   * A brand-new schedule on an agent that can NEVER dispatch read
+        #     "healthy", because no run had failed yet. The most broken state the
+        #     product can be in rendered green.
+        #
+        # So ask the resolver the live question. It is the same single owner the
+        # dispatch door uses, so the badge cannot disagree with what a fire would
+        # actually do.
+        try:
+            await resolve_dispatch_target(db, agent, environment="production")
+            resp.dispatch_error = None
+        except DispatchTargetError as exc:
+            resp.dispatch_error = str(exc)
+
+        if resp.dispatch_error:
+            # Cannot dispatch: every fire WILL fail until this is fixed. Actionable now.
+            resp.health = "failing"
+        elif last == "failed":
+            # Config is sound and a run still failed — a real problem, but a different
+            # one: worth investigating rather than blocking, and the run rows carry the
+            # detail. `degraded` keeps it visibly amber without claiming the schedule
+            # can never work, which is what `failing` now means.
+            resp.health = "degraded"
+        else:
+            resp.health = "healthy"
 
     else:  # event-driven
         rate = (completed / total) if total else None

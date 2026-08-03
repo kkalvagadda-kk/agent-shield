@@ -113,6 +113,53 @@ if r.status_code != 404:
 print('OK')
 " && pass "T-S39-006 — unknown deployment → 404" || fail "T-S39-006"
 
+# T-S39-007 — every status the CATALOG deployment router writes is a value the
+# production_deployments CHECK constraint actually admits.
+#
+# WHY THIS AND NOT A LIVE SUSPEND: the cases above drive the SANDBOX path
+# (/agents/{name}/deployments -> the `deployments` table), whose constraint DOES
+# admit "suspending". The catalog path writes to `production_deployments`, whose
+# constraint does not — so `PATCH /catalog/{id}/deployments/{did} {"action":"suspend"}`
+# raised CheckViolationError and answered 500 on every call, and this suite stayed
+# green throughout because it never touched that table.
+#
+# Asserting the SET rather than replaying one action fixes the class: any future
+# status literal that drifts from the constraint fails here, without needing a
+# published artifact + production deployment fixture to exist first.
+# docs/bugs/production-deployment-suspend-500.md
+kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
+import asyncio, re, sys
+from sqlalchemy import text
+from db import AsyncSessionLocal
+
+# Scan the WHOLE router, not one handler: catalog.py has TWO status writers
+# (update_deployment and patch_production_deployment_status) plus the initial
+# ProductionDeployment(status=...) at deploy time, and every one of them is
+# bound by the same constraint. An earlier version of this check pinned a single
+# function name, could not find it, and failed — correctly, but for the wrong
+# reason. Every ProductionDeployment status literal in this file must be legal.
+src = open('/app/routers/catalog.py').read()
+written = sorted(set(re.findall(r'status\s*=\s*[\"\x27]([a-z_]+)[\"\x27]', src)))
+
+async def m():
+    async with AsyncSessionLocal() as s:
+        d = (await s.execute(text(
+            \"SELECT pg_get_constraintdef(oid) FROM pg_constraint \"
+            \"WHERE conname='production_deployments_status_check'\"))).scalar()
+    if not d:
+        print('FAIL constraint production_deployments_status_check not found'); sys.exit(1)
+    allowed = set(re.findall(r\"'([a-z_]+)'\", d))
+    bad = [w for w in written if w not in allowed]
+    print(f'writes={written}')
+    print(f'allowed={sorted(allowed)}')
+    if not written:
+        print('FAIL parsed zero status literals — this check would pass vacuously'); sys.exit(1)
+    if bad:
+        print(f'FAIL written but REJECTED by the constraint: {bad}'); sys.exit(1)
+    print('OK')
+asyncio.run(m())
+" && pass "T-S39-007 — catalog deployment statuses all satisfy the production CHECK" || fail "T-S39-007"
+
 echo ""
 echo "==> Suite 39 Results: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ] || exit 1

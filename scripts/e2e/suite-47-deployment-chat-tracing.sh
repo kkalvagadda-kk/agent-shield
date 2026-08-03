@@ -59,7 +59,8 @@ httpx.post('http://localhost:8000/api/v1/agents/s47-trace-a/versions',
 " 2>/dev/null || true
 
 echo "[T-S47-001/002] _create_traced_chat_run opens a trace and wires it to both rows"
-RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+_RAW=$(mktemp)
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import asyncio, datetime
 from db import AsyncSessionLocal
 from sqlalchemy import select
@@ -86,6 +87,11 @@ async def m():
         # The helper commits internally (mirrors the real chat POST path).
         run, agent_run, trace_id = await _create_traced_chat_run(
             db, agent=a, deployment=dep, user_sub='e2e-s47',
+            # run_by became a required kwarg on 2026-07-15 (WS-2 daemon identity).
+            # For an interactive chat resolve_principal returns the caller sub, so
+            # run_by == user_sub here; asserted below so the next drift FAILS loudly
+            # instead of exiting 1 with no output.
+            run_by='e2e-s47',
             preferred_username='e2e-user', caller_team='platform',
             message='trace me', session_id='s47-sess', context='playground',
             is_production=False,
@@ -101,22 +107,34 @@ async def m():
             print('SKIP: Langfuse disabled in pod (trace_id None)');
         t1 = trace_id is not None and fresh.langfuse_trace_id == trace_id
         t2 = trace_id is not None and fresh_ar.langfuse_trace_id == trace_id
+        t3 = fresh_ar.run_by == 'e2e-s47'
 
         # cleanup the committed run/agent_run/deployment rows
         await db.delete(fresh); await db.delete(fresh_ar); await db.delete(
             (await db.execute(select(Deployment).where(Deployment.id == dep.id))).scalar_one())
         await db.commit()
-        print(f'T1={t1} T2={t2}')
+        print(f'T1={t1} T2={t2} T3={t3}')
 
 asyncio.run(m())
-" 2>/dev/null | tail -1)
+" > "$_RAW" 2>&1 || true   # capture BOTH streams; `|| true` so the guard below runs
+RESULT=$(grep -E '^(T1=|SKIP)' "$_RAW" | tail -1 || true)   # `|| true`: grep exits 1 on no match, and under `set -e` that kills the guard below
+# Guard on the EXPECTED MARKER, not on non-emptiness: kubectl appends its own
+# "command terminated with exit code 1" line, so a crashed driver still yields a
+# non-empty last line and a non-emptiness check silently passes it through as the
+# result. `2>/dev/null` here used to discard the traceback entirely.
+if [ -z "$RESULT" ]; then
+  echo "  FAIL: driver never printed a T1=/SKIP line — raw follows:"; sed 's/^/    | /' "$_RAW" | tail -25
+  rm -f "$_RAW"; exit 1
+fi
+rm -f "$_RAW"
 
 echo "    → $RESULT"
 
 PASS=0; FAIL=0
 case "$RESULT" in
-  *"T1=True T2=True"*) echo "  PASS: T-S47-001 run.langfuse_trace_id populated"; \
-                       echo "  PASS: T-S47-002 same trace_id on AgentRun"; PASS=2 ;;
+  *"T1=True T2=True T3=True"*) echo "  PASS: T-S47-001 run.langfuse_trace_id populated"; \
+                       echo "  PASS: T-S47-002 same trace_id on AgentRun"; \
+                       echo "  PASS: T-S47-003 run_by persisted on the AgentRun row"; PASS=3 ;;
   *SKIP*) echo "  SKIP: $RESULT (Langfuse not enabled / seed missing)" ;;
   *) echo "  FAIL: $RESULT"; FAIL=1 ;;
 esac

@@ -59,21 +59,27 @@ def _fetch_schedule_triggers() -> list[tuple[str, str, str, str | None, str | No
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
-                           a.name AS agent_name, NULL::text AS workflow_id
-                    FROM agent_triggers t
-                    JOIN agents a ON t.agent_id = a.id
-                    WHERE t.trigger_type = 'schedule'
-                      AND t.enabled = true
-                      AND t.cron_expression IS NOT NULL
-                    UNION ALL
-                    SELECT t.id::text, t.cron_expression, COALESCE(t.timezone, 'UTC'),
-                           NULL::text AS agent_name, t.workflow_id::text
-                    FROM agent_triggers t
-                    JOIN workflows w ON t.workflow_id = w.id
-                    WHERE t.trigger_type = 'schedule'
-                      AND t.enabled = true
-                      AND t.cron_expression IS NOT NULL
+                    -- Liveness comes from the `trigger_liveness` VIEW (migration 0077),
+                    -- the ONE definition shared with the event-gateway and registry-api.
+                    -- It is not restated here on purpose: stating it independently is
+                    -- how this filter was wrong twice in one day —
+                    -- `w.status='published'` matched nothing, then
+                    -- `w.publish_status='published'` was too strict. Three images, one
+                    -- rule, in the only place all three already reach.
+                    --
+                    -- `_sync_jobs` removes any job whose trigger stops appearing here, so
+                    -- an artifact archived mid-flight is unregistered within one reload
+                    -- interval (RELOAD_INTERVAL_SECONDS, default 60) — the accepted bound.
+                    SELECT id::text,
+                           cron_expression,
+                           COALESCE(timezone, 'UTC'),
+                           CASE WHEN artifact_kind = 'agent'    THEN artifact_name END,
+                           CASE WHEN artifact_kind = 'workflow' THEN artifact_id::text END
+                    FROM trigger_liveness
+                    WHERE trigger_type = 'schedule'
+                      AND enabled
+                      AND artifact_is_live
+                      AND cron_expression IS NOT NULL
                     """
                 )
                 rows = [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]

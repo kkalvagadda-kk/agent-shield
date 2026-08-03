@@ -28,6 +28,11 @@ fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"   # sets E2E_TOKEN; aborts loudly if it cannot
+
 
 # Helper: run a python snippet inside the registry-api pod.
 pyexec() { kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "$1" 2>&1; }
@@ -62,7 +67,7 @@ async def main():
     if r.status_code != 201:
         print('SETUP_FAIL create agent', r.status_code, r.text); sys.exit(1)
     # 2. webhook trigger with a filter (event == order.created)
-    r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', json={
+    r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={
         'trigger_type': 'webhook', 'enabled': True,
         'filter_conditions': [{'field': 'event', 'op': 'eq', 'value': 'order.created'}],
     })
@@ -152,7 +157,7 @@ sys.exit(0 if r.status_code == 202 and body.get('status') == 'filtered' else 1)
 echo "--- T-S28-005: Rotate token — old rejected, new works ---"
 pyexec "
 import httpx, sys
-rot = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers/${TRIGGER_ID}/rotate-token', timeout=10)
+rot = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers/${TRIGGER_ID}/rotate-token', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, timeout=10)
 if rot.status_code != 200:
     print('FAIL rotate', rot.status_code, rot.text); sys.exit(1)
 new_token = rot.json()['token']

@@ -63,7 +63,31 @@ import asyncio, sys, time as _time
 from datetime import datetime, timezone
 import httpx
 from sqlalchemy import select
-from db import AsyncSessionLocal
+import os
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+# NOT a plain 'from db import AsyncSessionLocal'. (No backticks in this file: the
+# heredoc is unquoted, so bash runs backticked text as a command.) That sessionmaker
+# is bound to an engine built
+# at import time, and this driver calls asyncio.run twice -- each call makes a NEW event
+# loop while the pool still holds connections bound to the FIRST one:
+#   RuntimeError: Task ... got Future ... attached to a different loop
+# A fresh engine per loop, disposed on the way out, is the only shape that survives
+# more than one asyncio.run in one process.
+_DB_URL = os.getenv("DATABASE_URL",
+    "postgresql+asyncpg://agentshield:agentshield@agentshield-postgresql:5432/agentshield")
+
+class AsyncSessionLocal:
+    """Async-context session on a per-loop engine; disposes the engine on exit."""
+    async def __aenter__(self):
+        self._eng = create_async_engine(_DB_URL)
+        self._sess = async_sessionmaker(self._eng, expire_on_commit=False)()
+        return await self._sess.__aenter__()
+    async def __aexit__(self, *exc):
+        try:
+            return await self._sess.__aexit__(*exc)
+        finally:
+            await self._eng.dispose()
 from models import Agent, AgentTool, Tool, Deployment, Approval
 
 TS   = "${TS}"

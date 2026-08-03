@@ -39,6 +39,29 @@ try:
     urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE'), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
+
+  # ALSO drop the catalog rows this suite creates. Deleting the AGENT does not remove
+  # its published_artifact — the catalog outlives the source asset by design — so the
+  # row survived, and the next run promoted a NEW agent of the same name into a
+  # UNIQUE(name, type) collision. T-S14-003 had been 500ing on that leftover since
+  # 2026-07-11: a suite poisoning its own next run, one row at a time.
+  #
+  # Scoped by this suite's own fixture name, never a blanket delete: another suite's
+  # catalog entry is not this one's to remove.
+  kubectl exec -i -n "$NAMESPACE" "$API_POD" -- bash -c "cd /app && PYTHONPATH=/app python3" <<'PYEOF' 2>/dev/null || true
+import asyncio
+from sqlalchemy import text
+from db import AsyncSessionLocal
+async def m():
+    async with AsyncSessionLocal() as s:
+        await s.execute(text(
+            "DELETE FROM published_versions WHERE artifact_id IN "
+            "(SELECT id FROM published_artifacts WHERE name = 's14-promote-test')"))
+        await s.execute(text(
+            "DELETE FROM published_artifacts WHERE name = 's14-promote-test'"))
+        await s.commit()
+asyncio.run(m())
+PYEOF
 }
 trap cleanup EXIT
 

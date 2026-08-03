@@ -1,14 +1,41 @@
 # OPA Authorization Contract (Phase 9.1 completion)
 
-**Status:** authoritative spec for completing the unified-bundle OPA authorization layer.
-**Why this exists:** the Phase 9.1 "unified bundle" migration was wired only halfway. OPA
-sidecars never load a bundle (403), the served policy is the wrong package + hits a
-column-name bug, and no policy exposes the decision fields `opa_client` reads. Result:
-in real deployments OPA denies every tool call (fail-closed on empty result), while all
-e2e tests pass *vacuously* because dev/playground/sandbox use `mock_opa` (allow-all) and
-HITL is triggered by the SDK's static `fn.risk` — never touching the OPA sidecar.
+**Status: SHIPPED AND LIVE — verified on the cluster 2026-08-02.** This document began as a
+remediation spec; the remediation landed. It is now the **wire contract of record** for the
+tool-call authorization layer, plus a short delta list (§11).
 
-This document is the single source of truth for both the fix and the tests. Do not diverge
+> **§0 — Boundary.** Three authorization layers, independent, failing differently:
+> **RBAC** ([`rbac-and-artifact-authorization.md`](rbac-and-artifact-authorization.md)) — may this
+> *person* press Deploy? · **Identity**
+> ([`identity-propagation-architecture.md`](identity-propagation-architecture.md)) — whose
+> authority does the *run* carry? · **This doc** — may this *agent pod* call this *tool*, right
+> now? This doc owns exactly one decision, made from the inputs in §3. It does **not** own who may
+> start a run (§10.3), nor any credential handed *to* a tool (a fourth mechanism entirely —
+> identity doc §2, "Delegated tool-call credentials").
+
+**Live verification, 2026-08-02** — executed against agent pod `cic-journey-agent-sandbox` on
+EKS `test-cluster-964-10086`:
+
+```
+GET  localhost:8181/health?bundles=true   → {}                    # all bundles activated
+GET  localhost:8181/v1/data/agentshield   → {"allow":false,"deny_reason":"agent_unauthenticated",
+                                              "reason":"deny_agent_unauthenticated", …}
+GET  localhost:8181/v1/data               → agents: 19 entries, per-tool risk present
+                                              ("cic-echo-tool": risk "high"), grants{platform}
+```
+
+Bundle loads (no Forbidden), the unified `package agentshield` is the served policy, `data.json`
+carries per-tool risk, and the empty-input case correctly denies on gate 1. **The original
+"why this exists" — reproduced below for history — no longer describes the system.**
+
+> **Historical (2026-07-11 → 2026-07-28):** the Phase 9.1 "unified bundle" migration was wired
+> only halfway. OPA sidecars never loaded a bundle (403), the served policy was the wrong package
+> + hit a column-name bug, and no policy exposed the decision fields `opa_client` reads. Result:
+> in real deployments OPA denied every tool call (fail-closed on empty result), while all e2e
+> tests passed *vacuously* because dev/playground/sandbox used `mock_opa` (allow-all) and HITL was
+> triggered by the SDK's static `fn.risk` — never touching the OPA sidecar.
+
+This document is the single source of truth for both the contract and the tests. Do not diverge
 from the contract below without updating this file.
 
 ---
@@ -25,7 +52,17 @@ from the contract below without updating this file.
 - registry-api builds the bundle content from the DB (`bundle_generator.py`,
   `routers/bundle.py`).
 
-## 2. The three defects to fix
+## 2. The three defects to fix — **ALL THREE FIXED** (verified 2026-08-02)
+
+| # | Defect | Fix, in code today |
+|---|---|---|
+| 1 | 403 / bundle never loads | `GET /api/v1/bundle/bundle.tar.gz` serves a real gzipped bundle (`routers/bundle.py:87`); `bundle-sync` + `bundle-init` fetch it (`infra/opa-bundle-server/deployment.yaml:34,98`). Live probe: `health?bundles=true` → `{}` |
+| 2 | `policy_rego` vs `rego_policy` column-name bug | endpoint superseded per §5; the tarball path is the live one |
+| 3 | Package / contract mismatch | one static `package agentshield` at `services/registry-api/opa_policy/agentshield.rego`, exposing exactly the §4 decision surface. Live probe returns `allow`/`require_approval`/`reason`/`deny_reason` |
+
+Original defect text retained below for the historical record.
+
+### 2h. Historical defect detail
 
 1. **403 / bundle never loads.** OPA config `resource: /bundles/agentshield` makes OPA
    fetch a **single gzipped bundle tarball** at that URL. nginx serves a *directory* of
@@ -216,9 +253,20 @@ Confirmed live on the EKS test cluster during the Claude-in-Chrome lifecycle jou
 (`docs/testing/claude-in-chrome-journey.md`). These are the still-open gaps this contract
 targets, now with real evidence, plus one adjacent authorization bug found + fixed.
 
-### 10.1 OPA `default_deny` still fires in real deployments — STILL OPEN
-The §2 defect ("in real deployments OPA denies every tool call") is **confirmed still
-present**. A high-risk HTTP tool (`cic-echo-tool`) bound to a deployed declarative agent, when
+### 10.1 OPA `default_deny` still fires in real deployments — ~~STILL OPEN~~ **RESOLVED**
+
+> **Corrected 2026-08-02.** This section is **stale**. Re-probed on the same cluster: the sidecar
+> reports all bundles activated, `data.agents` holds 19 agents with per-tool risk, and
+> `data.agentshield` evaluates the unified policy. `default_deny` is no longer the live behaviour;
+> a bare query now returns `deny_agent_unauthenticated` — gate 1 of §4 doing its job, not an
+> unloaded bundle. `cic-echo-tool` is present in the bundle at `risk: "high"`, so the specific
+> tool this section reported as permanently denied would now resolve to `require_approval`. The
+> §2–§6 fix shipped between 2026-07-28 and now. Evidence in the header block.
+>
+> The observation below was accurate when written; kept so the fix has a before-picture.
+
+The §2 defect ("in real deployments OPA denies every tool call") was **confirmed present on
+2026-07-28**. A high-risk HTTP tool (`cic-echo-tool`) bound to a deployed declarative agent, when
 actually invoked (sandbox playground leg 4/12 AND production consumer leg 12b), returns:
 
 > **Tool 'cic-echo-tool' denied by policy: default_deny**
@@ -251,10 +299,90 @@ caller may decide ANY approval, any context, without a per-tool grant), correcte
 to include the hyphenated `platform-admin`, and switched the authority existence checks from
 `scalar_one_or_none()` to `.limit(1)/.first()`. See `docs/bugs/production-hitl-decide-403-authority.md`.
 
-### 10.3 Sandbox/playground auto-approve note
+### 10.3 Run INITIATION is not an OPA concern — stated so nobody looks for it here (2026-08-02)
+
+This contract governs **tool calls inside a run**: given that a run is happening, may this agent
+call this tool. It says nothing about **who may start a run in the first place**, and it should
+not — the decision needs a Keycloak identity and a team lookup, neither of which reaches the OPA
+sidecar (see §3's input shape: `sa_subject`, `tool_name`, `agent_class`, `user_id`, `user_team` —
+no notion of a trigger, a schedule, or a caller asking to fire one).
+
+Recording it because the boundary is easy to misread. The schedules workstream found that
+`POST /api/v1/internal/runs/start` has **no authentication at all** — an unauthenticated POST
+reaches the handler (422 on body shape) while the read endpoint beside it correctly 401s. That is
+a real hole, but fixing it here would be wrong: OPA would be asked a question it has no inputs
+for, and a `default_deny` on run initiation would stop the scheduler itself.
+
+It belongs to `identity-propagation-architecture.md` — Drop point 7 and 7a, §4.2's manual-fire
+row, and Phase 3/3a, which own both the service-identity fix and the authenticated, team-scoped
+route a Studio "Run now" control would need. Evidence and the reason the control was NOT built:
+`docs/bugs/internal-run-door-has-no-authentication.md`.
+
+**One thing that IS this contract's business,** once those runs are properly attributed: §4's
+decision logic has no gate on *who authorized a scheduled run*. A daemon fires on `sa_subject` +
+granted scopes with `user_id=""` by design (§4 / identity-propagation §4.6 Gate 5). If a future
+requirement says a high-risk tool call in an autonomous run needs a named human authorizer, that
+is a new gate here, fed by `AgentTrigger.created_by` from identity-propagation's migration `0052`.
+It is an open question in that doc (§10), not a decision this contract has taken.
+
+### 10.4 Sandbox/playground auto-approve note
 The journey confirmed §4's "future improvement" note is now real behavior on the **sandbox**
 side: a high-risk tool call in the playground/sandbox parks as an **inline self-service** approval
 (resumable in place), while the SAME call in **production** routes to the reviewer console
 (authority-scoped, no self-approve). The OPA policy still does not branch on
 `sandbox`/`playground` (§4) — this split is enforced above OPA (SDK/registry-api), consistent with
 this contract.
+
+---
+
+## 11. What shipped BEYOND this contract (2026-08-02)
+
+The live policy implements more than §4 describes. Documented here so §4 stops being read as the
+complete rule set — `services/registry-api/opa_policy/agentshield.rego` is the code of record.
+
+| Addition | Where | Why it matters |
+|---|---|---|
+| **Gate 6 — `user_identity_ok` identity floor** (WS-2) | `:22,101-108`, AND-ed into `allow` at `:116` | A **sixth gate** §4 never listed, with a fifth `deny_reason`, `missing_user_identity` (`:182`). A `user_delegated` agent with `input.user_id == ""` is denied. This is the gate that caused a silent, total tool outage before identity propagation existed — see `docs/bugs/opa-user-identity-floor-denies-tools-missing-x-user-sub.md` |
+| **Risk resolution is MAX, not first-match** | `risk_rank` `:43`, `_matching_ranks` `:67-72`, `max_rank` `:82` | §4.4 says "resolve the matched tool's risk", which is ambiguous when a tool appears in both the agent's own set and a team grant at **different** risk levels. The implementation takes the **highest** — the fail-closed reading. Contract text should be read as such |
+| **Decision 27 de-anonymize gate** | `allow_deanonymize` `:23,149`, `_matching_deanon` `:137-147`, per-tool `pii_deanonymize_allowed` | A second decision output beside allow/require_approval, fail-closed on a bare string or missing flag |
+| **22 Rego unit tests + a CI gate** | `opa_policy/agentshield_test.rego`; `scripts/smoke-test-cp1-ws2-infra.sh` T-CP1B-003 | §9.1's "`opa test` passes" is satisfied and enforced |
+| **`suite-18-opa-governance.sh` covers the full §Test-surface** | T-S18-001…012 | bundle health, tarball validity, per-tool risk in `data.json`, all four risk→action rows, both identity denials, team-grant path, daemon class. Queries the deployed sidecar directly, as prescribed |
+
+## 12. Remaining deltas — the whole list
+
+Small, and two of them are owned elsewhere. Nothing here needs a migration; number allocation
+across the three authorization docs leaves this one with none.
+
+| # | Delta | Owner |
+|---|---|---|
+| 1 | Gate 6 reads self-reported `input.agent_class`, not registry-side `agent.agent_class` — a compromised pod can relabel itself `daemon` and skip the identity floor | **identity doc §4.6 D-1**, its Phase 2 |
+| 2 | `input.playground` / `input.sandbox` are carried and ignored (§4). May be correct — the sandbox/production HITL split is already enforced above OPA (§10.4) — so this is a decision, not automatically a gap | **identity doc §4.6 D-2 / §10** |
+| 3 | Gate 6 gates `allow` but not `require_approval` (`:120-124`). Harmless only because the SDK returns early on `not decision.allow` (`graph_builder.py:303-308`) | **identity doc §4.6 D-3** |
+| 4 | `opa_decisions` is a built table + router with **zero writers**; `Approval.opa_decision_id` (FK exists) is never populated, so no OPA decision is ever audited | **identity doc Phase 5** |
+| 5 | No gate on *who authorized* an autonomous run — a daemon fires on `sa_subject` + scopes with `user_id=""` by design. If a high-risk tool call in a scheduled run should require a named human authorizer, that is a **new gate here**, fed by `AgentTrigger.created_by` | this doc, once identity `0081` lands (§10.3) |
+
+## 13. Consolidated sources
+
+| Source | What moved here | What stays there |
+|---|---|---|
+| `authorization-model-spec.md` §12 (OPA bundle lifecycle), §15 (policy structure + SDK input shape) | superseded by §1/§3/§5/§6 — the per-agent `package agentshield.agent.{name}` scheme it describes was **retired** by the unified-policy change | its §4–§7 machine-identity flows |
+| `plan/execution-models-v2/ws2/contracts/opa-daemon-rule.md` | the `user_identity_ok` floor + `input.agent_class`/`user_id`/`trigger_type` inputs → §11 | the WS-2 task decomposition |
+| `sandbox-production-parity-architecture.md` | the sandbox↔production governance parity requirement → §10.4 | the two deploy paths, the two-table split, the per-pod parity matrix |
+| `debugging/001` (HITL not triggering), `003` (OPA bundle 5-min cold start), `008` (production OPA identity parity) | referenced as the operational record behind §2 and §10 | the investigations themselves |
+
+**Not consolidated here, deliberately:** run-initiation auth (§10.3 → identity doc), control-plane
+RBAC (→ `rbac-and-artifact-authorization.md`), and credentials handed *to* a tool
+(→ `identity-propagation-architecture.md` **§4.8**).
+
+**Where this contract sits for an MCP tool call.** An `mcp_tool` invocation passes three
+independent gates; OPA is the **first**, and the only one this document owns:
+
+1. **OPA (here)** — may this agent call this tool at all? Decided in the pod before dispatch
+   (`graph_builder.py:303` deny → `:369` dispatch).
+2. **MCP proxy team floor** — may this agent's team reach this server/tool? (`mcp-proxy/authz.py`,
+   caller authenticated by K8s TokenReview.)
+3. **The upstream MCP server** — may this end user do this thing, per the credential the proxy
+   presents? (identity doc §4.8.)
+
+A deny at gate 1 means the call never reaches the proxy. An allow at gate 1 says nothing about
+gates 2 and 3 — OPA has no input describing the upstream server's own authorization.

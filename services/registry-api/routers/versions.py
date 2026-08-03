@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from deployment_lifecycle import detach_and_delete_deployments
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -283,26 +284,12 @@ async def delete_version(
     # is NOT NULL, so we must remove the rows before deleting the version.
     # AgentRun.sandbox_deployment_id references deployments — SET NULL first.
     from sqlalchemy import update
-    all_deps = (
-        await db.execute(
-            select(Deployment).where(Deployment.version_id == version_id)
-        )
-    ).scalars().all()
-    terminated_count = 0
-    dep_ids = []
-    for dep in all_deps:
-        dep_ids.append(dep.id)
-        if dep.status not in ("terminated",):
-            terminated_count += 1
-
-    if dep_ids:
-        await db.execute(
-            update(AgentRun)
-            .where(AgentRun.sandbox_deployment_id.in_(dep_ids))
-            .values(sandbox_deployment_id=None)
-        )
-        for dep in all_deps:
-            await db.delete(dep)
+    terminated_count = await detach_and_delete_deployments(
+        db,
+        deployment_model=Deployment,
+        version_id=version_id,
+        run_fk_column=AgentRun.sandbox_deployment_id,
+    )
 
     # Clear previous_version_id references from deployments that upgraded FROM this version
     await db.execute(

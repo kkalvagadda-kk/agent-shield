@@ -9,16 +9,24 @@
 #      early return, or a truncated result file otherwise yields "0 failures" on a
 #      half-run gate.
 #
-#   2. Worse, and ABOVE every per-suite census: run-all.sh's run_suite() (:38-41)
-#      RETURNS 0 WHEN THE SCRIPT FILE IS MISSING — "Don't count missing future suites as
-#      failures". So DELETING OR RENAMING ANY SUITE MAKES THE RUNNER GREENER, NOT REDDER.
-#      Every per-suite T-SNN-COMPLETE census is defeated by a suite that never runs at
-#      all. That is the hole this gate closes from the outside.
+#   2. Worse, and ABOVE every per-suite census: a suite that is not registered anywhere
+#      never runs, and a runner that skips a missing file reports GREEN for it. So
+#      DELETING, RENAMING, OR SIMPLY NOT REGISTERING A SUITE MAKES THE RUN GREENER, NOT
+#      REDDER. Every per-suite T-SNN-COMPLETE census is defeated by a suite that never
+#      runs at all. That is the hole this gate closes from the outside.
 #
 # TWO ASSERTIONS:
-#   (a) REGISTRATION CENSUS — every registered suite exists; every suite on disk is
-#       registered. Drift in BOTH directions. Protects all ~76 suites regardless of
-#       their internal pattern.
+#   (a) REGISTRATION CENSUS — every registered suite/spec exists; every suite/spec on
+#       disk is registered. Drift in BOTH directions, across BOTH layers. Protects all
+#       ~104 suites regardless of their internal pattern.
+#
+#       Delegated to `run-tests.sh --audit`, which owns the census over
+#       scripts/test-manifest.txt. NOT reimplemented here: this gate used to grep
+#       run-all.sh for `"suite-NN.sh"` strings, and when the registry moved into the
+#       manifest (run-all.sh became a thin wrapper with no list of its own), the grep
+#       matched nothing — "0 registered", and every one of the 104 suites reported as
+#       unregistered. A census with its own copy of "where the registry lives" fails
+#       exactly when the registry moves, which is the moment it is most needed.
 #   (b) GUARD META-GATE — every DRIVER-PATTERN suite carries a crash-loud T-SNN-999 and
 #       an ID-based REQUIRED_IDS census.
 #
@@ -38,7 +46,6 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
-RUN_ALL="scripts/e2e/run-all.sh"
 E2E_DIR="scripts/e2e"
 
 PASS=0
@@ -50,39 +57,18 @@ echo "=== suite guards: no half-run may read green ==="
 echo ""
 
 # ---------------------------------------------------------------------------
-# (a) REGISTRATION CENSUS — the R7 hole, closed from outside run_suite().
+# (a) REGISTRATION CENSUS — the R7 hole, closed from outside the runner.
 #
-# NOTE: this deliberately does NOT "fix" run_suite() to fail on a missing file.
-# Suites are being registered concurrently by other workstreams; changing the runner's
-# failure semantics mid-flight would break their landings for reasons unrelated to their
-# work. This census fails JUST AS LOUDLY and is inert to landing order.
+# One implementation, in run-tests.sh, over scripts/test-manifest.txt: registered
+# files must exist AND files on disk must be registered, both layers. Two copies of
+# this check is how the old one went stale without anyone noticing.
 # ---------------------------------------------------------------------------
-echo "-- registration census (a deleted/renamed suite makes run-all.sh GREENER) --"
-REGISTERED=$(grep -oE '"suite-[^"]+\.sh"' "$RUN_ALL" | tr -d '"' | sort -u)
-
-miss=""
-for s in $REGISTERED; do
-  [ -f "$E2E_DIR/$s" ] || miss="$miss $s"
-done
-if [ -n "$miss" ]; then
-  bad "every registered suite exists on disk" \
-      "REGISTERED BUT MISSING:$miss
-        run_suite() returns 0 for a missing file, so each of these is SILENTLY SKIPPED and
-        run-all.sh still reports GREEN. Either restore the file or remove its run_suite line."
+echo "-- registration census (an unregistered suite runs in NO group and proves nothing) --"
+AUDIT=$(bash scripts/run-tests.sh --audit 2>&1)
+if [ $? -eq 0 ]; then
+  ok "manifest census clean (both layers)" "$(echo "$AUDIT" | tail -1)"
 else
-  ok "every registered suite exists on disk" "$(echo "$REGISTERED" | wc -w | tr -d ' ') registered"
-fi
-
-unreg=""
-for f in "$E2E_DIR"/suite-*.sh; do
-  b=$(basename "$f")
-  grep -q "\"$b\"" "$RUN_ALL" || unreg="$unreg $b"
-done
-if [ -n "$unreg" ]; then
-  bad "every suite on disk is registered in run-all.sh" \
-      "ON DISK BUT NEVER RUN:$unreg — an unregistered suite is dead code that proves nothing."
-else
-  ok "every suite on disk is registered in run-all.sh" "$(ls "$E2E_DIR"/suite-*.sh | wc -l | tr -d ' ') on disk"
+  bad "manifest census clean (both layers)" "$AUDIT"
 fi
 
 echo ""

@@ -6,6 +6,18 @@ import {
   type Page,
 } from "@playwright/test";
 
+/**
+ * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
+ * every wizard submit must choose one — the same step a user now takes. Selects
+ * the first real provider rather than a fixed id, since seeded providers differ
+ * per cluster.
+ */
+async function pickModel(page: import("@playwright/test").Page) {
+  const select = page.getByLabel("Model", { exact: true });
+  const value = await select.locator("option").nth(1).getAttribute("value");
+  if (value) await select.selectOption(value);
+}
+
 // ---------------------------------------------------------------------------
 // tools-picker-drawer.spec.ts
 //
@@ -162,6 +174,7 @@ test.describe("tools picker — browse-and-select tile drawer", () => {
       (r) => r.request().method() === "POST" && /\/api\/v1\/agents\/?$/.test(r.url()),
       { timeout: 30_000 },
     );
+    await pickModel(page);
     await page.getByRole("button", { name: /^Create Agent$/i }).click();
     const resp = await created;
     expect(resp.status(), await resp.text()).toBeLessThan(300);

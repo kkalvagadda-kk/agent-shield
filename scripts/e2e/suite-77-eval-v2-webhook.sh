@@ -186,9 +186,15 @@ echo ""
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then
+
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
   exit 1
 fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 echo "  Pod: $API_POD"
 echo ""
 
@@ -249,6 +255,11 @@ BASE = "http://localhost:8000/api/v1"
 # mocked transport, never an in-process app.
 GW = "http://agentshield-event-gateway:8091"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 
 SFX = os.environ["S77_SFX"]
@@ -473,7 +484,14 @@ def det(row):
 
 
 async def main():
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90)
+    # follow_redirects: a slashless collection path such as POST /teams/{t}/applications
+    # gets a 307 with an EMPTY body, which surfaced as 'app=307' with nothing to read.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90, auth=BearerAuth(),
+                          follow_redirects=True)
+    # NO auth=BearerAuth() here. This client talks to the EVENT GATEWAY, which
+    # authenticates a webhook by its own token/HMAC — and webhook_auth.presented_token()
+    # resolves X-Webhook-Token -> Authorization: Bearer -> URL path token IN THAT ORDER,
+    # so a Keycloak Bearer here is read AS the webhook token and shadows the real one.
     gw = httpx.AsyncClient(timeout=30)
     ds_id = None
     ds_nh = None
@@ -805,18 +823,36 @@ async def main():
         # The eval scores the decision PRODUCTION actually makes. Same payloads, same
         # trigger, through the REAL gateway as REAL WS-4-signed requests.
         try:
-            cr = await c.post(f"/triggers/{trig_id}/clients",
-                              json={"client_id": f"s77-app-{SFX}"})
-            if cr.status_code != 201:
+            # POST /triggers/{id}/clients is RETIRED — it answers 410 pointing at the
+            # application flow (routers/webhook_clients.py). This suite kept calling it
+            # and failed on the 410 rather than on anything it set out to prove.
+            # Replacement, same shape suite-83 exercises: create a reusable application
+            # for the team, then grant it the `invoker` role on the artifact.
+            ar = await c.post("/teams/platform/applications",
+                              json={"name": f"s77-app-{SFX}"})
+            gr_ok = False
+            if ar.status_code == 201:
+                app_id = ar.json()["id"]
+                _ag = (await c.get(f"/agents/{AGENT}")).json()
+                gg = await c.post(f"/artifacts/agent/{_ag['id']}/grants",
+                                  json={"grantee_type": "application",
+                                        "grantee_id": app_id, "role": "invoker"})
+                gr_ok = gg.status_code == 201
+            if not gr_ok:
                 rec("T-S77-009 LIVE DIFFERENTIAL CONTROL", False,
-                    f"client register failed {cr.status_code}: {cr.text[:200]}")
+                    f"application setup failed: app={ar.status_code} "
+                    f"{ar.text[:120]} grant={'n/a' if ar.status_code != 201 else gg.status_code}")
             else:
-                secret = cr.json()["secret"]
+                secret = ar.json()["secret"]
                 token = trig["token"]
                 gw_status = {}
                 for label, payload in (("match", PAY_MATCH), ("miss", PAY_MISS)):
                     body = json.dumps(payload).encode()
                     hdrs = sign_webhook(secret, body)   # the PRODUCT'S signer
+                    # X-Client-Id carries the application NAME, not its uuid: the gateway
+                    # resolves the sender with lookup_application(team, name). Sending the
+                    # id produced a uniform 401 whose only explanation was server-side --
+                    # "no application matches this team/client_id" in the gateway log.
                     hdrs["X-Client-Id"] = f"s77-app-{SFX}"
                     # content=body, NOT json= — the signature covers these exact bytes.
                     gr = await gw.post(f"{GW}/hooks/{AGENT}/{token}",

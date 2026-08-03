@@ -253,6 +253,16 @@ The requirements doc's original §11 phasing predates Decision 27 (the generic g
 
 ### 7a. FR-MCP-21 (on-behalf-of) — Scoped Work and External Dependency
 
+> **Consolidated treatment (2026-08-02):** the full identity picture for MCP tool calls — the
+> implemented four-mode credential matrix in `mcp-proxy/identity.py`, the external-OAuth chain, the
+> three-gate model (OPA → proxy team floor → upstream server), the RFC 8693
+> delegation-vs-impersonation analysis, and the fail-closed invariants — now lives in
+> [`identity-propagation-architecture.md`](identity-propagation-architecture.md) **§4.8**. This
+> section remains the MCP-side task list. One correction it makes: `identity_mode="service_identity"`
+> is **built** (`mcp-proxy/keycloak_client.py:80` mints an audienced client-credentials token), so
+> on-behalf-of is a delta on a proven code path — the grant type and subject parameter — not new
+> infrastructure.
+
 **Confirmed mechanism (Decision 29, `docs/decisions.md`): impersonation-based Keycloak token exchange — not JWT forward, not Classic RFC 8693 subject_token exchange.** Verified in code (see the JWT-plumbing investigation earlier in this design's history) that no raw Keycloak JWT survives past `auth_middleware.py` today — every internal hop carries only a derived `user_id`/`user_team` string. `docs/design/identity-propagation-architecture.md` (Proposed, unimplemented) will replace the current ad-hoc `x-user-sub`/`x-agent-team` header pattern with a durable `RunContext.user_sub` string propagated via an HMAC-signed internal token (RCT) — but **by design it still never carries a re-presentable access token**, only the verified subject string, specifically because (a) verifying a full JWT at every hop needs JWKS infra that doesn't exist outside registry-api, and (b) identity has to survive HITL pauses of up to 24 hours, by which point any original token would be long expired anyway. Both reasons independently rule out Classic Exchange and confirm impersonation-based exchange is the only mechanism that fits the platform's actual constraints — this holds even after `identity-propagation-architecture.md` ships in full, not just today.
 
 **This is a hard external dependency, not standalone MCP work.** FR-MCP-21 is blocked on `identity-propagation-architecture.md` Phase 0–2 (shared `RunContext` infra + SDK pod runtime reading it) landing first. Without it, `RunContext.user_sub` never reaches `governed_tool` for `sdk`-type agents at all — the same root cause as Gap 1 in `docs/design/sdk-agent-gaps.md` (a broader SDK-runtime parity gap set, tracked there, not duplicated here).

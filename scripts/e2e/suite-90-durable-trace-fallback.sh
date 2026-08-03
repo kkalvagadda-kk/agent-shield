@@ -96,10 +96,18 @@ echo "  Raw: $RESULT"
 python3 - "$RESULT" <<'PY'
 import json, sys
 res = json.loads(sys.argv[1]) if sys.argv[1].strip() else {}
-checks = ["001_playground_owner_spans", "002_observability_owner_spans", "003_tenant_isolation"]
-ok = all(res.get(k) for k in checks)
+# 002 is auth_gated, NOT owner_spans: the check was reframed (a bash suite cannot mint a
+# JWT, so it asserts the endpoint refuses) but this list kept the old name. res.get()
+# returns None for an absent key, so the rename read as a plain assertion failure forever.
+checks = ["001_playground_owner_spans", "002_observability_auth_gated", "003_tenant_isolation"]
+missing = [k for k in checks if k not in res]
+if missing:
+    # Name drift explicitly. Otherwise the next rename is another indefinite silent FAIL.
+    print(f"  [FAIL] driver output has no key(s) {missing}; it emitted {sorted(res)}")
+ok = not missing and all(res.get(k) for k in checks)
 for k in checks:
-    print(f"  [{'PASS' if res.get(k) else 'FAIL'}] {k}")
+    if k in res:
+        print(f"  [{'PASS' if res[k] else 'FAIL'}] {k}")
 sys.exit(0 if ok else 1)
 PY
 echo "=== Suite 90 PASSED ==="

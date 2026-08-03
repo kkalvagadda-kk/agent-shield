@@ -29,6 +29,12 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 66: PRODUCTION triggers — webhook + scheduled (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -44,6 +50,11 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun, CompositeWorkflow
 BASE="http://localhost:8000/api/v1"
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
 H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
 GW="http://agentshield-event-gateway:8091"
 SFX=uuid.uuid4().hex[:6]; NAMES=[f"s66-a-{SFX}",f"s66-b-{SFX}"]; WFN=f"s66-wf-{SFX}"
@@ -70,7 +81,7 @@ async def run_of(wfname, trig, tries):
     return None, []
 async def main():
     out={}; wid=None
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60, auth=BearerAuth())
     pid=await prov(c)
     try:
         for n in NAMES:
@@ -99,13 +110,26 @@ async def main():
         # WEBHOOK
         wh=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"webhook","name":"s66-hook"})).json()
         token=wh.get("token")
+        # NO auth=BearerAuth() here. This client talks to the EVENT GATEWAY, which
+        # authenticates a webhook by its own token/HMAC — and webhook_auth.presented_token()
+        # resolves X-Webhook-Token -> Authorization: Bearer -> URL path token IN THAT ORDER,
+        # so a Keycloak Bearer here is read AS the webhook token and shadows the real one.
         async with httpx.AsyncClient(timeout=30) as gwc:
             fired=await gwc.post(f"{GW}/hooks/workflow/{WFN}/{token}", json={"message":"What is the capital of France?"})
         p,kids=await run_of(WFN,"webhook",40)
         out["T-S66-001 webhook_fires_prod_run"]= bool(fired.status_code in (200,202) and p and p.status=="completed" and p.context=="production" and len(kids)>=2 and all(k.status=="completed" for k in kids))
         # SCHEDULE (every minute) — delete immediately after firing once
         sch=(await c.post(f"/workflows/{wid}/triggers", json={"trigger_type":"schedule","name":"s66-sched","cron_expression":"* * * * *","input_payload":{"message":"What is 2+2?"}})).json()
-        p2,kids2=await run_of(WFN,"schedule",30)  # ~90s for reload+fire
+        # 80 polls x 3s = 240s. The old 30 (90s) was sized for "reload+fire" and
+        # under-counted twice: the scheduler's reload interval (up to 60s) and the
+        # cron minute boundary are INDEPENDENT waits, and the run then has to
+        # COMPLETE two member agents on top. Observed on a passing cluster:
+        #   14:27:30  scheduler registered the trigger
+        #   14:28:00  dispatched  -> already past a 90s window opened at ~14:26:40
+        # The result was `sched run=None`, which reads as "the scheduler never
+        # fired" when the scheduler had fired correctly and the test had stopped
+        # looking. Do not tighten this without re-doing that arithmetic.
+        p2,kids2=await run_of(WFN,"schedule",80)
         out["T-S66-002 scheduler_fires_prod_run"]= bool(p2 and p2.status=="completed" and p2.context=="production" and len(kids2)>=2 and all(k.status=="completed" for k in kids2))
         # CRITICAL: delete the every-minute schedule trigger so it stops firing
         try: await c.delete(f"/workflows/{wid}/triggers/{sch['id']}")

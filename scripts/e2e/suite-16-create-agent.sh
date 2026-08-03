@@ -120,7 +120,17 @@ token = r.json()['access_token']
 claims = jose_jwt.get_unverified_claims(token)
 user_sub = claims['sub']
 
-# Ensure user_team_assignments has a row for this user
+# Ensure user_team_assignments has a row for this user.
+#
+# The upsert deliberately does NOT touch \`role\` on conflict, because
+# scripts/seed-platform-admin-role.sh pins this very user to role='platform-admin'
+# on EVERY deploy. Fighting the seed here would just be undone by the next one.
+#
+# So the role this test reads back is whatever the row actually holds, and the
+# assertion below compares against THAT rather than a hardcoded 'operator'. The
+# claim under test is \"/me resolves team+role FROM user_team_assignments\" — pinning
+# the expected value to a literal made the test assert the seed's behaviour instead,
+# and it failed on every cluster deployed with the standard script.
 async def setup():
     async with AsyncSessionLocal() as db:
         await db.execute(text(
@@ -129,14 +139,20 @@ async def setup():
             \"ON CONFLICT (user_sub) DO UPDATE SET team_name='platform'\"
         ), {'sub': user_sub})
         await db.commit()
-asyncio.run(setup())
+        row = (await db.execute(text(
+            \"SELECT team_name, role FROM user_team_assignments WHERE user_sub = :sub\"
+        ), {'sub': user_sub})).first()
+        return row
+db_team, db_role = asyncio.run(setup())
 
 # Call /me with real Bearer token
 r2 = httpx.get('http://localhost:8000/api/v1/me', headers={'Authorization': f'Bearer {token}'})
 assert r2.status_code == 200, f'Expected 200, got {r2.status_code}: {r2.text}'
 data = r2.json()
 assert data['team'] == 'platform', f'Expected platform, got {data[\"team\"]}'
-assert data['role'] == 'operator', f'Expected operator, got {data[\"role\"]}'
+# Compare against the ROW, not a literal — see the note above.
+assert data['role'] == db_role, f'/me role {data[\"role\"]!r} != user_team_assignments role {db_role!r}'
+assert data['team'] == db_team, f'/me team {data[\"team\"]!r} != row team {db_team!r}'
 assert data['sub'] == user_sub
 "
 

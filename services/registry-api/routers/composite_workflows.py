@@ -26,6 +26,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from deployment_lifecycle import detach_and_delete_deployments
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +60,7 @@ from schemas import (
     WorkflowTriggerResponse,
 )
 from store_factory import get_conversation_store
+from trigger_lifecycle import apply_trigger_update
 from trigger_utils import _new_token, workflow_webhook_url
 from workflow_orchestrator import dispatch_to_orchestrator_pod, orchestrate, orchestrate_stream, resolve_member_names
 
@@ -347,8 +349,17 @@ async def update_workflow(
 async def archive_workflow(workflow_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> None:
     wf = await _get_workflow(workflow_id, db)
     wf.status = "archived"
+    # Disarm in the SAME transaction as the status change. Archiving used to leave
+    # triggers armed: 8 archived workflows were still firing daily on the cluster, and
+    # the e2e suites' own cleanup (which archives) was manufacturing them. Same rule as
+    # delete_agent — see trigger_lifecycle for why this is a write-side gate and why
+    # undeploy is deliberately excluded.
+    from trigger_lifecycle import disarm_triggers
+
+    disarmed = await disarm_triggers(db, workflow_id=wf.id, reason="workflow archived")
     wf.updated_at = datetime.now(timezone.utc)
     await db.commit()
+    logger.info("archive_workflow: '%s' archived, disarmed %d trigger(s)", wf.name, disarmed)
 
 
 @router.post("/{workflow_id}/members", response_model=WorkflowMemberResponse, status_code=status.HTTP_201_CREATED)
@@ -869,9 +880,9 @@ async def update_workflow_trigger(
     if not trigger:
         raise HTTPException(status_code=404, detail="Trigger not found")
 
-    for field, value in body.model_dump(exclude_none=True).items():
-        setattr(trigger, field, value)
-    trigger.updated_at = datetime.now(timezone.utc)
+    # Same helper the agent PATCH uses — same table, same body model, so the
+    # re-enable-clears-the-disarm-record rule cannot exist on only one of them.
+    apply_trigger_update(trigger, body)
 
     await db.commit()
     await db.refresh(trigger)
@@ -1170,20 +1181,17 @@ async def delete_workflow_version(
             detail=f"Version '{version_id}' not found for workflow '{workflow_id}'.",
         )
 
-    # Terminate all non-terminated deployments for this version.
-    active_deps = (
-        await db.execute(
-            select(WorkflowDeployment).where(
-                WorkflowDeployment.version_id == version_id,
-                WorkflowDeployment.status.notin_(["terminated"]),
-            )
-        )
-    ).scalars().all()
-    now = datetime.now(timezone.utc)
-    for dep in active_deps:
-        dep.status = "terminated"
-        dep.terminated_at = now
-    terminated_count = len(active_deps)
+    # Tear down the deployments pinned to this version. Flipping status to
+    # 'terminated' and leaving the rows was not enough: workflow_deployments.version_id
+    # is a NO ACTION FK, so the db.delete(ver) below violated it and every delete of a
+    # once-deployed workflow version returned 500. Shared with the agent path so the
+    # two cannot drift apart again.
+    terminated_count = await detach_and_delete_deployments(
+        db,
+        deployment_model=WorkflowDeployment,
+        version_id=version_id,
+        run_fk_column=AgentRun.workflow_deployment_id,
+    )
 
     await db.delete(ver)
     await db.commit()

@@ -94,6 +94,7 @@ echo ""
 #   yaml:<dotted.path.in.values.yaml>            (a bare tag string)
 #   yamlimg:<dotted.path>                        (a full image ref — tag is after the ':')
 #   subchart:<chart dir name>                    (no top-level pin; sub-chart is authoritative)
+#   fileref:<path>@<image-name>                  (tag pinned in a plain file, e.g. an e2e fixture)
 # Multiple pins are separated by ','  — ALL of them must agree with the tag var.
 #
 # NOTE the two non-obvious ones:
@@ -116,6 +117,9 @@ SERVICES=(
   "python-executor|PYTHON_EXECUTOR_TAG|services/python-executor|subchart:python-executor"
   "scheduler|SCHEDULER_TAG|services/scheduler|subchart:scheduler"
   "embedding-sidecar|EMBEDDING_SIDECAR_TAG|services/embedding-sidecar|yaml:embeddingSidecar.image.tag"
+  "mcp-proxy|MCP_PROXY_TAG|services/mcp-proxy|yaml:mcp-proxy.image.tag"
+  # Fixture image: no chart pin -- its only consumer is the suite that deploys it.
+  "echo-agent|ECHO_AGENT_TAG|services/echo-agent|fileref:scripts/e2e/suite-2-lifecycle.sh@echo-agent"
 )
 
 # Dirs under services/ that intentionally have NO image tag. EXPLICIT, never a silent
@@ -129,7 +133,21 @@ NO_TAG_DIRS=("echo-agent" "minio-cp1" "nemo-guardrails" "postgresql-pgvector")
 # the Dockerfile is `COPY . .`, so almost everything in the dir IS image content.
 # tests/ IS in the image (and CP1c runs pytest off the real image), so tests/ counts.
 # Only docs are excluded.
-EXCLUDE_GLOBS=(":(exclude)*.md")
+# Playwright specs are excluded because they PROVABLY cannot reach the image, not as
+# a convenience: studio/Dockerfile is multi-stage and its final layer copies only
+# `/app/dist`, while `npm run build` runs `tsc` over tsconfig's `include: ["src"]`.
+# So a spec change can neither ship nor break the build. Without this, editing a
+# browser test forces a studio rebuild + redeploy and trains people to bump the tag
+# for a change that is not in the image — a lie in the opposite direction.
+#
+# The pathspec is ROOT-relative, so it must read `studio/e2e`, not `e2e/**` — the
+# latter silently matches nothing and the exclusion appears to work while doing
+# nothing at all.
+#
+# NOT excluded: src/**/*.test.tsx. Those ARE under tsconfig's include, so a broken one
+# fails `tsc` and therefore the build. They are image-relevant even though they do not
+# ship.
+EXCLUDE_GLOBS=(":(exclude)*.md" ":(exclude)studio/e2e")
 
 NOW=$(date +%s)
 
@@ -207,6 +225,21 @@ except Exception:
     print("<MISSING>"); sys.exit(0)
 print(str(((d or {}).get("image") or {}).get("tag", "<MISSING>")))
 PY
+      ;;
+    fileref)
+      # <path>@<image-name>: the tag a plain file pins for that image. Used for fixture
+      # images whose only consumer is an e2e suite rather than the Helm chart -- the
+      # coupling matters just as much: suite-2 pinned echo-agent:0.1.0 while nothing
+      # built it, so the reference silently described an image that did not exist.
+      python3 - "${arg%%@*}" "${arg##*@}" <<'FREF' 2>/dev/null
+import re, sys
+try:
+    txt = open(sys.argv[1]).read()
+except Exception:
+    print("<MISSING>"); sys.exit(0)
+m = re.search(r"/" + re.escape(sys.argv[2]) + r":([A-Za-z0-9._-]+)", txt)
+print(m.group(1) if m else "<MISSING>")
+FREF
       ;;
     *) echo "<BAD-SPEC>" ;;
   esac
@@ -300,6 +333,112 @@ for row in "${SERVICES[@]}"; do
        "source: $src_when ≤ tag bump: $tag_when"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# 4. The IN-BUNDLE build marker. studio/src/lib/build.ts hardcodes STUDIO_BUILD, which
+#    Sidebar renders and suite-79 asserts against the SERVED bytes — that is the only
+#    check that can catch a cluster running old code, so the marker being right is what
+#    makes it meaningful.
+#
+#    But it is a hand-maintained MIRROR of STUDIO_TAG, and mirrors drift. This one sat
+#    at 0.1.167 while the cluster served 0.1.176 — it reported the deploy had not landed
+#    when it had. Its predecessor (`window.__STUDIO_BUILD`) drifted 67 tags. The
+#    five-way check in suite-79 covers this, but suite-79 is not part of any deploy, so
+#    nothing failed at the moment the claim became false.
+#
+#    Checked HERE because this file already runs before every build and already owns
+#    "a tag is a claim about content". Same claim, third mirror.
+# ---------------------------------------------------------------------------
+marker=$(grep -E '^export const STUDIO_BUILD' studio/src/lib/build.ts | head -1 | cut -d'"' -f2)
+studio_tag=$(grep -E '^STUDIO_TAG=' scripts/deploy-cpe2e.sh | head -1 | cut -d'"' -f2)
+if [ -z "$marker" ] || [ -z "$studio_tag" ]; then
+  bad "in-bundle build marker is readable" \
+      "STUDIO_BUILD='$marker' STUDIO_TAG='$studio_tag' — one of them could not be parsed, so the check cannot run"
+elif [ "$marker" != "$studio_tag" ]; then
+  bad "studio: STUDIO_BUILD marker == STUDIO_TAG" \
+      "build.ts says '$marker' but the image will be tagged '$studio_tag'.
+        The Sidebar and suite-79 both report the marker, so the running build would
+        MISREPORT ITSELF — the one signal that says which code is live. Bump
+        studio/src/lib/build.ts with the tag."
+else
+  ok "studio: STUDIO_BUILD marker == STUDIO_TAG" "both $marker — the served bundle can name itself honestly"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. THE SECOND DEPLOY SCRIPT. scripts/deploy-eks.sh keeps its OWN copy of every tag
+#    variable, so the same service has two declared versions and nothing compared them.
+#    EKS sat on registry-api 0.2.251 / studio 0.1.175 while this file said 0.2.252 /
+#    0.1.177 — a cluster nine studio versions behind, with every check green, because
+#    each script was internally consistent.
+#
+#    That is not hypothetical: an EKS incident here was caused by the cluster running
+#    deploy-controller 0.1.0 while the repo had 0.1.7 — agents CrashLooped for a reason
+#    no source file could explain (docs/bugs/, deploy-controller SA gap).
+#
+#    Compared, not merged: the two scripts legitimately differ (EKS builds pgvector and
+#    skips the embedding sidecar), so only tags DECLARED IN BOTH must agree.
+# ---------------------------------------------------------------------------
+EKS_SH="scripts/deploy-eks.sh"
+if [ ! -f "$EKS_SH" ]; then
+  bad "the EKS deploy script is present" "$EKS_SH missing — cross-script tag parity cannot be checked"
+else
+  drift=""
+  shared=0
+  while IFS= read -r line; do
+    var="${line%%=*}"
+    local_val=$(printf '%s' "$line" | cut -d'"' -f2)
+    eks_val=$(grep -E "^${var}=" "$EKS_SH" | head -1 | cut -d'"' -f2)
+    [ -z "$eks_val" ] && continue          # declared here only — legitimately not shared
+    shared=$((shared+1))
+    [ "$local_val" = "$eks_val" ] || drift="$drift ${var}(local=$local_val eks=$eks_val)"
+  done < <(grep -E '^[A-Z_]+_TAG="' scripts/deploy-cpe2e.sh)
+
+  if [ -n "$drift" ]; then
+    bad "deploy-cpe2e.sh and deploy-eks.sh agree on every shared tag" \
+        "DRIFT:$drift
+        Each script is internally consistent, so nothing else can catch this — the
+        cloud cluster silently runs different code from the local one. Bump both."
+  else
+    ok "deploy-cpe2e.sh and deploy-eks.sh agree on every shared tag" \
+       "$shared shared tag(s) — local and EKS declare the same versions"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. EVERY IMAGE THE EKS CHART REFERENCES MUST HAVE A BUILDER.
+#    `values-eks.yaml` points image repositories at ECR. If deploy-eks.sh never
+#    builds and pushes one of them, the tag resolves to an image that has never
+#    existed and the pod sits in ImagePullBackOff forever — deployed, counted as
+#    part of the release, and permanently broken.
+#
+#    Found live: `embedding-sidecar` is referenced by values-eks.yaml and is NOT in
+#    deploy-eks.sh's build list. Its pod had been ImagePullBackOff on EKS for as long
+#    as the reference has existed; nothing failed, because nothing checked.
+#
+#    §5's cross-script check cannot catch this by design — it compares tags declared
+#    in BOTH scripts, and EMBEDDING_SIDECAR_TAG is declared only in deploy-cpe2e.sh.
+#    "Declared in one place only" is legitimate for a local-only service and fatal
+#    for one the cloud chart deploys anyway. This is the check that tells them apart.
+# ---------------------------------------------------------------------------
+EKS_VALUES="charts/agentshield/values-eks.yaml"
+if [ -f "$EKS_VALUES" ] && [ -f "$EKS_SH" ]; then
+  builders=$(grep -oE '^[[:space:]]+b[[:space:]]+[a-z0-9-]+' "$EKS_SH" | awk '{print $2}' | sort -u)
+  orphans=""
+  for img in $(grep -oE 'agentshield/[a-z0-9-]+"' "$EKS_VALUES" | sed 's|agentshield/||; s|"||' | sort -u); do
+    echo "$builders" | grep -qx "$img" || orphans="$orphans $img"
+  done
+  if [ -n "$orphans" ]; then
+    bad "every image values-eks.yaml references is built by deploy-eks.sh" \
+        "NO BUILDER:$orphans
+        values-eks.yaml points these at ECR but deploy-eks.sh never builds or pushes
+        them, so the tag names an image that does not exist -> ImagePullBackOff for
+        the life of the deployment. Either add it to the build list or stop deploying
+        it on EKS."
+  else
+    ok "every image values-eks.yaml references is built by deploy-eks.sh" \
+       "$(echo "$builders" | wc -w | tr -d ' ') builder(s) cover every ECR reference"
+  fi
+fi
 
 echo ""
 echo "=== tag⇄content coupling: PASS=$PASS FAIL=$FAIL ==="

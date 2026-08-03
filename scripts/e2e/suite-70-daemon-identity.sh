@@ -69,6 +69,12 @@ echo "--- T-S70-002: OPA identity floor on the DEPLOYED served bundle (opa eval)
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: no running registry-api pod"; exit 1; fi
+# Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "  pod: $API_POD"
 
 WORK=$(mktemp -d)
@@ -134,6 +140,11 @@ from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+import sys as _sys; _sys.path.insert(0, "/tmp")
+# Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
+# A static Authorization header is evaluated once at client construction and dies
+# mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
+from e2e_auth import BearerAuth
 HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 OUT = os.environ["S70_OUT"]
 SFX = uuid.uuid4().hex[:6]
@@ -219,7 +230,7 @@ async def main():
     sa_subject = None
     approval_id = None
     wid = None          # hoisted: the finally-cleanup references it even on an early crash
-    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0)
+    c = httpx.AsyncClient(base_url=BASE, headers=HDR, timeout=90.0, auth=BearerAuth())
     try:
         pid = await prov(c)
 

@@ -125,18 +125,29 @@ print('OK')
 " && pass "T-S25-003 — list filtered by thread" || fail "T-S25-003"
 
 # ---------------------------------------------------------------------------
-# T-S25-004 — Memory-disabled agent rejects save with 400
+# T-S25-004 — Memory-disabled agent still SAVES the transcript, but does not RECALL
 # ---------------------------------------------------------------------------
-echo "--- T-S25-004: Memory-disabled agent returns 400 ---"
+# This asserted 400 — the PRE-DECOUPLE contract. memory_enabled no longer gates the
+# save (routers/memory.py:59): the transcript is always persisted so the user's
+# History works for every agent, and memory_enabled now gates only whether the AGENT
+# recalls prior turns. The suite kept asserting the old rule and failed on a 201.
+echo "--- T-S25-004: Memory-disabled agent saves but does not recall ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.post('http://localhost:8000/api/v1/agents/${NOMEM_AGENT}/memory', json={
-    'thread_id': 'x', 'messages': [{'role': 'user', 'content': 'hi'}],
-})
-if r.status_code != 400:
-    print(f'FAIL: expected 400, got {r.status_code}: {r.text}'); sys.exit(1)
+base = 'http://localhost:8000/api/v1/agents/${NOMEM_AGENT}/memory'
+r = httpx.post(base, json={'thread_id': 'x', 'messages': [{'role': 'user', 'content': 'hi'}]})
+if r.status_code not in (200, 201):
+    print(f'FAIL: transcript save should succeed, got {r.status_code}: {r.text}'); sys.exit(1)
+# the user CAN see it (History)
+seen = httpx.get(base, params={'thread_id': 'x'}).json()
+if not seen:
+    print('FAIL: transcript not visible to the user'); sys.exit(1)
+# the AGENT cannot — this is the half memory_enabled still gates
+recall = httpx.get(base, params={'thread_id': 'x', 'scope': 'agent', 'for_agent_context': 'true'}).json()
+if recall:
+    print(f'FAIL: memory-disabled agent recalled {len(recall)} turns'); sys.exit(1)
 print('OK')
-" && pass "T-S25-004 — disabled agent 400" || fail "T-S25-004"
+" && pass "T-S25-004 — disabled agent saves, does not recall" || fail "T-S25-004"
 
 # ---------------------------------------------------------------------------
 # T-S25-005 — Delete thread (GDPR)

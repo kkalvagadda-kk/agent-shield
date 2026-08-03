@@ -6,6 +6,18 @@ import {
   type Page,
 } from "@playwright/test";
 
+/**
+ * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
+ * every wizard submit must choose one — the same step a user now takes. Selects
+ * the first real provider rather than a fixed id, since seeded providers differ
+ * per cluster.
+ */
+async function pickModel(page: import("@playwright/test").Page) {
+  const select = page.getByLabel("Model", { exact: true });
+  const value = await select.locator("option").nth(1).getAttribute("value");
+  if (value) await select.selectOption(value);
+}
+
 // ---------------------------------------------------------------------------
 // agent-knowledge-config.spec.ts
 //
@@ -184,6 +196,7 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
         new RegExp(`/api/v1/knowledge-bases/${kbId}/agents/`).test(r.url()),
       { timeout: 20_000 }
     );
+    await pickModel(page);
     await page.getByRole("button", { name: /^Create Agent$/i }).click();
     expect((await createResp).status()).toBe(201);
     expect((await bindResp).status()).toBe(200);

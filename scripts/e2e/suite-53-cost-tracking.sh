@@ -32,7 +32,8 @@ echo "=== Suite 53: Cost tracking (backfill + console) ==="
 echo "  Pod: $API_POD"
 echo ""
 
-RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+_RAW=$(mktemp)
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import asyncio, datetime, uuid
 from db import AsyncSessionLocal
 from sqlalchemy import select, text
@@ -47,10 +48,25 @@ async def main():
     out={}
     async with AsyncSessionLocal() as db:
         await db.execute(text('INSERT INTO user_team_assignments (user_sub, team_name) VALUES (:s,:t) ON CONFLICT DO NOTHING'), {'s':SUB,'t':TEAM})
-        a=(await db.execute(select(Agent).where(Agent.name==AG))).scalar_one_or_none()
-        if not a:
-            a=Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
-            db.add(a); await db.flush()
+        # REAP FIRST. Cleanup lives at the end of main(), so any crash mid-run leaves
+        # this fixture behind — and the next run then reuses the surviving agent and
+        # inserts version_number=1 again:
+        #   UniqueViolationError: uq_agent_versions (agent_id, version_number)=(...,1)
+        # A suite whose setup assumes its own teardown ran poisons every later run from
+        # the first failure onward. Deleting leftovers up front makes it self-healing
+        # rather than dependent on the previous run having succeeded.
+        stale=(await db.execute(select(Agent).where(Agent.name==AG))).scalar_one_or_none()
+        if stale:
+            for r in (await db.execute(select(AgentRun).where(AgentRun.agent_name==AG))).scalars().all():
+                await db.delete(r)
+            for d in (await db.execute(select(Deployment).where(Deployment.agent_id==stale.id))).scalars().all():
+                await db.delete(d)
+            for ov in (await db.execute(select(AgentVersion).where(AgentVersion.agent_id==stale.id))).scalars().all():
+                await db.delete(ov)
+            await db.delete(stale); await db.flush()
+
+        a=Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
+        db.add(a); await db.flush()
         v=AgentVersion(agent_id=a.id, version_number=1, config={}, tools=[])
         db.add(v); await db.flush()
         sd=Deployment(agent_id=a.id, version_id=v.id, environment='sandbox',
@@ -123,7 +139,20 @@ async def main():
     print('RESULT', out)
 
 asyncio.run(main())
-" 2>&1 | grep -v Defaulted | grep '^RESULT' | tail -1)
+" 2>&1 | grep -v Defaulted > "$_RAW" || true   # `|| true` so the guard below runs:
+# under `set -e` a crashing driver killed the script BEFORE anything could report why.
+RESULT=$(grep '^RESULT' "$_RAW" | tail -1 || true)
+# The driver's output is filtered to the RESULT line, so a CRASH used to vanish: the
+# traceback was discarded with everything else, RESULT came back empty, and `set -e`
+# killed the suite with nothing printed after the pod name. A real regression hid that
+# way — _dispatch_and_complete gained a required keyword-only `target` and this suite
+# died silently against the new signature. Show the raw output when there is no RESULT.
+if [ -z "$RESULT" ]; then
+  echo "  FAIL: driver produced no RESULT line — raw output follows:"
+  sed 's/^/    | /' "$_RAW" | tail -25
+  rm -f "$_RAW"; exit 1
+fi
+rm -f "$_RAW"
 
 echo "  $RESULT"
 echo ""

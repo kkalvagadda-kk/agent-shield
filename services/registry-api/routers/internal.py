@@ -34,7 +34,6 @@ from models import (
     AgentRun,
     AgentTrigger,
     CompositeWorkflow,
-    Deployment,
     KnowledgeBase,
     KnowledgeSource,
 )
@@ -63,7 +62,13 @@ async def _get_db():
 # `team or 'platform'` guard, so an empty team built the invalid `agents-` namespace
 # and None raised AttributeError — while workflow_orchestrator's copy resolved
 # `agents-platform`. Same name, two behaviours.
-from agent_endpoints import team_namespace as _team_namespace
+#
+# `resolve_dispatch_target` is the SECOND half of that lesson. This module used to
+# import only the namespace helper and then hand-build
+# `f"...{agent_name}-production..."` — an address the admission check above it never
+# validated (it asked "is ANY deployment running?"). Guard and target disagreed;
+# sandbox-only agents DNS-failed hourly. Now one call answers both.
+from agent_endpoints import DispatchTarget, DispatchTargetError, resolve_dispatch_target
 
 
 async def _mark_agent_run_failed(
@@ -93,6 +98,68 @@ async def _mark_agent_run_failed(
             logger.error("failure-alert dispatch errored for run %s: %s", run_id, exc)
 
 
+async def _record_denied_run(
+    db: AsyncSession,
+    *,
+    body: InternalRunStartRequest,
+    agent: Agent,
+    message: str,
+    effective_payload: dict | None,
+    reason: str,
+    log_label: str,
+) -> AgentRun:
+    """Record a fire that was refused BEFORE dispatch, and alert on it.
+
+    Two independent things can refuse a trigger fire before anything is
+    dispatched: identity resolution (a security decision) and dispatch-target
+    resolution (an infrastructure fact). Both must fail CLOSED, both must leave
+    an operator-readable row rather than silence, and both must alert. That is
+    one behaviour, so it is one function — the second refusal path was written
+    by copying the first, which is precisely how the two of them would drift
+    apart the first time one gained a field.
+
+    `reason` is written verbatim to `error_message` and rendered in the UI, so it
+    must name the CAUSE, not the symptom.
+    """
+    failed = AgentRun(
+        agent_name=agent.name,
+        input=message[:4000] if message else None,
+        context="production",
+        status="failed",
+        trigger_type=body.trigger_type,
+        trigger_payload=effective_payload,
+        run_by=body.run_by,
+        team=agent.team,
+        # Link to the trigger even on refusal: this row is how the schedule's
+        # own history shows WHY nothing ran (routers/triggers.py list_trigger_runs).
+        # Without it a refused fire is invisible to the operator watching that
+        # schedule — the same blindness the DNS failures had.
+        trigger_id=body.trigger_id,
+        error_message=reason,
+        completed_at=datetime.now(timezone.utc),
+    )
+    db.add(failed)
+    await db.commit()
+    await db.refresh(failed)
+    try:
+        from alerting import dispatch_failure_alert
+
+        await dispatch_failure_alert(
+            db,
+            trigger_id=body.trigger_id,
+            agent_name=agent.name,
+            run_id=str(failed.id),
+            error_message=reason,
+        )
+    except Exception as alert_exc:  # alerting must never break run recording
+        logger.error("failure-alert dispatch errored for denied run %s: %s", failed.id, alert_exc)
+    logger.warning(
+        "start_internal_run: %s (fail-closed) run=%s agent=%s trigger=%s reason=%s",
+        log_label, failed.id, agent.name, body.trigger_type, reason,
+    )
+    return failed
+
+
 async def _dispatch_and_complete(
     run_id: str,
     agent_name: str,
@@ -101,6 +168,8 @@ async def _dispatch_and_complete(
     execution_shape: str,
     input_payload: dict | None,
     trigger_id=None,
+    *,
+    target: DispatchTarget,
 ) -> None:
     """Shape-aware production dispatch (WS-0 parity core).
 
@@ -119,15 +188,19 @@ async def _dispatch_and_complete(
         # playground/workflow-member callers), NOT dispatch_durable_run's default
         # shared declarative-runner Service — that Service does not exist for SDK/
         # declarative agent pods, so omitting runner_url DNS-fails and the run never
-        # reaches the pod. Scheduled/event trigger runs target the production env.
-        ns = _team_namespace(team)
-        runner_url = f"http://{agent_name}-production.{ns}.svc.cluster.local:8080"
+        # reaches the pod.
+        #
+        # The address comes from the ALREADY-VALIDATED `target`, never rebuilt here.
+        # This line used to interpolate `-production` itself while the caller's
+        # admission check ignored environment entirely — the two disagreed and
+        # sandbox-only agents died on DNS. Rebuilding the URL at the point of use
+        # is what re-opens that gap; don't.
         ok, err = await dispatch_durable_run(
             run_id=run_id,
             agent_name=agent_name,
             input_payload=input_payload,
             callback_url=callback,
-            runner_url=runner_url,
+            runner_url=target.base_url,
         )
         if not ok:
             await _mark_agent_run_failed(run_id, err, agent_name, trigger_id)
@@ -135,12 +208,10 @@ async def _dispatch_and_complete(
         logger.info("internal run %s dispatched durable (accepted=%s)", run_id, ok)
         return
 
-    # reactive: existing synchronous /chat path (unchanged).
-    ns = _team_namespace(team)
-    # Agent Service is named "{agent_name}-{environment}" on port 8080 (see
-    # deploy-controller manifest_builder.build_service). Scheduled/event runs
-    # target the production environment.
-    url = f"http://{agent_name}-production.{ns}.svc.cluster.local:8080/chat"
+    # reactive: existing synchronous /chat path.
+    # Same rule as the durable branch — the base comes from the validated `target`,
+    # not from a second `-production` literal built at the point of use.
+    url = f"{target.base_url}/chat"
     start = time.perf_counter()
     status_val, output, err = "completed", None, None
     try:
@@ -382,26 +453,17 @@ async def start_internal_run(
     if body.workflow_id is not None:
         return await _start_workflow_run(body, db)
 
-    # Resolve the agent + require a running production deployment.
     result = await db.execute(select(Agent).where(Agent.name == body.agent_name))
     agent = result.scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail=f"Agent '{body.agent_name}' not found.")
 
-    # Deployment has no agent_name/created_at columns — resolve via agent_id and
-    # order by deployed_at (fixes a latent Phase 7 bug that errored on every
-    # internal dispatch; only surfaced now that the event-gateway exercises it).
-    dep_result = await db.execute(
-        select(Deployment)
-        .where(Deployment.agent_id == agent.id, Deployment.status == "running")
-        .order_by(Deployment.deployed_at.desc())
-        .limit(1)
-    )
-    if not dep_result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Agent '{body.agent_name}' has no running deployment to dispatch to.",
-        )
+    # NOTE: the running-deployment check used to live HERE, ahead of the trigger
+    # load, and asked "is ANY deployment running?" with no environment filter. It
+    # has moved BELOW (after `message` is known) and become
+    # `resolve_dispatch_target`, so that (a) it validates the environment actually
+    # dispatched to, and (b) a refusal can record a run row carrying the trigger's
+    # input — a 409 to the scheduler was only ever a log line nobody read.
 
     # Load the trigger once (if any) — reused for both the job-spec payload and
     # the identity decision below. The webhook path sends the event body as
@@ -421,6 +483,26 @@ async def start_internal_run(
     if effective_payload:
         message = effective_payload.get("message") or json.dumps(effective_payload)
 
+    # Resolve WHERE this run goes — and refuse here if nowhere. This single call
+    # replaces the environment-blind "is any deployment running?" guard that used
+    # to sit above: it validates the environment actually dispatched to and returns
+    # the address derived from that same row, so admission and target cannot
+    # disagree. Trigger-driven runs are production by definition, stated
+    # explicitly rather than defaulted (agent_endpoints module rules).
+    #
+    # Refusal is recorded, not raised: a 409 back to the scheduler produced a log
+    # line and nothing an operator could see, which is how 1,197 failures stayed
+    # invisible. A failed run row with a readable reason shows up in the schedule's
+    # own history and trips the failure alert.
+    try:
+        target = await resolve_dispatch_target(db, agent, environment="production")
+    except DispatchTargetError as exc:
+        return await _record_denied_run(
+            db, body=body, agent=agent, message=message,
+            effective_payload=effective_payload,
+            reason=str(exc), log_label="NO DISPATCH TARGET",
+        )
+
     # Resolve the acting principal — the ONE identity decision (WS-2 R3), shared
     # with the interactive `/chat` path. No JWT caller on a trigger-driven run, so
     # pass caller=None explicitly (never sniff agent_class): a daemon runs under its
@@ -437,38 +519,12 @@ async def start_internal_run(
     try:
         principal = await resolve_principal(agent, caller=None, trigger=trig, db=db)
     except PrincipalResolutionError as exc:
-        failed = AgentRun(
-            agent_name=body.agent_name,
-            input=message[:4000] if message else None,
-            context="production",
-            status="failed",
-            trigger_type=body.trigger_type,
-            trigger_payload=effective_payload,
-            run_by=body.run_by,
-            team=agent.team,
-            error_message=f"identity resolution failed (fail-closed): {exc}",
-            completed_at=datetime.now(timezone.utc),
+        return await _record_denied_run(
+            db, body=body, agent=agent, message=message,
+            effective_payload=effective_payload,
+            reason=f"identity resolution failed (fail-closed): {exc}",
+            log_label="DENY",
         )
-        db.add(failed)
-        await db.commit()
-        await db.refresh(failed)
-        try:
-            from alerting import dispatch_failure_alert
-
-            await dispatch_failure_alert(
-                db,
-                trigger_id=body.trigger_id,
-                agent_name=body.agent_name,
-                run_id=str(failed.id),
-                error_message=failed.error_message,
-            )
-        except Exception as alert_exc:  # alerting must never break run recording
-            logger.error("failure-alert dispatch errored for denied run %s: %s", failed.id, alert_exc)
-        logger.warning(
-            "start_internal_run: DENY (fail-closed) run=%s agent=%s trigger=%s reason=%s",
-            failed.id, body.agent_name, body.trigger_type, exc,
-        )
-        return failed
 
     run = AgentRun(
         agent_name=body.agent_name,
@@ -507,6 +563,7 @@ async def start_internal_run(
         _dispatch_and_complete(
             str(run.id), body.agent_name, agent.team, message,
             agent.execution_shape, effective_payload, body.trigger_id,
+            target=target,
         )
     )
 
