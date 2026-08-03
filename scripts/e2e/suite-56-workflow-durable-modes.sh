@@ -40,8 +40,10 @@ echo "=== Suite 56: workflow durable modes — D3 all-four-mode resume (WS-1 T5)
 echo "  Pod: $API_POD"
 echo ""
 
-RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+_RAW=$(mktemp)
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import asyncio, uuid
+CONV = str(uuid.uuid4())   # one conversation for the whole driver
 from db import AsyncSessionLocal
 from sqlalchemy import select, text
 from models import AgentRun, CompositeWorkflow
@@ -74,14 +76,22 @@ async def read(pid):
 # _run_step is replaced by a script: a list of (status, output, err) consumed in
 # order (member pods don't exist). resolve_edge_graph returns a fixed adjacency.
 SCRIPT=[]
-async def fake_run_step(parent_run_id, team, agent_name, current_input):
-    return SCRIPT.pop(0)
+# The seam is _run_step_stream, NOT _run_step. The mode walkers used to call _run_step
+# and now consume _run_step_stream directly; _run_step survives only as a thin drain of
+# it, so stubbing _run_step intercepted NOTHING and every walker did a real dispatch.
+# That is why all six checks read False against a driver that ran to completion.
+# The stub is an async generator that yields only the _MEMBER_END sentinel the walkers
+# route on -- no client-facing frames, since this suite asserts cursors, not SSE.
+async def fake_run_step_stream(parent_run_id, team, agent_name, current_input,
+                               conversation_id, *a, **kw):
+    status_val, output, err = SCRIPT.pop(0)
+    yield {'type': wo._MEMBER_END, 'status': status_val, 'output': output, 'error': err}
 
 GRAPH={}
 async def fake_resolve_edge_graph(session, workflow_id):
     return GRAPH
 
-wo._run_step = fake_run_step
+wo._run_step_stream = fake_run_step_stream
 wo.resolve_edge_graph = fake_resolve_edge_graph
 
 async def main():
@@ -93,7 +103,17 @@ async def main():
     GRAPH={'A':[('B',None)], 'B':[]}          # A --default--> B ; B terminal
     wf=await mk_wf('conditional'); pid=await mk_parent(wf); _cleanup.append(pid)
     SCRIPT=[('awaiting_approval', None, None)]   # A parks
-    await wo._run_conditional_from(pid, TEAM, wf, GRAPH, 'A', 0, 'in', 'durable')
+    # These are ASYNC GENERATORS -- they yield SSE frames as the run advances. Awaiting
+    # one returns the generator object without executing a single step, so the parked
+    # state the checks look for was never written:
+    #   TypeError: object async_generator can't be used in await expression
+    # Draining is what runs the orchestration; the frames themselves are not asserted here.
+    # 8 positionals used to line up as ... current_input='in', conversation_id='durable',
+    # with shape falling back to its default -- 'durable' was landing on the CONVERSATION
+    # ID. It never raised because both are str. conversation_id is passed explicitly now
+    # and shape by keyword, so the next signature change fails loudly instead of shifting.
+    async for _ in wo._run_conditional_from(pid, TEAM, wf, GRAPH, 'A', 0, 'in',
+                                            CONV, shape='durable'): pass
     r=await read(pid); st=r['state'] or {}
     out['c_park']=(r['status']=='awaiting_approval' and st.get('mode')=='conditional'
                    and st.get('node')=='A' and st.get('visited_count')==1)
@@ -106,7 +126,8 @@ async def main():
     GRAPH={'A':[('B',None)], 'B':[]}          # sole edge A->B (deterministic hop)
     wf=await mk_wf('handoff'); pid=await mk_parent(wf); _cleanup.append(pid)
     SCRIPT=[('awaiting_approval', None, None)]
-    await wo._run_handoff_from(pid, TEAM, wf, GRAPH, 'A', 0, 'in', 'durable')
+    async for _ in wo._run_handoff_from(pid, TEAM, wf, GRAPH, 'A', 0, 'in',
+                                        CONV, shape='durable'): pass
     r=await read(pid); st=r['state'] or {}
     out['h_park']=(r['status']=='awaiting_approval' and st.get('mode')=='handoff'
                    and st.get('node')=='A' and st.get('visited_count')==1)
@@ -125,9 +146,10 @@ async def main():
         ('completed', '{\"next\":\"wk\"}', None),  # sup call3
         ('awaiting_approval', None, None),         # wk  call4  -> PARK
     ]
-    await wo._run_supervisor_from(pid, TEAM, wf, 'sup', ['wk'], 3,
-                                  iteration=0, current_input='start', worker_outputs=[],
-                                  shape='durable')
+    async for _ in wo._run_supervisor_from(pid, TEAM, wf, 'sup', ['wk'], 3,
+                                           conversation_id=CONV,
+                                           iteration=0, current_input='start', worker_outputs=[],
+                                           shape='durable'): pass
     r=await read(pid); st=r['state'] or {}
     out['s_park']=(r['status']=='awaiting_approval' and st.get('mode')=='supervisor'
                    and st.get('phase')=='worker' and st.get('iteration')==1
@@ -152,7 +174,18 @@ async def main():
         pass
 
 asyncio.run(main())
-" 2>&1 | grep -v Defaulted | grep '^RESULT' | tail -1 || true)
+" > "$_RAW" 2>&1 || true
+RESULT=$(grep -v Defaulted "$_RAW" | grep '^RESULT' | tail -1 || true)
+# The pipe through `grep ^RESULT` used to be the only consumer, so a driver traceback
+# was discarded and all six checks reported FAIL against an empty string -- a crash
+# indistinguishable from six assertion failures. Same filter hid a real regression in
+# suite-54. Show the tail when the expected marker never arrives.
+if [ -z "$RESULT" ]; then
+  echo "  FAIL: driver never printed a RESULT line -- raw follows:"
+  sed 's/^/    | /' "$_RAW" | tail -25
+  rm -f "$_RAW"; exit 1
+fi
+rm -f "$_RAW"
 
 echo "  $RESULT"
 echo ""

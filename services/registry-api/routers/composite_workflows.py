@@ -26,6 +26,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from deployment_lifecycle import detach_and_delete_deployments
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1180,20 +1181,17 @@ async def delete_workflow_version(
             detail=f"Version '{version_id}' not found for workflow '{workflow_id}'.",
         )
 
-    # Terminate all non-terminated deployments for this version.
-    active_deps = (
-        await db.execute(
-            select(WorkflowDeployment).where(
-                WorkflowDeployment.version_id == version_id,
-                WorkflowDeployment.status.notin_(["terminated"]),
-            )
-        )
-    ).scalars().all()
-    now = datetime.now(timezone.utc)
-    for dep in active_deps:
-        dep.status = "terminated"
-        dep.terminated_at = now
-    terminated_count = len(active_deps)
+    # Tear down the deployments pinned to this version. Flipping status to
+    # 'terminated' and leaving the rows was not enough: workflow_deployments.version_id
+    # is a NO ACTION FK, so the db.delete(ver) below violated it and every delete of a
+    # once-deployed workflow version returned 500. Shared with the agent path so the
+    # two cannot drift apart again.
+    terminated_count = await detach_and_delete_deployments(
+        db,
+        deployment_model=WorkflowDeployment,
+        version_id=version_id,
+        run_fk_column=AgentRun.workflow_deployment_id,
+    )
 
     await db.delete(ver)
     await db.commit()

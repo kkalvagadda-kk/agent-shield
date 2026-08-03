@@ -19,7 +19,11 @@ echo "=== Suite 41: Version Delete Cascade ==="
 echo "T-S41-001 — Delete agent version with no deployments"
 run '
 import httpx, sys
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+# follow_redirects: FastAPI answers a slashless collection path such as POST /agents
+# with a 307 and an EMPTY body, so .json failed with:
+#   Expecting value: line 1 column 1 char 0
+# a redirect misreported as a malformed response. Real clients follow it; so must this.
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 # Create temp agent
 ag = c.post("/agents", json={"name":"s41-del-agent","team":"default","agent_type":"declarative"}).json()
 # Create version
@@ -40,7 +44,7 @@ print("PASS: T-S41-001")
 echo "T-S41-002 — Delete agent version cascades sandbox deployment"
 run '
 import httpx, sys
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 # Create version
 v = c.post("/agents/s41-del-agent/versions", json={"eval_passed":False}).json()
 vid = v["id"]
@@ -52,10 +56,13 @@ r = c.delete(f"/agents/s41-del-agent/versions/{vid}")
 assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
 body = r.json()
 assert body["terminated_deployments"] >= 1, f"Expected >=1, got {body}"
-# Verify deployment now terminated
+# The response field is called terminated_deployments and the server logs
+# "terminated %d deployments", but versions.py:304 does `await db.delete(dep)` --
+# the rows are REMOVED, not set to status=terminated. This asserted the vocabulary
+# and got IndexError on an empty list. Assert what actually happens, and the real
+# invariant underneath it: the cascade must not leave a dangling FK behind.
 deps = c.get("/agents/s41-del-agent/deployments").json()
-terminated = [d for d in deps if d["id"] == dep_id]
-assert terminated[0]["status"] == "terminated", f"Expected terminated, got {terminated[0]['status']}"
+assert not [d for d in deps if d["id"] == dep_id], f"deployment row survived: {deps}"
 print("PASS: T-S41-002")
 '
 
@@ -65,7 +72,7 @@ print("PASS: T-S41-002")
 echo "T-S41-003 — Delete agent version blocked by production (409)"
 run '
 import httpx, sys
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 # Create version with eval_passed so we can publish
 v = c.post("/agents/s41-del-agent/versions", json={"eval_passed":True}).json()
 vid = v["id"]
@@ -96,7 +103,7 @@ else:
 echo "T-S41-004 — Delete nonexistent version returns 404"
 run '
 import httpx, uuid
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 fake_id = str(uuid.uuid4())
 r = c.delete(f"/agents/s41-del-agent/versions/{fake_id}")
 assert r.status_code == 404, f"Expected 404, got {r.status_code}"
@@ -109,7 +116,7 @@ print("PASS: T-S41-004")
 echo "T-S41-005 — Delete workflow version with no deployments"
 run '
 import httpx
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 # Find or create a workflow
 wfs = c.get("/workflows").json()
 if isinstance(wfs, list) and len(wfs) > 0:
@@ -136,7 +143,7 @@ print("PASS: T-S41-005")
 echo "T-S41-006 — Delete workflow version cascades deployment"
 run '
 import httpx
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
 wfs = c.get("/workflows").json()
 if isinstance(wfs, list) and len(wfs) > 0:
     wf_id = wfs[0]["id"]

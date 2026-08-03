@@ -41,7 +41,11 @@ from sqlalchemy import text
 from db import AsyncSessionLocal
 
 async def main():
-    c = httpx.Client(base_url="http://localhost:8000/api/v1", timeout=10,
+    # follow_redirects: FastAPI answers a slashless collection path such as POST /agents
+    # with a 307 and an EMPTY body, so .json failed with:
+    #   Expecting value: line 1 column 1 char 0
+    # a redirect misreported as a malformed response. Real clients follow it; so must this.
+    c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", timeout=10,
                      headers={"X-User-Sub": "system"})
     # Archive workflow by name lookup
     try:
@@ -77,7 +81,7 @@ AGENT   = "${AGENT}"
 WF_NAME = "${WF_NAME}"
 TEAM    = "platform"
 B = "http://localhost:8000/api/v1"; H = {"X-User-Sub": "system", "Authorization": "Bearer ${E2E_TOKEN}"}
-c = httpx.Client(base_url=B, timeout=30, headers=H)
+c = httpx.Client(follow_redirects=True, base_url=B, timeout=30, headers=H)
 P = 0; F = 0
 
 def ok(n):

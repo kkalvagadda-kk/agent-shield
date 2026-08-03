@@ -6,8 +6,18 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
+# authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
+# This suite had NO token at all: T-S43-001/002 passed only because their endpoints use
+# get_optional_user, and T-S43-003 hit one behind require_user and got
+#   401 {"detail":"Authentication required"}
+# while asserting 404. The driver bodies are single-quoted, so the token cannot be
+# interpolated into them -- run prepends AUTH instead and each client merges it.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$POD"   # sets E2E_TOKEN; aborts loudly if it cannot
+
 run() {
-  kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "$1"
+  kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+$1"
 }
 
 echo "=== Suite 43: Memory Isolation + Deployment Chat + TTL ==="
@@ -42,7 +52,11 @@ echo "T-S43-002 — Memory save scoped by deployment_id"
 run '
 import httpx
 
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "s43-user"})
+# follow_redirects: FastAPI answers a slashless collection path such as POST /agents
+# with a 307 and an EMPTY body, so .json failed with:
+#   Expecting value: line 1 column 1 char 0
+# a redirect misreported as a malformed response. Real clients follow it; so must this.
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={**AUTH, "X-User-Sub": "s43-user"})
 
 # Create agent with memory_enabled
 ag = c.post("/agents", json={"name":"s43-mem-agent","team":"default","agent_type":"declarative","memory_enabled":True}).json()
@@ -82,7 +96,7 @@ echo "T-S43-003 — POST /agents/{name}/deployments/{dep_id}/chat returns 404 fo
 run '
 import httpx, uuid
 
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "s43-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={**AUTH, "X-User-Sub": "s43-user"})
 
 # Ensure agent exists
 try:
@@ -112,7 +126,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
 
 url = os.getenv("DATABASE_URL", "postgresql+asyncpg://agentshield:agentshield@agentshield-postgresql:5432/agentshield")
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "s43-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={**AUTH, "X-User-Sub": "s43-user"})
 
 # Get agent ID
 ag = c.get("/agents/s43-chat-agent").json()
@@ -195,7 +209,7 @@ echo "T-S43-006 — Clear memory with deployment_id scope"
 run '
 import httpx, uuid
 
-c = httpx.Client(base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "s43-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={**AUTH, "X-User-Sub": "s43-user"})
 dep_id = str(uuid.uuid4())
 
 # Save 2 messages: one global, one scoped
