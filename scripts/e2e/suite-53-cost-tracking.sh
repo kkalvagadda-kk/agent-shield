@@ -32,7 +32,8 @@ echo "=== Suite 53: Cost tracking (backfill + console) ==="
 echo "  Pod: $API_POD"
 echo ""
 
-RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+_RAW=$(mktemp)
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import asyncio, datetime, uuid
 from db import AsyncSessionLocal
 from sqlalchemy import select, text
@@ -123,7 +124,20 @@ async def main():
     print('RESULT', out)
 
 asyncio.run(main())
-" 2>&1 | grep -v Defaulted | grep '^RESULT' | tail -1)
+" 2>&1 | grep -v Defaulted > "$_RAW" || true   # `|| true` so the guard below runs:
+# under `set -e` a crashing driver killed the script BEFORE anything could report why.
+RESULT=$(grep '^RESULT' "$_RAW" | tail -1 || true)
+# The driver's output is filtered to the RESULT line, so a CRASH used to vanish: the
+# traceback was discarded with everything else, RESULT came back empty, and `set -e`
+# killed the suite with nothing printed after the pod name. A real regression hid that
+# way — _dispatch_and_complete gained a required keyword-only `target` and this suite
+# died silently against the new signature. Show the raw output when there is no RESULT.
+if [ -z "$RESULT" ]; then
+  echo "  FAIL: driver produced no RESULT line — raw output follows:"
+  sed 's/^/    | /' "$_RAW" | tail -25
+  rm -f "$_RAW"; exit 1
+fi
+rm -f "$_RAW"
 
 echo "  $RESULT"
 echo ""

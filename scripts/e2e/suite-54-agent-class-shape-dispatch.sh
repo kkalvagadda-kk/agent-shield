@@ -49,7 +49,8 @@ echo "=== Suite 54: agent_class authoring + shape-aware dispatch (WS-0) ==="
 echo "  Pod: $API_POD"
 echo ""
 
-RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+_RAW=$(mktemp)
+kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import asyncio, uuid, types
 from db import AsyncSessionLocal
 from sqlalchemy import select, text
@@ -59,6 +60,7 @@ import routers.agents as agents_r
 import routers.composite_workflows as wf_r
 import routers.internal as internal
 import workflow_orchestrator as wo
+import agent_endpoints
 import durable_dispatch
 
 TEAM='platform'
@@ -131,7 +133,15 @@ async def main():
     durable_dispatch.dispatch_durable_run=_stub_fail
     async with AsyncSessionLocal() as db:
         r=AgentRun(agent_name=AG, team=TEAM, status='running', context='production'); db.add(r); await db.flush(); rid7=str(r.id); await db.commit()
-    await internal._dispatch_and_complete(rid7, AG, TEAM, 'msg', 'durable', {}, None)
+    # `target` is keyword-only and REQUIRED since resolve_dispatch_target became the
+    # single owner of admissibility+address (Decision 36). Passing an explicit target
+    # here is the point of that design: this test exercises SHAPE routing, and the
+    # address it routes to is now supplied by the caller rather than rebuilt inside.
+    _tgt = agent_endpoints.DispatchTarget(
+        base_url=agent_endpoints.agent_pod_base(AG, TEAM, 'production'),
+        deployment_id=uuid.uuid4(), environment='production',
+        source_table='deployments')
+    await internal._dispatch_and_complete(rid7, AG, TEAM, 'msg', 'durable', {}, None, target=_tgt)
     durable_dispatch.dispatch_durable_run=_orig
     async with AsyncSessionLocal() as db:
         rr=(await db.execute(select(AgentRun).where(AgentRun.id==uuid.UUID(rid7)))).scalar_one()
@@ -151,7 +161,7 @@ async def main():
     internal.httpx=types.SimpleNamespace(AsyncClient=_Cli)
     async with AsyncSessionLocal() as db:
         r=AgentRun(agent_name=AG, team=TEAM, status='running', context='production'); db.add(r); await db.flush(); rid8=str(r.id); await db.commit()
-    await internal._dispatch_and_complete(rid8, AG, TEAM, 'msg', 'reactive', None, None)
+    await internal._dispatch_and_complete(rid8, AG, TEAM, 'msg', 'reactive', None, None, target=_tgt)
     internal.httpx=_realhttp
     async with AsyncSessionLocal() as db:
         rr=(await db.execute(select(AgentRun).where(AgentRun.id==uuid.UUID(rid8)))).scalar_one()
@@ -200,7 +210,20 @@ async def main():
     print('RESULT', out)
 
 asyncio.run(main())
-" 2>&1 | grep -v Defaulted | grep '^RESULT' | tail -1)
+" 2>&1 | grep -v Defaulted > "$_RAW" || true   # `|| true` so the guard below runs:
+# under `set -e` a crashing driver killed the script BEFORE anything could report why.
+RESULT=$(grep '^RESULT' "$_RAW" | tail -1 || true)
+# The driver's output is filtered to the RESULT line, so a CRASH used to vanish: the
+# traceback was discarded with everything else, RESULT came back empty, and `set -e`
+# killed the suite with nothing printed after the pod name. A real regression hid that
+# way — _dispatch_and_complete gained a required keyword-only `target` and this suite
+# died silently against the new signature. Show the raw output when there is no RESULT.
+if [ -z "$RESULT" ]; then
+  echo "  FAIL: driver produced no RESULT line — raw output follows:"
+  sed 's/^/    | /' "$_RAW" | tail -25
+  rm -f "$_RAW"; exit 1
+fi
+rm -f "$_RAW"
 
 echo "  $RESULT"
 echo ""
