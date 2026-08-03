@@ -45,6 +45,31 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — e2e suites requiring deployed agent pods — 2026-08-03
+
+Working the backlog of suites that had never completed a run (registry-api 0.2.258).
+Most failures were suite defects and are fixed. These three cannot pass on the EKS test
+cluster and are **left failing on purpose** — they are not softened to SKIP, because a
+suite that reports success without proving anything is worse than one that fails.
+
+- **environment-gated (not a code defect) — `suite-59`, `suite-60`, and `suite-37`
+  T-S37-002/003 need real agent pods that do not exist on EKS.** 59 needs `wf-router`,
+  `wf-payout`, `wf-confirm`, `wf-supervisor`; 60 needs `wf-payout`; 37 needs
+  `serper-agent-4`. Each suite already prints its own precondition
+  (`DIAG _diag missing/not-running: [...] — deploy them first`), so the failure names its
+  cause rather than implying a product fault. These fixtures were only ever deployed by
+  hand on the local Docker Desktop cluster; **no script seeds them**, which is the actual
+  gap. Until one exists, the orchestration/HITL-over-OPA paths are proven only on a
+  cluster someone set up manually — i.e. not reproducibly.
+
+- **debt — the suite runner could not tell "never ran" from "passed".** 34 of 101 suites
+  were silently skipped (`kubectl exec -i` consumed the here-string driving the loop) and
+  several more died before their first assertion while printing nothing, because their
+  drivers were piped through `grep '^RESULT'` or `2>/dev/null`. Fixed in `run-tests.sh`
+  (completeness guard: executed must equal selected) and in suites 47/53/54/56, which now
+  print the raw driver tail when the expected marker never arrives. Assume any suite not
+  yet re-run in this sweep is unproven.
+
 ## Known gaps — schedule-lifecycle journey on EKS — 2026-08-02
 
 Running `claude-in-chrome-schedule-lifecycle-journey.md` end to end (13/13 legs, registry-api
