@@ -575,9 +575,11 @@ r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'expected 200 got {r.status}'
 data = json.loads(r.read())
 # The endpoint returns {approval_id, status, thread_id, agent_name, team}. It has NEVER
-# returned `decided` or `decision` — `git log -S '\"decided\"'` on
-# routers/playground.py finds no commit — so this asserted a contract that never
-# shipped and failed on every run since it was written. The operation itself always
+# returned a 'decided' or 'decision' key -- git log -S on routers/playground.py finds no
+# commit -- so this asserted a contract that never shipped and failed on every run since
+# it was written. (No backticks anywhere in this file: these driver bodies sit inside a
+# double-quoted shell string, so backticked text is COMMAND SUBSTITUTED. That is how the
+# fix for this very assertion produced "line 565: decided: command not found".) The operation itself always
 # worked, which T-S8-018b (status=approved, read back) proves independently.
 assert data.get('status') == 'approved', f'status should be approved: {data}'
 assert data.get('approval_id') == '${PG_APPROVAL_ID}', f'approval_id echoed back: {data}'
