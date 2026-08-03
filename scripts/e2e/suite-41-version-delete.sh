@@ -161,10 +161,12 @@ dep_id = dep["id"]
 r = c.delete(f"/workflows/{wf_id}/versions/{vid}")
 assert r.status_code == 200, f"Expected 200, got {r.status_code}: {r.text}"
 assert r.json()["terminated_deployments"] >= 1
-# Verify deployment terminated
+# Same stale assertion as T-S41-002: the cascade REMOVES the deployment rows, it does
+# not set status='terminated'. Leaving them in place is exactly what produced the 500
+# this test exists to catch (workflow_deployments_version_id_fkey), so asserting the
+# row survives would assert the bug.
 deps = c.get(f"/workflows/{wf_id}/deployments").json()
-found = [d for d in deps if d["id"] == dep_id]
-assert found[0]["status"] == "terminated"
+assert not [d for d in deps if d["id"] == dep_id], f"deployment row survived: {deps}"
 print("PASS: T-S41-006")
 '
 
