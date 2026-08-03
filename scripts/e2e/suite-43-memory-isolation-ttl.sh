@@ -132,6 +132,11 @@ c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1",
 ag = c.get("/agents/s43-chat-agent").json()
 agent_id = ag["id"]
 
+# A real version row: deployments.version_id is an FK, and the INSERT below used to
+# bind :aid to BOTH agent_id and version_id -- one param reused for two columns --
+# so it failed with deployments_version_id_fkey before the test could assert anything.
+version_id = c.post("/agents/s43-chat-agent/versions", json={"eval_passed": False}).json()["id"]
+
 # Insert a terminated deployment directly
 dep_id = str(uuid.uuid4())
 async def insert():
@@ -139,8 +144,8 @@ async def insert():
     async with eng.begin() as conn:
         await conn.execute(text(
             "INSERT INTO deployments (id, agent_id, version_id, environment, status, k8s_namespace, deployed_at) "
-            "VALUES (:did, :aid, :aid, '\''sandbox'\'', '\''terminated'\'', '\''agents-default'\'', now())"
-        ), {"did": dep_id, "aid": agent_id})
+            "VALUES (:did, :aid, :vid, '\''sandbox'\'', '\''terminated'\'', '\''agents-default'\'', now())"
+        ), {"did": dep_id, "aid": agent_id, "vid": version_id})
     await eng.dispose()
 asyncio.run(insert())
 
@@ -164,6 +169,7 @@ url = os.getenv("DATABASE_URL", "postgresql+asyncpg://agentshield:agentshield@ag
 
 dep_id = str(uuid.uuid4())
 agent_id = str(uuid.uuid4())
+version_id = str(uuid.uuid4())   # same reused-param bug as T-S43-004
 
 async def check():
     eng = create_async_engine(url)
@@ -173,11 +179,15 @@ async def check():
             "INSERT INTO agents (id, name, team, agent_type, status) "
             "VALUES (:id, :name, '\''default'\'', '\''declarative'\'', '\''active'\'')"
         ), {"id": agent_id, "name": f"s43-ttl-{agent_id[:8]}"})
+        await conn.execute(text(
+            "INSERT INTO agent_versions (id, agent_id, version_number, eval_passed) "
+            "VALUES (:vid, :aid, 1, false)"
+        ), {"vid": version_id, "aid": agent_id})
         # Insert deployment with ttl_hours=0 (expired immediately) and deployed_at in the past
         await conn.execute(text(
             "INSERT INTO deployments (id, agent_id, version_id, environment, status, k8s_namespace, deployed_at, ttl_hours) "
-            "VALUES (:did, :aid, :aid, '\''sandbox'\'', '\''running'\'', '\''agents-default'\'', now() - interval '\''2 hours'\'', 1)"
-        ), {"did": dep_id, "aid": agent_id})
+            "VALUES (:did, :aid, :vid, '\''sandbox'\'', '\''running'\'', '\''agents-default'\'', now() - interval '\''2 hours'\'', 1)"
+        ), {"did": dep_id, "aid": agent_id, "vid": version_id})
 
     # Run the same query the TTL worker would run
     async with eng.begin() as conn:

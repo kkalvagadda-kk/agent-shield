@@ -168,6 +168,12 @@ assert any(i.get('approver_user_id') == 'reviewer-1' for i in items), \
 # Precondition: Create a pending production approval for issue_refund
 # ---------------------------------------------------------------------------
 echo ""
+# Per-run thread id. It was the fixed literal 'thread-s5-smoke', and POST /approvals/
+# is idempotent on (agent, thread, tool, args) -- so the second run got back the FIRST
+# run's approval, already decided by that run's T-S5-005. Three checks then failed
+# against an already-approved row while reporting it as a product fault.
+S5_THREAD="thread-s5-$(date +%s)-$$"
+
 echo "--- Setup: create pending production approval for issue_refund ---"
 
 APPROVAL_INFO=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
@@ -176,7 +182,7 @@ body = json.dumps({
     'agent_id': '${AGENT_ID}',
     'agent_name': 'hitl-s5-agent',
     'team': 'platform',
-    'thread_id': 'thread-s5-smoke',
+    'thread_id': '${S5_THREAD}',
     'tool_name': 'issue_refund',
     'tool_args': {'order_id': 'ORD-001', 'amount': 50.00},
     'risk_level': 'high',
