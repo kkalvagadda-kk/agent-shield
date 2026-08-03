@@ -42,7 +42,13 @@ echo "=== Suite 33: Composable Agent Filter ==="
 
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-B='http://localhost:8000/api/v1'; H={'X-User-Sub':'system'}
+# The Bearer is REQUIRED, not decorative: trigger CRUD is behind require_user, so a
+# header dict without it gets {\"detail\":\"Authentication required\"} on the FIRST
+# setup call and the suite dies before asserting anything. This suite already sources
+# lib/e2e-auth.sh and its cleanup driver used the token — only this dict was missed,
+# which is why it looked authenticated. Same class as the 15 suites restored in
+# c4fd927; this is the 16th.
+B='http://localhost:8000/api/v1'; H={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}
 c=httpx.Client(base_url=B, timeout=30)
 P=0; F=0
 def ok(n):

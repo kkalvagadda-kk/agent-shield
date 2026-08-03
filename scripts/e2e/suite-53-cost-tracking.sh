@@ -48,10 +48,25 @@ async def main():
     out={}
     async with AsyncSessionLocal() as db:
         await db.execute(text('INSERT INTO user_team_assignments (user_sub, team_name) VALUES (:s,:t) ON CONFLICT DO NOTHING'), {'s':SUB,'t':TEAM})
-        a=(await db.execute(select(Agent).where(Agent.name==AG))).scalar_one_or_none()
-        if not a:
-            a=Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
-            db.add(a); await db.flush()
+        # REAP FIRST. Cleanup lives at the end of main(), so any crash mid-run leaves
+        # this fixture behind — and the next run then reuses the surviving agent and
+        # inserts version_number=1 again:
+        #   UniqueViolationError: uq_agent_versions (agent_id, version_number)=(...,1)
+        # A suite whose setup assumes its own teardown ran poisons every later run from
+        # the first failure onward. Deleting leftovers up front makes it self-healing
+        # rather than dependent on the previous run having succeeded.
+        stale=(await db.execute(select(Agent).where(Agent.name==AG))).scalar_one_or_none()
+        if stale:
+            for r in (await db.execute(select(AgentRun).where(AgentRun.agent_name==AG))).scalars().all():
+                await db.delete(r)
+            for d in (await db.execute(select(Deployment).where(Deployment.agent_id==stale.id))).scalars().all():
+                await db.delete(d)
+            for ov in (await db.execute(select(AgentVersion).where(AgentVersion.agent_id==stale.id))).scalars().all():
+                await db.delete(ov)
+            await db.delete(stale); await db.flush()
+
+        a=Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
+        db.add(a); await db.flush()
         v=AgentVersion(agent_id=a.id, version_number=1, config={}, tools=[])
         db.add(v); await db.flush()
         sd=Deployment(agent_id=a.id, version_id=v.id, environment='sandbox',

@@ -820,19 +820,33 @@ async def main():
         # The eval scores the decision PRODUCTION actually makes. Same payloads, same
         # trigger, through the REAL gateway as REAL WS-4-signed requests.
         try:
-            cr = await c.post(f"/triggers/{trig_id}/clients",
-                              json={"client_id": f"s77-app-{SFX}"})
-            if cr.status_code != 201:
+            # POST /triggers/{id}/clients is RETIRED — it answers 410 pointing at the
+            # application flow (routers/webhook_clients.py). This suite kept calling it
+            # and failed on the 410 rather than on anything it set out to prove.
+            # Replacement, same shape suite-83 exercises: create a reusable application
+            # for the team, then grant it the `invoker` role on the artifact.
+            ar = await c.post("/teams/platform/applications",
+                              json={"name": f"s77-app-{SFX}"})
+            gr_ok = False
+            if ar.status_code == 201:
+                app_id = ar.json()["id"]
+                _ag = (await c.get(f"/agents/{AGENT}")).json()
+                gg = await c.post(f"/artifacts/agent/{_ag['id']}/grants",
+                                  json={"grantee_type": "application",
+                                        "grantee_id": app_id, "role": "invoker"})
+                gr_ok = gg.status_code == 201
+            if not gr_ok:
                 rec("T-S77-009 LIVE DIFFERENTIAL CONTROL", False,
-                    f"client register failed {cr.status_code}: {cr.text[:200]}")
+                    f"application setup failed: app={ar.status_code} "
+                    f"{ar.text[:120]} grant={'n/a' if ar.status_code != 201 else gg.status_code}")
             else:
-                secret = cr.json()["secret"]
+                secret = ar.json()["secret"]
                 token = trig["token"]
                 gw_status = {}
                 for label, payload in (("match", PAY_MATCH), ("miss", PAY_MISS)):
                     body = json.dumps(payload).encode()
                     hdrs = sign_webhook(secret, body)   # the PRODUCT'S signer
-                    hdrs["X-Client-Id"] = f"s77-app-{SFX}"
+                    hdrs["X-Client-Id"] = app_id   # the application id is the sender identity now
                     # content=body, NOT json= — the signature covers these exact bytes.
                     gr = await gw.post(f"{GW}/hooks/{AGENT}/{token}",
                                        content=body, headers=hdrs)
