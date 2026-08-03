@@ -122,12 +122,25 @@ echo "  note: using portable pgvector (${PGVECTOR_TAG}) — safe on nodes withou
 echo ""
 echo "[1/7] ECR login + repos..."
 aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$ECR" >/dev/null
-for r in registry-api deploy-controller declarative-runner studio scheduler event-gateway \
-         python-executor eval-runner minio-cp1 postgresql-pgvector mcp-proxy; do
+# The repo list is DERIVED from the build list below, not maintained beside it.
+# They are the same set by definition — every image this script pushes needs a
+# repository to push to — and keeping two hand-written copies means adding a service
+# to one and not the other. That is exactly what happened with embedding-sidecar:
+# the builder was added, the repo was not, and the push failed with "The repository
+# with name 'agentshield/embedding-sidecar' does not exist", which fails the WHOLE
+# deploy on the first attempt. A missing repo took down an unrelated memory bump.
+ECR_REPOS=$(grep -oE '^[[:space:]]+b[[:space:]]+[a-z0-9-]+' "${BASH_SOURCE[0]}" | awk '{print $2}' | sort -u)
+if [ -z "$ECR_REPOS" ]; then
+  echo "FATAL: could not derive the ECR repo list from this script's build calls." >&2
+  echo "       The 'b <svc> ...' lines are the source of truth; if their shape changed," >&2
+  echo "       fix this grep rather than reintroducing a second hand-written list." >&2
+  exit 1
+fi
+for r in $ECR_REPOS; do
   aws ecr describe-repositories --repository-names "agentshield/$r" --region "$REGION" >/dev/null 2>&1 \
-    || aws ecr create-repository --repository-name "agentshield/$r" --region "$REGION" >/dev/null
+    || { echo "  creating missing repo agentshield/$r"; aws ecr create-repository --repository-name "agentshield/$r" --region "$REGION" >/dev/null; }
 done
-echo "  11 repos ready"
+echo "  $(echo "$ECR_REPOS" | wc -w | tr -d ' ') repos ready"
 
 # ── Step 2: build + push (linux/amd64!) ──────────────────────────────────────
 if [ "$SKIP_BUILD" = "1" ]; then
