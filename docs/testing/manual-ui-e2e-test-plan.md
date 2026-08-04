@@ -110,9 +110,26 @@ deliberately absent from suite-97's completeness gate until it does.
   with no such local address. Attempting it produced `ECONNREFUSED ::ffff:127.0.0.1:8443` in the
   file's first test, which aborted the other two before they ran — so "2 did not run", **not** "2
   passed". R0's backend is proven by `suite-97` (11/11 against `0.2.260`, with `T-S97-004`
-  demonstrated RED against `0.2.258` first); the UI journey is not proven at all. Closing this needs
-  a tunnel to the internal NLB or an EKS-aware `STUDIO_E2E_GATEWAY_URL`. Until then R0 is
-  **backend-verified and UI-unverified**, and must not be described otherwise.
+  demonstrated RED against `0.2.258` first); the UI journey is not proven at all. R0 is
+  **backend-verified and UI-unverified** and must not be described otherwise.
+
+  **Diagnosed and half-closed 2026-08-04.** The root cause was not R0: the Gateway `HTTPRoute`
+  (`agentshield-routes`) is bound to the **internal NLB's own DNS name**, so nothing answers on
+  `127.0.0.1:8443` and no `Host` header matches. `scripts/studio-e2e.sh` then fell through to a
+  plain-http port-forward that cannot reach the API on `:8443`, so **every** spec died at its
+  fixture with `ECONNREFUSED` — the whole browser layer has been silently unrunnable against EKS,
+  not just this one test. The script now discovers the route hostname, port-forwards the Gateway
+  Service to 8443, and runs gateway mode against it; verified reachable
+  (`/config.json` → 200, `/realms/agentshield/.well-known/openid-configuration` → 200 via
+  `curl --resolve`).
+
+  **ONE MANUAL STEP REMAINS**, because Playwright drives a real browser and cannot override DNS the
+  way `curl --resolve` can:
+
+      sudo sh -c 'echo "127.0.0.1  <nlb-dns-name>" >> /etc/hosts'
+
+  The script prints the exact line and refuses to run rather than degrading silently. After that
+  entry exists, `bash scripts/studio-e2e.sh` runs the browser layer on EKS and this gap closes.
 
 **not-yet-wired (debt)**
 
