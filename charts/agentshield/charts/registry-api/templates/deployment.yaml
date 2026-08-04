@@ -137,6 +137,16 @@ spec:
                 secretKeyRef:
                   name: keycloak-admin-password
                   key: admin-password
+            # platform-admin bootstrap (Decision 40). The Secret moved here from the
+            # realm-init Job, which no longer creates users. Missing/empty -> the
+            # bootstrap fails loudly and /ready stays red.
+            # MAIN CONTAINER ONLY — the alembic-migrate init container runs schema
+            # migrations and must not carry a user credential it never reads.
+            - name: PLATFORM_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-user-passwords
+                  key: platform-admin
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
             - name: EVAL_RUNNER_IMAGE

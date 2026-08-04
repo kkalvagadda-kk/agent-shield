@@ -122,3 +122,43 @@ test("assigning consumer persists across a reload (save -> reload -> assert)", a
   const users = (await api_r.json()) as { username: string; role: string | null }[];
   expect(users.find((u) => u.username === USERNAME)?.role).toBe("consumer");
 });
+
+test("bootstrap gives platform-admin a role row, so the Admin menu renders (R0 / Decision 40)", async ({
+  page,
+}) => {
+  // The 2026-07-20 symptom was structural, not visual: the assignment row was pinned to
+  // a `sub` captured at seed time, the realm was later recreated, Keycloak reissued the
+  // admin under a NEW sub, /me answered role=null, `isAtLeast("platform-admin")` was
+  // false (Sidebar.tsx:392) and the Admin section silently vanished. Nothing errored —
+  // a menu just disappeared, which is why no suite caught it. Nothing in the install
+  // wrote that row at all; scripts/seed-platform-admin-role.sh patched it after the
+  // fact. It is now written by registry-api's lifespan bootstrap
+  // (services/registry-api/bootstrap_admin.py), which looks the admin up by USERNAME on
+  // every start so re-pinning falls out of the design.
+  //
+  // This asserts the WHOLE chain from the browser — real Keycloak login (global-setup)
+  // -> GET /me -> the sidebar — because that is the only layer where the symptom was
+  // visible. suite-97 T-S97-004 proves the same property from the other end (delete the
+  // Keycloak admin, restart, require a re-pin); neither replaces the other.
+  //
+  // /me is fetched exactly once, in main.tsx, BEFORE the first render — so the waiter
+  // must be armed before goto(). A 403 there is swallowed into `role = null`
+  // (main.tsx:37-39), i.e. the failure is silent by design and only the sidebar shows it.
+  const me = page.waitForResponse(
+    (r) => r.url().includes("/api/v1/me") && r.request().method() === "GET",
+    { timeout: 30_000 },
+  );
+  await page.goto(BASE_URL);
+  const meResponse = await me;
+  const body = await meResponse.json();
+  expect(meResponse.status(), `/me: ${meResponse.status()} ${JSON.stringify(body)}`).toBe(200);
+  expect(body.role, `/me role: ${JSON.stringify(body)}`).toBe("platform-admin");
+  expect(body.team).toBe("platform");
+
+  // `CollapsibleSection` (Sidebar.tsx:201-224) renders its label as a real <button>, so
+  // the role selector is correct. The name regex is case-INSENSITIVE on purpose: the
+  // label is uppercased by CSS (`uppercase` at Sidebar.tsx:216), and whether an
+  // accessible name reflects `text-transform` is a browser/engine detail this assertion
+  // must not depend on. The DOM text is "Admin"; the rendered text is "ADMIN"; both pass.
+  await expect(page.getByRole("button", { name: /^admin$/i })).toBeVisible({ timeout: 20_000 });
+});

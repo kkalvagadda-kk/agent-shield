@@ -321,6 +321,10 @@ async def main():
         d2c = "prereq failed (no parked approval)"; ok2c = False
         if approval_id:
             async with AsyncSessionLocal() as s:
+                # 'agent:reviewer' is a REVIEWER SCOPE, not a global role (Decision 42 / V-5).
+                # approvals.py:48 _DEFAULT_REVIEWER_SCOPE matches this literal via _caller_roles (:266).
+                # ROLE_HIERARCHY.get(...,0)==0 for it is load-bearing. Do not "normalize" it. The FR-12
+                # audit reports it as a matched row, never as litter.
                 await s.execute(text(
                     "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "
                     "VALUES (:u, 'platform', 'agent:reviewer', 'suite-71', :ts)"),

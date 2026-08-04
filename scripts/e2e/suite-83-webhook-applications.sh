@@ -31,10 +31,19 @@ if [ -z "$API_POD" ]; then
   echo "FAIL  T-SYY-FIXTURE  |  no Running registry-api pod found"; exit 1
 fi
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+
 echo "=== Suite 83: Webhook Applications (invoker grants + signed invoke) ==="
 echo "    pod: $API_POD"
 echo ""
 RUN_TAG="syy-$(date +%s)"
+
+# T-SYY-003 uses `agent-reviewer` as its contributor persona. Since R0/FR-9 the chart
+# creates no Keycloak users, so this suite provisions it through the real
+# POST /api/v1/admin/users. Idempotent. Without it token_for() below raises inside the
+# driver and the suite dies at T-SYY-FIXTURE-000 pointing at Keycloak rather than at
+# the fixture that no longer has an owner.
+e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
 
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   bash -c "cd /tmp && PYTHONPATH=/app python3 -" <<PY

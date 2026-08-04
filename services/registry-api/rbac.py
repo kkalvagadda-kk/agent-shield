@@ -37,9 +37,37 @@ _LEGACY_MAP = {
 PLATFORM_ROLES = frozenset(ROLE_HIERARCHY) | frozenset(_LEGACY_MAP)
 
 
-def _normalize_role(raw: str | None) -> str:
-    if raw is None:
-        return "contributor"
+class NoPlatformRole(Exception):
+    """The subject has no user_team_assignments row.
+
+    Decision 40/41: users are created by the platform, never auto-provisioned from
+    the IdP, so a missing row is DATA CORRUPTION, not a kind of user. Raised rather
+    than resolved to an invented role. main.create_app maps this to 403 with the
+    stable code below.
+    """
+
+    ERROR_CODE = "no_platform_role"
+
+    def __init__(self, user_sub: str) -> None:
+        self.user_sub = user_sub
+        super().__init__(f"no platform role row for sub '{user_sub}'")
+
+
+def _normalize_role(raw: str) -> str:
+    """Map a legacy spelling onto its canonical name. Never invents.
+
+    An UNRECOGNIZED value is returned VERBATIM and keeps today's behaviour
+    (ROLE_HIERARCHY.get(role, 0) == 0). That is deliberate and load-bearing, not a
+    gap: user_team_assignments.role is a union of {global role} u {reviewer scope}
+    (Decision 42 / V-5). routers/approvals.py:48 defines
+    _DEFAULT_REVIEWER_SCOPE = "agent:reviewer" and _caller_roles (:266) matches it
+    against this same column. Rank 0 for a scope literal is the ONLY thing stopping a
+    reviewer-scope holder from being read as a contributor. Do not "fix" it here —
+    the split lands in R5 (G-R0-1).
+
+    `raw` is no longer Optional: a missing row raises NoPlatformRole in
+    get_user_global_role rather than arriving here as None to be defaulted.
+    """
     return _LEGACY_MAP.get(raw, raw)
 
 
@@ -48,11 +76,24 @@ def _normalize_role(raw: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 async def get_user_global_role(db: AsyncSession, user_sub: str) -> str:
+    """The ONE resolution path for "what global role is this subject".
+
+    Raises NoPlatformRole when no row exists. Callers must not substitute a default —
+    that is the invention this function exists to remove.
+    """
     row = await db.execute(
         text("SELECT role FROM user_team_assignments WHERE user_sub = :sub"),
         {"sub": user_sub},
     )
     r = row.scalar_one_or_none()
+    if r is None:
+        logger.warning(
+            "rbac: sub '%s' has NO user_team_assignments row — refusing (%s). "
+            "Users are platform-created; a missing row is corruption, not a default "
+            "(Decision 40/41). Check GET /api/v1/admin/identity-audit.",
+            user_sub, NoPlatformRole.ERROR_CODE,
+        )
+        raise NoPlatformRole(user_sub)
     return _normalize_role(r)
 
 

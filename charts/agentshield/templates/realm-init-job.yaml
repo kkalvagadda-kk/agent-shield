@@ -7,13 +7,15 @@
     • Realm    : agentshield (display name "AgentShield")
     • Client   : registry-api   — confidential, service accounts enabled
     • Client   : envoy-gateway  — public client, used by Envoy JWT filter
-    • User     : platform-admin (password from keycloak-user-passwords)
-    • User     : agent-reviewer (password from keycloak-user-passwords)
+    • Client   : agentshield-studio — public SPA client (PKCE)
+    • Client   : langfuse       — confidential, SSO for trace links
+    • Users    : NONE. Decision 40 — users are created by platform code, never by
+                 the chart. registry-api's lifespan bootstraps platform-admin
+                 (services/registry-api/bootstrap_admin.py); agent-reviewer is
+                 created by the four e2e suites that use it, via POST /api/v1/admin/users.
 
   Secrets expected (pre-created before Helm install):
     keycloak-admin-password  → key: password         (Keycloak admin)
-    keycloak-user-passwords  → key: platform-admin   (platform-admin pw)
-                             → key: agent-reviewer   (agent-reviewer pw)
 
   Hook policy:
     • Runs after install and upgrade (post-install, post-upgrade)
@@ -101,18 +103,9 @@ spec:
                 secretKeyRef:
                   name: keycloak-admin-password
                   key: admin-password
-            # Platform user passwords — sourced from a separate secret so that
-            # admin credentials and user credentials can be rotated independently.
-            - name: PLATFORM_ADMIN_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: keycloak-user-passwords
-                  key: platform-admin
-            - name: REVIEWER_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: keycloak-user-passwords
-                  key: agent-reviewer
+            # NOTE: no user passwords here. This Job no longer creates users
+            # (Decision 40) — the keycloak-user-passwords Secret is consumed by
+            # registry-api (platform-admin) and by the e2e suites (agent-reviewer).
           command:
             - /bin/bash
             - -c
@@ -246,62 +239,21 @@ spec:
                 echo "    Client 'langfuse' already exists — skipping."
               fi
 
-              # ── User: platform-admin ───────────────────────────────────────
-              # Full-access administrative user for the AgentShield Studio and
-              # Registry API. Password from the keycloak-user-passwords secret.
-              echo "==> Creating user 'platform-admin' ..."
-              USER_EXISTS=$(/opt/keycloak/bin/kcadm.sh get users \
-                -r "${REALM}" --fields username --format csv 2>/dev/null \
-                | grep -c "^\"platform-admin\"" || true)
-
-              if [ "${USER_EXISTS}" -eq 0 ]; then
-                # email/emailVerified/firstName/lastName are REQUIRED: Keycloak's
-                # declarative user profile (VERIFY_PROFILE action) rejects a
-                # direct-grant login with "Account is not fully set up" when these
-                # profile fields are missing, even with requiredActions=[].
-                /opt/keycloak/bin/kcadm.sh create users \
-                  -r "${REALM}" \
-                  -s username=platform-admin \
-                  -s enabled=true \
-                  -s email=platform-admin@agentshield.local \
-                  -s emailVerified=true \
-                  -s firstName=Platform \
-                  -s lastName=Admin \
-                  -s 'requiredActions=[]'
-                /opt/keycloak/bin/kcadm.sh set-password \
-                  -r "${REALM}" \
-                  --username platform-admin \
-                  --new-password "${PLATFORM_ADMIN_PASSWORD}"
-                echo "    User 'platform-admin' created and password set."
-              else
-                echo "    User 'platform-admin' already exists — skipping."
-              fi
-
-              # ── User: agent-reviewer ───────────────────────────────────────
-              # Read-only reviewer user for HITL approval flows.
-              echo "==> Creating user 'agent-reviewer' ..."
-              USER_EXISTS=$(/opt/keycloak/bin/kcadm.sh get users \
-                -r "${REALM}" --fields username --format csv 2>/dev/null \
-                | grep -c "^\"agent-reviewer\"" || true)
-
-              if [ "${USER_EXISTS}" -eq 0 ]; then
-                /opt/keycloak/bin/kcadm.sh create users \
-                  -r "${REALM}" \
-                  -s username=agent-reviewer \
-                  -s enabled=true \
-                  -s email=agent-reviewer@agentshield.local \
-                  -s emailVerified=true \
-                  -s firstName=Agent \
-                  -s lastName=Reviewer \
-                  -s 'requiredActions=[]'
-                /opt/keycloak/bin/kcadm.sh set-password \
-                  -r "${REALM}" \
-                  --username agent-reviewer \
-                  --new-password "${REVIEWER_PASSWORD}"
-                echo "    User 'agent-reviewer' created and password set."
-              else
-                echo "    User 'agent-reviewer' already exists — skipping."
-              fi
+              # ── Users ──────────────────────────────────────────────────────
+              # NONE, deliberately (Decision 40, phase R0). This Job used to create
+              # 'platform-admin' and 'agent-reviewer' with kcadm and wrote NO
+              # user_team_assignments row — so the admin existed in Keycloak while
+              # the platform had no record of its role, and a realm recreation
+              # stranded the hand-seeded row on a dead sub (observed 2026-07-20).
+              #
+              # Users are now created by platform code, which owns BOTH sides:
+              #   platform-admin — services/registry-api/bootstrap_admin.py, run from
+              #                    registry-api's lifespan. Looks the user up by
+              #                    USERNAME every start, so a recreated realm
+              #                    self-heals onto the new sub.
+              #   agent-reviewer — created by the e2e suites that need it, through the
+              #                    real POST /api/v1/admin/users (FR-10).
+              echo "==> Users: none created here — see bootstrap_admin.py (Decision 40)."
 
               echo "==> Realm initialisation complete."
           resources:

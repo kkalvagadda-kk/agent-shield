@@ -966,6 +966,79 @@ if caller:
 
 ---
 
+## Decision 40: Users are created by the platform; `platform-admin` is the only auto-created one, and CODE creates it
+
+**Date:** 2026-08-04 · **Prerequisite for Decision 25's enforcement**
+
+**Context:** Enforcement (Decision 25) cannot be switched on while a user with no `user_team_assignments` row silently resolves to `contributor`. The question looked like "what default role should such a user get" — but it presupposed that legitimate users can lack a row. They cannot: users are provisioned by the platform, never from the IdP. Keycloak is an implementation detail. Meanwhile the install itself violated that: `realm-init-job.yaml` creates `platform-admin` **and** `agent-reviewer` via `kcadm.sh` and writes no row, and `scripts/seed-platform-admin-role.sh` exists only to patch it afterwards ("Nothing else in the install seeds that row").
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: keep `contributor` as the default** | Status quo | Nobody locked out; but any valid login is a contributor by default, and the illegal state stays legal |
+| **B: default to `consumer`** | Fail-closed default | Safer; but still an invented role, and needs a backfill plus an onboarding path |
+| **C: no auto-provision — platform code creates the sole admin; a missing row is corruption** | Remove the state | No default to argue about; but bootstrap moves into registry-api's startup path |
+
+**Choice: C.** Picking a "safe default" keeps the illegal state legal and merely less dangerous. Removing the state removes the question.
+
+**Consequences / trade-offs:**
+- Bootstrap lives in registry-api's `lifespan`, single-flighted across replicas with `pg_try_advisory_lock` — **reusing** the pattern at `mcp_health.py:172-193` rather than inventing a second one.
+- The admin is looked up by **username**, not by a stored `sub`. Realm-recreation self-healing then falls out for free — that is the 2026-07-20 incident (assignment stranded on a dead `sub`, Admin menu silently gone) fixed structurally instead of by a post-deploy script.
+- **The email is pinned to `platform-admin@agentshield.local`.** Langfuse authorizes trace access by project membership keyed on email; a different address silently breaks admin trace access.
+- **`agent-reviewer` stops being a bootstrap user.** `suite-76/78/82/83` use it as their non-admin persona and must create it themselves via `POST /api/v1/admin/users` — which is the right shape, since the fixture then exercises the real creation path.
+- Bootstrap failure is **non-fatal** to the process (`/ready` red + retry). Keycloak is routinely not ready when registry-api starts; crash-looping a fresh install is worse than degrading.
+- Design: `docs/design/rbac-r0-r1-spec.md`.
+
+---
+
+## Decision 41: A missing role row is corruption — and it had THREE producers, not one
+
+**Date:** 2026-08-04 · **Implements Decision 40**
+
+**Context:** The invented-role problem was scoped as one Python branch. Auditing the live cluster found three independent producers of the same defect.
+
+| # | Producer | Mechanism |
+|---|----------|-----------|
+| 1 | Python, missing row | `_normalize_role(None) → "contributor"` (`rbac.py:41-43`) |
+| 2 | **Postgres, role omitted** | `role` column `server_default="operator"` (migration `0013`) |
+| 3 | Python, unknown value | `ROLE_HIERARCHY.get(role, 0)` → rank 0, silently |
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: fix producer 1 only** | Raise on a missing row | Small; but producer 2 keeps minting `operator` rows behind it |
+| **B: fix 1 and 2** | Raise, and drop the column default | Closes both silent paths; one migration |
+| **C: fix 1, 2 and 3** | Also treat unknown values as corruption | Would break daemon-approval routing by design — see Decision 42 |
+
+**Choice: B.**
+
+**Consequences / trade-offs:**
+- **Producer 2 is the instructive one.** Migration `0044` migrated the data `operator → contributor` and `0075` did `viewer → consumer`, but **neither touched the column default** — so every insert omitting `role` re-introduces the exact legacy value those migrations existed to remove. The live cluster proved it: `agent-reviewer` sat at `role='operator'`, and `suite-53-cost-tracking.sh:44` inserts `(user_sub, team_name)` with no role.
+- `get_user_global_role` raises; `me.py` stops importing `_normalize_role` directly. **One resolution path, not two** — two independent answers to "what role is this" is exactly how `_ADMIN_ROLES` diverged (`production-hitl-decide-403-authority.md`).
+- `_upsert_team` loses its internal `commit()`; callers own the transaction boundary. That is what makes `POST /api/v1/admin/users` atomic (compensating `kc_delete` on row-write failure) — an explicit boundary rather than a `commit: bool` flag sniffed per call site.
+- **One-time cleanup, 2026-08-04:** the audit found 6 Keycloak users / 5 rows — 3 orphan users and 2 stale rows, **all e2e test litter; no real user lacked a role.** Deleted; the table is now 3/3, 1:1. Cleaning alone is insufficient: `suite-53:49` and `suite-71:325` regenerate their rows every run, so the suites are fixed in the same change.
+
+---
+
+## Decision 42: `user_team_assignments.role` knowingly holds two kinds of value — documented in R0, split in R5
+
+**Date:** 2026-08-04 · **Bounds Decision 41**
+
+**Context:** Treating an unrecognized role string as corruption looked obviously right. It is not. `approvals.py:48` defines `_DEFAULT_REVIEWER_SCOPE = "agent:reviewer"`, and `_caller_roles` (`:266`) matches it against `user_team_assignments.role`. WS-2 T011 deliberately uses that column as a namespace for **reviewer scopes** alongside the three global roles.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: document the union; leave it** | R0 changes nothing here | Ships now; the overload stays live and confusing |
+| **B: split the column inside R0** | `CHECK`-constrain `role`; move scopes out | Correct; but drags R5's whole HITL authority rewrite into R0 |
+| **C: A now, split in R5** | Reviewer scopes become `artifact_role_grants` rows | Two releases, but each is a vertical slice |
+
+**Choice: C.**
+
+**Consequences / trade-offs:**
+- R0's job is making the missing state unrepresentable, not untangling the overload. Doing B inside R0 is the horizontal-layer failure CLAUDE.md DoD rule 4 warns about, and R5 already plans to move reviewer authority onto `artifact_role_grants` — the split has a natural home there.
+- **`ROLE_HIERARCHY.get(role, 0) == 0` for `agent:reviewer` is therefore not a bug.** It is the only thing preventing a reviewer-scope holder from being treated as a contributor. Recorded so the next reader does not "fix" it.
+- The cost is stated out loud rather than papered over: between R0 and R5 the column has two meanings, and the gap ledger says so (G-R0-1). This is the Decision 32 lesson — one field, two meanings — sitting in the RBAC foundation.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -1009,3 +1082,6 @@ if caller:
 | 37 | Schedules read | Deny-by-default + team-scoped, applied **before** the endpoint existed rather than after a leak (the Decision 33 shape). `platform-admin` sees all; no team ⇒ empty list. Sub-gap still open: `list_triggers` has no auth at all. |
 | 38 | Workflow liveness | `status <> 'archived'` — **supersedes R8's `published`**, which matched 0 rows, and `publish_status`, which was too strict. Consequence, unsettled: **a DRAFT workflow's schedule fires.** Chosen because the alternatives were both wrong, not argued on merit; revisit as its own decision. |
 | 39 | Agent delete | **Removes** schedule triggers (migration 0078 reaped 63); webhooks are kept-and-disarmed because `webhook_clients.trigger_id` is ON DELETE CASCADE. Archive/quarantine unchanged. Safe because such a row is provably inert (T-S95-004). Invalidated five correct tests — recorded so the next person finds the decision, not a red test. |
+| 40 | User provisioning | **No auto-provision.** Users are platform-created; `platform-admin` is the only auto-created one and **registry-api code** creates it, not the chart. Looked up by username so realm recreation self-heals; email pinned for Langfuse membership; advisory-lock single-flight reusing `mcp_health.py`'s pattern. `agent-reviewer` stops being a bootstrap user. |
+| 41 | Missing role row | **Corruption, not a user type** — remove the state rather than pick a safe default. Three producers found, two fixed: `_normalize_role(None)` raises, and the `role` column's `server_default="operator"` is dropped (it silently re-introduced the value migrations 0044/0075 removed). One resolution path, not two. One-time cleanup deleted 5 rows/users — all e2e litter, no real user affected. |
+| 42 | Role column overload | `user_team_assignments.role` is a **union of {global role} ∪ {reviewer scope}** (WS-2 T011, `_DEFAULT_REVIEWER_SCOPE="agent:reviewer"`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`. So an unrecognized value is NOT treated as corruption — `ROLE_HIERARCHY.get(role,0)==0` is load-bearing, not a bug. |

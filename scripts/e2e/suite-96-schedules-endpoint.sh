@@ -22,10 +22,18 @@
 #
 #   T-S96-001 — the endpoint returns 200 and the shape the page is written against.
 #               RED before routers/schedules.py exists (404).
-#   T-S96-002 — DENY BY DEFAULT: an authenticated caller with NO team assignment gets
-#               an EMPTY list, never the unfiltered table. This is the `else` branch
-#               Decision 33 was written about — its absence elsewhere leaked every
-#               eval run on the platform.
+#   T-S96-002 — CONTRACT CHANGE (R0 / FR-5): DENY BY DEFAULT now means REFUSED, not
+#               "given an empty list". A caller with NO user_team_assignments row is
+#               refused with rbac.NoPlatformRole (403 over HTTP) *before* the team
+#               filter ever runs, because team_name is NOT NULL — so "no team" and "no
+#               row" are the same condition, and schedules.py's `else` is unreachable.
+#               The security property under test is UNCHANGED and still non-vacuous:
+#               an unfiltered read must never happen, and the evidence line still names
+#               how many schedules the platform holds so "returned nothing" cannot pass
+#               trivially. The old assertion (`denied == []`) would now RAISE, and
+#               leaving it — or softening it to swallow the raise — would be a test that
+#               stayed green through a real contract change. Decision 33 is still what
+#               this guards; R0 made the refusal louder.
 #   T-S96-003 — a DISARMED trigger is LISTED (the page's job is showing it) with
 #               will_fire=false and why_not carrying the disarm reason.
 #   T-S96-004 — a sandbox-only agent's schedule: will_fire=false and why_not names the
@@ -170,27 +178,40 @@ async def main():
         # Called through the REAL router function against the REAL database, with a
         # claims dict for a sub that has no user_team_assignments row.
         #
+        # CONTRACT CHANGE (R0 / FR-5). This case used to assert `denied == []`. It now
+        # asserts REFUSAL: rbac.get_user_global_role raises NoPlatformRole for a sub
+        # with no row, so the call never reaches the team filter — and because
+        # team_name is NOT NULL, "no team" and "no row" are the same condition. Keeping
+        # the old assertion would have errored; softening it to tolerate either outcome
+        # would have proven nothing. Rewritten, not deleted (Decision 39's lesson).
+        #
         # NOT over HTTP, deliberately. Minting a teamless Keycloak user needs a
         # password-grant login that this realm refuses with "Account is not fully set
         # up" even after clearing requiredActions and emailVerified — platform-admin
         # carries identical flags and works, so something else in the realm's account
         # setup differs. Chasing that would test Keycloak, not this endpoint: the HTTP
-        # hop is already proven by every other case here, and what needs proving is the
-        # `else` branch — that a caller resolving to NO team gets an empty list rather
-        # than the unfiltered table. Decision 33's leak was exactly a missing `else`,
-        # and it is reachable from the function boundary.
+        # hop is already proven by every other case here, and what needs proving is
+        # that a caller resolving to NO row is refused rather than handed the
+        # unfiltered table. Decision 33's leak was exactly a missing refusal, and it is
+        # reachable from the function boundary. (T-S97-010b covers the 403 over HTTP.)
         from routers.schedules import list_schedules
+        from rbac import NoPlatformRole
         teamless_sub = f"s96-noteam-{uuid.uuid4()}"
         async with AsyncSessionLocal() as s:
             assigned = (await s.execute(text(
                 "SELECT count(*) FROM user_team_assignments WHERE user_sub = :u"),
                 {"u": teamless_sub})).scalar()
-            denied = await list_schedules(trigger_type="schedule",
-                                          claims={"sub": teamless_sub}, db=s)
-        record("T-S96-002 DENY BY DEFAULT: a caller with no team gets an EMPTY list, not the table",
-               assigned == 0 and denied == [],
-               f"team_rows_for_caller={assigned} (want 0) returned={len(denied)} rows (want 0) "
-               f"— the platform has {len(body)} schedules, so an unfiltered read would return them all")
+            refused = False; returned = None
+            try:
+                returned = await list_schedules(trigger_type="schedule",
+                                                claims={"sub": teamless_sub}, db=s)
+            except NoPlatformRole:
+                refused = True
+        record("T-S96-002 DENY BY DEFAULT: a caller with NO role row is REFUSED, never given the table",
+               assigned == 0 and refused and returned is None,
+               f"team_rows_for_caller={assigned} (want 0) refused={refused} (want True) "
+               f"returned={returned!r} (want None) — the platform has {len(body)} schedules, "
+               f"so an unfiltered read would return them all")
 
         # The deleted agent's SCHEDULE must be GONE — not merely disarmed. Delete now
         # removes schedule triggers outright; a disarmed schedule on a deleted agent

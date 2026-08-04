@@ -158,10 +158,23 @@ negative tests shipped with it.
 | `consumer` | browse catalog, view runs, view deployment status | all mutation, playground, HITL approval, deploy |
 
 Legacy values normalize on read (`rbac._normalize_role`): `admin→platform-admin`,
-`operator→contributor`, `viewer→consumer`. Unknown/NULL → `contributor` (`rbac.py:41-43`).
+`operator→contributor`, `viewer→consumer`.
 
-> **Flagged for decision (§7 OQ-1):** defaulting an unknown role to `contributor` is fail-**open**.
-> Once §1.2's flags flip, that default decides what an unmapped user can do.
+> **Decided 2026-08-04 (Decisions 40–42, phase R0).** There is **no auto-provisioning** — users are
+> created by the platform, never from the IdP, and `platform-admin` is the only auto-created user.
+> A subject with **no row is therefore corruption, not a kind of user**, and is refused rather than
+> resolved to an invented role. The old fail-open `NULL → contributor` (`rbac.py:41-43`) goes away,
+> and so does the `role` column's `server_default="operator"`, which silently re-introduced the
+> value migrations `0044`/`0075` removed.
+>
+> **An *unrecognized* value is not corruption and keeps today's behaviour.**
+> `user_team_assignments.role` is a union of `{global role} ∪ {reviewer scope}` — `approvals.py:48`
+> defines `_DEFAULT_REVIEWER_SCOPE = "agent:reviewer"` and `_caller_roles` (`:266`) matches it
+> against this column. So `ROLE_HIERARCHY.get(role, 0) == 0` for a scope literal is **load-bearing,
+> not a bug**: it is the only thing stopping a reviewer-scope holder from being read as a
+> contributor. The split lands in R5 (G-R0-1), not R0.
+>
+> Design: [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md).
 
 ### 2.2 Artifact-scoped roles — in `artifact_role_grants`
 
@@ -238,6 +251,17 @@ Consolidated from the four superseded docs plus the bug record. Tagged per CLAUD
 - G-6 Two role vocabularies; `team_lead` exists nowhere else. Caused `production-hitl-decide-403-authority`. *(§1.5)*
 - G-7 `list_triggers` has no auth — R7's explicitly noted, still-open sub-gap. *(`schedule-lifecycle-and-operations.md` R7)*
 - G-8 `suite-42` has zero negative tests; the design's six 403 cases are unwritten. *(§1.6)*
+- G-R0-1 `user_team_assignments.role` holds **both** global roles and reviewer scopes (WS-2 T011,
+  `approvals.py:48,266`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`.
+  Until then an unrecognized value must NOT be treated as corruption. *(Decision 42)*
+- G-R0-2 Nothing in the install seeds an assignment row; `seed-platform-admin-role.sh` patches it
+  afterwards and covers only `platform-admin`. Closed by R0. *(Decision 40)*
+- G-R0-3 A stale row survives realm recreation or a hand-deleted admin — harmless (nobody can
+  authenticate as it) but "row count" ≠ "admin count". R0's audit surface reports it; nothing reaps
+  it automatically. *(open question 2 in `rbac-r0-r1-spec.md`)*
+- G-R0-4 `suite-53:49` inserts an assignment row with **no role** and `suite-71:325` inserts a
+  reviewer scope; both regenerate table litter on every run. Fixed in R0 (`FR-7`) — cleaning the
+  cluster without this is a one-time illusion.
 
 **deferred (intentional)**
 - G-9 `approval_authority` table not dropped — historical records retained.
@@ -256,6 +280,21 @@ Sequenced so each phase is independently shippable and reversible, and so the tw
 holes close first. **Number allocation across the three authorization docs** (latest on disk:
 migration `0078`, `suite-96`): RBAC takes `0079` + `suite-97/98`; identity propagation takes
 `0080–0082` + `suite-99+`; OPA needs no migration. Do not re-allocate without updating all three.
+
+**Phase R0 — make "a user with no role row" unrepresentable (prerequisite for R2).**
+Decisions 40–42. Platform code, not the chart, creates the sole auto-created user `platform-admin`
+on first init: registry-api `lifespan`, single-flighted across replicas with `pg_try_advisory_lock`
+(reusing the pattern at `mcp_health.py:172-193`), admin identified by *username* so realm
+recreation self-heals, email pinned to `platform-admin@agentshield.local` for Langfuse membership.
+`realm-init-job.yaml` drops both user blocks; `seed-platform-admin-role.sh` becomes a repair tool;
+`agent-reviewer` moves to the four suites that use it (`76/78/82/83`) via `POST /admin/users`.
+`POST /api/v1/admin/users` becomes atomic — `_upsert_team` loses its internal commit so callers own
+the boundary, with a compensating `kc_delete` on failure. `get_user_global_role` raises instead of
+inventing a role, and migration `0079` drops the `role` column's `server_default`. *Test:*
+`suite-97` — fresh install has an admin with a row and no seed script; replica race yields one row;
+realm recreation re-pins (**this case must fail against current code first**); orphan `sub` → 403.
+Design: [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md). Run **with or before R1** — they touch the same
+four e2e suites.
 
 **Phase R1 — close the unauthenticated routers (no behaviour change for legitimate users).**
 Add `require_user` to the 10 routers in §1.4. Pure authentication, no role logic, so no
@@ -316,10 +355,13 @@ Per CLAUDE.md, each phase must satisfy:
 
 ## 7. Open questions
 
-- **OQ-1 — unknown/NULL global role defaults to `contributor`** (`rbac.py:41-43`), which is
-  fail-open. Once R2 lands, an unmapped user silently gets create/deploy-to-sandbox rights.
-  Fail-closed (`consumer`) is the safer default but will lock out any user whose
-  `user_team_assignments` row is missing. **Decide before Phase R2.**
+- **OQ-1 — ~~unknown/NULL global role defaults to `contributor`~~ — RESOLVED 2026-08-04
+  (Decisions 40–42).** The question presupposed that legitimate users can lack a row. They cannot:
+  users are platform-created, `platform-admin` is the only auto-created one, and platform code
+  creates it. So the answer was not a safer default but **removing the state** — see phase R0 and
+  [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md). Two findings came out of resolving it: the `role`
+  column had its own fail-open `server_default="operator"` (a second, independent producer), and an
+  unrecognized value is *not* corruption because the column doubles as a reviewer-scope namespace.
 - **OQ-2 —** should `platform-admin` bypass *artifact-scoped* checks everywhere? It does today
   (`can_deploy_to_production`, `can_manage_artifact`, `can_approve_hitl` all short-circuit). That
   is convenient and it means no artifact is ever un-administrable — but it also means the

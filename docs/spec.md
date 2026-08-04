@@ -1144,9 +1144,19 @@ Key design choices — see spec for detail and rationale:
 > **Full spec**: [`docs/design/authorization-model-spec.md`](design/todo/authorization-model-spec.md)  
 > **Requirements**: [`docs/authorization-model.md`](authorization-model.md)
 
-Authorization covers three lifecycle stages: authoring (private workspace), control plane (publish + grant + deploy gate), and data plane (runtime enforcement). The current implementation has OPA risk labels but no identity-based enforcement, no publish/grant lifecycle, and no deploy gate. This section describes the target state.
+Authorization covers three lifecycle stages: authoring (private workspace), control plane (publish + grant + deploy gate), and data plane (runtime enforcement).
 
-**Agent identity** — each deployed agent gets a dedicated K8s ServiceAccount. Istio Ambient Mesh (ztunnel) provides L4 mTLS between pods using SPIFFE/SVID certificates minted per-SA. OPA policy is keyed on the SA subject string (`system:serviceaccount:agentshield:agent-{name}-sa`), not the agent name — a rogue pod that sends the correct name but can't present the matching SA token gets denied.
+> **Status corrected 2026-08-04.** The previous text ("OPA risk labels but no identity-based enforcement") is **stale**. OPA's identity floor — `user_identity_ok`, a sixth gate AND-ed into `allow` at `opa_policy/agentshield.rego:116` — has been live and denying since WS-2. What is missing is not the gate but the **identity that satisfies it**: nothing propagates the initiating human into a run, so a `user_delegated` agent reaches OPA with `user_id=""`. The three layers now have one doc each — see the index below. Reason from those, not from this summary.
+
+| Layer | Question | Doc | State |
+|---|---|---|---|
+| Control plane | May this **person** act on this **artifact**? | [`design/rbac-and-artifact-authorization.md`](design/rbac-and-artifact-authorization.md) | Built and wired, then switched off |
+| Run identity | Whose authority does a **run** carry across hops? | [`design/identity-propagation-architecture.md`](design/identity-propagation-architecture.md) | Not built |
+| Data plane | May this **agent pod** call this **tool**? | [`design/opa-authorization-contract.md`](design/opa-authorization-contract.md) | Shipped and live |
+
+**Agent identity** — each deployed agent gets a dedicated K8s ServiceAccount, and OPA policy is keyed on the SA subject string (`system:serviceaccount:agentshield:agent-{name}-sa`), not the agent name. The policy half is real: `opa_policy/agentshield.rego:27,36,39` looks the agent up by `input.sa_subject` and requires `agent.expected_sa_subject == input.sa_subject`.
+
+> ⚠️ **Corrected 2026-08-04 — the security property this used to claim does not hold yet.** The previous text said Istio Ambient Mesh (ztunnel) provides L4 mTLS with per-SA SPIFFE/SVID certificates, so "a rogue pod that sends the correct name but can't present the matching SA token gets denied." **Istio is not deployed** — the cluster has no `istio-system` namespace and no `ztunnel`/`istiod`/`waypoint` pods. `sa_subject` is therefore a value the pod *asserts*, compared against a value in the bundle. That stops a **misconfigured** pod, not a **compromised** one. Decision 16 remains the target; verifiable service identity is owned by [`design/identity-propagation-architecture.md`](design/identity-propagation-architecture.md) §4.5, and it is the same class of gap as its D-1 (self-reported `agent_class`).
 
 **Agent classes** — every agent is classified at publish time:
 - **Class A (Daemon)**: no user present; runs on its own machine identity; rejects any request carrying a user JWT
@@ -1172,15 +1182,23 @@ The `POST /publish` request is itself gated at the **version** level by two flag
   production deploy — see the *Adversarial-eval-runner automation* improvement note above, and the
   ledger at `docs/design/eval-state-of-play.md`.
 
-**HITL approval authority** — approval rights are scoped per-agent via the `approver` artifact-scoped role (see RBAC below). Reviewers see only HITL requests for agents they hold the `approver` role on. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
+**HITL approval authority** — *target*: approval rights scoped per-agent via the `approver` artifact-scoped role, so reviewers see only HITL requests for agents they hold that role on. In the Playground, the asset owner self-approves; no Slack notification fires; production and playground approval queues are completely separate.
+
+> ⚠️ **Corrected 2026-08-04 — this describes the target, not the code.** The `approver` artifact-scoped role does **not** gate HITL today. `routers/approvals.py` imports and queries `ApprovalAuthority` (`:30`, `:241-253`) — a **per-tool** grant keyed on `approver_user_id` — and contains no `can_approve_hitl` call and no `'approver'` check. It also carries a second, competing admin vocabulary (`_ADMIN_ROLES` at `:41`, including `team_lead`, which exists in no migration and no realm). Decision 25 marked `approval_authority` deprecated in favour of the scoped role; that rewrite is RBAC **phase R5** and is not done. See [`design/rbac-and-artifact-authorization.md`](design/rbac-and-artifact-authorization.md) §1.5.
 
 **Platform RBAC (Decision 25)** — two-tier role model for control-plane authorization:
 
 > **Full spec**: [`docs/design/rbac-design.md`](design/todo/rbac-design.md)
 
-- **Global roles** (one per user, stored in `user_team_assignments.role`): `platform-admin` (full access), `contributor` (create/deploy sandbox/submit publish), `viewer` (read-only, no playground)
+- **Global roles** (one per user, stored in `user_team_assignments.role`): `platform-admin` (full access), `contributor` (create/deploy sandbox/submit publish), `consumer` (read-only, no playground). *`viewer` was renamed to `consumer` by migration `0075`; `rbac._LEGACY_MAP` still normalizes the old spelling on read.*
 - **Artifact-scoped roles** (many per user, stored in `artifact_role_grants`): `agent-admin` (manage production deployments, delegate roles), `approver` (receive and decide HITL requests)
 - Grants target users or teams (polymorphic grantee). Creator auto-receives `agent-admin` on artifact creation. Production deploy requires `platform-admin` or `agent-admin`. HITL routed to `approver` holders.
+
+**User provisioning (Decisions 40–42)** — there is **no auto-provisioning**. Users are created by the platform, never from the IdP; Keycloak is an implementation detail. **`platform-admin` is the only auto-created user, and registry-api code creates it on first init — not the Helm chart.** The bootstrap is single-flighted across replicas by a Postgres advisory lock, identifies the admin by *username* (so a recreated realm self-heals onto the new `sub`), and pins the email to `platform-admin@agentshield.local` because Langfuse authorizes trace access by project membership keyed on that address.
+
+Consequently a subject with no `user_team_assignments` row is **corruption, not a kind of user**, and is refused rather than resolved to an invented role. The `role` column's `server_default="operator"` is dropped for the same reason — it silently re-introduced the value migrations `0044`/`0075` existed to remove. One caveat is deliberate and load-bearing: `user_team_assignments.role` is a **union of {global role} ∪ {reviewer scope}** (WS-2 T011 routes daemon approvals to the scope literal `agent:reviewer`), so an *unrecognized* value is not treated as corruption. That split lands in RBAC phase R5, not R0.
+
+> **Design**: [`design/rbac-r0-r1-spec.md`](design/rbac-r0-r1-spec.md) — phases R0 (platform-owned user identity) and R1 (router authentication).
 
 **Implementation phasing** (3 phases — see spec for detail):
 - Phase 1: OPA Bundle Server + K8s SA tokens + agent_class field (replaces per-agent ConfigMaps)

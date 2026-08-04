@@ -11,7 +11,8 @@ Endpoints:
 """
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -33,6 +34,8 @@ from keycloak_client import (
     set_user_realm_role,
     update_user as kc_update,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin/users", tags=["admin-users"])
 teams_router = APIRouter(prefix="/api/v1/admin", tags=["admin-teams"])
@@ -78,12 +81,25 @@ class UserResponse(BaseModel):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _team_map(db: AsyncSession) -> dict[str, dict]:
-    """Returns {user_sub: {team_name, role, assigned_at}} from local DB."""
+    """Returns {user_sub: {team, role, assigned_by, assigned_at}} from local DB.
+
+    `assigned_by` is carried so the FR-12 identity audit can report a stale row in
+    full without a second query against the same table. Additive: existing readers
+    (`_kc_to_response`, `patch_user`) take only `team`/`role`.
+    """
     rows = await db.execute(
-        text("SELECT user_sub, team_name, role, assigned_at FROM user_team_assignments")
+        text(
+            "SELECT user_sub, team_name, role, assigned_by, assigned_at "
+            "FROM user_team_assignments"
+        )
     )
     return {
-        r.user_sub: {"team": r.team_name, "role": r.role, "assigned_at": r.assigned_at}
+        r.user_sub: {
+            "team": r.team_name,
+            "role": r.role,
+            "assigned_by": r.assigned_by,
+            "assigned_at": r.assigned_at,
+        }
         for r in rows
     }
 
@@ -91,6 +107,13 @@ async def _team_map(db: AsyncSession) -> dict[str, dict]:
 async def _upsert_team(
     db: AsyncSession, user_sub: str, team_name: str, role: str, assigned_by: str | None
 ) -> None:
+    """Write the caller's team + role assignment row.
+
+    Does NOT commit — the CALLER owns the transaction boundary. That is what makes
+    create_user atomic (a compensating kc_delete needs the failure to be visible
+    before the response). An explicit boundary, not a `commit: bool` flag sniffed
+    per call site (Decision 41).
+    """
     await db.execute(
         text("""
             INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at)
@@ -103,7 +126,6 @@ async def _upsert_team(
         """),
         {"sub": user_sub, "team": team_name, "role": role, "by": assigned_by},
     )
-    await db.commit()
 
 
 def _kc_to_response(kc_user: dict, team_info: dict | None, roles: list[str] | None = None) -> UserResponse:
@@ -165,12 +187,24 @@ async def create_user(
         raise _kc_error(e)
 
     assigned_by = caller.get("preferred_username", "admin") if caller else "admin"
-    await _upsert_team(db, kc_id, body.team, body.role, assigned_by=assigned_by)
-
     try:
+        # Realm-role failure is FATAL, not swallowed. A user whose Keycloak role and
+        # DB row disagree is exactly the half-created state R0 exists to remove.
         await set_user_realm_role(kc_id, body.role)
-    except Exception:
-        pass  # realm role is best-effort; team assignment already saved
+        await _upsert_team(db, kc_id, body.team, body.role, assigned_by=assigned_by)
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        try:
+            await kc_delete(kc_id)          # compensate: no orphan Keycloak user
+        except Exception as cleanup_exc:
+            logger.error("create_user: compensating kc_delete FAILED for %s: %s — "
+                         "ORPHAN Keycloak user, see GET /api/v1/admin/identity-audit",
+                         kc_id, cleanup_exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"User creation rolled back: {type(exc).__name__}: {exc}",
+        )
 
     try:
         kc_user = await kc_get(kc_id)
@@ -215,7 +249,9 @@ async def patch_user(kc_id: str, body: UserPatch, db: AsyncSession = Depends(get
     new_role = body.role or current.get("role") or "operator"
 
     if body.team or body.role:
+        # `_upsert_team` no longer commits — patch owns its own boundary (Decision 41).
         await _upsert_team(db, kc_id, new_team, new_role, assigned_by="admin")
+        await db.commit()
         if body.role:
             try:
                 await set_user_realm_role(kc_id, new_role)
@@ -294,3 +330,99 @@ async def teams_summary(db: AsyncSession = Depends(get_db)):
         }
         for t in teams
     ]
+
+
+# ── Identity audit (FR-12) ─────────────────────────────────────────────────────
+
+class OrphanUser(BaseModel):
+    kc_id: str
+    username: str
+    email: Optional[str] = None
+
+
+class StaleRow(BaseModel):
+    user_sub: str
+    team_name: str
+    role: str
+    assigned_by: Optional[str] = None
+    assigned_at: Optional[str] = None
+
+
+class IdentityAuditResponse(BaseModel):
+    checked_at: str
+    keycloak_user_count: int
+    assignment_row_count: int
+    orphan_users: list[OrphanUser]
+    stale_rows: list[StaleRow]
+    matched_count: int
+
+
+# Mounted on `teams_router` (prefix /api/v1/admin), NOT on `router`, deliberately:
+# `router` declares `GET /{kc_id}`, so a literal `/audit` sibling would depend on
+# declaration order to avoid being shadowed. `/api/v1/admin/identity-audit` cannot
+# collide.
+@teams_router.get("/identity-audit", response_model=IdentityAuditResponse)
+async def audit_identity(db: AsyncSession = Depends(get_db)) -> IdentityAuditResponse:
+    """Cross-check Keycloak users against `user_team_assignments`, both directions.
+
+    READ-ONLY. Reports, never deletes (spec OQ-2, resolved to option (a)) — deciding
+    which side of a divergence is wrong is a judgement an operator makes, not one an
+    audit endpoint should make on their behalf.
+
+    `orphan_users` — a Keycloak user with no assignment row. This is the state R0
+    makes illegal: `POST /api/v1/admin/users` is atomic and the bootstrap always
+    writes its row, so a non-empty list means something created a user outside those
+    paths, or a compensating `kc_delete` failed.
+
+    `stale_rows` — a row whose `user_sub` is not a live Keycloak user. Litter, not a
+    security hole: nobody can authenticate as a dead `sub`. It does mean "row count"
+    stops equalling "admin count", which is why it is reported rather than ignored
+    (G-R0-3). Nothing here deletes them.
+
+    A row holding a REVIEWER SCOPE such as `agent:reviewer` whose `sub` is a live
+    Keycloak user is `matched`, never litter (Decision 42 / V-5). `role` is a union of
+    {global role} u {reviewer scope} and this endpoint does not adjudicate the
+    vocabulary — only presence on both sides.
+
+    Keycloak failure is a 502, not an empty result: an audit that silently reports
+    zero orphans because it could not read Keycloak is worse than one that fails.
+    """
+    try:
+        kc_users = await kc_list()
+    except httpx.HTTPStatusError as e:
+        raise _kc_error(e)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Keycloak unreachable: {e}")
+
+    team_map = await _team_map(db)
+    kc_ids = {u["id"] for u in kc_users}
+
+    orphan_users = [
+        OrphanUser(
+            kc_id=u["id"],
+            username=u.get("username", ""),
+            email=u.get("email"),
+        )
+        for u in kc_users
+        if u["id"] not in team_map
+    ]
+    stale_rows = [
+        StaleRow(
+            user_sub=sub,
+            team_name=info["team"],
+            role=info["role"],
+            assigned_by=info.get("assigned_by"),
+            assigned_at=info["assigned_at"].isoformat() if info.get("assigned_at") else None,
+        )
+        for sub, info in team_map.items()
+        if sub not in kc_ids
+    ]
+
+    return IdentityAuditResponse(
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        keycloak_user_count=len(kc_users),
+        assignment_row_count=len(team_map),
+        orphan_users=orphan_users,
+        stale_rows=stale_rows,
+        matched_count=len(kc_ids & set(team_map)),
+    )

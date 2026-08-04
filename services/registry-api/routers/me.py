@@ -23,7 +23,7 @@ from preferences import (
     UserPreferencesUpdate,
     load_user_preferences,
 )
-from rbac import get_user_artifact_roles, _normalize_role
+from rbac import get_user_artifact_roles, get_user_global_role
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -41,8 +41,14 @@ async def get_me(
     )
     assignment = row.mappings().first()
     team = assignment["team_name"] if assignment else None
-    raw_role = assignment["role"] if assignment else None
-    normalized_role = _normalize_role(raw_role)
+    # ONE resolution path. This handler used to import rbac's private role normalizer
+    # and answer the question itself — two independent answers to "what role is this"
+    # is exactly how approvals._ADMIN_ROLES diverged
+    # (docs/bugs/production-hitl-decide-403-authority.md). Decision 41.
+    # Raises NoPlatformRole for a sub with no row; main.create_app answers 403.
+    # (The private symbol is named nowhere in this file on purpose — CP2's
+    # `grep -c` on it is the mechanical guard that the second path stays gone.)
+    normalized_role = await get_user_global_role(db, sub)
 
     artifact_roles = await get_user_artifact_roles(db, sub, team)
 

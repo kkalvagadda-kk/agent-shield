@@ -45,7 +45,15 @@ Affected services and their tag variables:
 - `services/scheduler/` → `SCHEDULER_TAG`
 - `services/event-gateway/` → `EVENT_GATEWAY_TAG`
 
-**Also mirror the same tag in `charts/agentshield/values.yaml`** — the deploy uses `helm upgrade` with tags baked into values.yaml (no `--set`), so bumping only `deploy-cpe2e.sh` leaves the chart pointing at the old tag. Update BOTH in the same commit. (registry-api ~L503, studio ~L820, `deploy-controller.declarativeRunnerTag` ~L579.)
+**A tag lives in THREE files, not two. Update all three in the same commit:**
+
+1. `scripts/deploy-cpe2e.sh` — the LOCAL (kind/docker-desktop) build. Builds `registry.internal/...`.
+2. `scripts/deploy-eks.sh` — the CLOUD build. Builds and pushes to ECR. **This is the script the EKS test cluster uses** (`~/.kube/test-cluster-kube-config.yaml`); `deploy-cpe2e.sh` cannot deploy there, because EC2 nodes cannot see local images.
+3. `charts/agentshield/values.yaml` — the DEPLOY. `helm upgrade` bakes tags in from values (no `--set`), so a stale value here means the chart points at the old tag. (registry-api ~L750, studio ~L820, `deploy-controller.declarativeRunnerTag` ~L579.)
+
+**This rule used to name only 1 and 3, and that omission shipped a real failure (2026-08-04):** the R0 bump updated `deploy-cpe2e.sh` + `values.yaml`, `deploy-eks.sh` stayed a patch behind, and `scripts/check-tag-content-coupling.sh` blocked the deploy with `DRIFT: REGISTRY_API_TAG(local=0.2.259 eks=0.2.258)`. The same omission left `deploy-eks.sh` still calling `seed-platform-admin-role.sh` after `deploy-cpe2e.sh` had stopped — which silently overwrote the bootstrap's row provenance. **Whenever you change something in `deploy-cpe2e.sh`, grep `deploy-eks.sh` for the same thing.** They are siblings and they drift.
+
+Run `bash scripts/check-tag-content-coupling.sh` before deploying — it is cluster-free, takes ~5s, and catches exactly this.
 
 ### 3. Experience Docs
 

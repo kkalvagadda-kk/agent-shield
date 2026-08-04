@@ -741,7 +741,13 @@ registry-api:
     #          browser decide 403 fix + console scoping (suite-93 T-S93-004).
     # 0.2.242: resolve caller from the JWT Bearer (get_optional_user) — no Envoy SecurityPolicy
     #          injects claim headers, so the browser decide fell back to "studio-user" -> 403.
-    tag: "0.2.258"
+    # 0.2.259: RBAC R0 — the platform creates its own admin from lifespan (bootstrap_admin,
+    #          username lookup so a realm recreation self-heals, advisory-lock single-flight);
+    #          /ready is 503 {"status":"bootstrapping"} until it succeeds. realm-init creates no
+    #          users (Decision 40). POST /admin/users is atomic + GET /admin/identity-audit.
+    #          Migration 0079 drops the role default; a row-less caller is 403 no_platform_role.
+    #          MUST match scripts/deploy-cpe2e.sh REGISTRY_API_TAG.
+    tag: "0.2.260"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

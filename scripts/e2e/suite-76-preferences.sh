@@ -28,9 +28,18 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 [ -n "$API_POD" ] || { echo "FATAL: no running registry-api pod"; exit 1; }
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+
 echo "=== Suite 76: User Response Preferences (POC-3) ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
+
+# T-S76-002 needs a SECOND real identity — `get_token(c, "agent-reviewer", ...)` below.
+# Since R0/FR-9 the chart creates no Keycloak users, so this suite provisions its own
+# persona through the real POST /api/v1/admin/users. Idempotent. Without it the token
+# comes back None and the three JWT cases SKIP as a fabricated "no-keycloak-token"
+# environment gap — a suite going dark without naming why.
+e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   env SUFFIX="$SUFFIX" python3 - <<'PY'

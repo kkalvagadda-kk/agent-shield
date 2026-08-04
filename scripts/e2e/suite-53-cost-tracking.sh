@@ -47,7 +47,8 @@ now=datetime.datetime.now(datetime.timezone.utc)
 async def main():
     out={}
     async with AsyncSessionLocal() as db:
-        await db.execute(text('INSERT INTO user_team_assignments (user_sub, team_name) VALUES (:s,:t) ON CONFLICT DO NOTHING'), {'s':SUB,'t':TEAM})
+        # role is STATED, not defaulted — migration 0079 removed the column default (FR-4).
+        await db.execute(text('''INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by) VALUES (:s,:t,'contributor','suite-53') ON CONFLICT DO NOTHING'''), {'s':SUB,'t':TEAM})
         # REAP FIRST. Cleanup lives at the end of main(), so any crash mid-run leaves
         # this fixture behind — and the next run then reuses the surviving agent and
         # inserts version_number=1 again:

@@ -48,11 +48,20 @@
 # than an obvious error.
 E2E_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Seeded by charts/agentshield/templates/realm-init-job.yaml.
+# Created by the platform itself — registry-api's `bootstrap_admin.ensure_platform_admin`
+# writes this user, its realm role and its `user_team_assignments` row on every start
+# (R0 / Decision 40). The realm-init Job no longer creates ANY user.
 E2E_KC_USER="${E2E_KC_USER:-platform-admin}"
 E2E_KC_PASS="${E2E_KC_PASS:-PlatformAdmin2024}"
 E2E_KC_CLIENT="${E2E_KC_CLIENT:-agentshield-studio}"
 E2E_KC_URL="${E2E_KC_URL:-http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token}"
+
+# The NON-ADMIN persona. Four suites (76, 78, 82, 83) need a second real Keycloak
+# identity to prove caller-scoping and the 403 path, and `agent-reviewer` has always
+# been it. It used to arrive with the chart; since R0 (FR-9) the realm-init Job creates
+# no users at all, so the suites create it themselves — see `e2e_ensure_reviewer`.
+E2E_REVIEWER_USER="${E2E_REVIEWER_USER:-agent-reviewer}"
+E2E_REVIEWER_PASS="${E2E_REVIEWER_PASS:-Reviewer2024}"
 
 # e2e_token <namespace> <pod> [container]
 # Echoes a raw access token, or echoes nothing and returns 1.
@@ -117,7 +126,13 @@ e2e_require_token() {
   tok=$(e2e_token "$@") || {
     echo "FATAL: could not obtain a Keycloak token for ${E2E_KC_USER} (client ${E2E_KC_CLIENT})." >&2
     echo "       Trigger CRUD requires a real JWT since 76b3570 — X-User-Sub alone returns 401." >&2
-    echo "       Check the realm-init Job seeded ${E2E_KC_USER}, and that Keycloak is reachable in-cluster." >&2
+    echo "       ${E2E_KC_USER} is created by registry-api's LIFESPAN BOOTSTRAP" >&2
+    echo "       (services/registry-api/bootstrap_admin.py), NOT by the realm-init Job — since" >&2
+    echo "       R0/FR-9 that Job creates no users at all, so 'check the Job' is a dead end." >&2
+    echo "       Check GET /ready: it stays 503 {\"status\":\"bootstrapping\",\"detail\":…} until the" >&2
+    echo "       bootstrap succeeds, and its detail names the cause (a Keycloak outage, or an" >&2
+    echo "       empty PLATFORM_ADMIN_PASSWORD from the keycloak-user-passwords Secret)." >&2
+    echo "       Then GET /api/v1/admin/identity-audit for a Keycloak/DB divergence." >&2
     exit 1
   }
   printf '%s' "$tok"
@@ -135,7 +150,187 @@ e2e_set_token() {
   if [ -z "${E2E_TOKEN:-}" ]; then
     echo "FATAL: could not obtain a Keycloak token for ${E2E_KC_USER} (client ${E2E_KC_CLIENT})." >&2
     echo "       Trigger CRUD requires a real JWT since 76b3570 — X-User-Sub alone returns 401." >&2
-    echo "       Check the realm-init Job seeded ${E2E_KC_USER}, and that Keycloak is reachable in-cluster." >&2
+    echo "       ${E2E_KC_USER} is created by registry-api's LIFESPAN BOOTSTRAP" >&2
+    echo "       (services/registry-api/bootstrap_admin.py), NOT by the realm-init Job — since" >&2
+    echo "       R0/FR-9 that Job creates no users at all, so 'check the Job' is a dead end." >&2
+    echo "       Check GET /ready: it stays 503 {\"status\":\"bootstrapping\",\"detail\":…} until the" >&2
+    echo "       bootstrap succeeds, and its detail names the cause (a Keycloak outage, or an" >&2
+    echo "       empty PLATFORM_ADMIN_PASSWORD from the keycloak-user-passwords Secret)." >&2
+    echo "       Then GET /api/v1/admin/identity-audit for a Keycloak/DB divergence." >&2
     exit 1
   fi
+}
+
+# e2e_ensure_reviewer <namespace> <pod> [container]
+# Idempotently ensure the `agent-reviewer` persona exists and can actually log in.
+#
+# WHY IT EXISTS
+#   R0/FR-9 took every `kcadm.sh create users` out of
+#   charts/agentshield/templates/realm-init-job.yaml. `platform-admin` is fine — the
+#   platform now writes it from code — but `agent-reviewer` has no owner, so on the
+#   next fresh install suites 76, 78, 82 and 83 would each get a null token and either
+#   SKIP their real cases or 401 somewhere downstream. A fixture whose dependency
+#   silently vanished is exactly the "went dark and did not name its cause" failure
+#   this file was written about. The suite that needs the persona creates the persona.
+#
+# WHY THE REAL API AND NOT kcadm / a direct INSERT
+#   `POST /api/v1/admin/users` is the ONE path that creates the Keycloak user, its
+#   realm role and its `user_team_assignments` row atomically (FR-8). Provisioning the
+#   fixture any other way would build a persona the product cannot build, and would
+#   stop exercising the very endpoint the fixture depends on.
+#
+# WHY THE ADMIN TOKEN AND NOT AN ANONYMOUS CALL
+#   `/api/v1/admin/*` is unauthenticated today, but R2 puts
+#   `require_global_role("platform-admin")` on it. Authenticating now means R2 does not
+#   have to come back and rewrite four suites' fixtures.
+#
+# WHY THE reset-password CALL IS NOT OPTIONAL
+#   `keycloak_client.create_user` writes `"temporary": True` and
+#   `requiredActions: ["UPDATE_PASSWORD"]`. Keycloak refuses a `password` grant for
+#   such a user with "Account is not fully set up" — a 401 that names nothing. So the
+#   create is always followed by `POST /{kc_id}/reset-password {"temporary": false}`,
+#   which also re-asserts the credential if someone rotated it.
+#
+# WHY IT VERIFIES INSTEAD OF RETURNING OPTIMISTICALLY
+#   Every failure mode above surfaces as "token is None" inside a driver 20 minutes
+#   later, on whichever case happens to run last, and reads as a feature bug. So the
+#   helper performs the `password` grant itself and aborts naming the cause.
+#
+# CALL IT BARE, NOT IN A COMMAND SUBSTITUTION — same subshell subtlety documented on
+# `e2e_require_token` above: the `exit 1` here must reach the suite, not a subshell.
+#
+#     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+#     e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
+#
+# Idempotent: 409 from the create means the user already exists, which is SUCCESS —
+# the kc_id is re-resolved from `GET /api/v1/admin/users` and the run continues.
+e2e_ensure_reviewer() {
+  local ns="$1" pod="$2" container="${3:-registry-api}" admin_tok out
+  admin_tok="$(e2e_token "$ns" "$pod" "$container")" || {
+    echo "FATAL: e2e_ensure_reviewer could not obtain a ${E2E_KC_USER} token, so it cannot" >&2
+    echo "       call POST /api/v1/admin/users to create ${E2E_REVIEWER_USER}." >&2
+    echo "       registry-api's bootstrap writes ${E2E_KC_USER} on start — check /ready is 200" >&2
+    echo "       (503 {\"status\":\"bootstrapping\"} means it has not succeeded yet)." >&2
+    exit 1
+  }
+
+  # Values go in as ENV, not interpolated into the payload: a JWT and a password have
+  # no business being spliced into a script body, and a quoted heredoc keeps the Python
+  # readable as Python.
+  out=$(kubectl exec -i -n "$ns" "$pod" -c "$container" -- env \
+      REVIEWER_ADMIN_TOKEN="$admin_tok" \
+      REVIEWER_USER="$E2E_REVIEWER_USER" \
+      REVIEWER_PASS="$E2E_REVIEWER_PASS" \
+      REVIEWER_KC_CLIENT="$E2E_KC_CLIENT" \
+      REVIEWER_KC_URL="$E2E_KC_URL" \
+      python3 - <<'PY'
+import json, os, sys, urllib.error, urllib.parse, urllib.request
+
+BASE = "http://localhost:8000/api/v1/admin/users"
+USER = os.environ["REVIEWER_USER"]
+PASSWORD = os.environ["REVIEWER_PASS"]
+TEAM = "platform"
+# 'contributor' is the canonical stated role. The persona's job is to be a caller with
+# no ARTIFACT role (suite-82 T-ARG-004, suite-83 T-SYY-003); its GLOBAL role is
+# irrelevant to that and must not be the legacy 'operator' the R0 work is removing.
+ROLE = "contributor"
+HEADERS = {
+    "Authorization": "Bearer %s" % os.environ["REVIEWER_ADMIN_TOKEN"],
+    "Content-Type": "application/json",
+}
+
+
+def api(method, path, body=None):
+    """Returns (status, parsed_body). A 4xx/5xx is a RESULT here, not an exception —
+    409 is a success case and the others have to be reported with their body."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(BASE + path, data=data, headers=HEADERS, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            return resp.status, (json.loads(raw) if raw else None)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw)
+        except Exception:
+            return exc.code, raw.decode("utf-8", "replace")[:300]
+
+
+def die(msg):
+    print("FATAL: %s" % msg)
+    sys.exit(1)
+
+
+status, body = api("POST", "", {
+    "username": USER,
+    "email": "%s@example.com" % USER,
+    "first_name": "Agent",
+    "last_name": "Reviewer",
+    "temp_password": PASSWORD,
+    "team": TEAM,
+    "role": ROLE,
+})
+
+if status in (200, 201):
+    kc_id, state = body["kc_id"], "created"
+elif status == 409:
+    # ALREADY EXISTS IS SUCCESS. `_kc_error` maps Keycloak's 409 to
+    # "Username or email already exists" (admin_users.py:152-153) and nothing was
+    # written, so re-resolve the id from the list rather than treating it as a failure.
+    st, users = api("GET", "")
+    if st != 200 or not isinstance(users, list):
+        die("e2e_ensure_reviewer: POST said 409 but GET /api/v1/admin/users -> %s %s" % (st, users))
+    match = [u for u in users if u.get("username") == USER]
+    if not match:
+        die("e2e_ensure_reviewer: POST said %r already exists, but it is not in "
+            "GET /api/v1/admin/users — the realm and this API disagree." % USER)
+    kc_id, state = match[0]["kc_id"], "existing"
+    # The 409 only proves the KEYCLOAK half. A user left over from the old chart (or
+    # from a run whose row was cleaned up) can exist with no assignment row at all, and
+    # after FR-5 that persona cannot call anything — every route resolving a global
+    # role answers 403 no_platform_role. Re-pin through the same real API.
+    if match[0].get("team") != TEAM or match[0].get("role") != ROLE:
+        st, patched = api("PATCH", "/%s" % kc_id, {"team": TEAM, "role": ROLE})
+        if st != 200:
+            die("e2e_ensure_reviewer: PATCH /api/v1/admin/users/%s -> %s %s" % (kc_id, st, patched))
+        state = "existing+repinned"
+else:
+    die("e2e_ensure_reviewer: POST /api/v1/admin/users -> %s %s" % (status, body))
+
+# REQUIRED, not a nicety — see the header comment. Without it the account still carries
+# requiredActions=["UPDATE_PASSWORD"] and the grant below fails "Account is not fully set up".
+st, resp = api("POST", "/%s/reset-password" % kc_id, {"new_password": PASSWORD, "temporary": False})
+if st not in (200, 204):
+    die("e2e_ensure_reviewer: POST /api/v1/admin/users/%s/reset-password -> %s %s" % (kc_id, st, resp))
+
+# VERIFY. Do the exact grant the suites will do, so a broken persona fails HERE.
+grant = urllib.parse.urlencode({
+    "grant_type": "password", "client_id": os.environ["REVIEWER_KC_CLIENT"],
+    "username": USER, "password": PASSWORD}).encode()
+try:
+    token = json.loads(urllib.request.urlopen(
+        urllib.request.Request(os.environ["REVIEWER_KC_URL"], data=grant), timeout=20).read())
+except Exception as exc:
+    detail = ""
+    try:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+    except Exception:
+        pass
+    die("%s exists (kc_id=%s, %s) but cannot obtain a token from Keycloak: %s %s"
+        % (USER, kc_id, state, exc, detail))
+if not token.get("access_token"):
+    die("%s exists (kc_id=%s, %s) but cannot obtain a token: the grant returned no "
+        "access_token (%s)" % (USER, kc_id, state, sorted(token)))
+
+print("E2E_REVIEWER_OK %s kc_id=%s (%s)" % (USER, kc_id, state))
+PY
+  ) || {
+    if [ -n "$out" ]; then echo "$out" >&2; fi
+    echo "FATAL: e2e_ensure_reviewer could not provision ${E2E_REVIEWER_USER} in $pod." >&2
+    echo "       This suite uses it as its non-admin persona; the chart stopped creating" >&2
+    echo "       users in R0 (FR-9), so the fixture is the suite's own responsibility." >&2
+    exit 1
+  }
+  echo "  $out"
 }

@@ -40,9 +40,18 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 [ -n "$API_POD" ] || { echo "FATAL: no running registry-api pod"; exit 1; }
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+
 echo "=== Suite 78: Conversations (POC-5 list) ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
+
+# The ownership proof needs USER_B to be a DIFFERENT real sub — `get_token(
+# "agent-reviewer", ...)` in main(). Since R0/FR-9 the chart creates no Keycloak users,
+# so this suite provisions its own persona through the real POST /api/v1/admin/users.
+# Idempotent. Without it every case skip_all()s on "no keycloak token(s)", which reads
+# as an environment gap rather than as the missing fixture it actually is.
+e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   env SUFFIX="$SUFFIX" python3 - <<'PY'

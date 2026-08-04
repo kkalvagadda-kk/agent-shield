@@ -45,6 +45,112 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — RBAC R0 (bootstrap + refusal) — 2026-08-04 (registry-api 0.2.259)
+
+R0 shipped: the platform creates and re-pins its own `platform-admin` from `lifespan`
+(`services/registry-api/bootstrap_admin.py`), the realm-init Job creates no users at all
+(Decision 40), `POST /api/v1/admin/users` is atomic, migration `0079` drops the `role`
+column default, and a subject with no assignment row is refused with **403
+`no_platform_role`** instead of being handed an invented one.
+Postmortem: `docs/bugs/platform-admin-role-stranded-on-realm-recreation.md` ·
+`scripts/e2e/suite-97-rbac-bootstrap-and-router-auth.sh` (T-S97-001..010, 012) ·
+`studio/e2e/admin-access-roles.spec.ts`.
+
+**R1 (FR-11 — `require_user` on the ten routers) is NOT in this commit.** It ships as its
+own change together with the ~28-suite Bearer sweep, because a router change deployed
+without the suite token fixes reproduces commit `76b3570`'s fifteen-dark-suites failure at
+scale. Until it lands, **all ten routers still answer unauthenticated requests** — not
+only the five named exemptions below. `T-S97-011` (the 401 matrix + exemption canary) is
+deliberately absent from suite-97's completeness gate until it does.
+
+**deferred (intentional)**
+
+- **G-R0-1 — `user_team_assignments.role` is a union of two vocabularies.** It holds a
+  global role (`platform-admin`/`contributor`/`consumer`) *and* a reviewer **scope**
+  (`agent:reviewer`, `approvals.py:48 _DEFAULT_REVIEWER_SCOPE`, matched by `_caller_roles`
+  at `:266`). `rbac._normalize_role` returns an unrecognized value **verbatim** and
+  `ROLE_HIERARCHY.get(role, 0) == 0` is what stops a reviewer scope being read as a
+  contributor — load-bearing, not an oversight. Splitting the column is **R5's** job;
+  doing it here would have moved HITL authority in the same change that moves admin
+  bootstrap. Pinned by `T-S97-010(c)`.
+- **G-R0-2 — `approval_authority` remains the live HITL mechanism.** R0 changed nothing
+  about who may approve. Deliberate: the global role and the approval authority are
+  different questions and R5 owns merging them.
+- **G-R0-4 — no Keycloak realm-role OBJECTS exist for the three global roles.**
+  `set_user_realm_role` (`keycloak_client.py:203`) silently skips a name absent from
+  `role_map`, so today the DB row is the only carrier of the global role. Not a hole (the
+  backend never reads the realm role for authorization), but it means the Keycloak console
+  shows nothing about a user's platform role. `T-S97-007` asserts the mapping only where
+  the object exists, and says so in its evidence line rather than pretending.
+- **G-R0-5 — `scripts/seed-platform-admin-role.sh` is retained** as a **manual repair
+  tool**, retitled as one. Deploy no longer calls it. It exists for the operator who must
+  re-pin the row *without* restarting registry-api (a hand-edited row, or
+  `GET /api/v1/admin/identity-audit` reporting a stale one when waiting for the next
+  rollout is not acceptable).
+- **G-R0-6 — `UserCreate.role` still defaults to the legacy `"operator"`**
+  (`routers/admin_users.py:53`). Every in-repo caller now states a role explicitly, so the
+  default is unreachable from our own code, but an external `POST /api/v1/admin/users`
+  that omits `role` still creates a `contributor` by another name. Changing the API
+  default is a contract change and belongs with the R5 vocabulary work.
+- **G-R0-7 — the six checkpoint scripts CP1a–c / CP2a–c were never written**
+  (`docs/plan/rbac-r0-r1/tasks.md`, Checkpoints 1 and 2). Decided 2026-08-04: `suite-97` is
+  the gate instead. It carries every assertion those scripts would have made — T-S97-001/002/003
+  (bootstrap, restart idempotence, advisory-lock single-flight), T-S97-005/006 (Keycloak-outage
+  non-fatal path, `/ready` 503 body), T-S97-007/008 (atomic create + compensating delete),
+  T-S97-009 (`NOT NULL` proving the `server_default` is gone), T-S97-010 (403 `no_platform_role`
+  + the `agent:reviewer` rank-0 carve-out) and T-S97-012 (audit invariants) — driven through the
+  real handlers rather than restated in shell. CP1a/CP2a would have wrapped
+  `scripts/deploy-cpe2e.sh`, which CLAUDE.md already names as the only deploy mechanism. The
+  boxes stay unticked in tasks.md on purpose so this reads as a choice, not an omission.
+- **G-R0-8 — the R0 Playwright journey (T038) has NEVER been executed.** It is the **only** artifact
+  that proves DoD rule 1 for R0 — that the sidebar Admin section actually renders, which is the
+  literal 2026-07-20 symptom. It typechecks and is registered, but has not run:
+  `scripts/studio-e2e.sh` targets `https://agentshield.127.0.0.1.nip.io:8443` (the local
+  kind/docker-desktop Envoy Gateway), and on the EKS test cluster the gateway is an **internal NLB**
+  with no such local address. Attempting it produced `ECONNREFUSED ::ffff:127.0.0.1:8443` in the
+  file's first test, which aborted the other two before they ran — so "2 did not run", **not** "2
+  passed". R0's backend is proven by `suite-97` (11/11 against `0.2.260`, with `T-S97-004`
+  demonstrated RED against `0.2.258` first); the UI journey is not proven at all. Closing this needs
+  a tunnel to the internal NLB or an EKS-aware `STUDIO_E2E_GATEWAY_URL`. Until then R0 is
+  **backend-verified and UI-unverified**, and must not be described otherwise.
+
+**not-yet-wired (debt)**
+
+- **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
+  `GET /api/v1/admin/identity-audit` **reports** orphan users and stale rows in both
+  directions; it never deletes (spec OQ-2 → option (a): deciding which side of a
+  divergence is wrong is an operator's judgement). A stale row is litter, not a security
+  hole — nobody can authenticate as a dead `sub` — but it does mean "row count" stops
+  equalling "user count". There is no reaper and no alert. `T-S97-012` asserts the audit's
+  two arithmetic invariants **and** that both lists are empty, so litter fails the suite
+  by name rather than accumulating quietly.
+- **G-R1-1 — `services/registry-api/routers/agent_runs.py` is entirely unauthenticated**
+  (all 7 routes). Callers are in-cluster machines with no user identity to present:
+  `declarative-runner/main.py:410,437,148`, `checkpoint.py:27`, `orchestrator.py:35`,
+  `eval-runner/main.py:1254`. Closing it needs the service identity that
+  `docs/design/identity-propagation-architecture.md` owns (migrations 0080–0082), not a
+  `require_user` that would break every run recording.
+- **G-R1-2 — `GET /api/v1/deployments/` and `PATCH /api/v1/deployments/{id}`** stay
+  exempt for `deploy-controller/main.py:54,70,122,176`.
+- **G-R1-3 — `GET /api/v1/versions/{id}`** stays exempt for
+  `deploy-controller/main.py:33`.
+- **G-R1-4 — `GET /api/v1/auth-configs/{id}/secret-ref`** stays exempt for
+  `deploy-controller/tool_secrets.py:45`. **Credential-adjacent** — it returns a secret
+  *reference*, not a secret, but it is the most sensitive of the five.
+- **G-R1-5 — `GET /api/v1/agents/{name}/tools`** stays exempt for
+  `deploy-controller/tool_secrets.py:36` and
+  `declarative-runner/workflow_executor.py:171`.
+  *(G-R1-2..5 are the four route-level exemptions R1 will name in code with the caller's
+  `file:line` in the comment; all four are owned by identity propagation and will be
+  pinned by `T-S97-011` so a NEW unauthenticated route on those routers fails a test
+  rather than passing review.)*
+- **G-R1-6 — `agentshield deploy` from the SDK sends no token.**
+  `sdk/agentshield_sdk/cli.py:193-196` (create version) and `:205-209` (trigger deploy)
+  call `httpx.post` with no `Authorization` header. Harmless today; **the moment R1 puts
+  `require_user` on `deployments.py` and `versions.py` the CLI's deploy path 401s.** It
+  must gain a token before or with that change — it is the one caller of those routers
+  that is neither a browser nor an in-cluster service.
+
 ## Known gaps — intermittent agent-identity denial — 2026-08-03
 
 - **debt (intermittent, seen once in three consecutive runs) — a legitimate tool call

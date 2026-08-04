@@ -136,7 +136,15 @@ assert _normalize_role("viewer") == "consumer"
 assert _normalize_role("platform-admin") == "platform-admin"
 assert _normalize_role("contributor") == "contributor"
 assert _normalize_role("consumer") == "consumer"
-assert _normalize_role(None) == "contributor"
+
+# CONTRACT CHANGE (R0 / FR-5, FR-6). `_normalize_role(None) == "contributor"` used to
+# be asserted here — that was the invention Decision 41 named. A missing row now raises
+# NoPlatformRole in get_user_global_role and never reaches this function, so `raw` is
+# non-Optional. What replaces it: an UNRECOGNIZED value is returned VERBATIM and keeps
+# rank 0. That is load-bearing, not a gap — `agent:reviewer` is a reviewer SCOPE read
+# out of the same column by approvals.py:266 _caller_roles (Decision 42 / V-5).
+assert _normalize_role("agent:reviewer") == "agent:reviewer"
+assert ROLE_HIERARCHY.get(_normalize_role("agent:reviewer"), 0) == 0
 
 # consumer is the floor of the hierarchy; viewer is no longer a canonical key
 assert ROLE_HIERARCHY["consumer"] == 0, ROLE_HIERARCHY

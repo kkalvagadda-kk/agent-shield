@@ -45,9 +45,10 @@ AG='s48-fb-agent'; SUB='e2e-s48'; TEAM='platform'
 async def m():
     async with AsyncSessionLocal() as db:
         # seed team assignment + agent
+        # role is STATED, not defaulted — migration 0079 removed the column default (FR-4).
         await db.execute(sa_text(
-            'INSERT INTO user_team_assignments (user_sub, team_name) VALUES (:s,:t) '
-            'ON CONFLICT DO NOTHING'), {'s': SUB, 't': TEAM})
+            'INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by) '
+            '''VALUES (:s,:t,'contributor','suite-48') ON CONFLICT DO NOTHING'''), {'s': SUB, 't': TEAM})
         a = (await db.execute(select(Agent).where(Agent.name==AG))).scalar_one_or_none()
         if not a:
             a = Agent(name=AG, team=TEAM, agent_type='declarative', status='active')
