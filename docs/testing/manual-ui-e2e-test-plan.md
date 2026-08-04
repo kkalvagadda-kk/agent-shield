@@ -102,7 +102,40 @@ deliberately absent from suite-97's completeness gate until it does.
   real handlers rather than restated in shell. CP1a/CP2a would have wrapped
   `scripts/deploy-cpe2e.sh`, which CLAUDE.md already names as the only deploy mechanism. The
   boxes stay unticked in tasks.md on purpose so this reads as a choice, not an omission.
-- **G-R0-8 — the R0 Playwright journey (T038) has NEVER been executed.** It is the **only** artifact
+- **G-R0-8 — ✅ CLOSED 2026-08-04.** The R0 Playwright journey
+  (`studio/e2e/admin-access-roles.spec.ts` "bootstrap gives platform-admin a role row, so the Admin
+  menu renders") **passes against `0.2.260` on `test-cluster-964-10086`** — 2 passed of 3 in that
+  file, the third failure being G-R0-9 below and unrelated. R0 is now backend- **and**
+  UI-verified. The diagnosis below is kept because the root cause was never R0 and the fix is
+  reusable.
+
+  **Root cause, and a wrong turn worth recording.** `deploy-eks.sh` sets `global.publicUrl` to the
+  ELB address, so on EKS the `HTTPRoute` is bound to the **NLB's own DNS name**, not
+  `agentshield.127.0.0.1.nip.io`. Envoy therefore answers **404** to the default URL — a route
+  miss, not a connection failure. `scripts/studio-e2e.sh` then fell through to a plain-http
+  port-forward that cannot reach the API on `:8443`, so **every** spec died at its fixture with
+  `ECONNREFUSED` while `global-setup` reported a *successful* login. That shape reads as an
+  app-wide outage and is why it was misdiagnosed twice: first as an R0 regression, then as
+  requiring an `/etc/hosts` entry. **Neither was true.** The NLB name resolves to a private VPC
+  address (`10.80.118.27`), but anyone who can reach the cluster API — also private — can reach
+  the gateway too: `curl https://<nlb>/config.json` → 200 with **no tunnel at all**. The first fix
+  attempt hard-exited demanding an `/etc/hosts` line and would have *blocked* the working path;
+  it was replaced.
+
+  `studio-e2e.sh` now asks the cluster which hostname its Gateway serves and tries it directly, so
+  the browser layer runs on EKS with **zero configuration**. It still refuses to fall through to
+  the broken http mode, and prints the port-forward + `/etc/hosts` recipe for the genuinely
+  off-VPN case.
+
+- **G-R0-9 — `admin-access-roles.spec.ts` "assigning consumer persists across a reload" fails**
+  (`TimeoutError: locator.click` waiting for `getByRole('button', {name: /^save$/i})` at `:109` —
+  the edit modal's Save button never became actionable). **Pre-existing, not R0.** Proof: the two
+  R0 commits changed **zero** files under `studio/src` (40 added lines in the e2e spec and nothing
+  else), and Studio still runs the untouched `0.1.180` image — the UI this test drives is
+  byte-identical to before R0. The other two tests in the same file, including the new R0 journey,
+  pass. Unowned; needs a look at the Access-admin edit modal.
+
+- **~~G-R0-8 (original text)~~ — the R0 Playwright journey (T038) has NEVER been executed.** It is the **only** artifact
   that proves DoD rule 1 for R0 — that the sidebar Admin section actually renders, which is the
   literal 2026-07-20 symptom. It typechecks and is registered, but has not run:
   `scripts/studio-e2e.sh` targets `https://agentshield.127.0.0.1.nip.io:8443` (the local
