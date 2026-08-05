@@ -106,7 +106,13 @@ test("assigning consumer persists across a reload (save -> reload -> assert)", a
     (r) => /\/api\/v1\/admin\/users\//.test(r.url()) && r.request().method() === "PATCH" && r.ok(),
     { timeout: 20_000 },
   );
-  await page.getByRole("button", { name: /^save$/i }).click();
+  // EditUserModal's button reads "Save Changes" (AdminAccessPage.tsx:452), and has since
+  // 3192ebe — BEFORE this test was written in 8baba26. The original locator here was
+  // /^save$/i, anchored, so it could never match: this test has been RED since the day it
+  // was authored and had never once passed. Nothing surfaced it because the browser layer
+  // could not run against EKS at all (gap G-R0-8), so the mandatory save->reload->assert
+  // guard on the RBAC admin write path was silently absent. Match the real button.
+  await page.getByRole("button", { name: /^save changes$/i }).click();
   const patch = await saved;
   expect((await patch.json()).role).toBe("consumer");
 

@@ -127,13 +127,33 @@ deliberately absent from suite-97's completeness gate until it does.
   the broken http mode, and prints the port-forward + `/etc/hosts` recipe for the genuinely
   off-VPN case.
 
-- **G-R0-9 — `admin-access-roles.spec.ts` "assigning consumer persists across a reload" fails**
-  (`TimeoutError: locator.click` waiting for `getByRole('button', {name: /^save$/i})` at `:109` —
-  the edit modal's Save button never became actionable). **Pre-existing, not R0.** Proof: the two
-  R0 commits changed **zero** files under `studio/src` (40 added lines in the e2e spec and nothing
-  else), and Studio still runs the untouched `0.1.180` image — the UI this test drives is
-  byte-identical to before R0. The other two tests in the same file, including the new R0 journey,
-  pass. Unowned; needs a look at the Access-admin edit modal.
+- **G-R0-9 — root-caused 2026-08-04: the test could NEVER have passed, and the guard it represents
+  has never run.** `admin-access-roles.spec.ts` "assigning consumer persists across a reload"
+  looked for `getByRole('button', {name: /^save$/i})`. `EditUserModal`'s button reads **"Save
+  Changes"** (`AdminAccessPage.tsx:452`), so the anchored regex could not match and the click timed
+  out. Not R0: the R0 commits changed **zero** files under `studio/src`, and Studio still runs the
+  untouched `0.1.180` image.
+
+  **The serious part is the timeline.** "Save Changes" shipped in `3192ebe`; this test was written
+  **later**, in `8baba26` — an *RBAC* commit. So it was **red from the day it was authored and has
+  never once passed**. Nothing surfaced it because the browser layer could not run against EKS at
+  all (G-R0-8), so two failures covered for each other: a test that could not pass, in a layer that
+  could not run. The consequence is that **CLAUDE.md DoD rule 2's mandatory save→reload→assert
+  guard on the RBAC admin write path has never actually executed** — on the very surface R2 is
+  about to start enforcing against.
+
+  Locator corrected to `/^save changes$/i` (fix the test, not the user-facing copy — the same
+  principle applied to the `EmailStr` finding). **STILL UNVERIFIED end-to-end:** VPC connectivity
+  dropped before it could be re-run, so it is correct by inspection but has not been *observed*
+  passing. Whether the persistence round-trip itself works is exactly the open question. Re-run:
+  `bash scripts/studio-e2e.sh e2e/admin-access-roles.spec.ts`.
+
+- **G-R0-10 — `studio/src/pages/AdminAccessPage.tsx` has NO Vitest component test.** The page
+  creates, edits and deletes users and assigns global roles — the entire RBAC admin write surface —
+  and its only automated guard was the Playwright spec above, which was dead. A component test
+  would have caught the "Save Changes"/`/^save$/` mismatch offline in milliseconds and needs no
+  cluster. CLAUDE.md's Post-Implementation Checklist item 4 requires component tests for changed
+  components; this page predates that discipline and was never backfilled.
 
 - **~~G-R0-8 (original text)~~ — the R0 Playwright journey (T038) has NEVER been executed.** It is the **only** artifact
   that proves DoD rule 1 for R0 — that the sidebar Admin section actually renders, which is the
