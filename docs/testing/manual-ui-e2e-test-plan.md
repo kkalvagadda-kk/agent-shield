@@ -196,6 +196,22 @@ deliberately absent from suite-97's completeness gate until it does.
   The script prints the exact line and refuses to run rather than degrading silently. After that
   entry exists, `bash scripts/studio-e2e.sh` runs the browser layer on EKS and this gap closes.
 
+- **G-R0-11 — FIRST browser-layer baseline against EKS, 2026-08-04: 69 passed / 24 failed / 2
+  skipped / 23 did not run (17.9m).** Until the gateway-discovery fix (G-R0-8) this layer could not
+  run against this cluster at all, so this is the first time its real state has been observed.
+  **Zero connection/infrastructure errors** — every failure is a genuine assertion or locator
+  failure, spread 1-2 across 20 different spec files, which argues against a single systemic cause.
+  Error classes: ~12 plain assertion failures, 2 `strict mode violation` (a locator that stopped
+  being unique), 1 `locator.click` timeout (the G-R0-9 class), 1 60s test timeout.
+  **These are NOT triaged yet.** Each belongs in one of three buckets and the count means nothing
+  until they are split: (a) dead tests guarding a surface that intentionally changed, (b) real
+  product bugs that were invisible while the layer was dark, (c) fixture/timing. One clear
+  candidate for (a): `agent-graphs.spec.ts` asserts a "New Agent Graph" button is visible, but
+  **Decision 24 deliberately hid Agent Graphs from the nav** in favour of the unified Workflow
+  builder. Triage should precede R1 — R1 changes authentication on 10 routers, and starting it on
+  top of 24 unexplained browser failures makes any new breakage unattributable.
+  Log: `pw-full.log` (session scratchpad); re-run with `bash scripts/studio-e2e.sh`.
+
 **not-yet-wired (debt)**
 
 - **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
