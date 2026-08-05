@@ -143,7 +143,7 @@ test.describe("workflow builder", () => {
 
     // Toolbar buttons
     await expect(
-      page.getByRole("button", { name: /Add Existing Agent/i })
+      page.getByRole("button", { name: /^Add Agent$/i })
     ).toBeVisible();
     await expect(page.getByRole("button", { name: /Save/i })).toBeVisible();
   });
@@ -152,7 +152,7 @@ test.describe("workflow builder", () => {
     await page.goto("/workflows/new");
     await page.waitForLoadState("networkidle");
 
-    await page.getByRole("button", { name: /Add Existing Agent/i }).click();
+    await page.getByRole("button", { name: /^Add Agent$/i }).click();
 
     // Modal header
     await expect(
@@ -177,10 +177,18 @@ test.describe("workflow builder", () => {
     await page.goto("/workflows/new");
     await page.waitForLoadState("networkidle");
 
+    // "Add Agent", not "Add Existing Agent": Decision 24 unified the Workflow builder so a
+    // SINGLE modal handles both existing and newly-created members (AddAgentModal has
+    // "Existing Agent" / "Create New Agent" tabs, default 'existing'). The old name only made
+    // sense while those were separate flows. The row markup this spec's XPath depends on is
+    // unchanged — only the entry point was renamed.
     // Open modal and add first agent
-    await page.getByRole("button", { name: /Add Existing Agent/i }).click();
-    await expect(page.getByText(WF_AGENT_1)).toBeVisible({ timeout: 10_000 });
-
+    await page.getByRole("button", { name: /^Add Agent$/i }).click();
+    // SEARCH FIRST. ExistingTab fetches listAgents(100, 0, …, {composable:true}) — a
+    // hard cap of 100 (AddAgentModal.tsx:34) — and this cluster holds far more, so a
+    // freshly-created fixture is simply off the end of the list and its row never
+    // renders. The modal ships a search box for exactly this; using it removes the
+    // dependency on where the fixture happens to land in an unfiltered page.
     // Agent row structure in AddAgentModal:
     //   <div class="flex items-start justify-between gap-3 p-3...">   ← ROW (3 levels up from p)
     //     <div class="flex items-start gap-2 min-w-0">               ← inner-left (2 up)
@@ -192,20 +200,25 @@ test.describe("workflow builder", () => {
     //     <button>+ Add</button>                                     ← sibling of inner-left in ROW
     //   </div>
     // XPath: from p → up 3 → down to button sibling.
-    const addBtn1 = page.locator(
-      `xpath=//p[normalize-space()="${WF_AGENT_1}"]/../../../button`
-    );
-    await addBtn1.click();
-    // After adding, the button text changes to "Added"
-    await expect(addBtn1).toContainText("Added");
+    // ONE ADD PER MODAL. handleAddAgent closes it on every add — "Close the modal after
+    // adding so the new node is visible" (WorkflowBuilderPage.tsx:257). This spec was
+    // written against a multi-add modal: it added agent 1, asserted the button flipped to
+    // "Added" in a still-open modal, added agent 2, then clicked Done. The first assertion
+    // now fails against a modal that is already gone, and the canvas node — which is the
+    // thing actually under test — was correct all along. Reopen per agent and assert the
+    // NODE, not the button state of a dismissed dialog.
+    const addFromModal = async (name: string) => {
+      await page.getByPlaceholder("Search agents…").fill(name);
+      const addBtn = page.locator(`xpath=//p[normalize-space()="${name}"]/../../../button`);
+      await expect(addBtn).toBeVisible({ timeout: 10_000 });
+      await addBtn.click();
+      // The modal self-dismisses; wait for that rather than clicking a Done that is gone.
+      await expect(page.getByPlaceholder("Search agents…")).toBeHidden({ timeout: 10_000 });
+    };
 
-    // Add second agent using the same XPath pattern
-    const addBtn2 = page.locator(
-      `xpath=//p[normalize-space()="${WF_AGENT_2}"]/../../../button`
-    );
-    await addBtn2.click();
-
-    await page.getByRole("button", { name: /Done/i }).click();
+    await addFromModal(WF_AGENT_1);
+    await page.getByRole("button", { name: /^Add Agent$/i }).click();
+    await addFromModal(WF_AGENT_2);
 
     // ReactFlow renders each node inside a .react-flow__node wrapper.
     // WorkflowMemberNode shows the agent_name in a <span>.
@@ -224,13 +237,22 @@ test.describe("workflow builder", () => {
     await page.waitForLoadState("networkidle");
 
     // Add at least one agent so Save doesn't error
-    await page.getByRole("button", { name: /Add Existing Agent/i }).click();
+    await page.getByRole("button", { name: /^Add Agent$/i }).click();
+    // SEARCH FIRST. ExistingTab fetches listAgents(100, 0, …, {composable:true}) — a
+    // hard cap of 100 (AddAgentModal.tsx:34) — and this cluster holds far more, so a
+    // freshly-created fixture is simply off the end of the list and its row never
+    // renders. The modal ships a search box for exactly this; using it removes the
+    // dependency on where the fixture happens to land in an unfiltered page.
+    await page.getByPlaceholder("Search agents…").fill(WF_AGENT_1);
     await expect(page.getByText(WF_AGENT_1)).toBeVisible({ timeout: 10_000 });
     // Use XPath to navigate from the agent name <p> to its sibling Add button
     await page
       .locator(`xpath=//p[normalize-space()="${WF_AGENT_1}"]/../../../button`)
       .click();
-    await page.getByRole("button", { name: /Done/i }).click();
+    // No Done click: handleAddAgent dismisses the modal on every add
+    // (WorkflowBuilderPage.tsx:257). Wait for that instead of clicking a button that is
+    // already gone — same stale multi-add assumption as the two-node test above.
+    await expect(page.getByPlaceholder("Search agents…")).toBeHidden({ timeout: 10_000 });
 
     // Click Save — should open the "Save Workflow" modal (first save)
     await page.getByRole("button", { name: /^Save$/i }).click();
