@@ -143,10 +143,14 @@ deliberately absent from suite-97's completeness gate until it does.
   about to start enforcing against.
 
   Locator corrected to `/^save changes$/i` (fix the test, not the user-facing copy — the same
-  principle applied to the `EmailStr` finding). **STILL UNVERIFIED end-to-end:** VPC connectivity
-  dropped before it could be re-run, so it is correct by inspection but has not been *observed*
-  passing. Whether the persistence round-trip itself works is exactly the open question. Re-run:
-  `bash scripts/studio-e2e.sh e2e/admin-access-roles.spec.ts`.
+  principle applied to the `EmailStr` finding).
+
+  **✅ CLOSED — verified 2026-08-04: `3 passed`, exit 0** against `0.2.260` on
+  `test-cluster-964-10086`. **The persistence round-trip itself was never broken** — the PATCH
+  lands, survives a full reload, and reads back correctly from the backend. Only the guard was
+  dead. That is the better outcome, but it does not soften the finding: for the whole life of this
+  test the RBAC admin write surface was reported as covered while nothing was checking it, and the
+  bug it would have caught could have been anything.
 
 - **G-R0-10 — `studio/src/pages/AdminAccessPage.tsx` has NO Vitest component test.** The page
   creates, edits and deletes users and assigns global roles — the entire RBAC admin write surface —
