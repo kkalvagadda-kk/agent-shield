@@ -42,14 +42,43 @@ import {
 const TS = Date.now();
 
 // Header-auth identity for the REST fixture setup — platform-admin's real
-// Keycloak sub, the same user the browser logs in as (global-setup). The
-// conversation list is ownership-scoped to claims["sub"], so the seed must carry
-// this exact user_id for the browser's /me/conversations to return the threads.
-const ADMIN = {
-  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
-  "X-User-Team": "platform",
-};
-const USER_SUB = ADMIN["X-User-Sub"];
+// The conversation list is ownership-scoped to claims["sub"], so the seed must carry the
+// SAME user_id the browser session uses. This used to hardcode a literal sub
+// ("75c7c8b3-…") — and that broke the moment the Keycloak platform-admin was recreated
+// and reissued as a NEW subject, which is exactly what suite-97 T-S97-004 does on purpose
+// (delete the admin, restart, require the platform to re-pin). The seeds then wrote
+// conversations owned by a subject nobody logs in as, the list correctly returned none,
+// and the failure surfaced as "the seeded thread is not in the list".
+//
+// Coupling a fixture to an identifier the IdP is free to reissue is the SAME design flaw
+// R0 removed from the platform itself: bootstrap_admin.py looks the admin up by USERNAME,
+// never a stored sub, so a realm recreation self-heals. Resolve it at run time here too.
+let USER_SUB = "";
+const ADMIN: Record<string, string> = { "X-User-Sub": "", "X-User-Team": "platform" };
+
+async function resolveAdminSub(): Promise<string> {
+  // Read it off the Keycloak token itself: the `sub` claim IS the subject the browser
+  // session carries, so seeds owned by it are the ones the UI will list. GET /me cannot
+  // serve here — this spec's api context authenticates with X-User-Sub audit headers, not
+  // a Bearer, so /me answers 401.
+  const ctx = await pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true });
+  const r = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
+    form: {
+      grant_type: "password",
+      client_id: "agentshield-studio",
+      username: process.env.STUDIO_E2E_USER || "platform-admin",
+      password: process.env.STUDIO_E2E_PASSWORD || "PlatformAdmin2024",
+    },
+  });
+  expect(r.ok(), `token for the seed subject: ${r.status()} ${await r.text()}`).toBeTruthy();
+  const jwt = (await r.json()).access_token as string;
+  await ctx.dispose();
+  const claims = JSON.parse(
+    Buffer.from(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()
+  );
+  expect(claims.sub, "token carried no sub — cannot own the seeded conversations").toBeTruthy();
+  return claims.sub as string;
+}
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 const INSTR =
   "You are a helpful assistant with memory. Reply in one short sentence.";
@@ -97,11 +126,31 @@ async function seedConversation(
   return resp.ok();
 }
 
+
+/**
+ * Ensure the docked History panel is OPEN, whatever its default.
+ *
+ * AgentChatPage mounts it with `useState(true)` (AgentChatPage.tsx:99) — it defaults to
+ * OPEN. This spec used to click `history-toggle` unconditionally and then assert
+ * `history-dock` was visible, which CLOSED an already-open dock and failed. Asserting the
+ * intended STATE via aria-pressed, rather than assuming a starting state and toggling,
+ * keeps this correct if the default ever flips back.
+ */
+async function openHistoryDock(page: import("@playwright/test").Page) {
+  const toggle = page.getByTestId("history-toggle");
+  await expect(toggle).toBeVisible({ timeout: 15_000 });
+  if ((await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
+  await expect(page.getByTestId("history-dock")).toBeVisible({ timeout: 10_000 });
+}
+
 test.describe("conversations sidebar — standalone page + docked History", () => {
   let api: APIRequestContext;
   let agentCreated = false;
 
   test.beforeAll(async () => {
+    // Must precede newContext: ADMIN feeds extraHTTPHeaders.
+    USER_SUB = await resolveAdminSub();
+    ADMIN["X-User-Sub"] = USER_SUB;
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,
@@ -136,16 +185,22 @@ test.describe("conversations sidebar — standalone page + docked History", () =
     agentCreated = c.ok();
 
     if (agentCreated) {
-      await seedConversation(api, AGENT, {
+      // ASSERT THE SEED. seedConversation RETURNS resp.ok() and both call sites used to
+      // discard it, so a failed fixture write sailed through and resurfaced ~100 lines
+      // later as "the seeded thread is not in the list" — a message that points at the
+      // conversations list rather than at the write that never happened. Fail at the cause.
+      const okA = await seedConversation(api, AGENT, {
         threadId: STANDALONE_THREAD,
         userMsg: STANDALONE_TITLE,
         assistantMsg: STANDALONE_REPLY,
       });
-      await seedConversation(api, AGENT, {
+      expect(okA, `seed ${STANDALONE_THREAD} failed — POST /agents/${AGENT}/memory rejected`).toBeTruthy();
+      const okB = await seedConversation(api, AGENT, {
         threadId: DOCKED_THREAD,
         userMsg: DOCKED_TITLE,
         assistantMsg: DOCKED_REPLY,
       });
+      expect(okB, `seed ${DOCKED_THREAD} failed — POST /agents/${AGENT}/memory rejected`).toBeTruthy();
     }
   });
 
@@ -235,20 +290,22 @@ test.describe("conversations sidebar — standalone page + docked History", () =
     test.skip(!agentCreated, "could not create the fixture agent (env gap)");
     test.setTimeout(90_000);
 
-    await page.goto(`/agents/${AGENT}/chat`);
-    await page.waitForLoadState("networkidle");
-
-    // Opening the History dock mounts the ConversationSidebar, which fetches the
-    // agent-scoped list. HARD: the list loads from the backend + the seeded thread
-    // is present.
+    // ARM BEFORE NAVIGATING. The dock is open by DEFAULT (AgentChatPage.tsx:99), so
+    // ConversationSidebar mounts and fetches the agent-scoped list during the initial
+    // render — before any click. Arming the waiter after goto() (as this did) waits for a
+    // response that has already been delivered, and times out at 20s having proven
+    // nothing about a page that was working.
+    // HARD assertion retained: the list really loads from the backend and carries the
+    // seeded thread.
     const openList = page.waitForResponse(
       (r) =>
         new RegExp(`/api/v1/agents/${AGENT}/memory/conversations`).test(r.url()) &&
         r.request().method() === "GET",
       { timeout: 20_000 }
     );
-    await page.getByTestId("history-toggle").click();
-    await expect(page.getByTestId("history-dock")).toBeVisible();
+    await page.goto(`/agents/${AGENT}/chat`);
+    await page.waitForLoadState("networkidle");
+    await openHistoryDock(page);
     const listed = await openList;
     expect(listed.status()).toBe(200);
     expect(
@@ -271,7 +328,7 @@ test.describe("conversations sidebar — standalone page + docked History", () =
         r.request().method() === "GET",
       { timeout: 20_000 }
     );
-    await page.getByTestId("history-toggle").click();
+    await openHistoryDock(page);
     const reListedResp = await reListed;
     expect(reListedResp.status()).toBe(200);
     expect(
