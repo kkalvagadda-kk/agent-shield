@@ -168,3 +168,71 @@ test("bootstrap gives platform-admin a role row, so the Admin menu renders (R0 /
   // must not depend on. The DOM text is "Admin"; the rendered text is "ADMIN"; both pass.
   await expect(page.getByRole("button", { name: /^admin$/i })).toBeVisible({ timeout: 20_000 });
 });
+
+test("create a user THROUGH THE UI → it persists across a reload (R0 / FR-8)", async ({
+  page,
+}) => {
+  // R0 made POST /api/v1/admin/users ATOMIC: the Keycloak user, its realm role and the
+  // user_team_assignments row now land together or not at all, with a compensating
+  // kc_delete and a 502 on failure. suite-97 T-S97-007/008 prove that at the API. NOTHING
+  // proved it through the screen — the other tests in this file seed their fixture with
+  // api.post(), so the Create User modal itself had no journey at all, and CLAUDE.md DoD
+  // rule 2's save→reload→assert existed for the EDIT surface but not the CREATE one.
+  //
+  // Emails use @example.com deliberately: UserCreate.email is EmailStr and email-validator
+  // rejects .local as an RFC 6762 special-use TLD, so @agentshield.local answers 422. The
+  // bootstrap can pin platform-admin@agentshield.local only because it calls
+  // keycloak_client.create_user directly and never sees the model.
+  const NAME = `uicreate-${Date.now()}`;
+  let createdKcId = "";
+
+  try {
+    await page.goto(`${BASE_URL}/admin/access`);
+    await page.getByRole("button", { name: /^Create User$/i }).click();
+
+    // getByPlaceholder matches by SUBSTRING unless exact — "Smith" otherwise resolves to
+    // three fields (jsmith / j.smith@company.com / Smith) and fails strict mode. Same
+    // ambiguity class this triage has been clearing all day; it caught me too.
+    await page.getByPlaceholder("jsmith", { exact: true }).fill(NAME);
+    await page.getByPlaceholder("j.smith@company.com", { exact: true }).fill(`${NAME}@example.com`);
+    await page.getByPlaceholder("Jane", { exact: true }).fill("UI");
+    await page.getByPlaceholder("Smith", { exact: true }).fill("Created");
+    await page.getByPlaceholder("••••••••", { exact: true }).fill("UiCreate2024!");
+
+    // Team is required and its options come from the live cluster — pick a real one
+    // rather than hardcoding, so this does not track one cluster's seed data.
+    const teamSelect = page.locator("select").filter({ has: page.locator('option[value=""]') }).first();
+    const teamValue = await teamSelect.locator("option").nth(1).getAttribute("value");
+    expect(teamValue, "no team exists in this cluster to assign").toBeTruthy();
+    await teamSelect.selectOption(teamValue!);
+
+    const roleSelect = page.locator("select").filter({ has: page.locator('option[value="consumer"]') }).first();
+    await roleSelect.selectOption("consumer");
+
+    // Assert the write left the browser AND that the server answered 201 — not a toast,
+    // not a closed modal. A 502 here is R0's compensating-rollback path surfacing.
+    const created = page.waitForResponse(
+      (r) =>
+        /\/api\/v1\/admin\/users\/?$/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 20_000 },
+    );
+    await page.getByRole("button", { name: /^Create User$/i }).last().click();
+    const resp = await created;
+    expect(resp.status(), `create failed: ${await resp.text()}`).toBe(201);
+    createdKcId = (await resp.json()).kc_id;
+
+    // FULL RELOAD — the row must be rehydrated from the backend, not from the mutation
+    // cache. This is the round-trip R0's atomicity claim actually rests on: if the
+    // Keycloak user existed but the assignment row did not, the role cell would be empty.
+    await page.reload();
+    const row = page.getByRole("row", { name: new RegExp(NAME) });
+    await row.waitFor({ timeout: 20_000 });
+    await expect(row).toContainText("consumer");
+  } finally {
+    if (createdKcId) {
+      await page.request
+        .delete(`${BASE_URL}/api/v1/admin/users/${createdKcId}`)
+        .catch(() => {});
+    }
+  }
+});

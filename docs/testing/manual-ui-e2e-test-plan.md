@@ -212,6 +212,22 @@ deliberately absent from suite-97's completeness gate until it does.
   top of 24 unexplained browser failures makes any new breakage unattributable.
   Log: `pw-full.log` (session scratchpad); re-run with `bash scripts/studio-e2e.sh`.
 
+- **G-R0-12 — a corrupted account is indistinguishable from a low-privilege one in the UI.**
+  R0's FR-5 makes a subject with no `user_team_assignments` row answer **403
+  `no_platform_role`** — deliberately loud on the server, and proven by `suite-97` T-S97-010.
+  Studio does not surface it: `/me` is fetched once in `main.tsx` and a 403 is swallowed into
+  `role = null` (`main.tsx:37-39`), so the only visible effect is that the Admin section does not
+  render — exactly what a legitimate `consumer` sees. The 2026-07-20 incident was *precisely* this
+  symptom ("a menu just disappeared"), so the platform now detects the corruption and then hides
+  the detection.
+  **Deliberately NOT covered by a browser journey.** Staging it needs a Keycloak user with no row,
+  which R0's own atomicity makes unreachable through the API — a spec would have to drive
+  Keycloak's admin API *and* delete the DB row, neither of which Playwright can reach — and the
+  resulting assertion ("no Admin menu") could not distinguish the bug from correct `consumer`
+  behaviour. The test would be expensive and weak. The real fix is product-side: surface
+  `error_code === "no_platform_role"` as a distinct state instead of a null role. Then it becomes
+  cheaply testable.
+
 **not-yet-wired (debt)**
 
 - **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
