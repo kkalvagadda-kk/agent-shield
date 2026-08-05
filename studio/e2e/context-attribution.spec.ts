@@ -88,7 +88,12 @@ async function createAgentViaUI(browser: Browser, agentName: string): Promise<vo
     );
     await page.getByRole("button", { name: /Create Agent/i }).click();
     await done;
-    await page.waitForURL(`**/agents/${agentName}`, { timeout: 15_000 });
+    // The 201 above IS the proof of creation. The wizard navigates to the agent LIST
+    // (/agents, CreateAgentPage.tsx:785), NOT /agents/{name}, so waiting for the detail
+    // URL here hung for 15s and failed a beforeAll — taking every test in the file with
+    // it. catalog-overview-parity.spec.ts already documented this exact drift and named
+    // these specs as still carrying it: "a navigation is a side effect of creation, not
+    // proof of it; the 201 is the proof."
   } finally {
     await ctx.close();
   }
