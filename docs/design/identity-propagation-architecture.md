@@ -44,10 +44,50 @@ from everything above and is **not** owned here. Current platform-wide truth:
 | Tool kind | Credential the tool receives | Who validates | Status |
 |---|---|---|---|
 | External MCP server, `external_auth_mode="oauth"` | the end user's **own upstream OAuth access token**, resolved per-request from `user_sub` | the external server (e.g. GitHub), against that user's scopes | **BUILT** — `mcp_oauth_grants` (`0074`), `routers/internal_mcp.py`, `suite-87`; per-request-user fix in SDK `0.2.7` |
-| Internal MCP server, `identity_mode="service_identity"` | a **Keycloak client-credentials token, audienced to that server** — asserts *the platform*, not any human | the internal server (a real, validatable JWT) | **BUILT** — `mcp-proxy/keycloak_client.py:80` |
+| Internal MCP server, `identity_mode="service_identity"` | ⚠️ **NOT audienced — see the correction below.** A Keycloak client-credentials token asserting *the platform*, but the `audience` parameter is silently ignored, so every server receives the SAME unscoped token | the internal server — which cannot tell WHICH server the token was minted for | **CODE PATH BUILT, PROPERTY NOT DELIVERED** — `mcp-proxy/keycloak_client.py:80` |
 | Internal MCP server, `identity_mode="on_behalf_of"` | a token minted **for** `user_sub`, audienced to that server (impersonation exchange) | the internal server — **assumed, not contracted** | **STUB THAT FAILS CLOSED**, blocked on this doc's Phase 0–2 — Decision 29 |
 | Internal MCP server, `identity_mode="none"` | static per-server credentials | the server, if it bothers | **BUILT** (Phase 1) |
 | HTTP / Python platform tools | none | n/a — governance is OPA-side only | by design |
+
+> ### ⚠️ CORRECTION 2026-08-04 — `service_identity` does NOT produce a scoped token
+>
+> The row above previously read "**BUILT**". That was **wrong, and it was my error** — asserted
+> from reading `mint_service_account_token(audience)` and seeing an `audience` argument, without
+> testing what Keycloak does with it.
+>
+> `mcp-proxy/keycloak_client.py:80` sends `audience` on a **`grant_type=client_credentials`**
+> request. `audience` is RFC 8693's parameter; Keycloak honours it on
+> `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, **not** on client-credentials.
+> It is silently ignored. Verified against the live realm on `test-cluster-964-10086`:
+>
+> | request | HTTP | `aud` in the issued token |
+> |---|---|---|
+> | no `audience` param | 200 | `account` |
+> | `audience=totally-nonexistent-tool-xyz` | 200 | `account` |
+> | `audience=langfuse` (a **real** client) | 200 | `account` |
+>
+> Identical every time. **This is not token exchange — it is a plain service-account grant with an
+> ignored hint**, and `_token_cache` keyed by audience is caching one token under many keys.
+>
+> **Consequence if it were used:** every upstream MCP server receives the *same* unscoped platform
+> token. A server can tell "this is the platform" but not which server it was minted for, and the
+> token replays against any other server. The three-gate model in §4.8.1 assumes a scoped token at
+> gate 3; that assumption does not hold.
+>
+> **Masked today:** all 13 registered `mcp_servers` rows are `identity_mode="none"` /
+> `identity_audience=NULL`, and `MCP_PROXY_KEYCLOAK_CLIENT_ID` has no matching client on the realm
+> — so a mint would fail before it could mislead anyone. Nothing is exploitable right now; the
+> design claim was simply false.
+>
+> **What it takes:** (1) MCP-server registration must create or verify a Keycloak client for the
+> target and an audience-mapped scope on the proxy's client — that step does not exist at all
+> (`registry-api/keycloak_client.py` has only `/users` operations, and `identity_audience` is
+> unvalidated operator free text, `mcp_secrets.py:118`); (2) switch the grant to
+> `urn:ietf:params:oauth:grant-type:token-exchange`; (3) fail closed on an unregistered audience —
+> today the code cannot even detect one.
+>
+> Sharpens **OQ-5**: a server validating this token sees `aud: account` and has no basis to accept
+> or reject it. Postmortem: `docs/bugs/mcp-service-identity-token-is-not-audienced.md`.
 
 This doc supplies the `user_sub` those flows consume; it does not mint, scope, or validate
 tool-facing credentials. **Full treatment — the implemented matrix, the three-gate model, the
