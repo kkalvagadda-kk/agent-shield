@@ -152,7 +152,15 @@ deliberately absent from suite-97's completeness gate until it does.
   test the RBAC admin write surface was reported as covered while nothing was checking it, and the
   bug it would have caught could have been anything.
 
-- **G-R0-10 — `studio/src/pages/AdminAccessPage.tsx` has NO Vitest component test.** The page
+- **G-R0-10 — ✅ CLOSED 2026-08-04.** `studio/src/pages/AdminAccessPage.test.tsx` added — 5 tests,
+  **180ms, no cluster** (the browser layer needs a reachable cluster and ~20s per spec). It pins the
+  accessible names the e2e spec drives, so a label/locator drift now fails locally in the same
+  commit that causes it instead of rotting invisibly. **Mutation-verified**: renaming the button
+  back to `"Save"` fails 2 of the 5 in ~1s. Also covers the canonical-role list, that a role change
+  actually PATCHes, and that a legacy `operator` row still renders. Full suite green: 71 files,
+  618 tests. Original text:
+
+- **~~G-R0-10~~ — `studio/src/pages/AdminAccessPage.tsx` has NO Vitest component test.** The page
   creates, edits and deletes users and assigns global roles — the entire RBAC admin write surface —
   and its only automated guard was the Playwright spec above, which was dead. A component test
   would have caught the "Save Changes"/`/^save$/` mismatch offline in milliseconds and needs no
