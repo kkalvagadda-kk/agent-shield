@@ -1,4 +1,5 @@
 import { test, expect, type Browser } from "@playwright/test";
+import { pickModel } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // catalog-overview-parity.spec.ts — WS-6 Phase 4.
@@ -33,6 +34,7 @@ async function createAgentViaUI(browser: Browser, agentName: string) {
     await page.getByRole("button", { name: /No-code/i }).click();
     await page.waitForLoadState("domcontentloaded");
     await page.getByPlaceholder("my-agent").fill(agentName);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
     const createDone = page.waitForResponse(
       (r) =>
         r.url().includes("/api/v1/agents") &&

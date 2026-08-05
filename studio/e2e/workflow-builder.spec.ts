@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { pickModel } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // workflow-builder.spec.ts
@@ -166,6 +167,7 @@ test.describe("workflow builder", () => {
     await page.getByRole("button", { name: /Add Agent/i }).click();
     await page.getByRole("button", { name: /Create New Agent/i }).click();
     await page.getByPlaceholder("my-agent").fill(memberName);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
     const memberCreated = page.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
       { timeout: 20_000 }

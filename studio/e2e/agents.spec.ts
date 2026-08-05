@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { pickModel } from "./lib/agents";
 
 // Unique agent name per test run so parallel re-runs don't collide.
 const TS = Date.now();
@@ -45,6 +46,7 @@ test.describe("create agent → detail page tabs → delete", () => {
 
     // Step 2: fill required name field
     await page.getByPlaceholder("my-agent").fill(AGENT_NAME);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
 
     // Capture the POST before clicking submit (so we don't miss it)
     const createResponsePromise = page.waitForResponse(
@@ -90,11 +92,18 @@ test.describe("create agent → detail page tabs → delete", () => {
     await page.waitForLoadState("networkidle");
     await expect(page.getByText(AGENT_NAME)).toBeVisible();
 
-    // ── Delete (soft-delete via confirm dialog) ───────────────────────────────
+    // ── Delete (soft-delete via the in-app confirm MODAL) ─────────────────────
+    // studio 0.1.171 replaced native window.confirm() with an in-app modal
+    // (AgentListPage.tsx:267, data-testid="delete-agent-modal") precisely BECAUSE a
+    // native dialog blocks browser automation. This spec still registered a
+    // `page.once("dialog", …)` handler and never confirmed in the modal, so the row was
+    // never deleted and the assertion below retried 34 times against a live row. Silent
+    // since 0.1.171 — the browser layer could not run against EKS at all (gap G-R0-8).
     const agentRow = page.locator("tr", { hasText: AGENT_NAME });
-    // Register once so the dialog is accepted the moment it appears
-    page.once("dialog", (d) => d.accept());
     await agentRow.getByRole("button", { name: /Delete/i }).click();
+    const confirm = page.getByTestId("delete-agent-modal");
+    await expect(confirm).toBeVisible({ timeout: 10_000 });
+    await confirm.getByRole("button", { name: /^Delete$/ }).click();
 
     // After deletion the list refetches with status=active; deprecated row disappears
     await expect(page.locator("tr", { hasText: AGENT_NAME })).not.toBeVisible({

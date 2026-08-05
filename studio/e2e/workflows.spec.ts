@@ -1,4 +1,5 @@
 import { test, expect, type Browser } from "@playwright/test";
+import { pickModel } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // workflows.spec.ts  (HIGHEST VALUE — composite workflow feature)
@@ -39,6 +40,7 @@ async function createAgentViaUI(
     await page.waitForLoadState("domcontentloaded");
 
     await page.getByPlaceholder("my-agent").fill(agentName);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
 
     const done = page.waitForResponse(
       (r) =>
