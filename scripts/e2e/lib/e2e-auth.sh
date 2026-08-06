@@ -204,6 +204,83 @@ e2e_set_token() {
 #
 # Idempotent: 409 from the create means the user already exists, which is SUCCESS —
 # the kc_id is re-resolved from `GET /api/v1/admin/users` and the run continues.
+# ── Role personas for RBAC testing ────────────────────────────────────────────
+# WHY THIS EXISTS
+# --------------
+# 61 suites mint a token and every one of them authenticates as platform-admin. Four use
+# `agent-reviewer`, which is itself created as a *contributor*. No suite has ever logged in
+# as a `consumer`, and suite-42-rbac — the RBAC suite — contains ZERO 403 assertions: its
+# seven cases are structural (table exists, creator auto-grant, /me shape, normalization).
+#
+# That is survivable for R1, which only asks "is there a valid token". It is NOT survivable
+# for R2: R2 flips rbac.py's ENFORCE and wires require_global_role("platform-admin"), and if
+# every caller IS platform-admin then every test passes whether enforcement works or not.
+# The suite would go green over a completely broken authorization layer — the same
+# can't-fail-guard defect this repo keeps paying for (see G-R0-9, a test that was red from
+# birth and never once ran).
+#
+# e2e_ensure_persona creates/repairs a user at a GIVEN global role and echoes a token for
+# it. Idempotent: 409 means it already exists, and the role is re-pinned if it drifted —
+# a persona whose role is wrong silently inverts every assertion built on it.
+E2E_PERSONA_PASS="${E2E_PERSONA_PASS:-Persona2024!}"
+
+# e2e_ensure_persona <ns> <pod> <username> <global-role> [container]
+#   echoes: a Keycloak access token for that user (empty + non-zero on failure)
+e2e_ensure_persona() {
+  local ns="$1" pod="$2" uname="$3" role="$4" container="${5:-registry-api}" admin_tok tok
+  admin_tok="$(e2e_token "$ns" "$pod" "$container")" || {
+    echo "FATAL: e2e_ensure_persona could not obtain a ${E2E_KC_USER} token; cannot create '${uname}'." >&2
+    return 1
+  }
+  tok=$(kubectl exec -i -n "$ns" "$pod" -c "$container" -- env \
+      P_ADMIN_TOKEN="$admin_tok" P_USER="$uname" P_ROLE="$role" \
+      P_PASS="$E2E_PERSONA_PASS" P_CLIENT="$E2E_KC_CLIENT" P_KC="$E2E_KC_URL" \
+      python3 - <<'PY_PERSONA'
+import json, os, urllib.error, urllib.parse, urllib.request
+BASE="http://localhost:8000/api/v1/admin/users"
+U, ROLE, PW = os.environ["P_USER"], os.environ["P_ROLE"], os.environ["P_PASS"]
+H={"Authorization":"Bearer "+os.environ["P_ADMIN_TOKEN"],"Content-Type":"application/json"}
+
+def call(method, url, body=None):
+    req=urllib.request.Request(url, method=method,
+        data=json.dumps(body).encode() if body is not None else None, headers=H)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r: return r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as e: return e.code, (e.read() or b"").decode()[:200]
+
+# @example.com, never @agentshield.local: UserCreate.email is EmailStr and email-validator
+# rejects .local as an RFC 6762 special-use TLD, so the API answers 422.
+code, body = call("POST", BASE, {"username":U,"email":f"{U}@example.com","first_name":"E2E",
+                                 "last_name":"Persona","temp_password":PW,"team":"platform","role":ROLE})
+kc_id = body.get("kc_id") if code == 201 and isinstance(body, dict) else None
+if code == 409:                      # already exists — success, then re-pin the role
+    st, users = call("GET", BASE)
+    match = [u for u in (users or []) if u.get("username") == U] if st == 200 else []
+    if not match: raise SystemExit(f"FATAL: {U} reported 409 but is not listed")
+    kc_id = match[0]["kc_id"]
+    if match[0].get("role") != ROLE:  # a drifted persona inverts every assertion on it
+        call("PATCH", f"{BASE}/{kc_id}", {"role": ROLE, "team": "platform"})
+elif code != 201:
+    raise SystemExit(f"FATAL: create {U} -> {code} {body}")
+
+# Non-temporary password: create_user sets requiredActions=["UPDATE_PASSWORD"], and
+# Keycloak refuses a password grant for such a user with "Account is not fully set up".
+call("POST", f"{BASE}/{kc_id}/reset-password", {"new_password": PW, "temporary": False})
+
+data=urllib.parse.urlencode({"grant_type":"password","client_id":os.environ["P_CLIENT"],
+                             "username":U,"password":PW}).encode()
+try:
+    # P_KC is the FULL token URL already (E2E_KC_URL, :57) — appending the realm path
+    # to it doubles the path and 404s.
+    with urllib.request.urlopen(os.environ["P_KC"], data=data, timeout=20) as r:
+        print(json.loads(r.read())["access_token"])
+except Exception as exc:
+    raise SystemExit(f"FATAL: {U} exists but cannot obtain a token: {exc}")
+PY_PERSONA
+) || { echo "FATAL: e2e_ensure_persona failed for '${uname}' (role=${role})" >&2; return 1; }
+  printf '%s' "$tok"
+}
+
 e2e_ensure_reviewer() {
   local ns="$1" pod="$2" container="${3:-registry-api}" admin_tok out
   admin_tok="$(e2e_token "$ns" "$pod" "$container")" || {

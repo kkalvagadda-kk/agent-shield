@@ -146,6 +146,7 @@ api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves
 api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving/quarantining an artifact disarms its triggers (write gate + scheduler read filter)
 api|execution,rbac|suite-96-schedules-endpoint.sh|GET /api/v1/schedules — cross-artifact read, deny-by-default, will_fire from the same predicate dispatch uses
 api|governance,rbac|suite-97-rbac-bootstrap-and-router-auth.sh|R0/R1 — platform-admin bootstrap re-pins onto a new sub after realm recreation (DESTRUCTIVE: deletes the Keycloak admin + restarts registry-api)
+api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2 GATE — EXPECTED RED until R2 ships. Authenticates as a real consumer and contributor (not platform-admin, which every other suite uses) and asserts the 403s the platform does not yet return, plus the two guards against an over-broad fix: platform-admin still 200, anonymous still 401
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes

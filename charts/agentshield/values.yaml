@@ -747,7 +747,7 @@ registry-api:
     #          users (Decision 40). POST /admin/users is atomic + GET /admin/identity-audit.
     #          Migration 0079 drops the role default; a row-less caller is 403 no_platform_role.
     #          MUST match scripts/deploy-cpe2e.sh REGISTRY_API_TAG.
-    tag: "0.2.261"
+    tag: "0.2.262"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

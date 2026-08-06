@@ -21,7 +21,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
 from db import get_db
 from rbac import PLATFORM_ROLES
 from keycloak_client import (
@@ -37,8 +37,26 @@ from keycloak_client import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/admin/users", tags=["admin-users"])
-teams_router = APIRouter(prefix="/api/v1/admin", tags=["admin-teams"])
+# R1 GAP, CLOSED 2026-08-06. This module was NOT in the ten routers §1.4 enumerated —
+# that list named `admin.py`, and these are a SEPARATE module mounting under the same
+# /api/v1/admin prefix. The consequence, measured on the live cluster against 0.2.261:
+# an ANONYMOUS caller could POST /api/v1/admin/users with role="platform-admin" and get
+# 201 — unauthenticated to full platform admin in one request, immediately usable because
+# R0 made the Keycloak user and its role row land together. GET /admin/users,
+# /admin/teams-summary and /admin/identity-audit were all readable anonymously too.
+# Found by suite-98's T-S98-005, which was written to assert something else entirely.
+# No in-cluster machine caller reaches either router (checked), so both are protected
+# outright. Authentication only — WHICH role may call these is R2.
+router = APIRouter(
+    prefix="/api/v1/admin/users",
+    tags=["admin-users"],
+    dependencies=[Depends(require_user)],
+)
+teams_router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["admin-teams"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
