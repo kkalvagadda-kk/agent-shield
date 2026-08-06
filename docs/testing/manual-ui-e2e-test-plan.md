@@ -45,6 +45,34 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — R1 router auth broke Studio — 2026-08-06 (studio 0.1.182 / 0.1.183)
+
+Closing the anonymous `/api/v1/admin/*` hole (registry-api `0.2.262`) broke three Studio
+call sites that had been reaching those routers with a **raw `fetch`** and no
+`Authorization` header. Full postmortem:
+`docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md`.
+
+- **fixed in 0.1.182 — blank page on every route.** `Sidebar.tsx` parsed the 401 envelope
+  into React Query as *success* data; `(sidebarTeams ?? []).find(...)` threw inside a
+  `useMemo` and unmounted the whole app. Guarded by
+  `studio/e2e/app-shell-resilience.spec.ts` (3 cases; the `pageerror` listener is the
+  assertion, and it is mutation-verified).
+- **fixed in 0.1.183 — the entire Access Control users tab was dead.** Six more raw
+  fetches inline in `AdminAccessPage.tsx` (list/create/edit/delete/reset-password +
+  teams-summary). Caught by `e2e/admin-access-roles.spec.ts` going 3-red in the blast
+  radius sweep. All six moved behind the authed `http` client in `api/registryApi.ts`.
+- **closed structurally — `studio/src/api/transport-boundary.test.ts`.** Fails if any file
+  outside `api/registryApi.ts` calls `fetch()`, with a reasoned allowlist for the two SSE
+  streams (which must use `fetch` and do send a Bearer — asserted) and `/config.json`. It
+  runs inside `npm run test`, so it cannot be skipped.
+
+- **deferred (intentional) — the RED-first gate was satisfied by evidence, not by
+  redeploying the broken image.** The browser layer runs against the *deployed* artifact,
+  so demonstrating `app-shell-resilience.spec.ts` red would have meant putting studio
+  `0.1.181` back on the cluster. Used instead: the console `TypeError` captured live from
+  the failing tab, plus a mutation check proving the `pageerror` guard fires on that exact
+  error. Noted because it is a real weakening of rule 7, not a clean pass.
+
 ## Known gaps — RBAC R0 (bootstrap + refusal) — 2026-08-04 (registry-api 0.2.259)
 
 R0 shipped: the platform creates and re-pins its own `platform-admin` from `lifespan`

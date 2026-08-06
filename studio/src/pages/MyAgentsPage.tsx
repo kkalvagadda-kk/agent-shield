@@ -2,31 +2,30 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, Loader2, MessageSquare, Rocket, Eye } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { listAgents, listAllDeployments } from "../api/registryApi";
+import {
+  getTeamsSummary,
+  listAgents,
+  listAllDeployments,
+  type TeamSummary,
+} from "../api/registryApi";
 import DeployModal from "../components/DeployModal";
 import { useAuth } from "../contexts/AuthContext";
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
-interface TeamSummary {
-  id: string;
-  name: string;
-  namespace: string;
-  members: { user_sub: string; role: string }[];
-  grants: {
-    id: string;
-    asset_type: string;
-    asset_name: string;
-    granted_at: string | null;
-  }[];
-}
-
 // ── API ──────────────────────────────────────────────────────────────────────
 
+// Shared producer, not a local raw fetch — /admin/teams-summary requires auth since
+// 0.2.262. This call site already degraded to [] on !r.ok, so it went QUIET rather
+// than crashing (Sidebar had no such guard and took the whole app down). Quiet is
+// still wrong: "Shared With Me" renders empty as though the user has no shared
+// agents. Keeping the swallow is deliberate — this panel is supplementary, and the
+// Sidebar is where an outage must stay visible — but it now runs over an authed
+// client, so it swallows real failures only.
 async function fetchTeamsSummary(): Promise<TeamSummary[]> {
-  const r = await fetch("/api/v1/admin/teams-summary");
-  if (!r.ok) return [];
-  return r.json();
+  try {
+    return await getTeamsSummary();
+  } catch {
+    return [];
+  }
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────

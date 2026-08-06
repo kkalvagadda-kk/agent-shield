@@ -1596,9 +1596,14 @@ export const revokeArtifactGrant = async (
   await http.delete(`/artifacts/${artifactType}/${artifactId}/grants/${grantId}`);
 };
 
-// Directory user (Keycloak-backed) — the picker source for human-grantee grants.
-// `kc_id` is the Keycloak sub, i.e. the value artifact_role_grants stores as
-// grantee_id for a `user` grantee. Backend: routers/admin_users.py GET /admin/users.
+// Directory user (Keycloak-backed) — the picker source for human-grantee grants AND
+// the row model for the Access Control users tab. `kc_id` is the Keycloak sub, i.e.
+// the value artifact_role_grants stores as grantee_id for a `user` grantee.
+// Backend: routers/admin_users.py GET /admin/users.
+//
+// `enabled` / `created_at` were only ever consumed by AdminAccessPage, which declared
+// its own copy of this interface next to its own raw-fetch client. They are the same
+// row from the same endpoint, so there is one type and one producer.
 export interface AdminUser {
   kc_id: string;
   username: string;
@@ -1607,11 +1612,13 @@ export interface AdminUser {
   last_name: string;
   team?: string | null;
   role?: string | null;
+  enabled?: boolean;
+  created_at?: number | null;
 }
 
 export const listUsers = async (): Promise<AdminUser[]> => {
   const { data } = await http.get<AdminUser[]>("/admin/users");
-  return data;
+  return Array.isArray(data) ? data : [];
 };
 
 // ---------------------------------------------------------------------------
@@ -2052,4 +2059,92 @@ export const updateMyPreferences = async (
 ): Promise<UserPreferences> => {
   const { data } = await http.put<UserPreferences>("/me/preferences", prefs);
   return data;
+};
+
+// ---------------------------------------------------------------------------
+// Platform admin surface — /api/v1/admin/*
+//
+// These live HERE, not inline in AdminAccessPage/Sidebar/MyAgentsPage, because
+// every one of those had rolled its own `fetch("/api/v1/admin/...")` with no
+// Authorization header. That worked only while the routers were unauthenticated;
+// registry-api 0.2.262 added `require_user` and all of it broke at once — the
+// Sidebar copy took the entire app down to a blank page (see
+// docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md).
+//
+// The class fix is not "add a token to those fetches" — it is that page
+// components do not do transport. `http` owns the Bearer + refresh interceptor,
+// so anything routed through here is authenticated by construction and cannot
+// drift back.
+// ---------------------------------------------------------------------------
+
+export interface TeamSummary {
+  id: string;
+  name: string;
+  namespace: string;
+  members: { user_sub: string; role: string }[];
+  grants: {
+    id: string;
+    asset_type: string;
+    asset_name: string;
+    granted_at: string | null;
+  }[];
+}
+
+// Reading the user list is `listUsers` above — it already existed on the authed client
+// and is used by the grant pickers. A second `listAdminUsers` here would be two paths to
+// one fact, which is how the raw-fetch copy in AdminAccessPage survived unnoticed.
+
+export const createAdminUser = async (body: {
+  username: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  temp_password: string;
+  team: string;
+  role: string;
+}): Promise<AdminUser> => {
+  const { data } = await http.post<AdminUser>("/admin/users", body);
+  return data;
+};
+
+export const patchAdminUser = async (
+  kcId: string,
+  body: Partial<{
+    team: string;
+    role: string;
+    enabled: boolean;
+    first_name: string;
+    last_name: string;
+  }>
+): Promise<AdminUser> => {
+  const { data } = await http.patch<AdminUser>(`/admin/users/${kcId}`, body);
+  return data;
+};
+
+export const deleteAdminUser = async (kcId: string): Promise<void> => {
+  // A 404 means the user is already gone — the caller's intent is satisfied, so
+  // swallow only that. Every other status still throws.
+  try {
+    await http.delete(`/admin/users/${kcId}`);
+  } catch (e) {
+    if (axios.isAxiosError(e) && e.response?.status === 404) return;
+    throw e;
+  }
+};
+
+export const resetAdminUserPassword = async (
+  kcId: string,
+  newPassword: string
+): Promise<void> => {
+  await http.post(`/admin/users/${kcId}/reset-password`, {
+    new_password: newPassword,
+    temporary: true,
+  });
+};
+
+// Coerced to an array on purpose. The Sidebar consumer does `.find(...)` on this
+// and an error envelope reaching it as data is exactly what blanked the app.
+export const getTeamsSummary = async (): Promise<TeamSummary[]> => {
+  const { data } = await http.get<TeamSummary[]>("/admin/teams-summary");
+  return Array.isArray(data) ? data : [];
 };

@@ -3,9 +3,21 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "../test/utils";
 import AdminAccessPage from "./AdminAccessPage";
+import {
+  createAdminUser,
+  deleteAdminUser,
+  getTeamsSummary,
+  listUsers,
+  patchAdminUser,
+  resetAdminUserPassword,
+} from "../api/registryApi";
 
-// The grants tab pulls from registryApi; the users tab this file exercises talks to
-// /api/v1/admin/* through raw fetch (AdminAccessPage.tsx:54-108), so fetch is the seam.
+// registryApi is the ONLY seam. The users tab used to call /api/v1/admin/* through raw
+// fetch defined inline in the page, so this file stubbed global fetch. Those helpers moved
+// into registryApi behind the authed `http` client after the unauthenticated versions all
+// began 401-ing under registry-api 0.2.262 (docs/bugs/studio-blank-page-unauthed-fetch-
+// teams-summary.md). Mocking the module — like every other page test here — means this
+// test can no longer pass while the page bypasses the client, which is the defect class.
 vi.mock("../api/registryApi", () => ({
   listGrants: vi.fn().mockResolvedValue([]),
   listAllTools: vi.fn().mockResolvedValue([]),
@@ -14,6 +26,12 @@ vi.mock("../api/registryApi", () => ({
   listCompositeWorkflows: vi.fn().mockResolvedValue([]),
   createGrant: vi.fn(),
   revokeGrant: vi.fn(),
+  listUsers: vi.fn(),
+  createAdminUser: vi.fn(),
+  patchAdminUser: vi.fn(),
+  deleteAdminUser: vi.fn(),
+  resetAdminUserPassword: vi.fn(),
+  getTeamsSummary: vi.fn().mockResolvedValue([]),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -44,24 +62,22 @@ const user = (over: Partial<Record<string, unknown>> = {}) => ({
   ...over,
 });
 
-let fetchMock: ReturnType<typeof vi.fn>;
-
-/** Route by URL+method so a PATCH assertion cannot be satisfied by the list call. */
-function installFetch(users: ReturnType<typeof user>[]) {
-  fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    const method = (init?.method ?? "GET").toUpperCase();
-    const ok = (body: unknown) =>
-      ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) }) as Response;
-    if (url.includes("/admin/users") && method === "GET") return ok(users);
-    if (url.includes("/admin/teams-summary")) return ok([]);
-    if (url.includes("/admin/users/") && method === "PATCH") return ok({ ...users[0], role: "consumer" });
-    return ok({});
-  });
-  vi.stubGlobal("fetch", fetchMock);
+/** Seed the mocked client. Each endpoint is its own fn, so a PATCH assertion cannot
+ *  be satisfied by the list call. */
+function installApi(users: ReturnType<typeof user>[]) {
+  vi.mocked(listUsers).mockResolvedValue(users);
+  vi.mocked(getTeamsSummary).mockResolvedValue([]);
+  vi.mocked(patchAdminUser).mockResolvedValue({ ...users[0], role: "consumer" });
+  vi.mocked(createAdminUser).mockResolvedValue(users[0]);
+  vi.mocked(deleteAdminUser).mockResolvedValue(undefined);
+  vi.mocked(resetAdminUserPassword).mockResolvedValue(undefined);
 }
 
-beforeEach(() => installFetch([user()]));
-afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  vi.clearAllMocks();
+  installApi([user()]);
+});
+afterEach(() => vi.restoreAllMocks());
 
 describe("AdminAccessPage — users tab", () => {
   it("renders the seeded user's row with its role chip", async () => {
@@ -122,21 +138,16 @@ describe("AdminAccessPage — users tab", () => {
     await u.click(screen.getByRole("button", { name: /^save changes$/i }));
 
     await waitFor(() => {
-      const patch = fetchMock.mock.calls.find(
-        ([url, init]) =>
-          String(url).includes("/admin/users/kc-1") &&
-          (init?.method ?? "").toUpperCase() === "PATCH",
-      );
-      expect(patch, "no PATCH to /admin/users/kc-1 was issued").toBeTruthy();
-      expect(JSON.parse(String(patch![1]!.body)).role).toBe("consumer");
+      const call = vi.mocked(patchAdminUser).mock.calls.find(([kcId]) => kcId === "kc-1");
+      expect(call, "no PATCH to /admin/users/kc-1 was issued").toBeTruthy();
+      expect(call![1].role).toBe("consumer");
     });
   });
 
   it("renders a legacy role value rather than dropping it", async () => {
     // A pre-0044/0075 row can still hold 'operator'. rbac._LEGACY_MAP normalizes on READ
     // server-side, but the admin table must not render an un-migrated row as blank.
-    vi.unstubAllGlobals();
-    installFetch([user({ role: "operator" })]);
+    installApi([user({ role: "operator" })]);
     renderWithProviders(<AdminAccessPage />);
     const row = await screen.findByRole("row", { name: /roletest/i });
     expect(within(row).getByText("operator")).toBeInTheDocument();

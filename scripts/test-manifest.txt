@@ -150,6 +150,7 @@ api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2 GATE — EXPECTED RED u
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
+browser|health,rbac|e2e/app-shell-resilience.spec.ts|App shell survives a 401/non-array from /admin/teams-summary (blank-page regression)
 browser|governance,rbac|e2e/admin-access-roles.spec.ts|Admin access — canonical role names + persistence
 browser|governance,rbac|e2e/artifact-grants.spec.ts|Artifact grants — mixed roles, create + revoke
 browser|agent|e2e/agents.spec.ts|Agents list + detail

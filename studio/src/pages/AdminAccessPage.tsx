@@ -15,98 +15,36 @@ import {
 import { useState } from "react";
 import { toast } from "sonner";
 import {
+  createAdminUser,
   createGrant,
+  deleteAdminUser,
+  getTeamsSummary,
+  listUsers,
   listGrants,
   listAllTools,
   listAgents,
   listSkills,
   listCompositeWorkflows,
+  patchAdminUser,
+  resetAdminUserPassword,
   revokeGrant,
+  type AdminUser,
   type AssetGrant,
 } from "../api/registryApi";
 
-// ── API types ────────────────────────────────────────────────────────────────
+// ── API ──────────────────────────────────────────────────────────────────────
+//
+// This page used to define its own `fetch("/api/v1/admin/...")` helpers here. They
+// carried no Authorization header and only worked because those routers were
+// unauthenticated; registry-api 0.2.262 added `require_user` and every one of them
+// started 401-ing — the whole users tab went dead (list, create, edit, delete,
+// reset-password). See docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md.
+//
+// They now live in api/registryApi.ts behind the shared `http` client, which owns the
+// Bearer + token-refresh interceptor. A page component doing its own transport is the
+// defect class; keeping these out of here is what stops it recurring.
 
-interface User {
-  kc_id: string;
-  username: string;
-  email: string;
-  first_name: string;
-  last_name: string;
-  enabled: boolean;
-  team: string | null;
-  role: string | null;
-  created_at: number | null;
-}
-
-interface TeamSummary {
-  id: string;
-  name: string;
-  namespace: string;
-  members: { user_sub: string; role: string }[];
-  grants: { id: string; asset_type: string; asset_name: string; granted_at: string | null }[];
-}
-
-// ── API calls ────────────────────────────────────────────────────────────────
-
-const API = "/api/v1";
-
-async function fetchUsers(): Promise<User[]> {
-  const r = await fetch(`${API}/admin/users`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
-
-async function createUser(body: {
-  username: string; email: string; first_name: string; last_name: string;
-  temp_password: string; team: string; role: string;
-}): Promise<User> {
-  const r = await fetch(`${API}/admin/users`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(err.detail ?? r.statusText);
-  }
-  return r.json();
-}
-
-async function patchUser(kc_id: string, body: Partial<{
-  team: string; role: string; enabled: boolean; first_name: string; last_name: string;
-}>): Promise<User> {
-  const r = await fetch(`${API}/admin/users/${kc_id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({ detail: r.statusText }));
-    throw new Error(err.detail ?? r.statusText);
-  }
-  return r.json();
-}
-
-async function deleteUser(kc_id: string): Promise<void> {
-  const r = await fetch(`${API}/admin/users/${kc_id}`, { method: "DELETE" });
-  if (!r.ok && r.status !== 404) throw new Error(await r.text());
-}
-
-async function resetPassword(kc_id: string, new_password: string): Promise<void> {
-  const r = await fetch(`${API}/admin/users/${kc_id}/reset-password`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ new_password, temporary: true }),
-  });
-  if (!r.ok) throw new Error(await r.text());
-}
-
-async function fetchTeamsSummary(): Promise<TeamSummary[]> {
-  const r = await fetch(`${API}/admin/teams-summary`);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
-}
+type User = AdminUser;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -190,18 +128,18 @@ function UsersTab() {
 
   const { data: users = [], isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["admin-users"],
-    queryFn: fetchUsers,
+    queryFn: listUsers,
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteUser,
+    mutationFn: deleteAdminUser,
     onSuccess: () => { toast.success("User deleted."); qc.invalidateQueries({ queryKey: ["admin-users"] }); },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const toggleMutation = useMutation({
     mutationFn: ({ kc_id, enabled }: { kc_id: string; enabled: boolean }) =>
-      patchUser(kc_id, { enabled }),
+      patchAdminUser(kc_id, { enabled }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["admin-users"] }),
     onError: (e: Error) => toast.error(e.message),
   });
@@ -341,14 +279,14 @@ function UsersTab() {
 // ── Create user modal ────────────────────────────────────────────────────────
 
 function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
-  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
+  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: getTeamsSummary });
   const [form, setForm] = useState({
     username: "", email: "", first_name: "", last_name: "",
     temp_password: "", team: "", role: "contributor" as Role,
   });
 
   const mutation = useMutation({
-    mutationFn: () => createUser(form),
+    mutationFn: () => createAdminUser(form),
     onSuccess: () => { toast.success("User created. They'll be prompted to change their password on first login."); onSuccess(); },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -408,7 +346,7 @@ function CreateUserModal({ onClose, onSuccess }: { onClose: () => void; onSucces
 // ── Edit user modal ──────────────────────────────────────────────────────────
 
 function EditUserModal({ user, onClose, onSuccess }: { user: User; onClose: () => void; onSuccess: () => void }) {
-  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
+  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: getTeamsSummary });
   const [form, setForm] = useState({
     first_name: user.first_name ?? "",
     last_name: user.last_name ?? "",
@@ -417,7 +355,7 @@ function EditUserModal({ user, onClose, onSuccess }: { user: User; onClose: () =
   });
 
   const mutation = useMutation({
-    mutationFn: () => patchUser(user.kc_id, form),
+    mutationFn: () => patchAdminUser(user.kc_id, form),
     onSuccess: () => { toast.success("User updated."); onSuccess(); },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -461,7 +399,7 @@ function EditUserModal({ user, onClose, onSuccess }: { user: User; onClose: () =
 function ResetPasswordModal({ kc_id, onClose }: { kc_id: string; onClose: () => void }) {
   const [pwd, setPwd] = useState("");
   const mutation = useMutation({
-    mutationFn: () => resetPassword(kc_id, pwd),
+    mutationFn: () => resetAdminUserPassword(kc_id, pwd),
     onSuccess: () => { toast.success("Password reset. User will be forced to change it on next login."); onClose(); },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -486,9 +424,9 @@ function ResetPasswordModal({ kc_id, onClose }: { kc_id: string; onClose: () => 
 function TeamsTab() {
   const { data: teams = [], isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["admin-teams-summary"],
-    queryFn: fetchTeamsSummary,
+    queryFn: getTeamsSummary,
   });
-  const { data: users = [] } = useQuery({ queryKey: ["admin-users"], queryFn: fetchUsers });
+  const { data: users = [] } = useQuery({ queryKey: ["admin-users"], queryFn: listUsers });
   const userMap = Object.fromEntries(users.map((u) => [u.kc_id, u]));
 
   return (
@@ -594,7 +532,7 @@ function GrantsTab() {
   const { data: allTools } = useQuery({ queryKey: ["tools", "all"], queryFn: () => listAllTools() });
   const { data: skillsPage } = useQuery({ queryKey: ["skills"], queryFn: () => listSkills() });
   const { data: workflows = [] } = useQuery({ queryKey: ["workflows-published"], queryFn: () => listCompositeWorkflows() });
-  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: fetchTeamsSummary });
+  const { data: teams = [] } = useQuery({ queryKey: ["admin-teams-summary"], queryFn: getTeamsSummary });
 
   const agents = (agentsPage?.items ?? []).filter((a) => a.publish_status === "published");
   const tools = (allTools ?? []).filter((t) => (t as { publish_status?: string }).publish_status === "published");

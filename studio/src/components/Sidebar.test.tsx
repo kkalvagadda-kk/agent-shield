@@ -4,9 +4,17 @@ import { renderWithProviders } from "../test/utils";
 import Sidebar from "./Sidebar";
 import { STUDIO_BUILD } from "../lib/build";
 
+// getTeamsSummary/listSchedules must be here even though this file only asserts the
+// approvals badge: Sidebar reads them too. getTeamsSummary was ABSENT until 0.1.183
+// because that query used a raw `fetch("/api/v1/admin/teams-summary")`, which this
+// module mock could not see — so the call site that later blanked the whole app was
+// invisible to the component's own test. Routing it through registryApi makes the
+// bypass impossible to reintroduce silently: omit it here and this file fails.
 vi.mock("../api/registryApi", () => ({
   listAgents: vi.fn(),
   listPendingApprovals: vi.fn(),
+  listSchedules: vi.fn().mockResolvedValue([]),
+  getTeamsSummary: vi.fn().mockResolvedValue([]),
 }));
 
 import { listAgents, listPendingApprovals } from "../api/registryApi";

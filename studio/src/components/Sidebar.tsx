@@ -30,7 +30,12 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { listAgents, listPendingApprovals, listSchedules } from "../api/registryApi";
+import {
+  getTeamsSummary,
+  listAgents,
+  listPendingApprovals,
+  listSchedules,
+} from "../api/registryApi";
 import { needsAttention } from "../lib/triggerArm";
 import { DEMO } from "../demo/demo";
 import { STUDIO_BUILD } from "../lib/build";
@@ -231,7 +236,15 @@ export default function Sidebar() {
 
   const { data: sidebarTeams } = useQuery({
     queryKey: ["sidebar-teams"],
-    queryFn: () => fetch("/api/v1/admin/teams-summary").then((r) => r.json()),
+    // Shared producer on the AUTHED client, not a raw fetch. /admin/teams-summary needed
+    // no auth until 0.2.262 closed that hole, so a bare fetch() worked by accident;
+    // afterwards it returns 401 {"detail":...} and `r.json()` parsed that OBJECT into
+    // React Query as SUCCESS data. `(sidebarTeams ?? []).find(...)` then threw "find is
+    // not a function" inside a useMemo — uncaught, so the whole app unmounted to a blank
+    // page. The `?? []` guard only covers null/undefined and gave false confidence; a 500
+    // would have done the same. getTeamsSummary coerces to an array, so a shape surprise
+    // degrades instead of crashing. Guarded by e2e/app-shell-resilience.spec.ts.
+    queryFn: getTeamsSummary,
     staleTime: 60_000,
   });
 
