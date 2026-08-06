@@ -104,7 +104,11 @@ test.describe("route to production", () => {
     // The wizard's own notice must name the FULL path, not just "Publish".
     // docs/bugs/publish-does-not-create-a-production-deployment.md
     const notice = page.getByTestId("schedule-not-in-production-notice");
-    await expect(notice).toContainText(/Publish Queue/i);
+    // NBSP, not a space. The notice renders "Admin&nbsp;▸&nbsp;Publish&nbsp;Queue"
+    // (CreateAgentPage.tsx:146) so the DOM text carries U+00A0 between the words and a
+    // regular-space regex can never match. Match either kind of whitespace rather than
+    // pasting a literal NBSP into the source, which is invisible in review.
+    await expect(notice).toContainText(/Publish[\s\u00a0]+Queue/i);
     await expect(notice).toContainText(/Deploy Latest/i);
     await expect(notice).toContainText(/only creates the catalog listing/i);
 

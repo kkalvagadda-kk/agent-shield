@@ -1,5 +1,4 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
-import { pickModel } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // workflow-builder.spec.ts
@@ -166,8 +165,14 @@ test.describe("workflow builder", () => {
     // Add one member via inline create (self-contained; also sets the workflow team).
     await page.getByRole("button", { name: /Add Agent/i }).click();
     await page.getByRole("button", { name: /Create New Agent/i }).click();
+    // NO pickModel here. This creates a member through AddAgentModal's "Create New Agent"
+    // TAB, which has only name / description / system prompt (AddAgentModal.tsx:258-282) —
+    // there is no Model select to pick. pickModel belongs to the full CreateAgentPage
+    // wizard at /agents/new, where llm_provider_id is required. I inserted it here by a
+    // blanket regex on getByPlaceholder("my-agent") in the first triage batch without
+    // checking which FORM that placeholder belonged to, and it hung for 15s waiting on a
+    // field that does not exist.
     await page.getByPlaceholder("my-agent").fill(memberName);
-    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
     const memberCreated = page.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),
       { timeout: 20_000 }

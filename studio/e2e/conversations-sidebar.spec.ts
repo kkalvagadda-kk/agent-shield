@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { resolveSessionSub } from "./lib/apiAuth";
 
 // ---------------------------------------------------------------------------
 // conversations-sidebar.spec.ts  (context-storage POC-5 — Conversations & History)
@@ -56,29 +57,6 @@ const TS = Date.now();
 let USER_SUB = "";
 const ADMIN: Record<string, string> = { "X-User-Sub": "", "X-User-Team": "platform" };
 
-async function resolveAdminSub(): Promise<string> {
-  // Read it off the Keycloak token itself: the `sub` claim IS the subject the browser
-  // session carries, so seeds owned by it are the ones the UI will list. GET /me cannot
-  // serve here — this spec's api context authenticates with X-User-Sub audit headers, not
-  // a Bearer, so /me answers 401.
-  const ctx = await pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true });
-  const r = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
-    form: {
-      grant_type: "password",
-      client_id: "agentshield-studio",
-      username: process.env.STUDIO_E2E_USER || "platform-admin",
-      password: process.env.STUDIO_E2E_PASSWORD || "PlatformAdmin2024",
-    },
-  });
-  expect(r.ok(), `token for the seed subject: ${r.status()} ${await r.text()}`).toBeTruthy();
-  const jwt = (await r.json()).access_token as string;
-  await ctx.dispose();
-  const claims = JSON.parse(
-    Buffer.from(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString()
-  );
-  expect(claims.sub, "token carried no sub — cannot own the seeded conversations").toBeTruthy();
-  return claims.sub as string;
-}
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 const INSTR =
   "You are a helpful assistant with memory. Reply in one short sentence.";
@@ -149,7 +127,7 @@ test.describe("conversations sidebar — standalone page + docked History", () =
 
   test.beforeAll(async () => {
     // Must precede newContext: ADMIN feeds extraHTTPHeaders.
-    USER_SUB = await resolveAdminSub();
+    USER_SUB = await resolveSessionSub(API_BASE);
     ADMIN["X-User-Sub"] = USER_SUB;
     api = await pwRequest.newContext({
       baseURL: API_BASE,

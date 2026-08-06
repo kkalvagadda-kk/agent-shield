@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { resolveSessionSub } from "./lib/apiAuth";
 
 // ---------------------------------------------------------------------------
 // deployment-conversations.spec.ts  (context-storage POC-5 — deployment tab)
@@ -38,11 +39,10 @@ import {
 
 const TS = Date.now();
 
-const ADMIN = {
-  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
-  "X-User-Team": "platform",
-};
-const USER_SUB = ADMIN["X-User-Sub"];
+// Resolved at run time — see resolveSessionSub in lib/apiAuth.ts for why a literal sub
+// cannot be trusted here (the IdP reissues it; suite-97 T-S97-004 does so on purpose).
+let USER_SUB = "";
+const ADMIN: Record<string, string> = { "X-User-Sub": "", "X-User-Team": "platform" };
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 const INSTR =
   "You are a helpful assistant with memory. Reply in one short sentence.";
@@ -93,6 +93,9 @@ test.describe("deployment Conversations tab — scoped list + rehydrate + resume
   let depId = "";
 
   test.beforeAll(async () => {
+    // Must precede newContext: ADMIN feeds extraHTTPHeaders.
+    USER_SUB = await resolveSessionSub(API_BASE);
+    ADMIN["X-User-Sub"] = USER_SUB;
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,
