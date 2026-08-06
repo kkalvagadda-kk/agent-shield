@@ -1,6 +1,6 @@
 # RBAC R0 + R1 — Platform-Owned User Identity & Router Authentication
 
-**Status**: PROPOSED — pending team review
+**Status**: SHIPPED — R0 `0.2.260`, R1 `0.2.261` (2026-08-05). Verified state below is as-designed unless a gap says otherwise.
 **Date**: 2026-08-04
 **Author**: Kalyan + Claude
 **Version**: 1.0.0
@@ -236,7 +236,7 @@ An unauthenticated request to any of the ten routers is refused before it touche
 | **FR-8** | P1 | `POST /api/v1/admin/users` becomes atomic: `_upsert_team` no longer commits internally (callers own the transaction boundary), and a compensating `kc_delete` runs if the row write fails | Story 2 scenarios 1–3 |
 | **FR-9** | P1 | `realm-init-job.yaml` stops creating users; it keeps realm + client setup. `seed-platform-admin-role.sh` is demoted to a manual repair tool | fresh install passes Story 1 with no seed script |
 | **FR-10** | P1 | `suite-76`, `suite-78`, `suite-82`, `suite-83` create `agent-reviewer` themselves via `POST /api/v1/admin/users` | four suites green against a chart that no longer creates it |
-| **FR-11** | P1 | `require_user` on the ten routers in V-4 — **except five route groups with verified in-cluster machine callers** (see V-7). Router-level where the whole router is protectable; per-endpoint where it is not | Story 4 scenarios 1–2, plus a canary asserting the exemption set is exactly V-7's |
+| **FR-11** ✅ | P1 | `require_user` on the ten routers in V-4 — **except five route groups with verified in-cluster machine callers** (see V-7). Router-level where the whole router is protectable; per-endpoint where it is not | Story 4 scenarios 1–2, plus a canary asserting the exemption set is exactly V-7's |
 | **FR-12** | P2 | A read-only audit surface reports Keycloak users with no row, and rows with no Keycloak user | reproduces the V-6 table on demand |
 
 ### Non-Functional Requirements

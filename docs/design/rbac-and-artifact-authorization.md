@@ -91,18 +91,24 @@ Only `Depends(get_db)` — no `require_user`, no `get_optional_user`, no router-
 `dependencies=`, and registry-api installs no global auth middleware (`main.py`). Verified
 per-file 2026-08-02.
 
-| Router | Endpoints | Notable exposure |
-|---|---|---|
-| `deployments.py` | 9 | **deploy to production**, rollback, delete deployment |
-| `agent_runs.py` | 7 | full run history |
-| `workflows.py` | 7 | agent-graph CRUD |
-| `auth_configs.py` | 6 | **tool credential configuration** |
-| `versions.py` | 5 | version create / publish |
-| `teams.py` | 5 | team listing |
-| `llm_providers.py` | 5 | **LLM provider keys** |
-| `agent_tools.py` | 3 | tool binding |
-| `admin.py` | — | **the admin surface itself**: grants, publish-requests, approval-authority |
-| `playground_approvals.py` | — | playground approval decide |
+> **R1 outcome (2026-08-05, `0.2.261`)** added as the last column. `require_user` now covers
+> **47** of these routes; **12** stay open because in-cluster machine callers reach them with no
+> `Authorization` header (V-7 of [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md) lists all eight call
+> sites). The exempt set is pinned by `suite-97` **T-S97-011**, which walks `app.routes` — so a
+> route added without auth fails a test, not a review.
+
+| Router | Endpoints | Notable exposure | R1 outcome |
+|---|---|---|---|
+| `deployments.py` | 9 | **deploy to production**, rollback, delete deployment | 7 protected · **2 exempt** — `GET /` + `PATCH /{id}` (deploy-controller) **G-R1-2** |
+| `agent_runs.py` | 7 | full run history | **0 protected · 7 exempt** — whole router (declarative-runner ×5, eval-runner) **G-R1-1** |
+| `workflows.py` | 7 | agent-graph CRUD | ✅ all 7 protected |
+| `auth_configs.py` | 6 | **tool credential configuration** | 5 protected · **1 exempt** — `GET /{id}/secret-ref` **G-R1-4** |
+| `versions.py` | 5 | version create / publish | 4 protected · **1 exempt** — `GET /{version_id}` **G-R1-3** |
+| `teams.py` | 5 | team listing | ✅ all 5 protected |
+| `llm_providers.py` | 5 | **LLM provider keys** | ✅ all 5 protected |
+| `agent_tools.py` | 3 | tool binding | 2 protected · **1 exempt** — `GET /{name}/tools` **G-R1-5** |
+| `admin.py` | 11 | **the admin surface itself**: grants, publish-requests, approval-authority | ✅ all 11 protected |
+| `playground_approvals.py` | 1 | playground approval decide | ✅ protected |
 
 `bundle.py`, `internal.py`, `internal_mcp.py`, `events.py`, `catalog.py` are also unauthenticated
 but are **intentionally** service-facing — except `internal.py`, which is a real hole owned by
@@ -281,7 +287,7 @@ holes close first. **Number allocation across the three authorization docs** (la
 migration `0078`, `suite-96`): RBAC takes `0079` + `suite-97/98`; identity propagation takes
 `0080–0082` + `suite-99+`; OPA needs no migration. Do not re-allocate without updating all three.
 
-**Phase R0 — make "a user with no role row" unrepresentable (prerequisite for R2).**
+**Phase R0 — ✅ SHIPPED 2026-08-05 (registry-api `0.2.260`).** Make "a user with no role row" unrepresentable (prerequisite for R2).
 Decisions 40–42. Platform code, not the chart, creates the sole auto-created user `platform-admin`
 on first init: registry-api `lifespan`, single-flighted across replicas with `pg_try_advisory_lock`
 (reusing the pattern at `mcp_health.py:172-193`), admin identified by *username* so realm
@@ -296,7 +302,18 @@ realm recreation re-pins (**this case must fail against current code first**); o
 Design: [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md). Run **with or before R1** — they touch the same
 four e2e suites.
 
-**Phase R1 — close the unauthenticated routers (no behaviour change for legitimate users).**
+**Phase R1 — ✅ SHIPPED 2026-08-05 (registry-api `0.2.261`).** Close the unauthenticated routers
+(no behaviour change for legitimate users).
+
+> **Caveat, stated because a green tick would hide it:** R1 protects **47** routes and leaves **12**
+> exempt. Five route groups keep accepting anonymous requests because in-cluster machine callers
+> reach them with no `Authorization` header — verified at eight call sites (`deploy-controller` sends
+> no auth headers at all; `eval-runner`'s `_EVAL_HEADERS` is an audit stamp). They are G-R1-1…5, each
+> commented in code with its caller's `file:line`, and `suite-97` **T-S97-011** walks `app.routes` to
+> pin the partition so a new unauthenticated route fails a test rather than a review. Closing them
+> needs the service identity owned by `identity-propagation-architecture.md` (migrations `0080–0082`).
+> **R1 is authentication only** — no role check, no team scope, no new 403. That is R2.
+
 Add `require_user` to the 10 routers in §1.4. Pure authentication, no role logic, so no
 legitimate Studio call changes — Studio already sends the JWT. *Test:* `suite-97` — every route
 in §1.4, anonymous → 401. This is the cheapest large risk reduction available and it blocks

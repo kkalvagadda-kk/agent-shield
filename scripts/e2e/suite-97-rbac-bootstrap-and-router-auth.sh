@@ -1205,13 +1205,116 @@ else
   record_host FAIL "T-S97-004 realm-recreation re-pin  |  SETUP: no ${E2E_KC_USER} token after the T-S97-005 outage phase, so Keycloak did not come back. REFUSING to delete the admin on a cluster whose IdP is already down — that turns one outage into two and leaves nothing able to recreate the user."
 fi
 
+
+# ── Phase 8b — T-S97-011: the router-auth partition canary (R1) ────────────────
+# WHY A TEST AND NOT A COMMENT (research.md D11): the parent doc's §1.3 is a list of
+# policy functions that were built and never called — a prose exemption list decays the
+# same way. This walks the REAL app.routes and asserts the protected/exempt partition
+# equals the mapping written literally below from contracts/router-auth.md. Adding a new
+# unauthenticated route to any of the ten fails a TEST, not a review.
+echo ""
+echo "[8b/9] T-S97-011 — router-auth partition + 401 matrix…"
+CANARY="/tmp/s97d_canary_${RUN_TAG}.py"
+CANARY_OUT="/tmp/s97d_out_${RUN_TAG}.txt"
+
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- bash -c "cat > $CANARY" <<'PYEOF'
+import json, sys
+sys.path.insert(0, "/app")
+from main import app
+from auth_middleware import require_user
+
+# THE CONTRACT, restated literally. Counts are (protected, exempt) per router module.
+# Source of truth: docs/plan/rbac-r0-r1/contracts/router-auth.md.
+EXPECTED = {
+    "workflows": (7, 0), "teams": (5, 0), "llm_providers": (5, 0),
+    "admin": (11, 0), "playground_approvals": (1, 0),
+    "deployments": (7, 2),      # G-R1-2: GET / and PATCH /{deployment_id}
+    "versions": (4, 1),         # G-R1-3: GET /{version_id}
+    "auth_configs": (5, 1),     # G-R1-4: GET /{config_id}/secret-ref
+    "agent_tools": (2, 1),      # G-R1-5: GET /{name}/tools
+    "agent_runs": (0, 7),       # G-R1-1: entire router
+}
+
+def module_of(route):
+    ep = getattr(route, "endpoint", None)
+    return getattr(ep, "__module__", "").rsplit(".", 1)[-1] if ep else ""
+
+def protected(route):
+    # require_user may be attached router-level or per-endpoint; dependant.dependencies_flat
+    # flattens both, so this cannot be fooled by where it was declared.
+    dep = getattr(route, "dependant", None)
+    if dep is None:
+        return False
+    stack = [dep]
+    while stack:
+        d = stack.pop()
+        if getattr(d, "call", None) is require_user:
+            return True
+        stack.extend(getattr(d, "dependencies", []) or [])
+    return False
+
+actual, exempt_paths = {}, {}
+for r in app.routes:
+    m = module_of(r)
+    if m not in EXPECTED:
+        continue
+    p, e = actual.get(m, (0, 0))
+    if protected(r):
+        actual[m] = (p + 1, e)
+    else:
+        actual[m] = (p, e + 1)
+        exempt_paths.setdefault(m, []).append(f"{sorted(r.methods)[0]} {r.path}")
+
+diffs = [f"{m}: want {EXPECTED[m]} got {actual.get(m, (0,0))}" for m in EXPECTED if actual.get(m, (0, 0)) != EXPECTED[m]]
+json.dump({"ok": not diffs, "diffs": diffs, "exempt": exempt_paths}, open("OUTFILE_PLACEHOLDER", "w"))
+PYEOF
+
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- \
+  bash -c "sed -i 's#OUTFILE_PLACEHOLDER#$CANARY_OUT#' $CANARY && cd /app && PYTHONPATH=/app python3 $CANARY" \
+  >/dev/null 2>&1 || true
+CANARY_JSON="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- cat "$CANARY_OUT" 2>/dev/null || true)"
+
+if [ -z "$CANARY_JSON" ]; then
+  record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  the in-pod canary produced no output"
+else
+  if echo "$CANARY_JSON" | grep -q '"ok": true'; then
+    record_host PASS "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  47 protected / 12 exempt; exempt set: $(echo "$CANARY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["exempt"]; print("; ".join(f"{k}=[{\",\".join(v)}]" for k,v in sorted(d.items())))' 2>/dev/null)"
+  else
+    record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  $(echo "$CANARY_JSON" | python3 -c 'import json,sys; print(" | ".join(json.load(sys.stdin)["diffs"]))' 2>/dev/null) — a NEW unauthenticated route on one of the ten, or an exemption silently closed"
+  fi
+fi
+
+# 401 over the wire: a protected route with NO Authorization header must refuse.
+ANON_CODE="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- python3 -c "
+import urllib.request, urllib.error
+try:
+    urllib.request.urlopen('http://localhost:8000/api/v1/teams/'); print(200)
+except urllib.error.HTTPError as e: print(e.code)
+except Exception: print(0)
+" 2>/dev/null | tr -d '\r\n' || true)"
+# And an EXEMPT route must still answer for its machine caller.
+EXEMPT_CODE="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- python3 -c "
+import urllib.request, urllib.error
+try:
+    urllib.request.urlopen('http://localhost:8000/api/v1/deployments/'); print(200)
+except urllib.error.HTTPError as e: print(e.code)
+except Exception: print(0)
+" 2>/dev/null | tr -d '\r\n' || true)"
+
+if [ "$ANON_CODE" = "401" ] && [ "$EXEMPT_CODE" != "401" ]; then
+  record_host PASS "T-S97-011b 401 MATRIX: anonymous is refused on a protected route, and an exempt route still answers its machine caller  |  GET /teams/ -> $ANON_CODE (want 401); GET /deployments/ -> $EXEMPT_CODE (want NOT 401 — deploy-controller reaches it with no JWT)"
+else
+  record_host FAIL "T-S97-011b 401 MATRIX: anonymous is refused on a protected route, and an exempt route still answers its machine caller  |  GET /teams/ -> $ANON_CODE (want 401); GET /deployments/ -> $EXEMPT_CODE (want NOT 401)"
+fi
+
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- rm -f "$CANARY" "$CANARY_OUT" 2>/dev/null || true
+
 # ── Phase 9 — completeness gate ─────────────────────────────────────────────────
 # A silently dropped case is the failure mode this repo keeps paying for: the suite
 # reports green because the assertion never ran. Name the IDs that MUST appear.
-# T-S97-011 is absent on purpose — see the header. Add it here with its case.
 echo ""
 echo "[9/9] Completeness gate…"
-REQUIRED_IDS="001 002 003 004 005 006 007 008 009 010 012"
+REQUIRED_IDS="001 002 003 004 005 006 007 008 009 010 011 012"
 MISSING=""
 for id in $REQUIRED_IDS; do
   echo "$ALL_RESULTS" | grep -q "T-S97-$id " || MISSING="$MISSING T-S97-$id"
