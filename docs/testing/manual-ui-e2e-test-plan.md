@@ -243,6 +243,18 @@ deliberately absent from suite-97's completeness gate until it does.
   (only the browser layer was baselined), so attribution had to be reconstructed after the fact
   instead of read off a diff.
 
+- **G-R1-8 — `knowledge.spec.ts` "attach agent" picker option never renders; cause NOT established.**
+  `expect(picker.locator("option", {hasText: AGENT_NAME})).toHaveCount(1)` gets 0 (`:283`).
+  **Ruled out by inspection, so the obvious answers are not it:** the options render `a.name`
+  (`KnowledgeBaseDetailPage.tsx:449`), matching the locator; `list_agents` orders
+  `created_at.desc()` (`agents.py:207`) so a fixture created in `beforeAll` sits at position 1, well
+  inside the picker's `listAgents(200, 0)` cap — the cap is real (722 agents on this cluster, 136
+  active) but cannot be what hides a brand-new one; `available` filters only already-bound agents
+  and this one is not yet bound; and step 3 does a full `page.goto`, so the React Query cache is
+  cold. The failure artifact carries no page snapshot, so the rendered option list was never
+  observed. Needs a debug run that dumps `picker.locator("option").allTextContents()` — I stopped
+  rather than keep guessing at it. Everything else in Group B is fixed.
+
 **not-yet-wired (debt)**
 
 - **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
