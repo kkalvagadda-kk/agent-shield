@@ -43,6 +43,20 @@ const ALERT_EMAIL = `oncall-${Date.now()}@example.com`;
 test("scheduled overview renders next-fire/health/last-run + alert config persists on reload", async ({
   page,
 }) => {
+  // ARM THE HEALTH WAITER BEFORE THE FIRST NAVIGATION. /agents/{name} already fetches
+  // the health producer, so by the time this spec armed it (after that goto, below the
+  // deployment link) React Query had the response cached and the deployment overview
+  // mounted from cache without a second request — the waiter then timed out at 20s
+  // against a page that had called health correctly. Third occurrence of this shape in
+  // this suite (conversations-sidebar had two); the rule is: arm before the action that
+  // can trigger it, not before the action you happen to care about.
+  const healthResp = page.waitForResponse(
+    (r) =>
+      /\/api\/v1\/agents\/[^/]+\/health/.test(r.url()) &&
+      r.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+
   // 1. Agent detail → the Deployments tab (default) lists sandbox deployments.
   await page.goto(`/agents/${AGENT}`);
   await page.waitForLoadState("networkidle");
@@ -53,13 +67,6 @@ test("scheduled overview renders next-fire/health/last-run + alert config persis
   const depLink = page.locator("main a", { hasText: `${AGENT}-` }).first();
   await expect(depLink).toBeVisible({ timeout: 15_000 });
 
-  // The scheduled overview fetches the mode-aware health producer on mount.
-  const healthResp = page.waitForResponse(
-    (r) =>
-      /\/api\/v1\/agents\/[^/]+\/health/.test(r.url()) &&
-      r.request().method() === "GET",
-    { timeout: 20_000 }
-  );
   await depLink.click();
   await page.waitForURL("**/d/**", { timeout: 10_000 });
   const hr = await healthResp; // the operate surface actually called the health producer
