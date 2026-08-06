@@ -255,6 +255,25 @@ deliberately absent from suite-97's completeness gate until it does.
   observed. Needs a debug run that dumps `picker.locator("option").allTextContents()` — I stopped
   rather than keep guessing at it. Everything else in Group B is fixed.
 
+- **G-R1-9 — R1 CHANGED AUDIT ATTRIBUTION, and it is the first real behavioural consequence found.**
+  `routers/triggers.py:73` reads `armed_by = (user or {}).get("sub") or x_user_sub` — the JWT
+  subject takes precedence over the self-asserted `X-User-Sub` header. Before R1 the e2e suites sent
+  no Bearer, so `user` was `None` and `armed_by` fell back to the header literal; Phase 7 attached a
+  real token, so `armed_by` is now the **authenticated** caller. `suite-71` T-S71-001c encodes the
+  old behaviour and fails: `armed_by=5cf374d6-… expected=75c7c8b3-…`.
+  **The new behaviour is the correct one** — an authenticated identity outranking a header a caller
+  can type is precisely what R1 is for — but the change was silent, and anything that reads
+  `armed_by` for *audit* now attributes differently than before. That deserves to be a stated
+  consequence of R1, not an absorbed surprise.
+  **Wider exposure:** `grep -rn 75c7c8b3 scripts/` finds **33 occurrences across 30+ files**. Most
+  are harmless — `X-User-Sub` as an audit stamp works with any string. The dangerous ones are those
+  asserting that a **persisted** value equals the literal, which silently couple a test to a real
+  Keycloak identity that the IdP is free to reissue (and which `suite-97` T-S97-004 reissues on
+  purpose). Those need auditing individually; a blanket replace would be wrong, since most sites are
+  legitimately arbitrary.
+  Fix for T-S71-001c: assert `armed_by` equals the sub of the token that actually armed it, not a
+  literal.
+
 **not-yet-wired (debt)**
 
 - **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
