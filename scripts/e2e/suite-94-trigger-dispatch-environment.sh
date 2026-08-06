@@ -64,6 +64,16 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+
+# R1/FR-11 widened what needs a JWT here: GET /llm-providers/, POST /agents/{name}/deploy
+# and GET /agents/{name}/versions joined trigger CRUD on the protected list. The driver
+# already minted ONE token at import; that is no longer enough, because the production
+# deploy at the end of this suite happens minutes after two sandbox deploys and their
+# wait_running polls — well past the 300s token lifespan. Install lib/e2e_auth.py and let
+# BearerAuth re-mint per request (lib/e2e-auth.sh:88-96, lib/e2e_auth.py:1-21).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 echo "=== Suite 94: trigger dispatch environment resolution (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -75,29 +85,25 @@ OUTFILE="/tmp/s94_out_${RUN_TAG}.txt"
 RUNLOG="/tmp/s94_run_${RUN_TAG}.log"
 
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
-import asyncio, json, os, urllib.parse, urllib.request, uuid, httpx
+import asyncio, json, os, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth, mint
 from sqlalchemy import select, desc, text
 from db import AsyncSessionLocal
 from models import Agent, Deployment, AgentRun
 
 BASE = "http://localhost:8000/api/v1"
-# Trigger CRUD is gated by `require_user` (routers/triggers.py:57), which needs a real
-# JWT — `X-User-Sub` alone returns 401. Same in-pod Keycloak password grant suite-83
-# uses; the header stays too, because `armed_by` reads X-User-Sub.
-KC = "http://agentshield-keycloak/realms/agentshield/protocol/openid-connect/token"
-
-
-def token_for(user, pw):
-    data = urllib.parse.urlencode({
-        "grant_type": "password", "client_id": "agentshield-studio",
-        "username": user, "password": pw}).encode()
-    return json.loads(urllib.request.urlopen(
-        urllib.request.Request(KC, data=data), timeout=15).read())["access_token"]
-
-
+# Trigger CRUD is gated by `require_user` (routers/triggers.py), and since R1/FR-11 so
+# are /llm-providers/, /agents/{name}/deploy and /agents/{name}/versions — `X-User-Sub`
+# alone returns 401. X-User-Sub STAYS: it is the audit stamp `armed_by` reads.
+#
+# Authentication is a per-REQUEST concern here, not a per-run one: this driver is
+# detached and its last deploy lands long after a single token would have expired. The
+# grant itself lives in lib/e2e_auth.py — one definition, every suite — rather than a
+# private token_for() copy.
 H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
 try:
-    H["Authorization"] = f"Bearer {token_for('platform-admin', 'PlatformAdmin2024')}"
+    mint()  # prove a token is obtainable NOW so a bad fixture fails loud, not at case 6
 except Exception as _exc:  # surfaced as a case failure below, never a silent skip
     H["_token_error"] = str(_exc)
 OUT = os.environ["S94_OUT"]
@@ -165,7 +171,7 @@ async def main():
         results.append((name, bool(ok), detail))
 
     tok_err = H.pop("_token_error", None)
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=40.0)
+    c = httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=40.0)
     try:
         # Fail LOUD on a missing token rather than letting every later case 401 and
         # read as "the feature is broken" — a wrong diagnosis is worse than a red X.

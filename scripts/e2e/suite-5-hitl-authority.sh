@@ -33,6 +33,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: every /api/v1/admin/* route (routers/admin.py) now requires a real JWT —
+# here that is the approval-authority create / list / delete. /api/v1/approvals/* and
+# /api/v1/agents/* are NOT among R1's ten routers and stay as they are. Call
+# e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 AUTHORITY_ID=""
 cleanup() {
   echo ""
@@ -41,7 +48,8 @@ cleanup() {
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, method='DELETE'), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
@@ -134,7 +142,8 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -154,9 +163,10 @@ fi
 
 run_test "T-S5-001 GET /admin/approval-authority?resource_id=issue_refund → reviewer-1 record present" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/approval-authority?resource_type=tool&resource_id=issue_refund'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/approval-authority?resource_type=tool&resource_id=issue_refund',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 assert len(items) > 0, 'no records returned'
@@ -212,6 +222,7 @@ if [ -z "$APPROVAL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 try: urllib.request.urlopen(req)
@@ -344,6 +355,7 @@ if [ -n "$AUTHORITY_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)

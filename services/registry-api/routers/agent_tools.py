@@ -17,12 +17,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from db import get_db
 from models import Agent, AgentTool, Tool
 from schemas import AgentToolBind, AgentToolResponse, PaginatedResponse, ToolResponse
 
 logger = logging.getLogger(__name__)
 
+# MIXED (R1, FR-11): protection is per-endpoint here, NOT router-level, because
+# deploy-controller and declarative-runner read an agent's tool bindings with no JWT.
+# Protected: POST /{name}/tools, DELETE /{name}/tools/{tool_id}.
+# Exempt: GET /{name}/tools (see the G-R1-5 comment below).
 router = APIRouter(prefix="/api/v1/agents", tags=["agent-tools"])
 
 
@@ -56,6 +61,7 @@ async def _resolve_tool(tool_id: uuid.UUID, db: AsyncSession) -> Tool:
     status_code=status.HTTP_201_CREATED,
     response_model=AgentToolResponse,
     summary="Bind a tool to an agent",
+    dependencies=[Depends(require_user)],
 )
 async def bind_tool(
     name: str,
@@ -95,6 +101,7 @@ async def bind_tool(
     "/{name}/tools/{tool_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Unbind a tool from an agent",
+    dependencies=[Depends(require_user)],
 )
 async def unbind_tool(
     name: str,
@@ -123,6 +130,14 @@ async def unbind_tool(
 # ---------------------------------------------------------------------------
 # GET /api/v1/agents/{name}/tools
 # ---------------------------------------------------------------------------
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-5). In-cluster machine callers with no user
+# JWT: services/deploy-controller/tool_secrets.py:36 (resolves which tool credentials
+# an agent Pod needs at deploy time) and services/declarative-runner/
+# workflow_executor.py:171 (resolves the agent's tool set at run time). Closing this
+# needs a service identity that docs/design/identity-propagation-architecture.md owns
+# (migrations 0080-0082); doing it here would break control-plane reconciliation and
+# every declarative run. Same posture as routers/internal.py: cluster-internal,
+# NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set.
 @router.get(
     "/{name}/tools",
     response_model=PaginatedResponse[ToolResponse],

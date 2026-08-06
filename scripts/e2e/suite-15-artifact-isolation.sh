@@ -36,6 +36,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/versions and POST /api/v1/admin/publish-requests/{id}/approve
+# now require a real JWT. The isolation assertions themselves are driven through
+# /api/v1/agents (routers/agents.py) with X-User-Sub personas — that is caller SCOPING,
+# not authentication, and R1 does not touch it, so those calls are left alone.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agents..."
@@ -289,7 +297,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${ALICE_AGENT}/versions',
     data=json.dumps({'image_tag': 'registry.internal/s15:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'user-alice'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'user-alice',
+             'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except Exception as e:
@@ -326,7 +335,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/publish-requests/${PUBLISH_REQUEST_ID}/approve',
     data=json.dumps({'grantee_teams': ['platform']}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)

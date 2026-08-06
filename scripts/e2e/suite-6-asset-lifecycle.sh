@@ -39,6 +39,17 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: this suite drives four of the ten protected routers —
+#   • routers/admin.py       : /admin/publish-requests*, /admin/grants*
+#   • routers/agent_tools.py : POST /{name}/tools, DELETE /{name}/tools/{id}
+#   • routers/versions.py    : POST/GET/PATCH /{name}/versions*
+#   • routers/deployments.py : POST /{name}/deploy
+# all of which now require a real JWT. /api/v1/agents/*, /api/v1/tools/* and
+# /agents/{name}/publish are NOT among the ten and stay as they are.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 CRITICAL_TOOL_ID=""
 cleanup() {
   echo ""
@@ -207,7 +218,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools',
     data=json.dumps({'tool_id': '${CRITICAL_TOOL_ID}'}).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -246,6 +257,7 @@ if [ -n "$CRITICAL_TOOL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools/${CRITICAL_TOOL_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)
@@ -259,7 +271,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/versions',
     data=json.dumps({'image_tag': 'registry.internal/s6-publish:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except Exception as e:
@@ -304,9 +316,10 @@ echo ""
 echo "--- T-S6-004: Publish request appears in admin queue ---"
 run_test "T-S6-004 GET /admin/publish-requests?status=pending_review → ${AGENT_NAME} present" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/publish-requests?status=pending_review'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/publish-requests?status=pending_review',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 asset_ids = [str(i.get('asset_id', '')) for i in items]
@@ -326,7 +339,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/publish-requests/${PUBLISH_REQUEST_ID_1}/reject',
     data=json.dumps({'notes': 'Suite 6 test rejection'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -392,7 +405,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/publish-requests/${PUBLISH_REQUEST_ID_2}/approve',
     data=json.dumps({'grantee_teams': ['platform']}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -429,9 +442,10 @@ echo "--- T-S6-009 (plan T-S6-008): AssetGrant row visible in admin grants ---"
 
 GRANT_ID=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 assert len(items) > 0, f'no grants found for asset_id=${AGENT_ID:0:8}'
@@ -462,6 +476,7 @@ if [ -n "$GRANT_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/grants/${GRANT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)
@@ -471,9 +486,10 @@ assert r.status == 204, f'expected 204 got {r.status}'
   # Verify grant is gone from the active list
   run_test "T-S6-010 GET /admin/grants?asset_id=${AGENT_ID:0:8}... → no active grants remain" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 active = [i for i in items if i.get('revoked_at') is None]
@@ -560,7 +576,7 @@ v = json.dumps({'agent_name': agent_name, 'description': 'v1',
                  'adversarial_eval_passed': False}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
-    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    data=v, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 version = json.loads(r.read())
 version_id = str(version.get('id'))
 
@@ -570,7 +586,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -589,8 +605,9 @@ ts = '${TS6LG}'
 agent_name = 'high-risk-gate-' + ts
 
 # Get latest version id
-r = urllib.request.urlopen(
-    base + '/api/v1/agents/' + agent_name + '/versions', timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/agents/' + agent_name + '/versions',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 versions = json.loads(r.read())
 # versions may be a list or paginated — handle both
 items = versions if isinstance(versions, list) else versions.get('items', versions.get('data', []))
@@ -601,7 +618,7 @@ version_id = str(items[-1].get('id'))
 patch = json.dumps({'adversarial_eval_passed': True}).encode()
 req = urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions/' + version_id,
-    data=patch, headers={'Content-Type': 'application/json'}, method='PATCH')
+    data=patch, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 r = urllib.request.urlopen(req, timeout=5)
 assert r.getcode() in (200, 204), f'patch failed: {r.getcode()}'
 
@@ -611,7 +628,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     r2 = urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     print('DEPLOY_OK status=' + str(r2.getcode()))
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -644,7 +661,7 @@ v = json.dumps({'agent_name': agent_name, 'description': 'v1',
                  'adversarial_eval_passed': True}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
-    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    data=v, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 version_id = str(json.loads(r.read()).get('id'))
 
 d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
@@ -652,7 +669,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -675,7 +692,7 @@ d = json.dumps({'agent_name': 'nonexistent-agent-' + ts, 'version_id': '00000000
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/nonexistent-agent-' + ts + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 4xx but got 200')
 except urllib.error.HTTPError as e:
     assert e.code in (404, 422), f'expected 404 or 422 got {e.code}'

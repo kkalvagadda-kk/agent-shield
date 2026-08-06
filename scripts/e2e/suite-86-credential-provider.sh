@@ -32,17 +32,28 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 [ -z "$API_POD" ] && API_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep registry-api | grep Running | awk '{print $1}' | head -1)
 [ -z "$API_POD" ] && { echo "FATAL: no running registry-api pod"; exit 1; }
 
+# R1/FR-11: POST /api/v1/auth-configs/ (credential-bearing, routers/auth_configs.py) now
+# requires a real JWT — it is the ONE HTTP call this suite makes into R1's ten routers;
+# everything else runs in-pod against the ORM and the provider seam. The driver is a
+# QUOTED heredoc, so the token travels as an env var beside SUFFIX. Call e2e_set_token
+# BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 86: CredentialProvider seam (WS-1 / Decision 31) ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY'
+  env SUFFIX="$SUFFIX" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY'
 import os, asyncio, httpx, json
 SUFFIX = os.environ["SUFFIX"]
 BASE = "http://localhost:8000/api/v1"
 TEAM = "platform"
-ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM}
+# X-User-* stay AUDIT STAMPS; the Bearer is the R1 authentication for
+# POST /auth-configs/ (credential-bearing, protected router-wide except secret-ref).
+ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 TOKEN = f"s86-secret-{SUFFIX}"
 fails = []
 

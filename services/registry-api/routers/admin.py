@@ -26,6 +26,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
 # THE threshold resolution — imported, never re-implemented. It already handles the
@@ -52,7 +53,17 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+# AUTHENTICATED (R1, FR-11). Router-level: all 11 routes require a valid JWT —
+# asset grants, publish-requests, approval-authority and bundle regenerate were
+# all reachable anonymously before R1. Authentication only — no role logic, no
+# team scoping, no new 403; the existing per-handler authority checks are
+# unchanged and an authenticated response is byte-identical to pre-R1. Role
+# enforcement on these routes is R2. suite-97 T-S97-011 pins the partition.
+router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["admin"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ---------------------------------------------------------------------------

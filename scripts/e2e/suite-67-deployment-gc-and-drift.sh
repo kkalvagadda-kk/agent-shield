@@ -31,6 +31,11 @@ AGENTS_NS="${AGENTS_NS:-agents-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# DELETE /agents/{name} is routers/agents.py — not one of the ten — so api_delete stays
+# as it is. Call e2e_set_token BARE (lib/e2e-auth.sh explains the subshell trap).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 echo "=== Suite 67: deployment GC on delete + running-but-lost drift (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -41,7 +46,8 @@ dbq() { kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c
 api_create_deploy() {  # $1 = agent name
   dbq "
 import asyncio, httpx
-H={'X-User-Sub':'75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6','X-User-Team':'platform'}
+# X-User-* remain AUDIT STAMPS; the Bearer is the R1 authentication.
+H={'X-User-Sub':'75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6','X-User-Team':'platform','Authorization':'Bearer ${E2E_TOKEN}'}
 async def m():
     async with httpx.AsyncClient(base_url='http://localhost:8000/api/v1', headers=H, timeout=40) as c:
         pid=(await c.get('/llm-providers/', params={'team':'platform'})).json()['items'][0]['id']

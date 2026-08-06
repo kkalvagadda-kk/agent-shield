@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from crypto import decrypt_json
 from agent_config import build_config_snapshot
 from db import get_db
@@ -192,10 +193,24 @@ async def _auto_grant_tool_access(
     return created
 
 
-router = APIRouter(prefix="/api/v1/agents", tags=["deployments"])
+# AUTHENTICATED (R1, FR-11). Router-level: /{name}/deploy, /{name}/rollback,
+# GET /{name}/deployments and PATCH /{name}/deployments/{id} — production deploy
+# and rollback, the highest-blast-radius writes on this service. Authentication
+# only — no role logic, no team scoping, no new 403; an authenticated response is
+# byte-identical to pre-R1. suite-97 T-S97-011 pins the partition.
+router = APIRouter(
+    prefix="/api/v1/agents",
+    tags=["deployments"],
+    dependencies=[Depends(require_user)],
+)
 
 # ---------------------------------------------------------------------------
 # Global deployments router (separate prefix — used by deploy-controller)
+#
+# MIXED (R1, FR-11): protection is per-endpoint here, NOT router-level, because
+# deploy-controller polls and callbacks land on two of these routes with no JWT.
+# Protected: GET /workflows, GET /{id}/stats, GET /{id}/runs.
+# Exempt: GET /  and  PATCH /{deployment_id}  (see G-R1-2 comments below).
 # ---------------------------------------------------------------------------
 global_deployments_router = APIRouter(prefix="/api/v1/deployments", tags=["deployments"])
 
@@ -206,6 +221,12 @@ class DeploymentStatusUpdate(BaseModel):
     error_message: Optional[str] = None
 
 
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-2). In-cluster machine caller with no user
+# JWT: services/deploy-controller/main.py:70,122,176 — the reconcile loop lists
+# deployments on every pass. Closing this needs a service identity that
+# docs/design/identity-propagation-architecture.md owns (migrations 0080-0082); doing
+# it here would break control-plane reconciliation. Same posture as routers/internal.py:
+# cluster-internal, NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set.
 @global_deployments_router.get(
     "/",
     response_model=PaginatedResponse[DeploymentResponse],
@@ -238,6 +259,12 @@ async def list_all_deployments(
     return PaginatedResponse(items=items, total=total)
 
 
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-2). In-cluster machine caller with no user
+# JWT: services/deploy-controller/main.py:54 — the status callback that moves a
+# deployment to running/failed. Closing this needs a service identity that
+# docs/design/identity-propagation-architecture.md owns (migrations 0080-0082); doing
+# it here would break control-plane reconciliation. Same posture as routers/internal.py:
+# cluster-internal, NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set.
 @global_deployments_router.patch(
     "/{deployment_id}",
     response_model=DeploymentResponse,
@@ -268,6 +295,7 @@ async def update_deployment_status(
     "/workflows",
     response_model=list[WorkflowDeploymentResponse],
     summary="List workflow deployments (filterable by status/environment)",
+    dependencies=[Depends(require_user)],
 )
 async def list_all_workflow_deployments(
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -328,6 +356,7 @@ def _run_scope(deployment_id: uuid.UUID, context: str):
     "/{deployment_id}/stats",
     response_model=AgentStatsResponse,
     summary="Get run statistics for a single deployment (last 24h)",
+    dependencies=[Depends(require_user)],
 )
 async def get_deployment_stats(
     deployment_id: uuid.UUID,
@@ -378,6 +407,7 @@ async def get_deployment_stats(
     "/{deployment_id}/runs",
     response_model=list[AgentRunResponse],
     summary="List runs for a single deployment",
+    dependencies=[Depends(require_user)],
 )
 async def list_deployment_runs(
     deployment_id: uuid.UUID,

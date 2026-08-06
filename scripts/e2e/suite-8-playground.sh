@@ -43,6 +43,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: GET /api/v1/playground/approvals is the ONE call this suite makes into R1's
+# ten routers — routers/playground_approvals.py is router-level protected. The rest of
+# /api/v1/playground/* (runs, datasets, eval-runs, approvals/{id}/decide) lives in
+# routers/playground.py, which R1 does NOT touch, so those calls are left alone.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 DATASET_ID=""
 cleanup() {
   echo ""
@@ -604,7 +612,9 @@ fi
 # ---------------------------------------------------------------------------
 run_test "T-S8-019 GET /playground/approvals → all items context=playground" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/playground/approvals', timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/playground/approvals',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 data = json.loads(r.read())
 assert isinstance(data, list), f'expected list got {type(data)}'
 for item in data:

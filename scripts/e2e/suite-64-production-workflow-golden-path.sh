@@ -41,6 +41,15 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
 
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver is DETACHED (nohup) and outlives the 300s token lifespan, so a
+# statically-interpolated Bearer would expire mid-run and 401 on whichever case
+# happened to be last. Install lib/e2e_auth.py and let BearerAuth re-mint per
+# request (lib/e2e-auth.sh:88-96).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 64: PRODUCTION durable-workflow golden path (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -54,6 +63,8 @@ OUTFILE="/tmp/s64_out_${RUN_TAG}.txt"
 # 1) write the driver into the pod (one short exec)
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun
@@ -87,7 +98,8 @@ async def wait_running(name, env, tries=60):
     return None
 async def main():
     out={}; wid=None
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid=await prov(c)
     try:
         for n in NAMES:

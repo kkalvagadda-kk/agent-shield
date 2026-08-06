@@ -59,6 +59,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver waits up to 180s for the deploy and another 300s for the eval run, so a
+# statically-interpolated token would EXPIRE mid-run (Keycloak issues expires_in=300).
+# Install lib/e2e_auth.py into the pod and let BearerAuth re-mint per request instead.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 61: Eval v2 E-0 REAL reactive-parity gate (no fakes) ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -66,6 +74,8 @@ echo ""
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY' 2>/dev/null
 import asyncio, uuid
 import httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult, PlaygroundDataset
@@ -154,7 +164,10 @@ async def wait_eval_terminal(run_id, timeout=300):
 async def main():
     out = {}
     skip = None
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication. auth=
+    # BearerAuth() is what satisfies R1, and httpx re-evaluates it per request so the
+    # token stays fresh across this driver's multi-minute waits.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid = await provider_id(c)
     ds_id = None
     run_id = None

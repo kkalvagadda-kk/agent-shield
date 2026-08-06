@@ -30,17 +30,29 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 [ -z "$API_POD" ] && API_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep registry-api | grep Running | awk '{print $1}' | head -1)
 [ -z "$API_POD" ] && { echo "FATAL: no running registry-api pod"; exit 1; }
 
+# R1/FR-11: POST /api/v1/admin/bundle/regenerate (routers/admin.py) is the ONE call this
+# suite makes into R1's ten routers. /api/v1/tools/*, /api/v1/mcp-servers/*,
+# /api/v1/internal/* and /api/v1/bundle/* are outside them and stay anonymous.
+# The driver is a QUOTED heredoc, so the token travels as an env var beside SUFFIX.
+# Call e2e_set_token BARE (lib/e2e-auth.sh explains the subshell trap).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 84: MCP as a Tool Source (registry-api surface) ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY'
+  env SUFFIX="$SUFFIX" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY'
 import os, asyncio, httpx, uuid
 SUFFIX = os.environ["SUFFIX"]
 BASE = "http://localhost:8000/api/v1"
 TEAM = "platform"
-ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM}
+# X-User-* stay AUDIT STAMPS; the Bearer is the R1 authentication. Only the
+# /admin/bundle/regenerate call actually needs it, but ADMIN is one dict shared by
+# every call in this driver and carrying a valid token on the others is inert.
+ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 fails = []
 
 def check(cond, tid, msg):

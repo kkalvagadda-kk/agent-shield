@@ -38,6 +38,14 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+
+# R1/FR-11: GET /llm-providers/, POST /agents/{name}/deploy and
+# PATCH /agents/{name}/versions/{id} now require a real JWT. This driver is DETACHED
+# (nohup) and drives two real deploys plus two eval runs, far past the 300s token
+# lifespan, so BearerAuth re-mints per request instead of a static token.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 echo "=== Suite 65: PRODUCTION reviewer-console HITL (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -49,6 +57,8 @@ DRIVER="/tmp/s65_driver_${RUN_TAG}.py"
 OUTFILE="/tmp/s65_out_${RUN_TAG}.txt"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun, Approval
@@ -79,7 +89,8 @@ async def latest_version(name):
     return str(v.id)
 async def main():
     out={}; wid=None
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid=await prov(c)
     try:
         specs=[(WORK, WORK_INSTR, ["refund_action"]), (FINAL, FINAL_INSTR, [])]

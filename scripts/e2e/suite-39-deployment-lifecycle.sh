@@ -17,6 +17,12 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -n "${API_POD:-}" ] || { echo "FATAL: registry-api pod not found"; exit 1; }
 
+# R1/FR-11: POST /{name}/versions, POST /{name}/deploy and PATCH /{name}/deployments/{id}
+# now require a real JWT. Call e2e_set_token BARE — in a command substitution its
+# `exit 1` kills only the subshell and every later call 401s (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
@@ -36,12 +42,13 @@ echo ""
 echo "--- Setup: agent + v1 + v2 + sandbox deployment ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
 httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT}', 'team': 'default', 'agent_type': 'declarative',
     'metadata': {'instructions': 'lifecycle test'}})
-v1 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', json={'eval_passed': True}).json()
-v2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', json={'eval_passed': True}).json()
-d = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/deploy', json={
+v1 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', headers=AUTH, json={'eval_passed': True}).json()
+v2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', headers=AUTH, json={'eval_passed': True}).json()
+d = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/deploy', headers=AUTH, json={
     'version_id': v1['id'], 'environment': 'sandbox', 'ttl_hours': 12})
 if d.status_code != 201:
     print(f'FAIL setup deploy {d.status_code}: {d.text}'); sys.exit(1)
@@ -59,7 +66,8 @@ V2_ID=$(echo "$S39_LINE" | cut -d' ' -f2)
 # T-S39-001 — suspend → suspending
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', json={'action':'suspend'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', headers=AUTH, json={'action':'suspend'})
 if r.status_code != 200 or r.json().get('status') != 'suspending':
     print(f'FAIL {r.status_code}: {r.text}'); sys.exit(1)
 print('OK')
@@ -68,7 +76,8 @@ print('OK')
 # T-S39-002 — resume → pending (controller re-reconciles + scales up)
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', json={'action':'resume'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', headers=AUTH, json={'action':'resume'})
 if r.status_code != 200 or r.json().get('status') != 'pending':
     print(f'FAIL {r.status_code}: {r.text}'); sys.exit(1)
 print('OK')
@@ -77,7 +86,8 @@ print('OK')
 # T-S39-003 — upgrade swaps version_id + pending
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', json={'action':'upgrade','version_id':'${V2_ID}'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', headers=AUTH, json={'action':'upgrade','version_id':'${V2_ID}'})
 d = r.json()
 if r.status_code != 200 or d.get('version_id') != '${V2_ID}' or d.get('status') != 'pending':
     print(f'FAIL {r.status_code}: {r.text}'); sys.exit(1)
@@ -89,7 +99,8 @@ print('OK')
 # T-S39-004 — upgrade without version_id → 400
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', json={'action':'upgrade'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', headers=AUTH, json={'action':'upgrade'})
 if r.status_code != 400:
     print(f'FAIL expected 400, got {r.status_code}'); sys.exit(1)
 print('OK')
@@ -98,7 +109,8 @@ print('OK')
 # T-S39-005 — terminate → terminating
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', json={'action':'terminate'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/${DEP_ID}', headers=AUTH, json={'action':'terminate'})
 if r.status_code != 200 or r.json().get('status') != 'terminating':
     print(f'FAIL {r.status_code}: {r.text}'); sys.exit(1)
 print('OK')
@@ -107,7 +119,8 @@ print('OK')
 # T-S39-006 — unknown deployment → 404
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/00000000-0000-0000-0000-000000000000', json={'action':'suspend'})
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+r = httpx.patch('http://localhost:8000/api/v1/agents/${AGENT}/deployments/00000000-0000-0000-0000-000000000000', headers=AUTH, json={'action':'suspend'})
 if r.status_code != 404:
     print(f'FAIL expected 404, got {r.status_code}'); sys.exit(1)
 print('OK')

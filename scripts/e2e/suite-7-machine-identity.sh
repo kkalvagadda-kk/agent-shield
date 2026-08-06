@@ -36,6 +36,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /teams/ (routers/teams.py), POST /agents/{name}/versions and
+# POST /agents/{name}/deploy now require a real JWT. Everything else this suite drives
+# (/api/v1/agents, /api/v1/bundle, kubectl) is outside R1's ten routers.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
@@ -101,7 +108,8 @@ BASE = 'http://localhost:8000/api/v1'
 
 def post(path, body):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST')
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
     try:
         r = urllib.request.urlopen(req)
         raw = r.read()
@@ -402,7 +410,8 @@ v_body = json.dumps({'agent_name': agent_name, 'description': 'critical-test',
                       'eval_passed': True, 'adversarial_eval_passed': True}).encode()
 try:
     r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/versions',
-        data=v_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=v_body, headers={'Content-Type': 'application/json',
+                              'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     version = json.loads(r.read())
     version_id = str(version.get('id'))
 except Exception as e:
@@ -414,7 +423,8 @@ d_body = json.dumps({'agent_name': agent_name, 'version_id': version_id,
                       'deployer_team': 'platform'}).encode()
 try:
     req = urllib.request.Request(base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d_body, headers={'Content-Type': 'application/json'}, method='POST')
+        data=d_body, headers={'Content-Type': 'application/json',
+                              'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
     r = urllib.request.urlopen(req, timeout=5)
     print('DEPLOY_ALLOWED:status=' + str(r.getcode()))  # Should not reach here
 except urllib.error.HTTPError as e:

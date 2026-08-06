@@ -20,13 +20,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_config import build_config_snapshot
+from auth_middleware import require_user
 from db import get_db
 from models import Agent, AgentRun, AgentTool, AgentVersion, Deployment, ProductionDeployment, PublishedVersion, Tool
 from schemas import AgentVersionCreate, AgentVersionPatch, AgentVersionResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/agents", tags=["versions"])
+# AUTHENTICATED (R1, FR-11). Router-level: all 4 /{name}/versions* routes require
+# a valid JWT. Authentication only — no role logic, no team scoping, no new 403; an
+# authenticated response is byte-identical to pre-R1. Note this covers ONLY the
+# agent-scoped routes — `versions_global_router` at the bottom of this file is
+# exempt (G-R1-3). suite-97 T-S97-011 pins the partition.
+router = APIRouter(
+    prefix="/api/v1/agents",
+    tags=["versions"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +326,13 @@ async def delete_version(
 versions_global_router = APIRouter(prefix="/api/v1/versions", tags=["versions"])
 
 
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-3). In-cluster machine caller with no user
+# JWT: services/deploy-controller/main.py:33 — the reconcile loop resolves a version
+# to its image/config before it can build a Deployment. Closing this needs a service
+# identity that docs/design/identity-propagation-architecture.md owns (migrations
+# 0080-0082); doing it here would break control-plane reconciliation. Same posture as
+# routers/internal.py: cluster-internal, NetworkPolicy-trusted. suite-97 T-S97-011
+# pins this exemption set. Nothing on `versions_global_router` is protected.
 @versions_global_router.get(
     "/{version_id}",
     response_model=AgentVersionResponse,

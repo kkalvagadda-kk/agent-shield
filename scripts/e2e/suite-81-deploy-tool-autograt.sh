@@ -23,14 +23,23 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "$API_POD" ] && API_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep registry-api | grep Running | awk '{print $1}' | head -1)
 
+# R1/FR-11: POST /api/v1/admin/bundle/regenerate (routers/admin.py) now requires a real
+# JWT. GET /api/v1/bundle/bundle.tar.gz is routers/bundle.py — not one of R1's ten — and
+# stays anonymous. The driver is a QUOTED heredoc, so the token travels as an env var
+# alongside SUFFIX. Call e2e_set_token BARE (lib/e2e-auth.sh explains the subshell trap).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 81: deploy-time tool-access auto-grant ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY'
+  env SUFFIX="$SUFFIX" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY'
 import os, asyncio, httpx
 SUFFIX = os.environ["SUFFIX"]
+# X-User-Sub stays the audit stamp; the Bearer is the R1 authentication.
+AUTH = {"Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 BASE = "http://localhost:8000/api/v1"
 TOOL = f"s81-hitl-tool-{SUFFIX}"
 TEAM = "platform"
@@ -84,7 +93,7 @@ async def main():
     # T-S81-003 — the granted tool appears in the served OPA bundle for the team (risk high).
     async with httpx.AsyncClient(timeout=20) as c:
         # regenerate then read the served grants
-        await c.post(f"{BASE}/admin/bundle/regenerate", headers={"X-User-Sub": "platform-admin"})
+        await c.post(f"{BASE}/admin/bundle/regenerate", headers={"X-User-Sub": "platform-admin", **AUTH})
         import io, tarfile, json
         rb = await c.get(f"{BASE}/bundle/bundle.tar.gz")
     data = None

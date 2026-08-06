@@ -21,13 +21,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from db import get_db
 from models import Agent, Team
 from schemas import AgentResponse, PaginatedResponse, TeamCreate, TeamResponse, TeamUpdate
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/teams", tags=["teams"])
+# AUTHENTICATED (R1, FR-11). Router-level: all 5 routes require a valid JWT.
+# Authentication only — no role logic, no team scoping, no new 403; an
+# authenticated response is byte-identical to pre-R1. suite-97 T-S97-011 pins
+# the protected/exempt partition for this router.
+router = APIRouter(
+    prefix="/api/v1/teams",
+    tags=["teams"],
+    dependencies=[Depends(require_user)],
+)
 
 
 async def _resolve(team_id: uuid.UUID, db: AsyncSession) -> Team:

@@ -27,6 +27,12 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/deploy now requires a real JWT. Call e2e_set_token
+# BARE — in a command substitution its `exit 1` kills only the subshell and the
+# deploys below would 401 with no explanation (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 50: Version dedup on deploy ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -38,7 +44,7 @@ from sqlalchemy import select, func
 from models import Agent, AgentVersion, Deployment
 
 AG='s50-ver-agent'; BASE='http://localhost:8000/api/v1'
-H={'X-User-Team':'platform'}
+H={'X-User-Team':'platform', 'Authorization':'Bearer ${E2E_TOKEN}'}
 
 async def vcount(db, agent_id):
     return (await db.execute(select(func.count(AgentVersion.id)).where(AgentVersion.agent_id==agent_id))).scalar()

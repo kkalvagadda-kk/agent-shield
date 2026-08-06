@@ -58,6 +58,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: the setup block below hits POST /teams/ (routers/teams.py),
+# POST /agents/{name}/versions, POST /agents/{name}/deploy and POST /admin/grants
+# (routers/admin.py) — all now require a real JWT. They share one post() helper, so the
+# Bearer goes there once. /api/v1/tools/* and /api/v1/agents are NOT among R1's ten.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agent and tools..."
@@ -91,7 +99,8 @@ BASE = 'http://localhost:8000/api/v1'
 
 def post(path, body):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST')
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
     try:
         r = urllib.request.urlopen(req, timeout=10)
         raw = r.read()

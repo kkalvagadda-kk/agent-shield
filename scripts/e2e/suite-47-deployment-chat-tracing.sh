@@ -34,6 +34,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/versions now requires a real JWT. The seed block below
+# swallows its own errors (`2>/dev/null || true`), so an unauthenticated 401 there would
+# surface later as a missing version row rather than as an auth failure. Call
+# e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
@@ -55,6 +62,7 @@ import httpx
 httpx.post('http://localhost:8000/api/v1/agents/',
     json={'name': 's47-trace-a', 'team': 'platform', 'agent_type': 'declarative'}, timeout=5)
 httpx.post('http://localhost:8000/api/v1/agents/s47-trace-a/versions',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)
 " 2>/dev/null || true
 

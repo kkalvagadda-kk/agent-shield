@@ -42,6 +42,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# The /workflows/* calls are routers/composite_workflows.py, which R1 does NOT protect.
+# This driver waits for two real sandbox deploys and then a live workflow run, well past
+# the 300s token lifespan, so BearerAuth re-mints per request instead of a static token.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 58: REAL durable-workflow run (no fakes) ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -49,6 +57,8 @@ echo ""
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY' 2>/dev/null
 import asyncio, os, uuid
 import httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, text
 from db import AsyncSessionLocal
 from models import AgentRun, CompositeWorkflow, Deployment, Agent
@@ -97,7 +107,8 @@ async def wait_run_terminal(run_id, timeout=150):
 
 async def main():
     out={}
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid=await provider_id(c)
     # 1. create + deploy two real durable agents
     for n in NAMES:
