@@ -298,14 +298,19 @@ test.describe("conversations sidebar — standalone page + docked History", () =
 
     // DoD #2 — save → reload → assert survived: reload the page, re-open History,
     // and confirm the thread is STILL listed from the backend (not store state).
-    await page.reload();
-    await page.waitForLoadState("networkidle");
+    // ARM BEFORE THE RELOAD, for the same reason as the first fetch above: the dock is
+    // open by DEFAULT (AgentChatPage.tsx:99), so ConversationSidebar re-mounts and
+    // re-fetches during the reload's initial render. Arming afterwards waits for a
+    // response already delivered and times out at 20s on a page that worked. I fixed the
+    // first occurrence and missed this one — same bug, twice in one file.
     const reListed = page.waitForResponse(
       (r) =>
         new RegExp(`/api/v1/agents/${AGENT}/memory/conversations`).test(r.url()) &&
         r.request().method() === "GET",
       { timeout: 20_000 }
     );
+    await page.reload();
+    await page.waitForLoadState("networkidle");
     await openHistoryDock(page);
     const reListedResp = await reListed;
     expect(reListedResp.status()).toBe(200);
