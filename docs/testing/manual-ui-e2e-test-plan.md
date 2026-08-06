@@ -228,6 +228,21 @@ deliberately absent from suite-97's completeness gate until it does.
   `error_code === "no_platform_role"` as a distinct state instead of a null role. Then it becomes
   cheaply testable.
 
+- **G-R1-7 — `suite-18-opa-governance` T-S18-005/006/011 fail on SCAVENGED tool fixtures, not on
+  policy.** Reproduced identically standalone against `0.2.261` (10 passed / 3 failed / 1 skipped).
+  **Not an R1 regression, and R1 cannot cause it:** OPA decisions are served by the agent pod's
+  sidecar at `localhost:8181` and never traverse registry-api, which is the only thing R1 changed.
+  Root cause: the three failing cases assert on **pre-existing shared** tools — `email_notifier`,
+  `cic-echo-tool`, `get_weather` — and a live bundle query shows **zero of the 47 agents grant any
+  of them**. T-S18-007 passes using `opa-s18-crit-1785707664`, a tool minted ~3 days earlier, which
+  confirms the suite reuses cluster tools rather than creating its own. Same scavenged-fixture class
+  as `catalog-overview-parity` (which its own header forbade and then did anyway): the verdict
+  tracks leftover cluster state. Bundle health itself is fine — T-S18-001/002/003 all pass.
+  Fix is to create and grant the tools it asserts on, or skip with a named reason when they are
+  absent. **Process gap this exposed:** R1 shipped without a pre-change baseline of the BASH layer
+  (only the browser layer was baselined), so attribution had to be reconstructed after the fact
+  instead of read off a diff.
+
 **not-yet-wired (debt)**
 
 - **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
