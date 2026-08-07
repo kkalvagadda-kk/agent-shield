@@ -31,7 +31,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${EVENT_AGENT}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${EVENT_AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -144,7 +144,7 @@ if data.get('matched'):
     sys.exit(1)
 
 # Cleanup bare agent
-httpx.delete(f'http://localhost:8000/api/v1/agents/{bare}')
+httpx.delete(f'http://localhost:8000/api/v1/agents/{bare}', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 print('OK')
 " && pass "T-S22-004 — no triggers returns not matched" || fail "T-S22-004"
 

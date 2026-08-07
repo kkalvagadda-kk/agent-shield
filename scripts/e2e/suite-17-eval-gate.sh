@@ -47,7 +47,7 @@ cleanup() {
 import urllib.request
 for name in ['eval-gate-s17-agent', 'eval-gate-s17-noversion', 'eval-gate-s17-risky', 'eval-gate-s17-auto', 'eval-gate-s17-fail']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
@@ -163,7 +163,7 @@ echo "--- T-S17-003: publish blocked (eval not passed) ---"
 run_test "T-S17-003 POST /agents/eval-gate-s17-agent/publish → 422 eval_not_passed" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -191,7 +191,7 @@ r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'patch expected 200 got {r.status}'
 # now publish
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'publish expected 202 got {r.status}'
 d = json.loads(r.read())
@@ -224,7 +224,7 @@ try:
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/eval-gate-s17-noversion/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -263,7 +263,7 @@ req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions',
 vid = json.loads(urllib.request.urlopen(req).read())['id']
 # publish blocked on adversarial
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -277,7 +277,7 @@ req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions/' + vi
     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 urllib.request.urlopen(req, timeout=5)
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'expected 202 after adversarial passed got {r.status}'
 print('adversarial gate: 422 then 202 after passing')
@@ -423,7 +423,7 @@ for ag in eval-gate-s17-agent eval-gate-s17-noversion eval-gate-s17-risky eval-g
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, urllib.error
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/$ag', method='DELETE'))
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/$ag', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
     print('deleted $ag')
 except Exception:
     pass
@@ -493,7 +493,7 @@ urllib.request.urlopen(req)
 def publish():
     r = urllib.request.Request(base + '/agents/' + name + '/publish',
         data=json.dumps({}).encode(),
-        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     return json.loads(urllib.request.urlopen(r).read())
 
 first = publish()

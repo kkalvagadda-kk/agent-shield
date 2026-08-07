@@ -59,7 +59,7 @@ cleanup() {
 import urllib.request
 for name in ['pg-s8-run-agent', 'pg-s8-hitl-agent']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
   if [ -n "$DATASET_ID" ]; then
@@ -743,7 +743,7 @@ run_test "Cleanup: DELETE pg-s8-hitl-agent → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/pg-s8-hitl-agent',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 204, f'expected 204 got {r.status}'
@@ -753,7 +753,7 @@ run_test "Cleanup: DELETE pg-s8-run-agent → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/pg-s8-run-agent',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 204, f'expected 204 got {r.status}'

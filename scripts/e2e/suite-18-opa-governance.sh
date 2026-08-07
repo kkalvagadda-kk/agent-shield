@@ -72,7 +72,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request, json
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 try:
     r = urllib.request.urlopen('http://localhost:8000/api/v1/tools/?limit=200', timeout=5)
@@ -675,7 +675,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request, urllib.error
 try:
     urllib.request.urlopen(urllib.request.Request(
-        'http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'))
+        'http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
     print('deleted ${AGENT_NAME}')
 except Exception as e:
     print(f'cleanup warn: {e}')

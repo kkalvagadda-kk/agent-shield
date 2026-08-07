@@ -151,7 +151,8 @@ run '
 import httpx, uuid
 
 c = httpx.Client(base_url="http://localhost:8000", follow_redirects=True,
-                 headers={"X-User-Sub": "test-suite-44"})
+                 headers={"X-User-Sub": "test-suite-44",
+                          "Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 
 SUFFIX = uuid.uuid4().hex[:6]
 HELPER1 = f"ver-test-44-h1-{SUFFIX}"

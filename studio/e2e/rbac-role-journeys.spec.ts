@@ -243,6 +243,54 @@ test.describe("contributor", () => {
   });
 });
 
+// ── R3: artifact-scoped mutations, from the browser ─────────────────────────
+//
+// suite-98 proves the API returns these 403s. What only the browser can show is what
+// the person SEES when it happens — R2's lesson was that a correct API and a broken
+// screen look identical from the pod.
+
+test.describe("contributor — R3 artifact scope", () => {
+  test.use({ storageState: stateFor("contributor") });
+  test.beforeAll(() => assertRoleSession("contributor"));
+
+  test("T-RJ-010 opening someone else's agent does not blank the app", async ({ page }) => {
+    // rj-picker-probe is seeded by the admin, so this contributor holds no grant on it.
+    // Every management call the detail page makes will now 403. The page must degrade,
+    // not unmount — this is the blank-page class re-asserted at the new 403 surface.
+    const errors = trackPageErrors(page);
+    await page.goto(`${BASE_URL}/agents/${PICKER_AGENT}`);
+    await expect(page.locator(SHELL)).toBeVisible();
+    await expect(page.getByRole("main")).toBeVisible();
+    expectNoPageErrors(errors);
+  });
+
+  test("T-RJ-011 a non-owner's edit is REFUSED by the API, not just hidden by the UI", async () => {
+    // The nav-guard-is-not-the-control case, at artifact scope. If the only thing
+    // stopping a non-owner from editing were a disabled button, R3 would be theatre.
+    const ctx = await pwRequest.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: true });
+    const tokenRes = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
+      form: {
+        grant_type: "password",
+        client_id: "agentshield-studio",
+        username: "e2e-contributor",
+        password: PERSONA_PASS,
+      },
+    });
+    expect(tokenRes.ok(), `contributor token: ${tokenRes.status()}`).toBeTruthy();
+    const token = (await tokenRes.json()).access_token;
+
+    const res = await ctx.patch(`/api/v1/agents/${PICKER_AGENT}`, {
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      data: { description: "hijacked by a non-owner" },
+    });
+    expect(
+      res.status(),
+      "a contributor with no grant on this agent must not be able to edit it",
+    ).toBe(403);
+    await ctx.dispose();
+  });
+});
+
 // ── platform-admin (the "did not deny the right role" half) ─────────────────
 
 test.describe("platform-admin", () => {

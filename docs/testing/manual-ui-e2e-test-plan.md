@@ -45,6 +45,57 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — RBAC R3 (artifact-scoped enforcement) — 2026-08-07 (registry-api 0.2.264)
+
+R3 closed what R2 left: `PATCH`/`PUT`, `DELETE` and `POST /publish` on
+`/api/v1/agents/{name}` were **fully unauthenticated** — anyone reaching the API could
+rename, soft-delete (which also terminates deployments and disarms triggers) or push any
+agent into the review queue. R2 had closed a read disclosure on `/admin/*` while these
+destructive writes stayed open, which made them the biggest remaining hole. Design:
+`docs/design/rbac-and-artifact-authorization.md` §5 R3.
+
+- **closed — G-R2-4.** `agents.py` was 1 protected / 11 exempt after R2. The mutations
+  now require platform-admin or `agent-admin` on the artifact; quarantine is
+  platform-admin **only** (it is applied *to* an owner, so an owner able to lift it makes
+  it advisory). `publish.submitted_by` now comes from the verified token instead of an
+  `X-User-Sub` header defaulting to `"system"` — that name is what a reviewer sees when
+  deciding, so the header was a forged signature on a governance record.
+- **closed — §1.3's orphan list.** `can_deploy_to_production`, `can_use_playground` and
+  `can_manage_artifact` all have live callers. Only `can_approve_hitl` remains (R5).
+- **closed — 35 suites mutated agents with no credential.** A router change without the
+  suite fixes turns ~31 suites red; that is the R1/HC-3 lesson and it is why they are in
+  this commit. 61 call sites across two shapes, all verified to interpolate.
+- **NOT YET VERIFIED ON A CLUSTER — R3 is code-complete but unproven.** The VPN to the
+  EKS test cluster dropped before `0.2.264` could be built, so nothing in this phase has
+  been run against a deployed image. Local gates only (tsc, Vitest, `bash -n` on every
+  touched suite, `ast.parse` on every touched module, coupling 43/43, manifest audit).
+  The RED baseline was NOT captured either — the cluster is still on `0.2.263`, which has
+  R2 but not R3, so it is still capturable and should be taken **before** deploying:
+  ```
+  KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/e2e/suite-98-rbac-role-enforcement.sh
+  #   expect T-S98-011..014 and -016 RED, -015 green (it is the over-reach guard)
+  KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/deploy-eks.sh registry-api
+  #   then suite-98 must go 17/0, plus the blast-radius sweep and the Playwright specs
+  ```
+  Standing evidence that the hole was real, independent of that run: the T-S97-011 canary
+  measured `agents` at **1 protected / 11 exempt** on the deployed `0.2.263`, and 31 e2e
+  suites were successfully deleting agents with **no credential** against it. Both are
+  reproductions; neither is a substitute for the suite going red then green.
+- **not-yet-wired (debt) — G-R3-1, the playground gate is bypassable by header.**
+  `can_use_playground` is applied only to a VERIFIED user, because `eval-runner` POSTs
+  `/playground/runs` with `X-User-Sub: eval-runner` and no Bearer; gating the route would
+  break batch eval. So a caller who sends that header with no token still lands in the
+  `_SERVICE_IDENTITIES` branch and skips the check. What IS closed is every authenticated
+  path, including all of Studio. Closing the rest needs eval-runner to hold a real
+  verifiable identity — identity-propagation Phase 3 / migration `0081`.
+- **not-yet-wired (debt) — the 404-before-403 ordering on agent mutations.** The agent
+  must be fetched before it can be authorized, so an unauthorized caller can still tell
+  "exists" from "does not". Not a new leak: `GET /agents/{name}` is deliberately open for
+  the in-cluster machine callers, so names are already enumerable. Same Phase 3 owner.
+- **still open — workflow mutations.** R3 covered `agents.py`. The parallel surface in
+  `composite_workflows.py` has not been audited to the same standard; `ENFORCE_TRIGGER_MGMT`
+  is still `False` (R4).
+
 ## Known gaps — RBAC R2 (global-role enforcement) — 2026-08-06 (registry-api 0.2.263 / studio 0.1.184)
 
 R2 is the first phase that returns a 403 to a real user: `/api/v1/admin/*` and

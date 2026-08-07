@@ -39,6 +39,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 PASS=0
 FAIL=0
 MANUAL=0
@@ -81,7 +88,7 @@ cleanup() {
 import urllib.request, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  method='DELETE'
+  method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 try:
   urllib.request.urlopen(req)
@@ -100,7 +107,7 @@ except Exception as e:
 import urllib.request, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT',
-  method='DELETE'
+  method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 try:
   urllib.request.urlopen(req)
@@ -131,7 +138,7 @@ try:
   if status == 'quarantined':
     req = urllib.request.Request(
       'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-      method='DELETE'
+      method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req)
     print('preexists-unquarantined')
@@ -183,7 +190,7 @@ req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
   data=b'',  # no body required
   headers={'Content-Type': 'application/json'},
-  method='POST'
+  method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -294,7 +301,7 @@ run_test "DELETE /agents/$QUARANTINE_AGENT/quarantine → 200, status=active" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  method='DELETE'
+  method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -349,7 +356,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  data=b'', headers={'Content-Type': 'application/json'}, method='POST'
+  data=b'', headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 urllib.request.urlopen(req)
 " 2>/dev/null || true
@@ -358,7 +365,7 @@ run_test "POST quarantine on already-quarantined agent → 409 Conflict" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  data=b'', headers={'Content-Type': 'application/json'}, method='POST'
+  data=b'', headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 try:
   urllib.request.urlopen(req)
@@ -378,7 +385,7 @@ req = urllib.request.Request('http://localhost:8000/api/v1/agents/${QUARANTINE_A
     data=b'{}', headers={
         'Content-Type': 'application/json',
         'X-AgentShield-Trace-ID': '${QUARANTINE_TRACE_ID}',
-    }, method='POST')
+    }, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 try:
     r = urllib.request.urlopen(req, timeout=5)
     trace_echo = r.headers.get('X-AgentShield-Trace-ID', 'MISSING')

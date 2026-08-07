@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
+from rbac import can_use_playground, get_user_global_role
 from models import Agent, Deployment, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
 from schemas import (
@@ -199,6 +200,37 @@ async def create_playground_run(
 
     # Resolve caller identity: JWT sub takes precedence over X-User-Sub header
     caller = (user or {}).get("sub") or x_user_sub or "dev"
+
+    # ── Role gate: the playground is contributor+ (R3, OQ-3 resolved 2026-08-07) ──
+    # `can_use_playground` has existed and been correct in rbac.py since R-phase 1 with
+    # ZERO callers (§1.3). OQ-3 asked whether a `consumer` should get the playground;
+    # decided NO — consumers browse the catalog and view runs, which is what the role
+    # table in rbac-and-artifact-authorization.md §2 already said. So wiring it changes
+    # no rule, it just makes the existing rule real.
+    #
+    # Applied ONLY to a VERIFIED user. `require_user` cannot go on this route: the
+    # eval-runner Job POSTs here with `X-User-Sub: eval-runner` and no Bearer, and
+    # gating it would break batch eval — degrading the feature to make an auth error go
+    # away. It reuses the `_SERVICE_IDENTITIES` exemption that already governs the owner
+    # check below rather than inventing a second notion of "is this a service".
+    #
+    # STATE THE LIMIT PLAINLY: a caller who sends `X-User-Sub: eval-runner` with no token
+    # still lands in the service branch and skips this gate. That is not closed here and
+    # cannot be — closing it requires eval-runner to hold a real verifiable identity,
+    # which is identity-propagation-architecture.md Phase 3 (migration 0081). What this
+    # DOES close is every authenticated path, including all of Studio: a logged-in
+    # consumer is now refused. Recorded as G-R3-1.
+    if user is not None and caller not in _SERVICE_IDENTITIES:
+        if not await can_use_playground(db, caller):
+            role = await get_user_global_role(db, caller)
+            logger.warning("playground: DENY sub=%s role=%s — needs contributor+", caller, role)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"The playground requires the 'contributor' role or higher; you have "
+                    f"'{role}'. Consumers can browse the catalog and view runs."
+                ),
+            )
 
     # Owner check (skip in dev mode when no header, and for reserved service
     # identities like the eval-runner that run agents they don't own).

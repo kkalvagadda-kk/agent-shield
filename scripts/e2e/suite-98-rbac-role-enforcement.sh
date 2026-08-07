@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/e2e/suite-98-rbac-role-enforcement.sh
 #
-# E2E Suite 98: RBAC R2 — GLOBAL ROLE ENFORCEMENT.
+# E2E Suite 98: RBAC R2 + R3 — GLOBAL ROLE + ARTIFACT-SCOPED ENFORCEMENT.
 #
 # STATUS: R2 SHIPPED 2026-08-06 (registry-api 0.2.263). This suite was written FIRST and
 # ran RED against 0.2.261/0.2.262; it must now be GREEN and stay green.
@@ -59,7 +59,20 @@
 #     Me" platform-wide. The census stays admin-only; GET /api/v1/me/team answers the
 #     self-scoped question. Same reasoning produced GET /api/v1/users/directory for the
 #     artifact grant picker, which a contributor must be able to use (design §2).
-#   (can_deploy_to_production / can_use_playground remain orphans — that is R3.)
+#
+# WHAT R3 DID (2026-08-07, registry-api 0.2.264) — cases 011-016
+#   - `_require_manage` on PATCH/PUT, DELETE and POST /publish: platform-admin OR
+#     `agent-admin` on that artifact. All three were FULLY UNAUTHENTICATED. R2 closed a
+#     read disclosure on /admin/* while these destructive writes stayed anonymous, which
+#     made them the biggest remaining hole once R2 landed.
+#   - quarantine (POST + DELETE) -> platform-admin ONLY, not agent-admin: it is applied
+#     TO an owner, often because of what their agent did, so an owner who could lift it
+#     makes it advisory.
+#   - `can_deploy_to_production` on the PRODUCTION branch of deploy only — sandbox stays
+#     contributor+ so the build/evaluate loop does not become admin-only.
+#   - `can_use_playground` for VERIFIED users (OQ-3 resolved: contributor+).
+#   All three were orphans with zero callers (§1.3); §1.3's list is now closed except
+#   can_approve_hitl, which is R5.
 #
 # CASES
 #   T-S98-001 — a CONSUMER is refused the admin surface        (GET /admin/users -> 403)
@@ -72,8 +85,14 @@
 #   T-S98-008 — the grant picker still works   (contributor GET /users/directory -> 200)
 #   T-S98-009 — the directory leaks no more than a name  (no email/role/team/enabled)
 #   T-S98-010 — a CONTRIBUTOR may still create an agent      (POST /agents/ -> 201)
+#   T-S98-011 — ANONYMOUS cannot delete an agent             (DELETE /agents/{n} -> 401)
+#   T-S98-012 — a NON-OWNER contributor cannot delete it     (DELETE -> 403)
+#   T-S98-013 — a NON-OWNER contributor cannot edit it       (PATCH  -> 403)
+#   T-S98-014 — quarantine is platform-admin ONLY            (contributor -> 403)
+#   T-S98-015 — the OWNER may still edit their own agent     (PATCH  -> 200)
+#   T-S98-016 — a CONSUMER is refused the playground         (POST /playground/runs -> 403)
 #
-# T-S98-003, -005, -007, -008 and -010 are the guards that stop an over-broad "fix": R2
+# T-S98-003, -005, -007, -008, -010 and -015 are the guards that stop an over-broad "fix": R2/R3
 # must deny the wrong role WITHOUT denying the right one, must not turn authentication
 # into authorization, and must not take the self-scoped reads down with the census. A
 # change that 403s everybody would pass 001/002/004/006 alone.
@@ -88,7 +107,7 @@ API_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-a
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 [ -n "$API_POD" ] || { echo "ERROR: no Running registry-api pod in $NAMESPACE"; exit 1; }
 
-echo "=== Suite 98: RBAC R2 role enforcement ==="
+echo "=== Suite 98: RBAC R2 + R3 role enforcement ==="
 echo "  Namespace: $NAMESPACE"
 echo "  Pod:       $API_POD"
 echo ""
@@ -231,6 +250,47 @@ case "$C10" in
   201|409) record PASS "T-S98-010 a CONTRIBUTOR may still create an agent  |  POST /agents/ -> $C10 (201 first run, 409 after — both mean the role gate let them through)" ;;
   *)       record FAIL "T-S98-010 a CONTRIBUTOR may still create an agent  |  POST /agents/ -> $C10 (want 201 or 409). can_create_agent is contributor+, not admin-only — a 403 here means R2 over-reached and only platform-admin can build anything." ;;
 esac
+
+# ── R3 (2026-08-07): the artifact-scoped mutations + the deploy/playground gates ──
+# These were fully UNAUTHENTICATED before R3 — anyone reaching the API could rename,
+# soft-delete or quarantine any agent. R2 closed a read disclosure on /admin/* while
+# these destructive writes stayed open, which made them the biggest remaining hole.
+S98_R3_AGENT="s98-r3-victim"
+status "$ADMIN_TOK" POST /api/v1/agents/ "{\"name\":\"${S98_R3_AGENT}\",\"description\":\"suite-98 R3 target (admin-owned)\",\"team\":\"platform\"}" >/dev/null 2>&1 || true
+
+C11="$(status "" DELETE "/api/v1/agents/${S98_R3_AGENT}")"
+[ "$C11" = "401" ] \
+  && record PASS "T-S98-011 ANONYMOUS cannot delete an agent  |  DELETE /agents/{name} -> 401 (it also terminates deployments and disarms triggers)" \
+  || record FAIL "T-S98-011 ANONYMOUS cannot delete an agent  |  DELETE /agents/{name} -> $C11 (want 401)"
+
+C12="$(status "$CONTRIB_TOK" DELETE "/api/v1/agents/${S98_R3_AGENT}")"
+[ "$C12" = "403" ] \
+  && record PASS "T-S98-012 a NON-OWNER contributor cannot delete someone else's agent  |  -> 403 (contributor+ is not enough; needs agent-admin ON IT)" \
+  || record FAIL "T-S98-012 a NON-OWNER contributor cannot delete someone else's agent  |  -> $C12 (want 403)"
+
+C13="$(status "$CONTRIB_TOK" PATCH "/api/v1/agents/${S98_R3_AGENT}" '{"description":"hijacked"}')"
+[ "$C13" = "403" ] \
+  && record PASS "T-S98-013 a NON-OWNER contributor cannot edit someone else's agent  |  PATCH -> 403" \
+  || record FAIL "T-S98-013 a NON-OWNER contributor cannot edit someone else's agent  |  PATCH -> $C13 (want 403)"
+
+C14="$(status "$CONTRIB_TOK" POST "/api/v1/agents/${S98_R3_AGENT}/quarantine")"
+[ "$C14" = "403" ] \
+  && record PASS "T-S98-014 quarantine is platform-admin ONLY  |  contributor POST /quarantine -> 403 (an owner must not be able to lift a quarantine applied against them)" \
+  || record FAIL "T-S98-014 quarantine is platform-admin ONLY  |  contributor POST /quarantine -> $C14 (want 403)"
+
+# The over-reach guard for the whole R3 block: the OWNER must still be able to manage
+# their own artifact. A change that 403s everyone passes 011-014 and breaks the product.
+S98_OWNED="s98-r3-owned"
+status "$CONTRIB_TOK" POST /api/v1/agents/ "{\"name\":\"${S98_OWNED}\",\"description\":\"suite-98 R3 target (contributor-owned)\",\"team\":\"platform\"}" >/dev/null 2>&1 || true
+C15="$(status "$CONTRIB_TOK" PATCH "/api/v1/agents/${S98_OWNED}" '{"description":"owner edit"}')"
+[ "$C15" = "200" ] \
+  && record PASS "T-S98-015 the OWNER may still edit their own agent  |  PATCH -> 200 (creator auto-grant gives agent-admin)" \
+  || record FAIL "T-S98-015 the OWNER may still edit their own agent  |  PATCH -> $C15 (want 200) — R3 over-reached; a contributor cannot manage what they created."
+
+C16="$(status "$CONSUMER_TOK" POST /api/v1/playground/runs "{\"agent_name\":\"${S98_OWNED}\",\"message\":\"probe\"}")"
+[ "$C16" = "403" ] \
+  && record PASS "T-S98-016 a CONSUMER is refused the playground  |  POST /playground/runs -> 403 (OQ-3 resolved: contributor+)" \
+  || record FAIL "T-S98-016 a CONSUMER is refused the playground  |  POST /playground/runs -> $C16 (want 403). can_use_playground had zero callers before R3."
 
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="

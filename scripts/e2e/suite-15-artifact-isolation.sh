@@ -92,7 +92,7 @@ cleanup() {
 import urllib.request
 for name in ['${ALICE_AGENT}', '${SYSTEM_AGENT}']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
 }
@@ -149,7 +149,7 @@ import urllib.request, urllib.error
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${name}',
-        method='DELETE'
+        method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req)
 except: pass
@@ -521,7 +521,7 @@ run_test "Cleanup: DELETE /agents/${ALICE_AGENT} → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${ALICE_AGENT}',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
@@ -531,7 +531,7 @@ run_test "Cleanup: DELETE /agents/${SYSTEM_AGENT} → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${SYSTEM_AGENT}',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'

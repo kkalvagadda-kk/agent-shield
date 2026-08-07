@@ -49,7 +49,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
@@ -60,7 +60,7 @@ try:
     for a in agents:
         if a.get('name','').startswith('crit-gate-test-'):
             try:
-                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE'), timeout=5)
+                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
             except Exception: pass
 except Exception: pass
 " 2>/dev/null || true
@@ -564,7 +564,7 @@ req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
     data=json.dumps({'publish_status': 'deprecated'}).encode(),
     headers={'Content-Type': 'application/json'},
-    method='PATCH',
+    method='PATCH', headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
 )
 try:
     urllib.request.urlopen(req)

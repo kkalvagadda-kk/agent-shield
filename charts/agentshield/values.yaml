@@ -751,7 +751,11 @@ registry-api:
     #          split: census stays admin-only, new self-scoped GET /api/v1/me/team backs
     #          the sidebar for every role; new GET /api/v1/users/directory backs the
     #          grant picker. MUST match scripts/deploy-cpe2e.sh REGISTRY_API_TAG.
-    tag: "0.2.263"
+    # 0.2.264: RBAC R3 — agent PATCH/DELETE/publish require platform-admin or
+    #          agent-admin on the artifact (all three were unauthenticated);
+    #          quarantine is platform-admin only; can_deploy_to_production gates
+    #          the production deploy branch; can_use_playground gates the playground.
+    tag: "0.2.264"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

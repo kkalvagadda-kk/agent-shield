@@ -65,7 +65,7 @@ import urllib.request, json
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${agent_name}',
-        method='DELETE'
+        method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req, timeout=5)
     print('  deleted: ${agent_name}')

@@ -57,7 +57,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   if [ -n "$CRITICAL_TOOL_ID" ]; then
@@ -76,7 +76,7 @@ try:
     for a in agents:
         if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
             try:
-                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE'), timeout=5)
+                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
             except Exception: pass
 except Exception: pass
 " 2>/dev/null || true
@@ -135,7 +135,7 @@ import urllib.request, urllib.error
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
-        method='DELETE'
+        method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req)
 except: pass
@@ -236,7 +236,7 @@ req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
     headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 try:
     r = urllib.request.urlopen(req)
@@ -287,7 +287,7 @@ req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
     headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'
@@ -372,7 +372,7 @@ req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
     headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'
@@ -523,7 +523,7 @@ run_test "Cleanup: DELETE /agents/${AGENT_NAME} → 204 (soft-delete)" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
@@ -717,7 +717,7 @@ try:
         if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
             req = urllib.request.Request(
                 'http://localhost:8000/api/v1/agents/' + a['name'],
-                method='DELETE')
+                method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
             try:
                 urllib.request.urlopen(req, timeout=5)
                 print('  deleted: ' + a['name'])

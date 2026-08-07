@@ -24,6 +24,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import require_user
+from rbac import can_deploy_to_production, get_user_global_role
 from crypto import decrypt_json
 from agent_config import build_config_snapshot
 from db import get_db
@@ -476,6 +477,7 @@ async def deploy_agent(
     name: str,
     body: DeploymentCreate,
     x_user_team: Optional[str] = Header(default=None, alias="X-User-Team"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> DeploymentResponse:
     """Create a new Deployment for a specific agent version.
@@ -649,6 +651,36 @@ async def deploy_agent(
     # evaluated in the playground before it earns eval_passed. The eval gate now
     # lives on PUBLISH (see routers/agents.py publish_agent).
     if body.environment == "production":
+        # ── Gate 0: AUTHORIZATION — production deploy (R3, 2026-08-07) ────────────
+        # `can_deploy_to_production` has existed and been correct in rbac.py since
+        # R-phase 1 with ZERO callers (§1.3), on what the design doc calls "the single
+        # highest-consequence action on the platform". R1 made this route require a
+        # token; until now ANY authenticated user — including a `consumer` — could put
+        # any agent into production. platform-admin, or `agent-admin` on this artifact.
+        #
+        # Deliberately INSIDE the production branch, not on the route: sandbox stays
+        # contributor+ so an agent can be deployed and evaluated before it has earned
+        # anything. Guarding the whole route would have made the playground loop
+        # admin-only, which is a different product.
+        #
+        # Ordered BEFORE the eval gates on purpose. A 422 telling an unauthorized caller
+        # which versions have passed evaluation answers a question they were not
+        # entitled to ask.
+        if not await can_deploy_to_production(db, claims["sub"], agent.id):
+            role = await get_user_global_role(db, claims["sub"])
+            logger.warning(
+                "deploy_agent: DENY production sub=%s role=%s agent=%s",
+                claims["sub"], role, agent.name,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Deploying '{agent.name}' to production requires the 'agent-admin' "
+                    f"role on it, or platform-admin; you have '{role}' and no grant on "
+                    "this agent. Sandbox deploys are unaffected."
+                ),
+            )
+
         # Gate 3: eval gate — only passed versions may reach production
         if not version.eval_passed:
             raise HTTPException(

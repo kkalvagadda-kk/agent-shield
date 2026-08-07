@@ -49,7 +49,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
 for n in ('s46-pin-a', 's46-pin-b'):
-    try: httpx.delete(f'http://localhost:8000/api/v1/agents/{n}', timeout=5)
+    try: httpx.delete(f'http://localhost:8000/api/v1/agents/{n}', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, timeout=5)
     except Exception: pass
 " 2>/dev/null || true
 }

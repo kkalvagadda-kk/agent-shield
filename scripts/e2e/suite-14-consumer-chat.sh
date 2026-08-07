@@ -44,7 +44,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
 
@@ -265,7 +265,7 @@ esac
 echo "[T-S14-007] Cleanup: delete s14-promote-test agent"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
-httpx.delete('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5)
+httpx.delete('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 " 2>/dev/null || true
 pass "T-S14-007: cleanup complete"
 

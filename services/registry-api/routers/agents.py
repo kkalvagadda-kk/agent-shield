@@ -28,7 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_endpoints import DispatchTargetError, resolve_dispatch_target
 from auth_middleware import get_optional_user, require_user
 from db import get_db
-from rbac import can_create_agent, get_user_global_role, grant_creator_admin
+from rbac import (
+    can_create_agent,
+    can_manage_artifact,
+    get_user_global_role,
+    grant_creator_admin,
+    require_global_role,
+)
 from models import (
     Agent,
     AgentIdentity,
@@ -55,6 +61,46 @@ from schemas import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
+
+
+async def _require_manage(db: AsyncSession, claims: dict, agent: Agent) -> None:
+    """403 unless the caller may manage THIS agent: platform-admin, or `agent-admin`
+    granted on this artifact (which its creator receives automatically).
+
+    R3, 2026-08-07. Until this landed, `PATCH /agents/{name}`, `DELETE /agents/{name}`
+    and `POST /agents/{name}/publish` took only `Depends(get_db)` — no authentication at
+    all. Anyone who could reach the API could rename, soft-delete (which also terminates
+    the agent's deployments and disarms its triggers) or submit for publish ANY agent on
+    the platform. R2 closed a read disclosure on `/admin/*` while these destructive
+    mutations stayed anonymous; measured on 0.2.263, `agents.py` was 1 protected / 11
+    exempt (suite-97 T-S97-011).
+
+    One helper rather than the same six lines inlined five times, and it takes the
+    already-fetched `agent` instead of re-querying: two lookups of one row is how a
+    handler ends up authorizing a different object than it mutates.
+
+    NOTE the 404-before-403 ordering in the callers: the agent must be fetched before it
+    can be authorized, so a caller without access can still distinguish "exists" from
+    "does not". Not a new leak — `GET /agents/{name}` is deliberately open for the
+    in-cluster machine callers (declarative-runner, deploy-controller, eval-runner), so
+    names are already enumerable. Closing that is the service-identity work in
+    identity-propagation-architecture.md Phase 3, not this phase.
+    """
+    caller = claims["sub"]
+    if await can_manage_artifact(db, caller, agent.id):
+        return
+    role = await get_user_global_role(db, caller)
+    logger.warning(
+        "agents: DENY sub=%s role=%s agent=%s — needs platform-admin or agent-admin on it",
+        caller, role, agent.name,
+    )
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"Managing '{agent.name}' requires the 'agent-admin' role on it, or "
+            f"platform-admin; you have '{role}' and no grant on this agent."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -301,10 +347,13 @@ async def get_agent(
 async def update_agent(
     name: str,
     body: AgentUpdate,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentResponse:
     """Update mutable agent fields (description, status, metadata).
-    Returns 404 if the agent does not exist."""
+
+    Requires platform-admin or `agent-admin` on this agent (R3) — see
+    `_require_manage`. Returns 404 if the agent does not exist."""
     result = await db.execute(select(Agent).where(Agent.name == name))
     agent = result.scalar_one_or_none()
     if agent is None:
@@ -312,6 +361,7 @@ async def update_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{name}' not found.",
         )
+    await _require_manage(db, claims, agent)
 
     changed = False
     if body.description is not None:
@@ -390,10 +440,15 @@ async def update_agent(
 )
 async def delete_agent(
     name: str,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Soft-delete an agent by setting its status to 'deprecated'.
-    Returns 404 if not found."""
+
+    Requires platform-admin or `agent-admin` on this agent (R3). This is the most
+    destructive route in the router and was the most exposed: it also terminates the
+    agent's running deployments and disarms its triggers, and it took no credential at
+    all. Returns 404 if not found."""
     result = await db.execute(select(Agent).where(Agent.name == name))
     agent = result.scalar_one_or_none()
     if agent is None:
@@ -401,6 +456,7 @@ async def delete_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{name}' not found.",
         )
+    await _require_manage(db, claims, agent)
 
     agent.status = "deprecated"
     # Cascade: terminate active deployments. Set 'terminating' (NOT 'terminated')
@@ -451,6 +507,13 @@ async def delete_agent(
     "/{name}/quarantine",
     response_model=AgentResponse,
     summary="Emergency quarantine",
+    # platform-admin ONLY, not `agent-admin` — unlike the other mutations below.
+    # Quarantine is an incident-response control applied TO an owner, frequently
+    # BECAUSE of what their agent did; letting the owner lift their own quarantine
+    # would make it advisory. Design §3 matrix. Was fully unauthenticated before R3:
+    # anyone could quarantine any agent, which is a denial-of-service on every
+    # deployment of it.
+    dependencies=[require_global_role("platform-admin")],
 )
 async def quarantine_agent(
     name: str,
@@ -495,6 +558,9 @@ async def quarantine_agent(
     "/{name}/quarantine",
     response_model=AgentResponse,
     summary="Lift quarantine",
+    # platform-admin ONLY — see the POST above. Lifting must not be available to the
+    # party the quarantine was applied against.
+    dependencies=[require_global_role("platform-admin")],
 )
 async def lift_quarantine(
     name: str,
@@ -533,15 +599,25 @@ async def lift_quarantine(
 async def publish_agent(
     name: str,
     body: AgentPublishRequest,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Submit a publish request for the named agent.
+
+    Requires platform-admin or `agent-admin` on this agent (R3).
+
+    `submitted_by` used to come from an `X-User-Sub` header defaulting to the literal
+    `"system"`, on a route with no credential — so an anonymous caller could push any
+    agent into the review queue under any name. That name is what the reviewer sees when
+    deciding, which makes the header a forged signature on a governance record, not just
+    a bad audit field. It now comes from the verified token; the header is deleted rather
+    than demoted, for the same reason as in `create_agent`.
 
     - Rejects (422) if any tool assigned to the agent has risk_level='critical'.
     - Sets agent.publish_status = 'pending_review'.
     - Returns 202 with the new publish_request_id.
     """
+    submitter = claims["sub"]
     result = await db.execute(select(Agent).where(Agent.name == name))
     agent = result.scalar_one_or_none()
     if agent is None:
@@ -549,6 +625,7 @@ async def publish_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Agent '{name}' not found.",
         )
+    await _require_manage(db, claims, agent)
 
     # Load all tools assigned to this agent
     tools_result = await db.execute(
@@ -663,7 +740,7 @@ async def publish_agent(
     pr = PublishRequest(
         asset_id=agent.id,
         asset_type="agent",
-        submitted_by=x_user_sub,
+        submitted_by=submitter,
         highest_risk_level=highest,
         dependency_declaration=body.dependency_declaration,
         source_version_id=target_version.id,
@@ -682,7 +759,7 @@ async def publish_agent(
         name,
         agent.id,
         pr.id,
-        x_user_sub,
+        submitter,
     )
     return {"publish_request_id": str(pr.id)}
 

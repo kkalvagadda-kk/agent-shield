@@ -1083,7 +1083,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request
 try:
     urllib.request.urlopen(urllib.request.Request(
-        'http://localhost:8000/api/v1/agents/${CHAT_AGENT}', method='DELETE'), timeout=5)
+        'http://localhost:8000/api/v1/agents/${CHAT_AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception:
     pass
 " 2>/dev/null || true
