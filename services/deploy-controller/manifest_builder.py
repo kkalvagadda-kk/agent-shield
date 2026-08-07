@@ -177,6 +177,25 @@ def build_deployment(
             name="AGENTSHIELD_SA_TOKEN_PATH",
             value="/var/run/secrets/sa-token/token",
         ),
+        # Identity propagation P0 (design §4.3). The shared HMAC secret this pod uses to
+        # VERIFY the run-context token registry-api minted, and to EXTEND it with its own
+        # hop. Copied into this namespace by identity_secret.ensure_run_context_secret —
+        # a pod cannot mount a Secret from another namespace.
+        #
+        # optional=True so a pod whose namespace predates the Secret still SCHEDULES:
+        # run_context then raises a named error at first use, which is diagnosable, where
+        # a missing-secret CrashLoop reports only "CreateContainerConfigError". It does
+        # NOT make identity optional — without the key OPA Gate 6 denies every tool call.
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_INTERNAL_SIGNING_KEY",
+            value_from=k8s_client.V1EnvVarSource(
+                secret_key_ref=k8s_client.V1SecretKeySelector(
+                    name="agentshield-run-context",
+                    key="AGENTSHIELD_INTERNAL_SIGNING_KEY",
+                    optional=True,
+                )
+            ),
+        ),
         # MCP tool source (T012): second projected SA token path, audience
         # agentshield-mcp-proxy. The SDK/runner MCP tool executors read it and send
         # it as a Bearer token to the MCP proxy (separate audience from OPA's).

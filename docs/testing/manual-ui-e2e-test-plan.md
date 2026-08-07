@@ -45,6 +45,38 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Identity propagation P0 — 2026-08-07 (registry-api 0.2.265 / deploy-controller 0.1.42 / declarative-runner 0.1.68)
+
+The `RunContext` primitive and its signing key. Design:
+`docs/design/identity-propagation-architecture.md` §4.1/§4.3. `suite-99` **8/0**.
+
+- **the blocker this phase carried was based on a component that does not exist.** Both
+  the design doc and the plan recorded "resolve the Deployment backing the shared
+  `declarative-runner` Service (not found under any chart template)". Checking the running
+  cluster instead of the chart: there is no such Service and no such Deployment. The runner
+  runs as **per-agent pods** created by the deploy-controller. Nothing was missing — the
+  premise was wrong, and §4.3 had already named the right target. Reason from the running
+  product, not the design doc (DoD rule 6), applied to a doc I had been treating as ground
+  truth all week.
+- **deliberately no runtime change.** P0 threads nothing through a live run; that is P1. So
+  `suite-99` asserts the primitive and the wiring and never that a run carries identity — a
+  P0 suite claiming otherwise would be green for the wrong reason.
+- **the security properties are the cases that matter.** A tampered token, a token signed
+  with the wrong key, an expired token, and a missing key are all rejected — the last by
+  raising rather than degrading to unsigned. An unsigned run context is worse than none:
+  every downstream hop would treat forged identity as verified and OPA would authorize it.
+- **three vendored copies, checked mechanically.** No shared package spans `services/*` and
+  `sdk/`. T-S99-004 hashes the shared core of all three so drift fails a test — a token
+  minted by one and rejected by another surfaces as an OPA denial naming a TOOL, three
+  layers from the cause.
+- **not-yet-wired (debt) — OPA Gate 6 still denies.** P0 changes nothing for a running
+  agent: `user_id` is still `""` at the OPA call, so `user_delegated` tool calls are still
+  denied. That is the live production denial this whole workstream exists to close, and it
+  closes in **P1**, not here. Stated so "P0 shipped" is not read as "identity works".
+- **the escaping bug that bit suite-42 bit suite-99 too.** `\"PASS\" if ok else \"FAIL\"`
+  inside an f-string inside a single-quoted bash string is a SyntaxError. Second occurrence;
+  the fix both times is to precompute rather than nest quotes. Worth a lint if it recurs.
+
 ## Known gaps — RBAC R3 (artifact-scoped enforcement) — 2026-08-07 (registry-api 0.2.264)
 
 R3 closed what R2 left: `PATCH`/`PUT`, `DELETE` and `POST /publish` on

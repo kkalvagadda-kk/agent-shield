@@ -10,6 +10,7 @@ from config import Settings
 from k8s_client import K8sClient
 from identity import register_agent_identity
 from manifest_builder import build_deployment, build_service, build_httproute
+from identity_secret import ensure_run_context_secret
 from tool_secrets import resolve_and_copy_tool_secrets
 
 logger = logging.getLogger(__name__)
@@ -232,6 +233,15 @@ async def reconcile(
         tool_secret_refs = await resolve_and_copy_tool_secrets(
             agent_name, namespace, k8s, settings
         )
+
+        # Run-context signing key (identity P0, §4.3). Same shared-helper reasoning as
+        # the tool secrets above: an agent whose namespace lacks this runs with no
+        # verifiable identity, and OPA Gate 6 denies every tool call.
+        if not await ensure_run_context_secret(namespace, k8s, settings):
+            logger.warning(
+                "agent '%s' will deploy WITHOUT a run-context signing key — its tool "
+                "calls will be denied by OPA Gate 6 as missing_user_identity", agent_name,
+            )
 
         # 3. Build the K8s manifest
         manifest = build_deployment(

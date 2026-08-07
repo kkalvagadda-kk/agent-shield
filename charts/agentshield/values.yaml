@@ -755,7 +755,8 @@ registry-api:
     #          agent-admin on the artifact (all three were unauthenticated);
     #          quarantine is platform-admin only; can_deploy_to_production gates
     #          the production deploy branch; can_use_playground gates the playground.
-    tag: "0.2.264"
+    # 0.2.265: identity P0 — vendored run_context.py; mints the root run context.
+    tag: "0.2.265"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -846,7 +847,9 @@ deploy-controller:
     #   production-context HITL approvals → OPA parked low-risk tools + the inline sandbox
     #   approve/resume never worked (chat hung after approval). Now derived from the
     #   deployment's `environment`. See docs/bugs/sandbox-hitl-playground-context.md.
-    tag: "0.1.41"
+    # 0.1.42: identity P0 — copies agentshield-run-context into each agent namespace
+    #         and injects AGENTSHIELD_INTERNAL_SIGNING_KEY into every agent pod.
+    tag: "0.1.42"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
@@ -861,7 +864,8 @@ deploy-controller:
   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4.
   # 0.1.66: rebuilds sdk 0.2.9 — F-E (Issue 2) message_start + reasoning SSE events.
   # 0.1.67: memory decouple — _load_memory_context sends for_agent_context (scope=agent).
-  declarativeRunnerTag: "0.1.67"
+  # 0.1.68: identity P0 — vendored run_context.py (verify/extend only).
+  declarativeRunnerTag: "0.1.68"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

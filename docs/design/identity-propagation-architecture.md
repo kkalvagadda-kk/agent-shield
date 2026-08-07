@@ -491,7 +491,27 @@ Each phase is a real vertical slice with its own bash e2e suite (**`suite-99` on
 its own; verify with `bash scripts/run-tests.sh --audit`), and bumps the touched image tags in
 **both** `scripts/deploy-cpe2e.sh` and `charts/agentshield/values.yaml`.
 
-**Phase 0 — Shared token infra.** `run_context.py` ×3; `AGENTSHIELD_INTERNAL_SIGNING_KEY` secret + chart wiring; resolve the Deployment backing the shared `declarative-runner` Service (not found under any current chart template — must be located for the secret mount). *e2e:* `suite-99` mint/verify/expiry/tamper/cap. *Tags:* registry-api, declarative-runner, SDK version.
+**Phase 0 — ✅ SHIPPED 2026-08-07 (deploy-controller `0.1.42` / declarative-runner `0.1.68`).**
+Shared token infra: `run_context.py` ×3, `AGENTSHIELD_INTERNAL_SIGNING_KEY` Secret + chart wiring.
+*e2e:* `suite-99` — 8 cases, the primitive exercised **inside the pod** (tamper, wrong key, expiry
+and a missing key all rejected) plus a mechanical check that the three vendored copies agree.
+*Tags:* deploy-controller, declarative-runner.
+
+> **The blocker this phase carried was based on a component that does not exist.** Both this
+> section and the gap ledger recorded "resolve the Deployment backing the shared
+> `declarative-runner` Service (not found under any current chart template)". Checking the running
+> cluster rather than the chart: there is **no** `declarative-runner` Service and **no** Deployment
+> of that name. The runner image runs as **per-agent pods** in `agents-platform`, created by the
+> deploy-controller, each with its own OPA sidecar. Nothing was missing from the chart — the
+> premise was wrong. §4.3 already named the correct target (`manifest_builder.py`'s env list,
+> beside `AGENTSHIELD_SA_TOKEN_PATH`), so the design was right and only the blocker note was stale.
+> The Secret is copied into each agent namespace by `identity_secret.ensure_run_context_secret`,
+> called from **both** reconcilers — sandbox and production — because the file's own comment
+> already warns that those two paths drift.
+
+*Deliberately NOT in P0:* nothing is threaded through a live run. `suite-99` therefore asserts the
+primitive and the wiring, never that a run carries identity — that is P1, and a P0 suite claiming
+otherwise would be green for the wrong reason.
 
 **Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0080` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
 
@@ -539,7 +559,7 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 - **deferred (intentional):** legacy `x-user-sub` header shim kept through Phase 5, removed in Phase 6.
 - **deferred (intentional):** pre-existing `agent_triggers` get `created_by=NULL`; no backfill.
 - **not-yet-wired (debt):** `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` — separate approver-identity bug, fixed in Phase 6.
-- **infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service — needed for the secret mount.
+- ~~**infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service.~~ **RESOLVED 2026-08-07 — the premise was false.** No such Service or Deployment exists; the runner runs as per-agent pods created by the deploy-controller. The secret mount goes in `manifest_builder.py` (which §4.3 already said) plus a per-namespace copy from both reconcilers. Verified against the running cluster, not the chart.
 - **not-yet-wired (debt), blocked on Phase 0–2 (§4.8.4):** internal MCP `on_behalf_of` — the
   `mint_on_behalf_of_token` stub (`mcp-proxy/identity.py:77`) raises on every data-plane call.
   Fails closed and loud, so it is an unavailable feature rather than a security hole. Unblocked by

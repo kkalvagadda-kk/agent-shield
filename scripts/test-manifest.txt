@@ -147,6 +147,7 @@ api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving
 api|execution,rbac|suite-96-schedules-endpoint.sh|GET /api/v1/schedules — cross-artifact read, deny-by-default, will_fire from the same predicate dispatch uses
 api|governance,rbac|suite-97-rbac-bootstrap-and-router-auth.sh|R0/R1 — platform-admin bootstrap re-pins onto a new sub after realm recreation (DESTRUCTIVE: deletes the Keycloak admin + restarts registry-api)
 api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2+R3 GATE — authenticates as a real consumer and contributor (not platform-admin, which every other suite uses) and asserts the 403s R2/R3 introduced: admin surface, agent create, artifact-scoped PATCH/DELETE/quarantine, and the playground. Plus the over-reach guards: platform-admin still 200, anonymous still 401, the OWNER can still edit their own agent, /me/team and /users/directory still open to non-admins
+api|governance,identity|suite-99-run-context-p0.sh|Identity P0 — RunContext mint/verify/extend exercised INSIDE the pod (tamper, wrong key, expiry and a missing key all rejected), the signing key is actually mounted, and the three vendored run_context.py copies agree
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
