@@ -1039,6 +1039,50 @@ if caller:
 
 ---
 
+## Decision 43: R2 splits `/admin/teams-summary` rather than gating it — an admin endpoint was doing double duty
+
+**Date:** 2026-08-06 · **Enables R2 (`rbac-and-artifact-authorization.md` §5)**
+
+**Context:** R2's instruction was one line: wire `require_global_role("platform-admin")` onto `admin.py` + `admin_users.py`. Grepping the **browser** before doing it — the step whose omission shipped the blank page (`docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md` lesson 1) — found that `GET /admin/teams-summary` had two unrelated readers: the Admin → Access Control screen, which wants a census of every team, member and grant, and the **Sidebar + My Agents page**, which every role sees and which only ever wanted the caller's own team. The same check found the artifact grant picker (`ArtifactGrantsList`, rendered on the agent Settings tab) reading `GET /admin/users`, and that panel is reachable by a contributor.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: gate it and accept the fallout** | Both routers go platform-admin | "Shared With Me" silently empties for every non-admin; My Agents renders as though nothing is shared. A capability broken by an authorization change, with no error anywhere |
+| **B: leave `teams-summary` at `require_user`** | Authenticated, any role | The sidebar keeps working — and a `consumer` keeps reading the whole org's membership and grant map. R2 would claim to close the admin surface while leaving its most disclosure-heavy read open |
+| **C: split the question** | Census stays admin-only; new self-scoped `GET /api/v1/me/team`; new `GET /api/v1/users/directory` (name + sub only) for the picker | Two new endpoints and a client change, in exchange for both halves being right |
+
+**Choice: C.**
+
+**Consequences / trade-offs:**
+- **One endpoint was answering two questions, and that is the actual defect** — the gating just exposed it. B is the bandaid: it keeps the illegal disclosure legal because a UI depends on it. A is worse, because the breakage is silent.
+- **The split removes a crash site, not only a permission.** The old client had to `.find()` its own team inside an array of all teams by matching `members[].user_sub` — and that exact call, handed a 401 envelope as success data, unmounted the entire app in `0.1.181`. `/me/team` is scoped server-side, so there is no array to search and no member list to return. The fix for the authorization problem and the fix for the crash class are the same change.
+- **`/users/directory` is a deliberate, narrowed disclosure.** Any authenticated user can enumerate usernames. That is inherent to a name picker — you cannot delegate a role to a person you cannot name, and the model explicitly lets an `agent-admin` delegate on their own artifact. What it does *not* return is everything that made `/admin/users` sensitive: no email, no `enabled`, no team, no global role. It is strictly less than every role could already read before R2. `suite-98` T-S98-009 asserts those fields stay absent, so the endpoint cannot quietly grow back into `/admin/users`.
+- **The cost is two more endpoints to keep honest.** Both grant reads go through `team_assets.fetch_team_asset_grants`, one producer, so the census and the self-scoped view cannot drift apart — the same rule that would have prevented the duplicate raw-fetch reader in the first place.
+
+---
+
+## Decision 44: role gates get a browser journey, because every Playwright spec was already an admin
+
+**Date:** 2026-08-06 · **Corrects `rbac-and-artifact-authorization.md` §6, which called R5 "the only UX-facing phase"**
+
+**Context:** R2 is the first phase that returns a 403 to a real user. Both test layers were structurally incapable of noticing if it went wrong: all 61 bash suites authenticate as `platform-admin` (suite-98's header records this), and `global-setup.ts` logged in exactly one user, so all 47 Playwright specs ran as `platform-admin` too. A role gate whose only witnesses already pass every check is a guard that cannot fail — and the immediately preceding bug is the proof: a change that broke the app for **every** user passed the full suite, because nothing drove the screen that broke.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: API-only (suite-98)** | Assert the 403s from inside the pod | Proves the gate, proves nothing about the product. This is exactly what was done before the blank page |
+| **B: add non-admin Playwright sessions** | global-setup provisions the personas and saves a session per role | One more setup dependency; personas must exist on the cluster |
+| **C: mock the roles in Vitest** | Render Sidebar with `role: "consumer"` | Cheap, and worthless here: the failure mode is a real 403 from a real endpoint arriving at a real QueryClient. A mock hands the component whatever the test author imagined |
+
+**Choice: B**, with A retained — the two answer different questions.
+
+**Consequences / trade-offs:**
+- Personas are the **same** identities suite-98 uses and are created through the real `POST /api/v1/admin/users`, not seeded. A fixture that bypasses the creation path proves nothing about it.
+- Provisioning **fails loud**. A role spec that silently does not run is indistinguishable from one that passes, which is how `G-R0-9` stayed red for months; `assertRoleSession` turns a missing session into a named failure.
+- The default `storageState` still points at the admin session, so no existing spec changes behaviour. Roles are opt-in per describe block.
+- This also fixed a real flake: global-setup waited on `networkidle`, which the sidebar's 30-second approvals poll can prevent, leaving a half-written `state.json` that then failed **every** spec in the batch with what looked like an auth regression. It now waits for the build marker — a concrete signal that React mounted.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -1085,3 +1129,5 @@ if caller:
 | 40 | User provisioning | **No auto-provision.** Users are platform-created; `platform-admin` is the only auto-created one and **registry-api code** creates it, not the chart. Looked up by username so realm recreation self-heals; email pinned for Langfuse membership; advisory-lock single-flight reusing `mcp_health.py`'s pattern. `agent-reviewer` stops being a bootstrap user. |
 | 41 | Missing role row | **Corruption, not a user type** — remove the state rather than pick a safe default. Three producers found, two fixed: `_normalize_role(None)` raises, and the `role` column's `server_default="operator"` is dropped (it silently re-introduced the value migrations 0044/0075 removed). One resolution path, not two. One-time cleanup deleted 5 rows/users — all e2e litter, no real user affected. |
 | 42 | Role column overload | `user_team_assignments.role` is a **union of {global role} ∪ {reviewer scope}** (WS-2 T011, `_DEFAULT_REVIEWER_SCOPE="agent:reviewer"`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`. So an unrecognized value is NOT treated as corruption — `ROLE_HIERARCHY.get(role,0)==0` is load-bearing, not a bug. |
+| 43 | R2 endpoint split | `/admin/teams-summary` had TWO readers — the Access Control census and the sidebar/My Agents view every role sees. Gating it as-is would have silently emptied "Shared With Me" platform-wide; leaving it open would keep handing a `consumer` the whole org's membership. **Split:** census stays admin-only, new self-scoped `GET /api/v1/me/team`, new name-only `GET /api/v1/users/directory` for the grant picker. The split also deletes the client-side `.find()` that blanked the app. |
+| 44 | Role gates need a browser | All 61 bash suites and all 47 Playwright specs ran as `platform-admin`, so no role gate could fail a test. `global-setup.ts` is now multi-role (personas created through the real admin API, fail-loud); `e2e/rbac-role-journeys.spec.ts` drives the app as a consumer and a contributor. Corrects the claim that R5 is the only UX-facing RBAC phase. |

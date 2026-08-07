@@ -3,14 +3,14 @@
 #
 # E2E Suite 98: RBAC R2 — GLOBAL ROLE ENFORCEMENT.
 #
-# ⚠ THIS SUITE IS EXPECTED TO FAIL UNTIL R2 SHIPS. That is its purpose. ⚠
+# STATUS: R2 SHIPPED 2026-08-06 (registry-api 0.2.263). This suite was written FIRST and
+# ran RED against 0.2.261/0.2.262; it must now be GREEN and stay green.
 # ------------------------------------------------------------------------------
-# Every case here asserts a 403 that the platform does NOT yet return. Run it before
-# R2 and it goes RED; run it after and it must go GREEN. CLAUDE.md DoD rule 7 asks for
-# exactly this — a test that reproduces the defect BEFORE the fix — and this repo has
-# already paid for skipping it: docs/testing/manual-ui-e2e-test-plan.md G-R0-9 records a
-# test that was red from the day it was written, never once passed, and went unnoticed
-# for months because nothing could run it.
+# Every case here asserts a 403 the platform did not return before R2. That RED-first
+# run is the CLAUDE.md DoD rule 7 evidence, and this repo has already paid for skipping
+# it: docs/testing/manual-ui-e2e-test-plan.md G-R0-9 records a test that was red from
+# the day it was written, never once passed, and went unnoticed for months because
+# nothing could run it.
 #
 # WHY THIS SUITE HAD TO BE BUILT BEFORE R2, NOT AFTER
 # ---------------------------------------------------
@@ -26,6 +26,20 @@
 # cannot fail is the defect this repo keeps rediscovering. This suite is the one that
 # can fail.
 #
+# RED BASELINE, captured on the live EKS cluster 2026-08-06 against 0.2.262, immediately
+# before R2's image rolled — this is the DoD rule 7 artifact, a real run and not an
+# inference:
+#     T-S98-001  consumer    GET  /api/v1/admin/users          -> 200   (want 403)
+#     T-S98-002  contributor GET  /api/v1/admin/users          -> 200   (want 403)
+#     T-S98-004  consumer    POST /api/v1/agents/              -> 409*  (want 403)
+#     T-S98-006  consumer    GET  /api/v1/admin/teams-summary  -> 200   (want 403)
+#     T-S98-007  consumer    GET  /api/v1/me/team              -> 404   (want 200)
+#     T-S98-008  contributor GET  /api/v1/users/directory      -> 404   (want 200)
+#     T-S98-003 and T-S98-005 passed, as they must — they are the over-reach guards.
+# *409, not 201, and that is why T-S98-004 now uses a unique name: an EARLIER pre-R2 run
+# had actually created `s98-should-not-exist`, so the uniqueness check answered before
+# authorization would have and the case reported the wrong reason. See its comment.
+#
 # MEASURED ON THE LIVE CLUSTER, 2026-08-06, against registry-api 0.2.261 (R1 shipped):
 #     e2e-consumer  ->  GET /api/v1/admin/users  ->  200
 # A `consumer` — the lowest global role — can enumerate every user on the platform.
@@ -34,11 +48,18 @@
 # is an orphan, ENFORCE=False) made visible by an authenticated non-admin caller,
 # which nothing previously was.
 #
-# WHAT R2 MUST DO FOR THIS SUITE TO PASS
-#   - flip `ENFORCE = False` -> True (rbac.py, inside require_global_role)
-#   - wire require_global_role("platform-admin") onto admin.py + admin_users.py
-#   - wire can_deploy_to_production / can_create_agent / can_use_playground
-#     (all three are built and have ZERO callers — §1.3)
+# WHAT R2 DID
+#   - deleted the `ENFORCE = False` closure-local in rbac.require_global_role — the
+#     factory now enforces unconditionally (a permanently-true flag is dead config)
+#   - wired require_global_role("platform-admin") onto admin.py + admin_users.py
+#   - wired can_create_agent onto POST /agents/, its first call site (§1.3), and
+#     deleted that handler's X-User-Sub identity fallback
+#   - SPLIT /admin/teams-summary. It was read by the Studio sidebar and My Agents for
+#     EVERY role, so locking the census as-is would have silently emptied "Shared With
+#     Me" platform-wide. The census stays admin-only; GET /api/v1/me/team answers the
+#     self-scoped question. Same reasoning produced GET /api/v1/users/directory for the
+#     artifact grant picker, which a contributor must be able to use (design §2).
+#   (can_deploy_to_production / can_use_playground remain orphans — that is R3.)
 #
 # CASES
 #   T-S98-001 — a CONSUMER is refused the admin surface        (GET /admin/users -> 403)
@@ -46,10 +67,16 @@
 #   T-S98-003 — platform-admin is STILL allowed                (GET /admin/users -> 200)
 #   T-S98-004 — a CONSUMER is refused agent creation           (POST /agents/ -> 403)
 #   T-S98-005 — anonymous is still 401, not 403 (R1 unchanged) (GET /admin/users -> 401)
+#   T-S98-006 — the CENSUS is admin-only          (consumer GET /admin/teams-summary -> 403)
+#   T-S98-007 — the SELF-SCOPED view is not       (consumer GET /me/team -> 200)
+#   T-S98-008 — the grant picker still works   (contributor GET /users/directory -> 200)
+#   T-S98-009 — the directory leaks no more than a name  (no email/role/team/enabled)
+#   T-S98-010 — a CONTRIBUTOR may still create an agent      (POST /agents/ -> 201)
 #
-# T-S98-003 and T-S98-005 are the guards that stop an over-broad "fix": R2 must deny the
-# wrong role WITHOUT denying the right one, and must not turn authentication into
-# authorization. A change that 403s everybody would pass 001/002/004 alone.
+# T-S98-003, -005, -007, -008 and -010 are the guards that stop an over-broad "fix": R2
+# must deny the wrong role WITHOUT denying the right one, must not turn authentication
+# into authorization, and must not take the self-scoped reads down with the census. A
+# change that 403s everybody would pass 001/002/004/006 alone.
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
@@ -61,7 +88,7 @@ API_POD="$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-a
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 [ -n "$API_POD" ] || { echo "ERROR: no Running registry-api pod in $NAMESPACE"; exit 1; }
 
-echo "=== Suite 98: RBAC R2 role enforcement (EXPECTED RED until R2 ships) ==="
+echo "=== Suite 98: RBAC R2 role enforcement ==="
 echo "  Namespace: $NAMESPACE"
 echo "  Pod:       $API_POD"
 echo ""
@@ -120,10 +147,20 @@ C3="$(status "$ADMIN_TOK" GET /api/v1/admin/users)"
   && record PASS "T-S98-003 PLATFORM-ADMIN is still allowed  |  GET /admin/users -> 200 (R2 must deny the wrong role WITHOUT denying the right one)" \
   || record FAIL "T-S98-003 PLATFORM-ADMIN is still allowed  |  GET /admin/users -> $C3 (want 200) — an over-broad R2 that 403s everybody would satisfy 001/002 and break the platform"
 
-C4="$(status "$CONSUMER_TOK" POST /api/v1/agents/ '{"name":"s98-should-not-exist","description":"role gate probe","team":"platform"}')"
+# UNIQUE name per run, and that is load-bearing. This case used the fixed name
+# `s98-should-not-exist`, and the pre-R2 baseline run on 2026-08-06 returned **409**
+# instead of the expected 200 — because an EARLIER pre-R2 run had actually created it.
+# The name was already taken, so the uniqueness check answered before authorization
+# would have, and the case reported the wrong reason for failing. Post-R2 the role gate
+# runs first and a stale row could hide a regression the same way. A name that cannot
+# pre-exist means 403 is the only passing answer, a broken build yields 201 (loud), and
+# a working build writes nothing — so there is no litter to clean up either.
+S98_DENIED_AGENT="s98-denied-$$-${RANDOM}"
+C4="$(status "$CONSUMER_TOK" POST /api/v1/agents/ "{\"name\":\"${S98_DENIED_AGENT}\",\"description\":\"role gate probe\",\"team\":\"platform\"}")"
 case "$C4" in
   403) record PASS "T-S98-004 CONSUMER is refused agent creation  |  POST /agents/ -> 403" ;;
-  *)   record FAIL "T-S98-004 CONSUMER is refused agent creation  |  POST /agents/ -> $C4 (want 403). can_create_agent exists in rbac.py and has zero callers (§1.3)." ;;
+  201) record FAIL "T-S98-004 CONSUMER is refused agent creation  |  POST /agents/ -> 201 — the agent WAS created. can_create_agent has no caller on this route." ;;
+  *)   record FAIL "T-S98-004 CONSUMER is refused agent creation  |  POST /agents/ -> $C4 (want 403)." ;;
 esac
 
 C5="$(status "" GET /api/v1/admin/users)"
@@ -131,11 +168,76 @@ C5="$(status "" GET /api/v1/admin/users)"
   && record PASS "T-S98-005 ANONYMOUS is still 401, not 403  |  R1's authentication layer is unchanged by R2" \
   || record FAIL "T-S98-005 ANONYMOUS is still 401, not 403  |  GET /admin/users -> $C5 (want 401) — R2 must not turn authentication into authorization"
 
+# ── The teams-summary split. These two cases are one decision, asserted from both
+# sides: the full-org census must close AND the self-scoped read must stay open. Only
+# checking the 403 would let R2 pass while "Shared With Me" was empty for every
+# non-admin in the product — the exact silent-breakage class that
+# docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md is about.
+C6="$(status "$CONSUMER_TOK" GET /api/v1/admin/teams-summary)"
+[ "$C6" = "403" ] \
+  && record PASS "T-S98-006 the ORG CENSUS is admin-only  |  consumer GET /admin/teams-summary -> 403 (it lists every team, its members and its grants)" \
+  || record FAIL "T-S98-006 the ORG CENSUS is admin-only  |  consumer GET /admin/teams-summary -> $C6 (want 403)"
+
+C7="$(status "$CONSUMER_TOK" GET /api/v1/me/team)"
+[ "$C7" = "200" ] \
+  && record PASS "T-S98-007 the SELF-SCOPED team view stays open  |  consumer GET /me/team -> 200 (backs the sidebar's Shared With Me for every role)" \
+  || record FAIL "T-S98-007 the SELF-SCOPED team view stays open  |  consumer GET /me/team -> $C7 (want 200). R2 closed the census; if this is not open, the sidebar section is empty for every non-admin and the lock-down was a silent regression."
+
+C8="$(status "$CONTRIB_TOK" GET /api/v1/users/directory)"
+[ "$C8" = "200" ] \
+  && record PASS "T-S98-008 the grant picker still works for a non-admin  |  contributor GET /users/directory -> 200 (an agent-admin may delegate on their own artifact — design §2)" \
+  || record FAIL "T-S98-008 the grant picker still works for a non-admin  |  contributor GET /users/directory -> $C8 (want 200)"
+
+# The directory exists because /admin/users closed. If it returns what /admin/users
+# returned, R2 moved the disclosure rather than removing it.
+#
+# The whole pipeline is `|| true`-guarded and the Python swallows its own errors. The
+# 2026-08-06 pre-R2 baseline run proved why: against 0.2.262 this endpoint 404s,
+# urlopen raised, and under `set -euo pipefail` that KILLED THE SUITE — T-S98-010 never
+# ran and the run reported 8 cases instead of 10. A probe that aborts the harness hides
+# every case after it, which is worse than the failure it was reporting.
+LEAK="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env T="$CONTRIB_TOK" python3 -c '
+import json, os, urllib.request
+banned = {"email", "role", "team", "enabled", "kc_id", "first_name", "last_name"}
+try:
+    req = urllib.request.Request("http://localhost:8000/api/v1/users/directory",
+                                 headers={"Authorization": "Bearer " + os.environ["T"]})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        rows = json.loads(r.read())
+    print(",".join(sorted({k for row in rows for k in row if k in banned})) or "clean")
+except Exception as exc:
+    print(f"unreadable:{type(exc).__name__}")
+' 2>/dev/null | tr -d "\r\n" || true)"
+[ -n "$LEAK" ] || LEAK="unreadable:no-output"
+[ "$LEAK" = "clean" ] \
+  && record PASS "T-S98-009 the directory leaks no more than a name  |  no email / role / team / enabled field — it is a name picker, not a user export" \
+  || record FAIL "T-S98-009 the directory leaks no more than a name  |  returned banned fields: $LEAK. /users/directory is readable by EVERY authenticated role; if it carries what /admin/users carried, R2 relocated the hole instead of closing it."
+
+# The other half of T-S98-004: can_create_agent must deny a consumer WITHOUT denying
+# the role whose whole purpose is creating things.
+#
+# 201 OR 409 both pass, and that is not a hedge — it is what makes this case leave NO
+# litter. `create_agent` runs the role gate BEFORE the uniqueness check, so reaching a
+# 409 proves authorization succeeded just as a 201 does. A fixed name therefore creates
+# exactly one row ever: the first run creates it, every later run gets 409 off the same
+# row. `DELETE /agents/{name}` is a SOFT delete (status='deprecated', name still taken),
+# so a create/delete pair would not have cleaned up either — it would have left a
+# deprecated row per run and then 409'd anyway. G-R0-4 is that defect in suite-53 and
+# suite-71; a suite that regenerates litter makes cleaning the cluster a one-time
+# illusion. A 403 here still fails, which is the whole point.
+S98_AGENT="s98-contrib-create-probe"
+C10="$(status "$CONTRIB_TOK" POST /api/v1/agents/ "{\"name\":\"${S98_AGENT}\",\"description\":\"suite-98 role gate probe\",\"team\":\"platform\"}")"
+case "$C10" in
+  201|409) record PASS "T-S98-010 a CONTRIBUTOR may still create an agent  |  POST /agents/ -> $C10 (201 first run, 409 after — both mean the role gate let them through)" ;;
+  *)       record FAIL "T-S98-010 a CONTRIBUTOR may still create an agent  |  POST /agents/ -> $C10 (want 201 or 409). can_create_agent is contributor+, not admin-only — a 403 here means R2 over-reached and only platform-admin can build anything." ;;
+esac
+
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -gt 0 ]; then
   echo ""
-  echo "  EXPECTED while R2 is unshipped. These failures ARE the R2 specification."
-  echo "  They must go green when rbac.py's ENFORCE flips and require_global_role is wired."
+  echo "  R2 shipped in registry-api 0.2.263. A failure here is a REGRESSION, not the"
+  echo "  pre-R2 baseline — check rbac.require_global_role is still wired onto admin.py"
+  echo "  and admin_users.py, and that the teams-summary split (T-S98-006/007) held."
   exit 1
 fi

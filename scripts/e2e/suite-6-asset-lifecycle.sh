@@ -150,7 +150,10 @@ req = urllib.request.Request(
         'team': 'platform',
         'description': 'Suite 6 publish lifecycle test'
     }).encode(),
-    headers={'Content-Type': 'application/json'},
+    # R2 (0.2.263): POST /agents/ requires a real JWT and contributor+. It used to take
+    # get_optional_user and fall back to an X-User-Sub header, so this call worked with
+    # no identity at all — see docs/bugs/anonymous-agent-creation-with-forged-attribution.md.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -559,7 +562,7 @@ ag = json.dumps({'name': 'high-risk-gate-' + ts, 'team': 'platform',
                   'description': 'gate test', 'risk_level': 'high'}).encode()
 try:
     r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     agent = json.loads(r.read())
     agent_name = agent.get('name')
 except urllib.error.HTTPError as e:
@@ -651,7 +654,7 @@ agent_name = 'crit-tool-gate-' + ts
 ag = json.dumps({'name': agent_name, 'team': 'platform', 'description': 'gate test'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 

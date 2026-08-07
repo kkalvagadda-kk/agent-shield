@@ -1233,6 +1233,18 @@ EXPECTED = {
     "auth_configs": (5, 1),     # G-R1-4: GET /{config_id}/secret-ref
     "agent_tools": (2, 1),      # G-R1-5: GET /{name}/tools
     "agent_runs": (0, 7),       # G-R1-1: entire router
+    # ── Added by R2 (2026-08-06). The canary covered only the ten routers R1 named, so
+    # `agents.py` was outside it and nothing would have noticed `POST /agents/` being
+    # unauthenticated — which it was, until R2. Pinning the four modules R2 touched.
+    "me": (5, 0),               # incl. the new self-scoped GET /me/team
+    "users": (1, 0),            # the new GET /users/directory — authenticated, any role
+    "admin_users": (8, 0),      # platform-admin via require_global_role (which depends on require_user)
+    # 1 protected = POST /agents/ (R2). The other ELEVEN are still open and that is NOT
+    # an oversight being pinned as acceptable — it is R3's scope, recorded here so the
+    # number is visible instead of implied. Among them: PATCH /agents/{name},
+    # DELETE /agents/{name} and POST /agents/{name}/quarantine — unauthenticated
+    # MUTATIONS. When R3 guards them, this number moves and this test tells you.
+    "agents": (1, 11),
 }
 
 def module_of(route):
@@ -1275,12 +1287,12 @@ kubectl exec -i -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- \
 CANARY_JSON="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- cat "$CANARY_OUT" 2>/dev/null || true)"
 
 if [ -z "$CANARY_JSON" ]; then
-  record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  the in-pod canary produced no output"
+  record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the pinned routers matches contracts/router-auth.md  |  the in-pod canary produced no output"
 else
   if echo "$CANARY_JSON" | grep -q '"ok": true'; then
-    record_host PASS "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  47 protected / 12 exempt; exempt set: $(echo "$CANARY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["exempt"]; print("; ".join(f"{k}=[{\",\".join(v)}]" for k,v in sorted(d.items())))' 2>/dev/null)"
+    record_host PASS "T-S97-011 ROUTER PARTITION: every route on the pinned routers matches contracts/router-auth.md  |  62 protected / 23 exempt (R1 ten + R2 four); exempt set: $(echo "$CANARY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["exempt"]; print("; ".join(f"{k}=[{\",\".join(v)}]" for k,v in sorted(d.items())))' 2>/dev/null)"
   else
-    record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the ten routers matches contracts/router-auth.md  |  $(echo "$CANARY_JSON" | python3 -c 'import json,sys; print(" | ".join(json.load(sys.stdin)["diffs"]))' 2>/dev/null) — a NEW unauthenticated route on one of the ten, or an exemption silently closed"
+    record_host FAIL "T-S97-011 ROUTER PARTITION: every route on the pinned routers matches contracts/router-auth.md  |  $(echo "$CANARY_JSON" | python3 -c 'import json,sys; print(" | ".join(json.load(sys.stdin)["diffs"]))' 2>/dev/null) — a NEW unauthenticated route on one of the ten, or an exemption silently closed"
   fi
 fi
 

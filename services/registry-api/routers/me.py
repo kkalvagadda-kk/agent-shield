@@ -8,7 +8,10 @@ Endpoints
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +27,7 @@ from preferences import (
     load_user_preferences,
 )
 from rbac import get_user_artifact_roles, get_user_global_role
+from team_assets import fetch_team_asset_grants
 
 router = APIRouter(prefix="/api/v1/me", tags=["me"])
 
@@ -60,6 +64,59 @@ async def get_me(
         "role": normalized_role,
         "artifact_roles": artifact_roles,
     }
+
+
+class MyTeamResponse(BaseModel):
+    """The caller's own team and the assets shared with it."""
+
+    team: Optional[str] = None
+    namespace: Optional[str] = None
+    grants: list[dict] = []
+
+
+@router.get("/team", response_model=MyTeamResponse)
+async def get_my_team(
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> MyTeamResponse:
+    """The caller's team + the assets granted to it. Self-scoped; any authenticated role.
+
+    R2 carved this out of `GET /api/v1/admin/teams-summary`, which is now
+    platform-admin only. That endpoint answered TWO different questions with one
+    payload: an admin census of every team, every member and every grant, and — for
+    the Studio sidebar and My Agents — "what is shared with *me*". The second is
+    needed by every role, so gating the census would have silently emptied
+    "Shared With Me" for every contributor and consumer. Leaving it ungated instead
+    would keep handing a `consumer` the whole org's team membership. Splitting is the
+    only answer that is right on both counts.
+
+    Deliberately returns NO member list. The old client had to `.find()` its own team
+    inside an array of all teams by matching `members[].user_sub` against its `sub` —
+    and that exact `.find()` on a non-array error envelope is what unmounted the whole
+    app (docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md). Here the server
+    already knows who is asking, so the client does no lookup and the shape it must
+    trust is one field deep. Removing the caller's need to search removes the crash
+    site, not just the crash.
+    """
+    sub = claims.get("sub")
+    row = await db.execute(
+        text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub"),
+        {"sub": sub},
+    )
+    team = row.scalar_one_or_none()
+    if not team:
+        # R0 makes a missing row illegal, so this is a row that exists with a blank
+        # team — not corruption, just a user parked outside any team. Empty, not 404:
+        # the sidebar renders "Nothing shared yet" and stays up.
+        return MyTeamResponse()
+
+    ns_row = await db.execute(
+        text("SELECT namespace FROM teams WHERE name = :name"), {"name": team}
+    )
+    namespace = ns_row.scalar_one_or_none()
+
+    grants = await fetch_team_asset_grants(db, team_name=team)
+    return MyTeamResponse(team=team, namespace=namespace, grants=grants.get(team, []))
 
 
 # ---------------------------------------------------------------------------

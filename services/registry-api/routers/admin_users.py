@@ -21,9 +21,13 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import get_optional_user, require_user
+# `require_user` is gone from this module: the router-level `require_global_role` runs it
+# as its own dependency, so importing it here would be a second, weaker door onto the same
+# routes. `get_optional_user` stays for create_user's audit attribution only.
+from auth_middleware import get_optional_user
 from db import get_db
-from rbac import PLATFORM_ROLES
+from rbac import PLATFORM_ROLES, require_global_role
+from team_assets import fetch_team_asset_grants
 from keycloak_client import (
     create_user as kc_create,
     delete_user as kc_delete,
@@ -47,15 +51,31 @@ logger = logging.getLogger(__name__)
 # Found by suite-98's T-S98-005, which was written to assert something else entirely.
 # No in-cluster machine caller reaches either router (checked), so both are protected
 # outright. Authentication only — WHICH role may call these is R2.
+#
+# R2, 2026-08-06 — AUTHORIZATION. R1's `require_user` proved only that SOMEBODY was
+# calling. Measured on the live cluster against 0.2.261: `e2e-consumer`, the lowest
+# global role, got 200 from GET /api/v1/admin/users and could enumerate every user on
+# the platform. Both routers now require the platform-admin global role.
+#
+# `teams_router` was the hard one. `GET /admin/teams-summary` had TWO readers with
+# nothing in common: the Studio Admin > Access Control screen (a census — every team,
+# every member, every grant) and the Studio sidebar + My Agents page, which are shown
+# to EVERY role and only ever wanted the caller's own team. Gating the census as-is
+# would have silently emptied "Shared With Me" for every contributor and consumer;
+# leaving it at `require_user` to avoid that would keep handing a `consumer` the whole
+# org's membership map. R2 splits the two questions instead: the census stays here and
+# is platform-admin only, and `GET /api/v1/me/team` (routers/me.py) answers the
+# self-scoped one for any authenticated role. Both read the grants through
+# `team_assets.fetch_team_asset_grants` so the shape cannot drift apart.
 router = APIRouter(
     prefix="/api/v1/admin/users",
     tags=["admin-users"],
-    dependencies=[Depends(require_user)],
+    dependencies=[require_global_role("platform-admin")],
 )
 teams_router = APIRouter(
     prefix="/api/v1/admin",
     tags=["admin-teams"],
-    dependencies=[Depends(require_user)],
+    dependencies=[require_global_role("platform-admin")],
 )
 
 
@@ -308,6 +328,11 @@ async def reset_password(kc_id: str, body: ResetPasswordRequest):
 
 @teams_router.get("/teams-summary")
 async def teams_summary(db: AsyncSession = Depends(get_db)):
+    """Full-org census: every team with its members and granted assets. platform-admin only.
+
+    The self-scoped counterpart is `GET /api/v1/me/team` — see the router comment above
+    for why these are two endpoints and not one.
+    """
     teams_rows = await db.execute(text("SELECT id, name, namespace FROM teams ORDER BY name"))
     teams = [{"id": str(r.id), "name": r.name, "namespace": r.namespace} for r in teams_rows]
 
@@ -318,27 +343,9 @@ async def teams_summary(db: AsyncSession = Depends(get_db)):
     for r in assignments:
         team_members.setdefault(r.team_name, []).append({"user_sub": r.user_sub, "role": r.role})
 
-    grants_rows = await db.execute(
-        text("""
-            SELECT ag.id, ag.asset_type, ag.grantee_team, ag.granted_at, ag.expires_at,
-                   COALESCE(a.name, t.name, s.name, w.name, ag.asset_id::text) AS asset_name
-            FROM asset_grants ag
-            LEFT JOIN agents a ON ag.asset_type = 'agent' AND a.id = ag.asset_id
-            LEFT JOIN tools t ON ag.asset_type = 'tool' AND t.id = ag.asset_id
-            LEFT JOIN skills s ON ag.asset_type = 'skill' AND s.id = ag.asset_id
-            LEFT JOIN workflows w ON ag.asset_type = 'workflow' AND w.id = ag.asset_id
-            WHERE ag.revoked_at IS NULL
-        """)
-    )
-    team_grants: dict[str, list] = {}
-    for r in grants_rows:
-        team_grants.setdefault(r.grantee_team, []).append({
-            "id": str(r.id),
-            "asset_type": r.asset_type,
-            "asset_name": r.asset_name,
-            "granted_at": r.granted_at.isoformat() if r.granted_at else None,
-            "expires_at": r.expires_at.isoformat() if r.expires_at else None,
-        })
+    # team_name=None => every team. Same producer /api/v1/me/team reads, so the two
+    # endpoints cannot answer the same question with different fields.
+    team_grants = await fetch_team_asset_grants(db)
 
     return [
         {

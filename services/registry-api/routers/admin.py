@@ -26,9 +26,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
+from rbac import require_global_role
 # THE threshold resolution — imported, never re-implemented. It already handles the
 # pre-E-6 NULL rows, and its docstring is the postmortem for what happens when this
 # rule gets copied: "the threshold used to exist four times across three services...
@@ -53,16 +53,26 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 
-# AUTHENTICATED (R1, FR-11). Router-level: all 11 routes require a valid JWT —
-# asset grants, publish-requests, approval-authority and bundle regenerate were
-# all reachable anonymously before R1. Authentication only — no role logic, no
-# team scoping, no new 403; the existing per-handler authority checks are
-# unchanged and an authenticated response is byte-identical to pre-R1. Role
-# enforcement on these routes is R2. suite-97 T-S97-011 pins the partition.
+# AUTHORIZED (R2, 2026-08-06). R1 made these 11 routes require a valid JWT; that
+# proved somebody was calling, never WHICH somebody. They now require the
+# platform-admin global role: asset-grant create/revoke, the publish-request
+# approve/reject queue, per-tool approval authority and OPA bundle regeneration are
+# all platform-operator actions.
+#
+# Blast radius checked in the BROWSER, not just under services/ — that omission is
+# what shipped the blank page (docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md
+# lesson 1). Every Studio caller of these routes lives on a page already gated by
+# `<RequireRole minRole="platform-admin">` in App.tsx: listPublishRequests /
+# approve / reject -> AdminPublishRequestsPage; listGrants / createGrant / revokeGrant
+# -> AdminGrantsPage + AdminAccessPage; the approval-authority trio ->
+# AdminApprovalAuthorityPage. No non-admin surface reads any of them, so no legitimate
+# UI call starts failing. (`GET /admin/users` was the exception — it is read by the
+# artifact grant picker on the agent Settings tab — and that is why R2 adds the
+# self-serve `GET /api/v1/users/directory` rather than leaving the picker broken.)
 router = APIRouter(
     prefix="/api/v1/admin",
     tags=["admin"],
-    dependencies=[Depends(require_user)],
+    dependencies=[require_global_role("platform-admin")],
 )
 
 

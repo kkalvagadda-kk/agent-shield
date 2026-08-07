@@ -26,9 +26,9 @@ from sqlalchemy import case, delete, exists, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent_endpoints import DispatchTargetError, resolve_dispatch_target
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
 from db import get_db
-from rbac import grant_creator_admin
+from rbac import can_create_agent, get_user_global_role, grant_creator_admin
 from models import (
     Agent,
     AgentIdentity,
@@ -68,12 +68,40 @@ router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 )
 async def create_agent(
     body: AgentCreate,
-    x_user_sub: Optional[str] = Header(default=None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AgentResponse:
-    """Create a new agent record.  Returns 409 if the name is already taken."""
-    caller = (user or {}).get("sub") or x_user_sub or "system"
+    """Create a new agent record. contributor+ required. Returns 409 on a name clash.
+
+    R2, 2026-08-06. This handler took `get_optional_user` and fell back to an
+    `X-User-Sub` header and then to the literal `"system"`, so an ANONYMOUS caller
+    could register an agent and attribute it to whoever it liked — `created_by` and
+    the `grant_creator_admin` auto-grant were both caller-supplied. `can_create_agent`
+    has existed and been correct in `rbac.py` since R-phase 1 with zero call sites
+    (§1.3); this is its first.
+
+    The `x_user_sub` fallback is DELETED, not merely outranked. Leaving it as a
+    secondary source keeps a header that any client can set feeding an identity field,
+    which is the forgeable-attribution defect the identity doc owns (Phase 3). No
+    in-cluster machine caller creates agents — checked: eval-runner's `X-User-Sub` goes
+    to `/playground/eval/score` and `PATCH /playground/eval-runs/{id}`, never here, and
+    the only other producer is `sdk/agentshield_sdk/cli.py`, a human-run CLI.
+    """
+    caller = claims["sub"]
+    if not await can_create_agent(db, caller):
+        # Second lookup, on the DENY path only, purely to name the role in the message.
+        # Deliberately NOT hoisted above the check by inlining the hierarchy comparison:
+        # `can_create_agent` is the one place that decides this, and a copy of its rule
+        # here would be a second answer to one question — the exact drift that made
+        # `approvals._ADMIN_ROLES` disagree with `rbac` in production
+        # (docs/bugs/production-hitl-decide-403-authority.md). One extra query on a
+        # refusal is cheaper than two definitions of who may create an agent.
+        role = await get_user_global_role(db, caller)
+        logger.warning("create_agent: DENY sub=%s role=%s — needs contributor+", caller, role)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Creating an agent requires the 'contributor' role or higher; you have '{role}'.",
+        )
 
     # Uniqueness check
     existing = await db.execute(select(Agent).where(Agent.name == body.name))

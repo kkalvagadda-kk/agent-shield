@@ -21,7 +21,7 @@ vi.mock("../../api/registryApi", () => ({
   listArtifactGrants: vi.fn(),
   createArtifactGrant: vi.fn(),
   revokeArtifactGrant: vi.fn(),
-  listUsers: vi.fn(),
+  listUserDirectory: vi.fn(),
   listTeams: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -29,7 +29,7 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 import {
   listTriggers, updateTrigger, rotateToken, createTrigger, updateAgent, getAgentHealth,
   listApplications, listArtifactGrants, createArtifactGrant, revokeArtifactGrant,
-  listUsers, listTeams,
+  listUserDirectory, listTeams,
 } from "../../api/registryApi";
 
 const NOW = new Date().toISOString();
@@ -122,7 +122,7 @@ describe("SettingsTab", () => {
     mock(listArtifactGrants).mockResolvedValue([]);
     mock(createArtifactGrant).mockResolvedValue(invokerGrant);
     mock(revokeArtifactGrant).mockResolvedValue(undefined);
-    mock(listUsers).mockResolvedValue([]);
+    mock(listUserDirectory).mockResolvedValue([]);
     mock(listTeams).mockResolvedValue({ items: [] });
   });
 
@@ -375,15 +375,17 @@ describe("SettingsTab", () => {
     });
 
     it("creates a human-grantee grant (agent-admin to a user) via ArtifactGrantsList", async () => {
-      mock(listUsers).mockResolvedValue([
-        { kc_id: "u1", username: "alice", email: "alice@example.com", first_name: "Alice", last_name: "Adams" },
+      // /users/directory, not /admin/users — R2 made the latter platform-admin only
+      // and this panel renders for contributors. Name + sub only, by design.
+      mock(listUserDirectory).mockResolvedValue([
+        { sub: "u1", username: "alice", display_name: "Alice Adams" },
       ]);
       renderTab();
 
       // Open the grant form (the header "Grant" button hides once the form is open).
       await userEvent.click(await screen.findByRole("button", { name: /^grant$/i }));
       await userEvent.selectOptions(screen.getByLabelText(/role to grant/i), "agent-admin");
-      // grantee type defaults to "user"; the user picker loads via listUsers.
+      // grantee type defaults to "user"; the picker loads via listUserDirectory.
       await userEvent.selectOptions(await screen.findByLabelText(/user to grant/i), "u1");
       await userEvent.click(screen.getByRole("button", { name: /^grant$/i }));
 

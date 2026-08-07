@@ -6,7 +6,7 @@ import {
   listArtifactGrants,
   revokeArtifactGrant,
   createArtifactGrant,
-  listUsers,
+  listUserDirectory,
   listTeams,
   type ArtifactType,
 } from "../../api/registryApi";
@@ -45,11 +45,18 @@ export default function ArtifactGrantsList({
 
   // Picker sources — fetched only while the form is open. The queryFns are wrapped in
   // arrows (not passed by reference) so the imported binding is touched only when the
-  // query actually runs — a bare `queryFn: listUsers` would be evaluated at render and
-  // blow up any test whose registryApi mock doesn't stub these lazy-only calls.
+  // query actually runs — a bare `queryFn: listUserDirectory` would be evaluated at
+  // render and blow up any test whose registryApi mock doesn't stub these lazy-only calls.
+  //
+  // R2: this reads /api/v1/users/directory, NOT /admin/users. This component renders on
+  // the agent Settings tab and the workflow triggers panel — surfaces a contributor
+  // reaches — and R2 restricts /admin/users to platform-admin. A contributor holding
+  // `agent-admin` on their own artifact is entitled to delegate on it (design §2), so
+  // leaving the picker on the admin endpoint would have let them submit a grant they
+  // could never populate: a capability broken silently by an authorization change.
   const { data: users = [] } = useQuery({
-    queryKey: ["admin-users"],
-    queryFn: () => listUsers(),
+    queryKey: ["user-directory"],
+    queryFn: () => listUserDirectory(),
     enabled: adding && granteeType === "user",
   });
   const { data: teamsPage } = useQuery({
@@ -97,11 +104,13 @@ export default function ArtifactGrantsList({
     onError: () => toast.error("Failed to revoke grant"),
   });
 
-  const userLabel = (kcId: string) => {
-    const u = users.find((x) => x.kc_id === kcId);
-    if (!u) return kcId;
-    const name = `${u.first_name} ${u.last_name}`.trim() || u.username;
-    return u.email ? `${name} (${u.email})` : name;
+  // `sub` is the Keycloak user id — the same value artifact_role_grants.grantee_id
+  // stores — so the option value needs no translation. Email is deliberately absent
+  // from the directory payload (routers/users.py), so the label is name-only.
+  const userLabel = (sub: string) => {
+    const u = users.find((x) => x.sub === sub);
+    if (!u) return sub;
+    return u.display_name || u.username;
   };
 
   return (
@@ -164,8 +173,8 @@ export default function ArtifactGrantsList({
               </option>
               {granteeType === "user"
                 ? users.map((u) => (
-                    <option key={u.kc_id} value={u.kc_id}>
-                      {userLabel(u.kc_id)}
+                    <option key={u.sub} value={u.sub}>
+                      {userLabel(u.sub)}
                     </option>
                   ))
                 : teams.map((t) => (

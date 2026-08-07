@@ -104,6 +104,20 @@ def skip_all(reason):
         result(t, "SKIP", reason)
 
 
+def fail_all(reason: str) -> None:
+    """A broken FIXTURE is a failure, not a skip.
+
+    R2 found this the hard way: `POST /agents/` began requiring a JWT, every case here
+    SKIPped on the resulting 401, and the suite printed "0 passed, 0 failed, 6 skipped"
+    then "OK: suite-78 all green" and exited 0. Six cases stopped testing anything and
+    the suite reported success. skip_all is for a genuinely absent PRECONDITION (no
+    Keycloak, two users that collapse to one sub) — never for a fixture step that
+    errored, because that is indistinguishable from the product being broken.
+    """
+    for t in IDS:
+        result(t, "FAIL", reason)
+
+
 async def get_token(user, pw):
     # The conversations endpoints are require_user (JWT); the X-User-Sub header only
     # works on playground routes. Fetch a real token the browser way.
@@ -198,17 +212,21 @@ async def main():
 
     hdr_a = {"X-User-Sub": sub_a, "X-User-Team": "platform"}
     # The scoped endpoint 404s for an unknown agent, so the agent must exist.
+    # R2 (0.2.263): POST /agents/ needs a real JWT — the X-User-Sub header alone is an
+    # audit stamp, not a credential. tok_a was already fetched above and simply was not
+    # being used here.
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            cr = await c.post(f"{BASE}/agents/", headers=hdr_a, json={
+            cr = await c.post(f"{BASE}/agents/",
+                headers={**hdr_a, "Authorization": f"Bearer {tok_a}"}, json={
                 "name": AGENT, "team": "platform", "agent_type": "declarative",
                 "memory_enabled": True})
         cr_status, cr_text = cr.status_code, cr.text
     except Exception as e:
-        skip_all(f"agent create errored: {e!r}")
+        fail_all(f"agent create errored: {e!r}")
         return
     if cr_status not in (200, 201, 409):
-        skip_all(f"agent create http={cr_status}: {cr_text[:120]}")
+        fail_all(f"agent create http={cr_status}: {cr_text[:120]}")
         return
 
     prod_dep_id = art_id = ver_id = dep_id = wf_id = None

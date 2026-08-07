@@ -128,8 +128,11 @@ RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
 
 # Create test agent
+# R2 (0.2.263): POST /agents/ requires a real JWT + contributor+; it used to accept an
+# anonymous caller. The very next call in this fixture already carried E2E_TOKEN.
 r = httpx.post('http://localhost:8000/api/v1/agents/',
     json={'name': 's14-promote-test', 'team': 'platform', 'agent_type': 'declarative'},
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     timeout=5)
 if r.status_code not in (200, 201, 409):
     print(f'agent create: {r.status_code} {r.text[:80]}')

@@ -2077,17 +2077,20 @@ export const updateMyPreferences = async (
 // drift back.
 // ---------------------------------------------------------------------------
 
+export interface TeamAssetGrant {
+  id: string;
+  asset_type: string;
+  asset_name: string;
+  granted_at: string | null;
+  expires_at?: string | null;
+}
+
 export interface TeamSummary {
   id: string;
   name: string;
   namespace: string;
   members: { user_sub: string; role: string }[];
-  grants: {
-    id: string;
-    asset_type: string;
-    asset_name: string;
-    granted_at: string | null;
-  }[];
+  grants: TeamAssetGrant[];
 }
 
 // Reading the user list is `listUsers` above — it already existed on the authed client
@@ -2142,9 +2145,52 @@ export const resetAdminUserPassword = async (
   });
 };
 
-// Coerced to an array on purpose. The Sidebar consumer does `.find(...)` on this
-// and an error envelope reaching it as data is exactly what blanked the app.
+// FULL-ORG CENSUS. platform-admin only since registry-api 0.2.263 (RBAC R2) — a
+// non-admin caller gets 403. Only Admin > Access Control may read this; the sidebar
+// and My Agents use `getMyTeam` below. Still array-coerced: the Sidebar consumer's
+// `.find(...)` over a non-array error envelope is what blanked the app, and a
+// producer that can only return an array is the property, not the discipline.
 export const getTeamsSummary = async (): Promise<TeamSummary[]> => {
   const { data } = await http.get<TeamSummary[]>("/admin/teams-summary");
+  return Array.isArray(data) ? data : [];
+};
+
+export interface MyTeam {
+  team: string | null;
+  namespace: string | null;
+  grants: TeamAssetGrant[];
+}
+
+// SELF-SCOPED — any authenticated role. The sidebar's "Shared With Me" and the My
+// Agents page ask "what is shared with ME", which is not an admin question; they were
+// reading the whole-org census only because that was the endpoint that existed. R2
+// gating the census would have emptied both for every contributor and consumer.
+//
+// Note what is NOT here: a member list. The old client had to `.find()` its own team
+// inside an array of every team by matching `members[].user_sub` — the exact call that
+// threw and unmounted the app. The server knows who is asking, so that lookup is gone
+// from the client entirely. `grants` is still coerced because a producer that cannot
+// return a non-array is worth more than a consumer that remembers to check.
+export const getMyTeam = async (): Promise<MyTeam> => {
+  const { data } = await http.get<MyTeam>("/me/team");
+  return {
+    team: data?.team ?? null,
+    namespace: data?.namespace ?? null,
+    grants: Array.isArray(data?.grants) ? data.grants : [],
+  };
+};
+
+export interface DirectoryUser {
+  sub: string;
+  username: string;
+  display_name: string;
+}
+
+// Name + id only, for grant pickers. Any authenticated role — a contributor holding
+// `agent-admin` on their own agent is entitled to delegate on it, so the picker cannot
+// depend on `/admin/users` (platform-admin only since R2). See routers/users.py for
+// the disclosure tradeoff.
+export const listUserDirectory = async (): Promise<DirectoryUser[]> => {
+  const { data } = await http.get<DirectoryUser[]>("/users/directory");
   return Array.isArray(data) ? data : [];
 };

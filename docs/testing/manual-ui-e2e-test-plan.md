@@ -45,6 +45,102 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — RBAC R2 (global-role enforcement) — 2026-08-06 (registry-api 0.2.263 / studio 0.1.184)
+
+R2 is the first phase that returns a 403 to a real user: `/api/v1/admin/*` and
+`/api/v1/admin/users*` now require the `platform-admin` global role, and `POST /agents/`
+requires contributor+. Design: `docs/design/rbac-and-artifact-authorization.md` §5 R2 ·
+Decisions 43–44.
+
+- **RED-first satisfied for real this time.** `suite-98` was written before R2 and was
+  run against the deployed `0.2.262` minutes before R2's image rolled: 001/002/004/006/
+  007/008 red, 003/005 (the over-reach guards) green. Captured run:
+  `docs/testing/evidence-suite98-red-baseline-0.2.262.txt`. The previous change had to substitute captured
+  evidence for a red run because showing red meant redeploying a broken image; here the
+  cluster was still on the pre-fix image, so the real run was free. The baseline also
+  found two defects in the suite itself — a fixed probe name that made T-S98-004 fail
+  for the wrong reason, and a T-S98-009 probe that aborted the harness under
+  `set -e`, hiding T-S98-010 entirely. Both fixed.
+- **closed — the browser layer could not fail a role gate.** All 61 bash suites and, until
+  `0.1.184`, all 47 Playwright specs authenticated as `platform-admin`, so R2 could have
+  been inverted or 403'd everybody and the whole suite would have stayed green.
+  `e2e/global-setup.ts` is now multi-role: it provisions `e2e-contributor` /
+  `e2e-consumer` through the real `POST /api/v1/admin/users` and saves a session per role
+  (fail-loud — `assertRoleSession` turns a missing session into a named failure, not a
+  silent skip). `e2e/rbac-role-journeys.spec.ts` drives the deployed app as each.
+- **closed — `/admin/teams-summary` was an admin endpoint with non-admin readers.** The
+  sidebar's "Shared With Me" and My Agents read it for *every* role. Gating it as R2's plan
+  said would have emptied both platform-wide with no error; leaving it open would have kept
+  a `consumer` reading the whole org's membership map. Split per Decision 43 — census stays
+  admin-only, `GET /api/v1/me/team` is self-scoped. `suite-98` asserts **both** sides
+  (T-S98-006 403 *and* T-S98-007 200); only the 403 half would have passed a broken build.
+- **closed — `app-shell-resilience.spec.ts` had gone vacuous, and the sweep is what
+  caught it.** Its three cases stub `/admin/teams-summary`; R2 moved the sidebar to
+  `/me/team`, so the stub matched nothing the shell requests and all three passed while
+  asserting nothing. They were **green** in the R2 regression run — a passing spec was
+  the symptom. Retargeted at `/me/team`, and each case now asserts its stub actually
+  FIRED (`expectStubWasUsed`), so the next time the producer moves they fail instead of
+  going quietly green. Generalizes: **a route stub is only a guard while the app still
+  requests the route it names.** Any spec built on `page.route` should assert the hit.
+- **closed — the artifact grant picker.** `ArtifactGrantsList` (agent Settings tab, workflow
+  triggers panel — both contributor-reachable) read `/admin/users`. Now reads the new
+  `GET /api/v1/users/directory`. `T-RJ-007` asserts the picker actually populates for a
+  contributor; asserting only that the panel renders would have missed an empty list.
+- **deferred (intentional) — G-R2-1, `/users/directory` lets any authenticated user
+  enumerate usernames.** Inherent to a name picker; carries no email / role / team /
+  `enabled`, so it is strictly less than every role could read before R2. `T-S98-009` pins
+  the absent fields so it cannot grow back into `/admin/users`.
+- **not-yet-wired (debt) — G-R2-4, eleven `agents.py` routes are still unauthenticated,
+  including MUTATIONS.** Measured on the deployed `0.2.263` via the T-S97-011 canary:
+  `agents` is 1 protected / 11 exempt. The exempt set includes `PATCH /agents/{name}`,
+  `DELETE /agents/{name}` and `POST /agents/{name}/quarantine` — anyone who can reach
+  the API can rename, soft-delete or quarantine any agent. R2 closed only `POST
+  /agents/`. This is R3's scope; it is pinned in the canary (`"agents": (1, 11)`) so the
+  number is visible rather than implied, and so guarding them moves a test.
+- **not-yet-wired (debt) — suite-97 was NOT run end-to-end for R2.** Its destructive leg
+  deletes the Keycloak `platform-admin` and relies on the bootstrap re-pinning; if that
+  failed the platform would be left without an admin, and recovering could require
+  entering a password, which I cannot do. The part R2 affects — the T-S97-011 route
+  partition — was verified **statically against the deployed app** by running the
+  canary's own algorithm in the pod (that is where the `(1, 11)` / `(5, 0)` / `(1, 0)` /
+  `(8, 0)` numbers above come from), but the suite itself has not been executed. Run it
+  deliberately:
+  `KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/e2e/suite-97-rbac-bootstrap-and-router-auth.sh`
+- **not-yet-wired (debt) — G-R2-2, a `/me` failure silently demotes an admin's UI.**
+  `main.tsx` catches a failed `getMe()` with `console.warn` and renders with `role = null`,
+  which `isAtLeast` treats as `consumer`: Admin nav gone, `/admin/*` deep links redirected,
+  no message. Denying is the safe direction; doing it silently is not. Not fixed in R2.
+- **closed — six e2e suites created agents with no credential.** `POST /agents/` took
+  `get_optional_user` and fell back to an `X-User-Sub` header, so suites 6, 14, 15, 42,
+  78 (and the LG block inside 6) created fixtures anonymously. All now carry a real
+  Bearer. Two went further, because the migration exposed that they were asserting the
+  wrong thing:
+  - **suite-15** drove isolation with `X-User-Sub: user-alice`, an identity that never
+    existed in Keycloak. It proved the visibility filter matches a string the caller
+    typed — which it would do whether or not the identity meant anything. Migrated to
+    two real personas (`s15-alice` / `s15-bob`) with subs read out of their tokens, and
+    T-S15-002 flipped from asserting anonymous creation SUCCEEDS to asserting it is
+    refused. The suite had the hole encoded as its expectation.
+  - **suite-42** T-S42-004 is named "returns role and artifact_roles" and checked
+    neither — it could only assert 401, and said so in a comment. With a real persona it
+    now asserts both halves, including that the creator auto-grants appear in `/me`.
+- **closed — suite-78 reported "all green" while testing nothing.** Its fixture create
+  started 401ing; every case took the `skip_all` path and the suite printed
+  `0 passed, 0 failed, 6 skipped` then `OK: suite-78 all green` and exited **0**. A
+  broken fixture is now `fail_all`. `skip_all` is reserved for a genuinely absent
+  precondition — a fixture that errored is indistinguishable from the product being
+  broken, and must not be reported as success.
+- **not-yet-wired (debt) — G-R2-3, the Build nav is not role-gated.** `POST /agents/` now
+  requires contributor+, but the sidebar shows "Build" to every role, so a **consumer**
+  can still open the create wizard, fill it in, and only discover at Save that they are
+  refused. The API is correct and the app does not break — it is a wasted journey and a
+  late error, not a hole. The nav-level counterpart to R3's `can_use_playground`; fix
+  both together rather than bolting one `isAtLeast` onto one nav group.
+- **not-yet-wired (debt) — R3's orphans remain orphans.** `can_deploy_to_production` and
+  `can_use_playground` still have zero callers, so production deploy and playground access
+  are still ungated. R2 wired `can_create_agent` only. Stated so "R2 shipped" is not read as
+  "RBAC is on".
+
 ## Known gaps — R1 router auth broke Studio — 2026-08-06 (studio 0.1.182 / 0.1.183)
 
 Closing the anonymous `/api/v1/admin/*` hole (registry-api `0.2.262`) broke three Studio

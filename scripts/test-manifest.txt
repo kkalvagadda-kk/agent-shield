@@ -146,11 +146,12 @@ api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves
 api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving/quarantining an artifact disarms its triggers (write gate + scheduler read filter)
 api|execution,rbac|suite-96-schedules-endpoint.sh|GET /api/v1/schedules — cross-artifact read, deny-by-default, will_fire from the same predicate dispatch uses
 api|governance,rbac|suite-97-rbac-bootstrap-and-router-auth.sh|R0/R1 — platform-admin bootstrap re-pins onto a new sub after realm recreation (DESTRUCTIVE: deletes the Keycloak admin + restarts registry-api)
-api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2 GATE — EXPECTED RED until R2 ships. Authenticates as a real consumer and contributor (not platform-admin, which every other suite uses) and asserts the 403s the platform does not yet return, plus the two guards against an over-broad fix: platform-admin still 200, anonymous still 401
+api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2 GATE — authenticates as a real consumer and contributor (not platform-admin, which every other suite uses) and asserts the 403s R2 introduced, plus the guards against an over-broad fix: platform-admin still 200, anonymous still 401, /me/team and /users/directory still open to non-admins
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
 browser|health,rbac|e2e/app-shell-resilience.spec.ts|App shell survives a 401/non-array from /admin/teams-summary (blank-page regression)
+browser|governance,rbac|e2e/rbac-role-journeys.spec.ts|R2 JOURNEY — drives the deployed Studio as a real consumer and contributor (not platform-admin): no Admin nav, /admin/access deep link refused across a reload, Shared With Me still renders, grant picker still populates, zero uncaught page errors
 browser|governance,rbac|e2e/admin-access-roles.spec.ts|Admin access — canonical role names + persistence
 browser|governance,rbac|e2e/artifact-grants.spec.ts|Artifact grants — mixed roles, create + revoke
 browser|agent|e2e/agents.spec.ts|Agents list + detail

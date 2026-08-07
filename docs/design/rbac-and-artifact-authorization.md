@@ -219,8 +219,11 @@ Creating an agent or workflow inserts an `agent-admin` grant for the creator,
 
 | Endpoint | Target guard | Today | Evidence |
 |---|---|---|---|
-| `GET/POST/PATCH/DELETE /admin/*` (16 routes) | `require_global_role("platform-admin")` | 🔓 | `admin.py` — `Depends(get_db)` only |
-| `POST /agents/` | `can_create_agent` | ❌ | `agents.py` — `get_optional_user`, audit only |
+| `GET/POST/PATCH/DELETE /admin/*` (16 routes) | `require_global_role("platform-admin")` | ✅ | R2 — router-level on `admin.py` + `admin_users.py` |
+| `GET /admin/teams-summary` (org census) | `require_global_role("platform-admin")` | ✅ | R2 — split from the self-scoped read (Decision 43) |
+| `GET /me/team` (self-scoped team + grants) | authenticated, any role | ✅ | R2 — `me.py`; backs the sidebar for every role |
+| `GET /users/directory` (name + sub only) | authenticated, any role | ✅ | R2 — `users.py`; backs the artifact grant picker |
+| `POST /agents/` | `can_create_agent` | ✅ | R2 — first caller of `can_create_agent`; the `X-User-Sub` identity fallback is deleted. (This row previously read ❌; it was 🔓 — `get_optional_user` meant ANONYMOUS creation with caller-supplied `created_by` **and** a caller-chosen `agent-admin` auto-grant. Postmortem: `docs/bugs/anonymous-agent-creation-with-forged-attribution.md`.) |
 | `PUT/DELETE /agents/{name}` | platform-admin OR `agent-admin` | ❌ | |
 | `POST /agents/{name}/quarantine` | platform-admin | ❌ | |
 | `POST /agents/{name}/deploy` env=sandbox | contributor+ | 🔓 | `deployments.py` |
@@ -249,14 +252,32 @@ Creating an agent or workflow inserts an `agent-admin` grant for the creator,
 Consolidated from the four superseded docs plus the bug record. Tagged per CLAUDE.md.
 
 **not-yet-wired (debt) — security-relevant**
-- G-1 `require_global_role` orphaned + `ENFORCE=False`; all 16 admin routes unguarded. *(§1.2, §1.3)*
+- ~~G-1 `require_global_role` orphaned + `ENFORCE=False`; all 16 admin routes unguarded.~~ **CLOSED
+  by R2 (`0.2.263`)** — the flag is deleted rather than flipped, and the factory is wired onto both
+  admin routers. Measured on `0.2.262` before the fix: `e2e-consumer` → `GET /api/v1/admin/users`
+  → **200**. *(§1.2, §1.3)*
 - G-2 Production deploy has no authorization check; `can_deploy_to_production` orphaned. *(§1.3)*
 - G-3 Trigger/webhook management permit-all via `ENFORCE_TRIGGER_MGMT=False`, 8 sites. *(§1.2)*
 - G-4 `auth_configs.py` (6) + `llm_providers.py` (5) expose credential configuration with no auth. *(§1.4)*
 - G-5 `admin.py`, `deployments.py`, `versions.py`, `workflows.py`, `agent_runs.py`, `teams.py`, `agent_tools.py`, `playground_approvals.py` — no auth dependency. *(§1.4)*
 - G-6 Two role vocabularies; `team_lead` exists nowhere else. Caused `production-hitl-decide-403-authority`. *(§1.5)*
 - G-7 `list_triggers` has no auth — R7's explicitly noted, still-open sub-gap. *(`schedule-lifecycle-and-operations.md` R7)*
-- G-8 `suite-42` has zero negative tests; the design's six 403 cases are unwritten. *(§1.6)*
+- G-8 `suite-42` has zero negative tests; the design's six 403 cases are unwritten. *(§1.6)* —
+  **partly closed:** `suite-98` (10 cases) and `e2e/rbac-role-journeys.spec.ts` (9 cases) now carry the
+  403 assertions for R2's surface. `suite-42` itself is still positive-only.
+- G-R2-1 `/api/v1/users/directory` lets ANY authenticated user enumerate usernames. Deliberate and
+  bounded (Decision 43): a name picker cannot work otherwise, and it carries no email/role/team/
+  enabled field — strictly less than every role could read before R2. `suite-98` T-S98-009 pins the
+  absent fields so it cannot grow back into `/admin/users`. **deferred (intentional)**.
+- G-R2-4 `agents.py` is **1 protected / 11 exempt** on the deployed `0.2.263` (measured
+  with T-S97-011's own algorithm). R2 closed `POST /agents/`; the eleven still-open routes
+  include `PATCH /agents/{name}`, `DELETE /agents/{name}` and `POST
+  /agents/{name}/quarantine` — unauthenticated **mutations**. R3's scope. Now pinned in
+  the canary (`"agents": (1, 11)`) so the count is a test, not a memory. *(§3)*
+- G-R2-2 `main.tsx` swallows a `/me` failure (`console.warn`) and renders with `role = null`, which
+  `isAtLeast` treats as `consumer`. With R2 live, a transient `/me` failure silently demotes a
+  platform-admin's UI to a consumer's — Admin nav gone, `/admin/*` deep links redirected — with no
+  message. Denying is the safe direction, but doing it silently is not. **not-yet-wired (debt)**.
 - G-R0-1 `user_team_assignments.role` holds **both** global roles and reviewer scopes (WS-2 T011,
   `approvals.py:48,266`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`.
   Until then an unrecognized value must NOT be treated as corruption. *(Decision 42)*
@@ -319,11 +340,32 @@ legitimate Studio call changes — Studio already sends the JWT. *Test:* `suite-
 in §1.4, anonymous → 401. This is the cheapest large risk reduction available and it blocks
 nothing.
 
-**Phase R2 — turn on global-role enforcement.** Wire `require_global_role("platform-admin")`
-into `admin.py` + `admin_users.py`; flip `rbac.py:205 ENFORCE=True`. The stated precondition is
-already met (§1.2), so this is a flag flip plus 16 decorators. Decide OQ-1 (unknown-role default)
-**before** flipping — it changes who gets locked out. *Test:* `suite-97` gains the design's
-T-S32-013 (contributor → `/admin/users` → 403).
+**Phase R2 — ✅ SHIPPED 2026-08-06 (registry-api `0.2.263` / studio `0.1.184`).** Turn on
+global-role enforcement. `require_global_role` now enforces — the `ENFORCE = False`
+closure-local was **deleted, not flipped**: a permanently-true flag is dead config that reads as
+a switch someone may flip back, and being closure-local it was invisible to grep. Wired onto
+`admin.py` + `admin_users.py`, which had zero call sites, so the flag alone would have changed
+nothing. `can_create_agent` got its first caller on `POST /agents/`, and that handler's
+`X-User-Sub` identity fallback was deleted (an anonymous caller could create an agent and
+attribute it to anyone).
+
+> **R2 was NOT "a flag flip plus 16 decorators", and this section said it was.** Checking the
+> browser before wiring — the step whose omission shipped the blank page — found `GET
+> /admin/teams-summary` had two unrelated readers: the Access Control census, and the **Sidebar +
+> My Agents page that every role sees**. Gating it as written would have silently emptied
+> "Shared With Me" platform-wide; leaving it authenticated-only would have kept handing a
+> `consumer` the entire org's membership map. The same check found the artifact grant picker on
+> the agent Settings tab reading `GET /admin/users`, a panel a contributor reaches. **Decision 43**
+> splits the questions: the census stays admin-only, `GET /api/v1/me/team` answers the self-scoped
+> one, and `GET /api/v1/users/directory` (name + `sub`, nothing else) backs the picker. Both grant
+> reads go through `team_assets.fetch_team_asset_grants` so they cannot drift.
+
+*Test:* `suite-98` — written RED before R2 and now green, 10 cases. Half of them are the guards
+against an over-broad fix: platform-admin still 200, anonymous still 401 (not 403), `/me/team` and
+`/users/directory` still open to non-admins, contributor can still create an agent. **Plus
+`e2e/rbac-role-journeys.spec.ts`** — see §6, R2 is UX-facing and this doc previously said it was
+not. OQ-1 was resolved by R0 (Decision 40/41): there is no unknown-role default to decide, because
+there is no such thing as a legitimate user without a row.
 
 **Phase R3 — guard the deploy path.** Wire `can_deploy_to_production` into the production branch
 of `deployments.py`; sandbox stays contributor+. Wire `can_create_agent` into agent/workflow POST
@@ -357,9 +399,24 @@ and any OPA rego change (OPA contract). A "Run now" style control needs R2's tea
 ## 6. Definition of Done
 
 Per CLAUDE.md, each phase must satisfy:
-1. **Real journey** — a bash suite for the API gate, plus a Playwright spec for R5 (the only
-   UX-facing phase).
-2. **Save → reload → assert** — R5's grant-driven queue filter must survive a reload.
+1. **Real journey** — a bash suite for the API gate, **plus a Playwright spec for any phase that
+   changes what a user can see or do.**
+
+   > **This item used to read "a Playwright spec for R5 (the only UX-facing phase)". That was
+   > wrong and it was load-bearing.** R2 is the first phase that returns a 403 to a real person;
+   > calling it API-only is what let it be planned as sixteen decorators. Worse, *both* test layers
+   > were structurally unable to notice a mistake: all 61 bash suites authenticate as
+   > `platform-admin` (suite-98's header), and until `0.1.184` `global-setup.ts` logged in exactly
+   > one user, so all 47 Playwright specs did too. **A role gate whose only witnesses already pass
+   > every check is a guard that cannot fail.** `global-setup.ts` is now multi-role (Decision 44)
+   > and `e2e/rbac-role-journeys.spec.ts` drives the deployed app as a real consumer and a real
+   > contributor. Every remaining phase (R3's playground/deploy denials, R4's trigger surfaces,
+   > R5's scoped approval queue) is UX-facing on the same terms.
+
+2. **Save → reload → assert** — R5's grant-driven queue filter must survive a reload. For a phase
+   whose change *is* a guard rather than a row, the reload assertion applies to the guard:
+   `T-RJ-005` reloads on `/admin/access` as a consumer, because a gate that only holds on first
+   render fails exactly when role resolution races the route — which is how users arrive.
 3. **No orphans** — after R3, `grep` must show a live caller for `can_deploy_to_production`,
    `can_use_playground`, `can_create_agent`, `require_global_role`, `can_approve_hitl`. This doc's
    §1.3 exists because that check was never run; it is now the phase-exit gate.

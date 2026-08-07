@@ -3,41 +3,41 @@ import { Bot, Loader2, MessageSquare, Rocket, Eye } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  getTeamsSummary,
+  getMyTeam,
   listAgents,
   listAllDeployments,
-  type TeamSummary,
+  type MyTeam,
 } from "../api/registryApi";
 import DeployModal from "../components/DeployModal";
-import { useAuth } from "../contexts/AuthContext";
 
 // ── API ──────────────────────────────────────────────────────────────────────
 
-// Shared producer, not a local raw fetch — /admin/teams-summary requires auth since
-// 0.2.262. This call site already degraded to [] on !r.ok, so it went QUIET rather
-// than crashing (Sidebar had no such guard and took the whole app down). Quiet is
-// still wrong: "Shared With Me" renders empty as though the user has no shared
-// agents. Keeping the swallow is deliberate — this panel is supplementary, and the
-// Sidebar is where an outage must stay visible — but it now runs over an authed
-// client, so it swallows real failures only.
-async function fetchTeamsSummary(): Promise<TeamSummary[]> {
+// SELF-SCOPED (/api/v1/me/team), not the admin census. This page read
+// /admin/teams-summary — which R2 restricts to platform-admin — purely to find its
+// own team inside the list of all of them. It is "My Agents": every user sees it, so
+// an admin-only source was always the wrong one. R2 just made that fatal instead of
+// merely over-broad.
+//
+// The swallow is kept and still deliberate: this panel is supplementary, and the
+// Sidebar is where an outage must stay visible. It runs over the authed client, so it
+// swallows real failures only — never a missing token.
+async function fetchMyTeam(): Promise<MyTeam> {
   try {
-    return await getTeamsSummary();
+    return await getMyTeam();
   } catch {
-    return [];
+    return { team: null, namespace: null, grants: [] };
   }
 }
 
 // ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function MyAgentsPage() {
-  const { user } = useAuth();
   const qc = useQueryClient();
   const [deployingAgent, setDeployingAgent] = useState<string | null>(null);
 
-  const { data: teams = [], isLoading: loadingTeams } = useQuery({
-    queryKey: ["my-agents-teams"],
-    queryFn: fetchTeamsSummary,
+  const { data: myTeam, isLoading: loadingTeams } = useQuery({
+    queryKey: ["my-agents-team"],
+    queryFn: fetchMyTeam,
     staleTime: 60_000,
   });
 
@@ -55,12 +55,8 @@ export default function MyAgentsPage() {
 
   const isLoading = loadingTeams || loadingAgents || loadingDeployments;
 
-  // Find the team this user belongs to
-  const myTeam = teams.find((t: TeamSummary) =>
-    t.members?.some((m) => m.user_sub === user?.sub)
-  );
-
-  // Derive granted agent names for this team
+  // Granted agent names for this user's team. No client-side team lookup: the server
+  // scopes to the caller, so there is no array to search and nothing to get wrong.
   const grantedNames = new Set(
     (myTeam?.grants ?? [])
       .filter((g) => g.asset_type === "agent")
@@ -81,7 +77,7 @@ export default function MyAgentsPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-slate-900">My Agents</h1>
         <p className="text-sm text-slate-500 mt-0.5">
-          Agents your team ({myTeam?.name ?? "—"}) has been granted access to.
+          Agents your team ({myTeam?.team ?? "—"}) has been granted access to.
         </p>
       </div>
 

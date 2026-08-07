@@ -87,6 +87,7 @@ from routers.admin_users import router as admin_users_router, teams_router as ad
 from routers.catalog import router as catalog_router
 from routers.chat import router as chat_router, deployment_chat_router
 from routers.me import router as me_router
+from routers.users import router as users_router
 from routers.memory import router as memory_router
 from routers.internal import router as internal_router
 from routers.internal_mcp import router as internal_mcp_router
@@ -319,6 +320,10 @@ def create_app() -> FastAPI:
 
     # --- Current user router ---
     app.include_router(me_router)
+
+    # --- User directory (grant pickers). Authenticated, any role — see routers/users.py
+    #     for why this is separate from the platform-admin-only /admin/users. ---
+    app.include_router(users_router)
 
     # --- System endpoints ---
     @app.get(
