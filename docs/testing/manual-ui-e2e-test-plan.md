@@ -45,6 +45,45 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — authorization review, 2026-08-07 (design session, no code change yet)
+
+A walkthrough of MCP and tool authorization surfaced eleven findings. **Decisions 45 and 46** were
+taken in response. This section is the routing table — where each finding lands — so the sequencing
+does not have to be reconstructed later.
+
+| # | Finding | Type | Lands in |
+|---|---|---|---|
+| 1 | `start_deployment_chat` (`chat.py:801`) has **no access check** — its sibling `start_chat` enforces team + `AssetGrant`, this enforces nothing, and Studio routes to it (`App.tsx:84`) | **live bug** | **now** — standalone fix |
+| 2 | OPA resolves the tool set on `agent.team`, never the caller's → wrap a tool in an agent, share the agent, bypass tool grants | gap | P2 (2d), Decision 45 |
+| 3 | MCP proxy Gate 2 has the **identical** defect — team from the pod SA, and `AuthorizeToolCallRequest` has no user field | gap | P2 (2d), Decision 45 |
+| 4 | `agent_class` is self-reported and now gates tool scope **and** credential choice, not just the identity floor | **blocker** | P2 (2a) — first |
+| 5 | 65 tools are `owner_team = NULL`; the resolver says "anyone", the OPA bundle lists them for nobody | contradiction | **Decision 46** — ship before P1 |
+| 6 | `x-user-sub` at the MCP proxy is self-asserted; the whole per-user OAuth chain rests on it | gap | P2 (2e) |
+| 7 | daemon + external OAuth must be a **permanent** deny, not a stub awaiting work | undocumented invariant | ✅ done — §4.8.6 inv. 7 |
+| 8 | `asset_grants` is "visibility, not authority" (§2) but `chat.py:585` uses it as the authority for cross-team invoke | doc ⇄ code conflict | R5 |
+| 9 | **Zero** admin-created tool grants — 120 `auto:deploy`, 27 `system`; the Deploy modal never mentions granting | measurement | Decision 46 |
+| 10 | OQ-4 was being treated as the route to per-tool authorization; the proxy can do it without touching credentials | de-scope | ✅ done — §4.8.7 |
+| 11 | The agent's tool list is fetched **once at pod startup**, so per-user schema *filtering* is impossible without request-scoped resolution | gap | post-P2 |
+
+**Revised order.** Decision 46 moves ahead of identity P1 — it is not blocked on identity, and it
+removes a P2 blocker (finding 5) rather than forcing a rego special case:
+
+```
+now  →  finding 1 (bug fix, no dependencies)
+     →  Decision 46 (tool ownership; unblocks 5)
+     →  identity P1  →  P1.5      (unchanged)
+     →  identity P2: 2a → 2b → 2c → 2d → 2e   (absorbs 2, 3, 4, 6)
+     →  post-P2: finding 11
+     →  R5: finding 8
+```
+
+**not-yet-verified — finding 1 is suspected, not proven.** A `consumer` reached
+`POST /agents/{name}/deployments/{dep_id}/chat` and got **200**, but that caller was in team
+`platform`, the same team as the agent, so `start_chat`'s own-team fast path would have allowed it
+too. The handler plainly has no check — it resolves `caller_team` and never compares it — but the
+cross-team reproduction needs a persona in `operations` and has **not** been run. Do not record this
+as confirmed until it has.
+
 ## Identity propagation P0 — 2026-08-07 (registry-api 0.2.265 / deploy-controller 0.1.42 / declarative-runner 0.1.68)
 
 The `RunContext` primitive and its signing key. Design:

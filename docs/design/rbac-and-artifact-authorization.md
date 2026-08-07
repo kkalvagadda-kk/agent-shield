@@ -269,6 +269,22 @@ Consolidated from the four superseded docs plus the bug record. Tagged per CLAUD
   bounded (Decision 43): a name picker cannot work otherwise, and it carries no email/role/team/
   enabled field — strictly less than every role could read before R2. `suite-98` T-S98-009 pins the
   absent fields so it cannot grow back into `/admin/users`. **deferred (intentional)**.
+- G-R3-2 **`start_deployment_chat` has no access check at all.** `chat.py:801`
+  (`POST /{name}/deployments/{dep_id}/chat`) resolves `caller_team` and never compares it to
+  `agent.team`, never calls `_has_grant`. Its sibling `start_chat` (`:550`) enforces both. Studio
+  routes to the UNGUARDED one (`App.tsx:84`) from a fleet row. Two doors to one capability, one
+  guarded — the same shape as `webhook_clients.py`/`agent_endpoints.py` and
+  `approvals._ADMIN_ROLES`. **not-yet-wired (debt), suspected not proven:** the 200 observed was
+  same-team, so the own-team fast path would have allowed it anyway. *(2026-08-07)*
+- G-R3-3 **`asset_grants` is called visibility in §2 and used as authority in `chat.py:585`.**
+  §2 says "visibility ≠ authority", but `_has_grant` on that table is THE gate for cross-team
+  invoke. Either the doc is wrong or the code trusts a visibility record as an authorization
+  decision. Resolving it determines whether the invoke gate replaces `_has_grant` or sits beside
+  it. Owned by R5 (one role vocabulary). *(2026-08-07)*
+- G-R3-4 **Tool authorization resolves on the agent's team, not the caller's** — so sharing an
+  agent escalates tool access. **Decision 45** resolves; lands in identity P2. *(2026-08-07)*
+- G-R3-5 **`owner_team` is never set at tool creation**, so a Studio-created tool is usable by every
+  team (65 of ~173 rows). **Decision 46** resolves; ships ahead of identity P1. *(2026-08-07)*
 - G-R2-4 `agents.py` is **1 protected / 11 exempt** on the deployed `0.2.263` (measured
   with T-S97-011's own algorithm). R2 closed `POST /agents/`; the eleven still-open routes
   include `PATCH /agents/{name}`, `DELETE /agents/{name}` and `POST

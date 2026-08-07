@@ -1083,6 +1083,134 @@ if caller:
 
 ---
 
+## Decision 45: delegating an agent does NOT delegate its tools — unless the agent is autonomous
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Resolves the gap behind three separate findings
+
+**Context:** Granting team B access to an agent owned by team A currently gives team B everything
+that agent can do. OPA resolves the effective tool set as `agent.tools ∪ data.grants[agent.team]`
+(`agentshield.rego:63,71-74`) — **the agent's team, never the caller's** — and the OPA input carries
+no caller-team dimension at all (`agent_class`, `sa_subject`, `tool_name`, `user_id`). So an admin's
+team→tool grant governs who may *deploy* (`deployments.py:638`, 422 `tool_grants_missing`) and never
+who may *use*. Measured on the test cluster: of 147 active tool grants, **120 were created by
+`auto:deploy` and 27 by `system` — zero by a human admin**, and 65 of ~173 tools have
+`owner_team = NULL`, which `team_may_use_tool` treats as usable by every team.
+
+The practical consequence is a privilege-escalation path: team A cannot grant team B a tool
+directly, but can wrap it in an agent and grant the agent. A shared agent becomes a confused
+deputy — the same hazard §4.8.1 already cites as the reason the MCP proxy has a team floor.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: agent is the unit of delegation** | Today's behaviour. Granting the agent grants its capabilities | Simple, and cross-team sharing "just works". But tool grants are then deploy-time bookkeeping, not a control, and the escalation path stays open |
+| **B: caller must independently hold every tool** | Intersect with the caller's team grants on every run | Closes the escalation. Breaks daemons outright — a scheduled run has no caller, so the intersection is empty and every autonomous agent stops working |
+| **C: split on the identity model** | User-delegated runs intersect; autonomous runs do not | Two rules to hold in your head, but each is right for its case |
+
+**Choice: C.**
+
+    user_delegated → (agent.tools ∪ grants[agent.team]) ∩ grants[caller_team]
+    daemon         →  agent.tools ∪ grants[agent.team]        (unchanged)
+
+**Rationale:** this is not a new axis — it is the distinction the platform already draws.
+`identity-propagation-architecture.md` §4.2 defines exactly these two identity models, and
+`agentshield.rego:101-107` already branches on them for the identity floor: a `daemon` needs no live
+user, a `user_delegated` run denies without one. Tool scope should follow the same seam. When a run
+acts for a person, that person's team is the ceiling; when it acts for itself, the agent's own grants
+are the whole story, because there is no user whose authority could be exceeded.
+
+**Consequences / trade-offs:**
+- **This makes `input.agent_class` load-bearing for TWO gates, and it is self-reported.** §4.6 D-1
+  already records that `agent_class` reaches OPA from the pod rather than the registry, so a
+  compromised pod can relabel itself `daemon` and skip the identity floor. Under this decision the
+  same relabel would ALSO skip the tool intersection. **D-1 must be fixed first or in the same
+  change** — `agent_class` has to come from the registry record. Without that, C is weaker than A.
+- **The bundle does not currently know what "unowned" means.** `bundle_generator` builds
+  `grants_by_team` from `asset_grants` only, so the 65 `owner_team = NULL` tools appear in no team's
+  grant set. They pass today solely because they sit in `agent.tools`. A naive intersection denies
+  all 65 to every cross-team user-delegated run. The rego must mirror `team_may_use_tool`'s rule that
+  an unowned tool is universal — or `owner_team` must become `NOT NULL` and the 65 backfilled. Either
+  is fine; leaving them contradictory is not.
+- **Needs `user_team` in the OPA input, from the verified `RunContext`** — never from a header, or
+  the caller picks their own ceiling. Blocked on identity P1/P2.
+- **`caller_team == ""` must fail closed** on the user-delegated branch. It will be empty until P1
+  lands, so this cannot be switched on before then.
+- **It is a breaking change for anyone relying on cross-team sharing today.** Needs a flag and a
+  measured rollout, not a flip — the same lesson as R2, where the sweep list was written by hand.
+- The same rule governs the *tool-schema filtering* question (a user-delegated run should not be
+  shown a tool it cannot call). Filtering and denial are complementary, not alternatives: filtering
+  keeps the model from proposing it and stops the tool's description leaking; denial ensures
+  filtering is not the only control.
+- **Unchanged by this decision:** an agent grant still controls whether you may *invoke* the agent
+  at all. C narrows what the agent may do *for you*, not whether you may reach it.
+
+---
+
+## Decision 46: a tool's team comes from its creator — `owner_team = NULL` becomes illegal
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Unblocks Decision 45
+
+**Context:** The intended rule — *creating a tool makes it your team's; other teams need a grant* —
+is already implemented in the authorization resolver:
+
+```python
+# tool_access.team_may_use_tool
+if owner_team is None or owner_team == team:  return True   # own-team implicit
+# else: look for an active cross-team AssetGrant
+```
+
+But **nothing populates `owner_team`.** `routers/tools.py::create_tool` builds
+`Tool(**body.model_dump(...))` and sets `created_by` from the JWT; `owner_team` comes from the
+request BODY and `ToolCreate.owner_team` defaults to `None`. Studio's tool form never sends it.
+
+So creating a tool produces the *most permissive* state available: `NULL`, which the resolver
+treats as usable by **every** team. Measured: **65 of ~173 tools are `NULL`**. That is not drift —
+it is what the create path produces.
+
+The visibility half is missing too. `GET /tools/` has an `owner_team` filter (`tools.py:202`), but
+all eight Studio callers of `listAllTools()` pass no params — so every tool on the platform is
+listed to every user, in the Create Agent picker, the agent detail tab, Skills, and Credentials.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: leave it** | `NULL` stays legal and universal | Tool grants remain unenforceable for user-created tools, and Decision 45's intersection cannot be implemented — see below |
+| **B: auto-grant the creator's team** | Write an `AssetGrant` at create | Works, but a grant row for your own team is redundant: the resolver already allows own-team without one. Adds bookkeeping that must then be kept in sync |
+| **C: set `owner_team` from the caller; make `NULL` illegal** | Ownership, not a grant. Genuine builtins get an explicit shared team every team is granted | One backfill decision for the existing 65, then the ambiguity is gone permanently |
+
+**Choice: C.**
+
+**Rationale:** `NULL` currently means two different things — "a deliberately universal builtin" and
+"a tool created through the UI, which never sets the field". Those need opposite treatment and are
+indistinguishable. This is the same shape as Decision 41 (a missing role row is corruption, not a
+kind of user): remove the ambiguous state rather than pick a safe reading of it. `owner_team` is
+derived from the **caller's team, not the request body** — a body field lets a caller assign
+ownership to a team they are not in.
+
+**Consequences / trade-offs:**
+- **This unblocks Decision 45.** The OPA bundle builds `grants_by_team` from `asset_grants` only,
+  so unowned tools appear in no team's grant set. A naive `∩ grants[caller_team]` would deny all 65.
+  With `NULL` illegal and builtins explicitly shared, the bundle and the resolver finally agree on
+  what "unowned" means — because nothing is unowned. Doing this FIRST removes a P2 blocker instead
+  of working around it in the rego.
+- **The backfill is a judgement call and must not be blanket.** Some of the 65 are genuine shared
+  builtins; some are user-created and belong to a team. `created_by` is populated on every row and
+  is the only signal available to tell them apart. Anything ambiguous should go to the shared team
+  (permissive, matching today's behaviour) rather than be guessed into a team — a wrong guess
+  silently revokes a tool from whoever was using it.
+- **The list endpoint must call `team_may_use_tool`, not a new predicate.** The visibility rule is
+  not `owner_team == myteam` — a team holding a cross-team grant must still see the tool. That is
+  exactly the resolver. A second filter would give visibility and authorization two answers, and
+  there is already one such disagreement (resolver vs OPA bundle) that this decision exists to end.
+- **The deploy-time auto-grant may become deletable.** 120 of 147 active tool grants are
+  `auto:deploy:*` — a team granting itself its own agent's tools at deploy. Once `owner_team` is
+  set, the resolver allows own-team tools with no grant row at all. Whether the rows are still
+  needed depends on whether OPA's Gate 3 (`agent.tools ∪ grants[agent.team]`) covers them via
+  `agent.tools`. **Verify before deleting** — this is a check, not a conclusion.
+- **UX consequence either way:** the Deploy modal currently shows Replicas and TTL and says nothing
+  about granting tool access, while Admin → Grants presents a "Create Grant" form that has produced
+  **zero** of the 147 grants. If the auto-grant survives, the modal must name what it grants.
+
+---
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -1131,3 +1259,5 @@ if caller:
 | 42 | Role column overload | `user_team_assignments.role` is a **union of {global role} ∪ {reviewer scope}** (WS-2 T011, `_DEFAULT_REVIEWER_SCOPE="agent:reviewer"`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`. So an unrecognized value is NOT treated as corruption — `ROLE_HIERARCHY.get(role,0)==0` is load-bearing, not a bug. |
 | 43 | R2 endpoint split | `/admin/teams-summary` had TWO readers — the Access Control census and the sidebar/My Agents view every role sees. Gating it as-is would have silently emptied "Shared With Me" platform-wide; leaving it open would keep handing a `consumer` the whole org's membership. **Split:** census stays admin-only, new self-scoped `GET /api/v1/me/team`, new name-only `GET /api/v1/users/directory` for the grant picker. The split also deletes the client-side `.find()` that blanked the app. |
 | 44 | Role gates need a browser | All 61 bash suites and all 47 Playwright specs ran as `platform-admin`, so no role gate could fail a test. `global-setup.ts` is now multi-role (personas created through the real admin API, fail-loud); `e2e/rbac-role-journeys.spec.ts` drives the app as a consumer and a contributor. Corrects the claim that R5 is the only UX-facing RBAC phase. |
+| 45 | Agent vs tool delegation | **Delegating an agent does NOT delegate its tools — unless it is autonomous.** user_delegated runs intersect the agent's effective tool set with the CALLER's team grants; daemon runs keep the agent's own. Follows the §4.2 identity-model seam the identity floor already branches on. Prereqs: D-1 (registry-side `agent_class`, now load-bearing for two gates), an unowned-tool rule in the bundle, and `user_team` in the OPA input from the verified RunContext (identity P1/P2). |
+| 46 | Tool ownership | **A tool's team comes from its creator; `owner_team = NULL` becomes illegal.** Creation currently leaves it NULL, which the resolver treats as usable by EVERY team — 65 of ~173 tools. Ownership, not an auto-grant (own-team needs no grant row). Builtins get an explicit shared team. Unblocks Decision 45 by making the bundle and the resolver agree on what 'unowned' means. List endpoint reuses `team_may_use_tool`. |

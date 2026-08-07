@@ -455,6 +455,20 @@ These are the properties that make the stub safe. Any change to `identity.py` mu
    token: listing a server's tools is the platform acting as itself, not as any user.
 6. An unrecognized `identity_mode` falls back to static credentials — never mints a platform
    identity for a mode it does not understand.
+7. **A daemon can NEVER call an external OAuth server. This is permanent, not a stub.** The
+   credential for an OAuth server *is* a specific human's grant; the platform has no GitHub
+   identity of its own, so there is nothing to fall back to. `OAuthUserRequired` is the correct
+   final answer for an autonomous run. Written down because Decision 45 says autonomous runs
+   delegate the agent's capabilities — someone will read that, see a daemon failing on GitHub,
+   and "fix" it by substituting a service token. That would hand the platform's own credentials
+   to an unattended job, and it is what invariant 1 forbids.
+8. **The user/service branch is decided by VERIFIED `agent_class`, never by "is `user_sub`
+   empty".** Under Decision 45 a daemon legitimately has no user and correctly resolves to
+   `service_identity`; a user-delegated run that has *lost* its identity must still fail closed.
+   Those two states look identical if the test is a missing `user_sub`, and conflating them is
+   how a user-delegated run silently acquires a platform token. This reframes invariant 4: never
+   resolve to a service token when the run **is user-delegated** — not merely when `user_sub` is
+   absent.
 
 #### 4.8.7 What this does NOT give you
 
@@ -464,6 +478,26 @@ Two properties are absent by design. Both are decisions, not oversights, and bot
   narrows it to the single tool being invoked. A token minted to call `search_repositories` is
   equally usable for `delete_repo` if the upstream authorizes it. Per-tool scope-down is where
   classic delegation earns its complexity — **OQ-4**.
+
+  > **OQ-4 DE-SCOPED 2026-08-07 by Decision 45.** OQ-4 was being treated as the route to per-tool
+  > *authorization*, and it is expensive: it needs classic delegation, which needs a live
+  > re-presentable token internally, which §4.3 rules out for reasons that survive full
+  > implementation. But authorization and credential scope are different problems. The proxy can
+  > enforce "may this user's team use this tool" at **Gate 2** without narrowing the credential's
+  > audience at all. OQ-4 therefore remains open only as *defence in depth* — bounding blast radius
+  > if an upstream server is compromised — and is no longer on the critical path for anything.
+  > Do not build classic delegation to get per-tool authorization.
+
+- **Gate 2 judges the AGENT's team, not the caller's — same defect as OPA Gate 1.** Found
+  2026-08-07. `authz.team_from_sa_subject` parses `system:serviceaccount:agents-{team}:{sa}`, so
+  the "caller team" is the **pod's** team; `AuthorizeToolCallRequest` carries `caller_sa_subject`
+  and **no user field at all**, so the acting user never reaches `internal_mcp.authorize_tool_call`.
+  §4.8.1's Gate 2 row ("may this agent's *team* reach this server/tool") is accurate about what the
+  code does and wrong about what it should do. Under **Decision 45** a user-delegated run must
+  intersect with the *acting user's* team; an autonomous run keeps today's behaviour.
+  The identity is already at the proxy — `tool_executor.py:409-416` sends per-request `x-user-sub`
+  — it is simply not used for the decision, and it is a self-asserted header until Phase 2 verifies
+  the RCT. So this is one change applied twice: once in the rego, once at Gate 2.
 - **No contract obliges the server to validate what it is handed.** For external servers this is
   moot (GitHub validates because it is GitHub). For an **internal** MCP server the platform mints
   an audienced token and trusts the receiver to check audience, expiry, and subject — with no
@@ -517,7 +551,40 @@ otherwise would be green for the wrong reason.
 
 **Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-101` approve after the token would have expired, assert identity still present.
 
-**Phase 2 — SDK pod runtime + Gate 5 hardening.** `server.py` reads/verifies the RCT header (today it reads only `x-agentshield-trace-id`); `start_chat` mints on the production path; transition window accepts legacy `x-user-sub` (RCT wins). **Gate 5 already exists** — this phase does not add it; it closes the three deltas in §4.6 (D-1 registry-side `agent_class`, D-2 decide the playground/sandbox question, D-3 `require_approval` gating), and D-1 is the only one that changes a security property. *Sequencing note:* the original "add Gate 5 only after identity arrives" is moot — the gate has been live and denying since WS-2, so Phase 1's real acceptance test is that the *existing* floor stops denying legitimate `user_delegated` traffic. *e2e:* `suite-102` user_delegated denied without identity; **daemons explicitly asserted unaffected**; self-reported-`daemon` relabel attempt denied (D-1's regression guard).
+**Phase 2 — SDK pod runtime + Gate 5/6 hardening. SCOPE GREW 2026-08-07 (Decisions 45/46).**
+Phase 2 now carries the tool-scope work, in this order — the order is forced, not stylistic:
+
+  **2a. D-1 FIRST — `agent_class` from the registry record, not the pod.** Previously "the only
+  delta that changes a security property". Under Decision 45 it also selects the tool set AND
+  (for MCP) the credential, so a pod that self-reports `daemon` would get a wider tool set and a
+  platform-scoped upstream token. Every other item below is weaker than today's behaviour without
+  it. *Regression guard:* a self-reported-`daemon` relabel attempt is denied.
+
+  **2b. Decision 46 must have landed** (`owner_team` set at creation, `NULL` illegal). The OPA
+  bundle lists only explicitly-granted tools, so intersecting against a caller's grants would deny
+  every unowned tool. Decision 46 removes that state rather than special-casing it in the rego.
+  It is not blocked on identity and should ship ahead of Phase 1.
+
+  **2c. `user_team` into the OPA input, from the verified `RunContext`** — never a header, or the
+  caller picks their own ceiling. `caller_team == ""` fails closed on the user-delegated branch.
+
+  **2d. The intersection, applied TWICE** — once in `agentshield.rego` Gate 3, once at the MCP
+  proxy's Gate 2 (which needs the acting user added to `AuthorizeToolCallRequest`). Same rule,
+  two enforcement points. Behind a flag: this breaks anyone relying on cross-team agent sharing
+  today, and R2 already demonstrated what a hand-rolled rollout costs.
+
+  **2e. `x-user-sub` stops being load-bearing** once the SDK verifies the RCT. This also closes
+  G-R3-1 (the playground role gate bypassable by forging that header).
+
+Original Phase 2 scope, unchanged: `server.py` reads/verifies the RCT header (today it reads only
+`x-agentshield-trace-id`); `start_chat` mints on the production path; transition window accepts
+legacy `x-user-sub` (RCT wins). **Gate 5 already exists** — this phase does not add it; it closes
+the §4.6 deltas, of which D-1 is now 2a. *Sequencing note:* the original "add Gate 5 only after
+identity arrives" is moot — the gate has been live and denying since WS-2, so Phase 1's real
+acceptance test is that the *existing* floor stops denying legitimate `user_delegated` traffic.
+*e2e:* `suite-102` user_delegated denied without identity; **daemons explicitly asserted
+unaffected**; self-reported-`daemon` relabel attempt denied (2a's regression guard); cross-team
+caller denied a tool their team lacks while the owning team still gets it (2d's over-reach guard).
 
 **Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0081` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
 
