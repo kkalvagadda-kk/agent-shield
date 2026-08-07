@@ -120,6 +120,46 @@ def _chat_thread_id(run, run_id: str) -> str:
     return run.session_id or run_id
 
 
+async def _require_agent_access(db: AsyncSession, agent, user_sub: str) -> str:
+    """403 unless the caller's team may reach this agent. Returns the caller's team.
+
+    THE ONE access check for starting a run against an agent. Both entry points call it:
+    `start_chat` (/{name}/chat) and `start_deployment_chat` (/{name}/deployments/{id}/chat).
+
+    G-R3-2, fixed 2026-08-07. `start_deployment_chat` did the same job pinned to a
+    deployment and enforced NOTHING — it resolved `caller_team` and never compared it to
+    `agent.team`, never consulted a grant. Studio routes to that endpoint from a fleet row
+    (App.tsx), so it was the path the product actually used. Reproduced on the cluster: a
+    `consumer` in team `operations`, against an agent owned by team `platform` —
+
+        /agents/{name}/chat                  -> 403 "Team 'operations' does not have access"
+        /agents/{name}/deployments/{id}/chat -> 200 run started
+
+    Same caller, same agent, same moment. Two doors to one capability, one guarded — the
+    shape `webhook_clients.py`/`agent_endpoints.py` and `approvals._ADMIN_ROLES` already have
+    postmortems for. Extracting the check is the fix; adding a second copy to the second
+    handler would only reset the clock on the same divergence.
+
+    NOTE this preserves today's semantics exactly — own-team, else an active `AssetGrant`.
+    Whether `asset_grants` (documented as *visibility*, §2 of the RBAC design) should be the
+    authority for cross-team invoke at all is G-R3-3, owned by R5. This fix does not decide
+    that; it makes both paths agree on whatever the answer turns out to be.
+    """
+    caller_team = await _caller_team(db, user_sub)
+    if caller_team != agent.team:
+        if not caller_team:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User has no team assignment.",
+            )
+        if not await _has_grant(db, agent.id, caller_team):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Team '{caller_team}' does not have access to agent '{agent.name}'.",
+            )
+    return caller_team
+
+
 async def _has_grant(db: AsyncSession, agent_id: uuid.UUID, team: str) -> bool:
     """Return True if team holds an active, non-expired grant on the given agent."""
     now = datetime.now(tz=timezone.utc)
@@ -573,20 +613,8 @@ async def start_chat(
 
     # -- Resolve caller team --------------------------------------------------
     user_sub = caller.get("sub", "")
-    caller_team = await _caller_team(db, user_sub)
-
-    # -- Access check ---------------------------------------------------------
-    if caller_team != agent.team:
-        if not caller_team:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="User has no team assignment.",
-            )
-        if not await _has_grant(db, agent.id, caller_team):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Team '{caller_team}' does not have access to agent '{name}'.",
-            )
+    # -- Access check (THE shared one — see _require_agent_access) -------------
+    caller_team = await _require_agent_access(db, agent, user_sub)
 
     # -- Resolve context (production vs playground) ------------------------------
     chat_context = body.context or "playground"
@@ -831,7 +859,11 @@ async def start_deployment_chat(
         )
 
     user_sub = caller.get("sub", "")
-    caller_team = await _caller_team(db, user_sub)
+    # THE SAME access check start_chat runs. Until 2026-08-07 this endpoint had NONE —
+    # it resolved caller_team on the next line and never used it for a decision, so any
+    # authenticated user could converse with any running deployment (G-R3-2, reproduced
+    # cross-team on the cluster). Regression: suite-98 T-S98-017/018.
+    caller_team = await _require_agent_access(db, agent, user_sub)
     # Fail-closed session binding (thread-ownership.md, S6).
     session_id = await _resolve_session_id(db, body.session_id, user_sub)
 

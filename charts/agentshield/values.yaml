@@ -756,7 +756,8 @@ registry-api:
     #          quarantine is platform-admin only; can_deploy_to_production gates
     #          the production deploy branch; can_use_playground gates the playground.
     # 0.2.265: identity P0 — vendored run_context.py; mints the root run context.
-    tag: "0.2.265"
+    # 0.2.266: G-R3-2 — the deployment-pinned chat endpoint had no access check.
+    tag: "0.2.266"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

@@ -269,7 +269,14 @@ Consolidated from the four superseded docs plus the bug record. Tagged per CLAUD
   bounded (Decision 43): a name picker cannot work otherwise, and it carries no email/role/team/
   enabled field — strictly less than every role could read before R2. `suite-98` T-S98-009 pins the
   absent fields so it cannot grow back into `/admin/users`. **deferred (intentional)**.
-- G-R3-2 **`start_deployment_chat` has no access check at all.** `chat.py:801`
+- ~~G-R3-2 **`start_deployment_chat` has no access check at all.**~~ **CLOSED 2026-08-07
+  (`0.2.266`).** Both entry points now call one shared `_require_agent_access`. **PROVEN
+  cross-team before the fix**: a `consumer` in team `operations` got 403 from
+  `/agents/trigger-demo-b/chat` and **200** from
+  `/agents/trigger-demo-b/deployments/{id}/chat` — same caller, same agent, same moment.
+  Regression: `suite-98` T-S98-017 (cross-team denied) + T-S98-018 (owning team still
+  works). Postmortem: `docs/bugs/deployment-pinned-chat-had-no-access-check.md`. Original
+  finding text:  `chat.py:801`
   (`POST /{name}/deployments/{dep_id}/chat`) resolves `caller_team` and never compares it to
   `agent.team`, never calls `_has_grant`. Its sibling `start_chat` (`:550`) enforces both. Studio
   routes to the UNGUARDED one (`App.tsx:84`) from a fleet row. Two doors to one capability, one

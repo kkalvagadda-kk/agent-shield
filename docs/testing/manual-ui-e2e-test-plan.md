@@ -45,6 +45,29 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## Known gaps — the two test layers share personas and can invalidate each other — 2026-08-07
+
+**not-yet-wired (debt).** `e2e_ensure_persona` (bash) calls `POST /admin/users/{id}/reset-password`
+on `e2e-consumer` / `e2e-contributor` every run — it has to, because `create_user` sets
+`requiredActions=["UPDATE_PASSWORD"]` and Keycloak then refuses a password grant. But Keycloak
+**invalidates that user's sessions on a password reset**, and Playwright's `global-setup` saves a
+`storageState` per role at the start of its run.
+
+So: run a bash sweep containing `suite-98`, then run the browser layer against a `storageState`
+minted earlier, and the non-admin specs fail with what looks exactly like a product regression.
+Observed today — `T-RJ-004` and `T-RJ-007` failed immediately after a bash sweep and passed
+**11/11** on a re-run with no code change.
+
+Mitigations, none applied yet:
+- run `scripts/studio-e2e.sh` *before* the bash layer, or re-run global-setup after it, or
+- give the browser layer its own personas (`pw-consumer` / `pw-contributor`) so the two layers stop
+  sharing identities, or
+- have `e2e_ensure_persona` skip the reset when the persona already has no `requiredActions`.
+
+The third is the smallest and removes the cause rather than sequencing around it. Recorded because a
+red browser layer that is really an expired session is indistinguishable from a real break, and the
+instinct will be to go looking in the product.
+
 ## Known gaps — authorization review, 2026-08-07 (design session, no code change yet)
 
 A walkthrough of MCP and tool authorization surfaced eleven findings. **Decisions 45 and 46** were
@@ -77,12 +100,18 @@ now  →  finding 1 (bug fix, no dependencies)
      →  R5: finding 8
 ```
 
-**not-yet-verified — finding 1 is suspected, not proven.** A `consumer` reached
-`POST /agents/{name}/deployments/{dep_id}/chat` and got **200**, but that caller was in team
-`platform`, the same team as the agent, so `start_chat`'s own-team fast path would have allowed it
-too. The handler plainly has no check — it resolves `caller_team` and never compares it — but the
-cross-team reproduction needs a persona in `operations` and has **not** been run. Do not record this
-as confirmed until it has.
+**finding 1 — PROVEN then FIXED, 2026-08-07 (`0.2.266`).** The cross-team reproduction was
+run: a `consumer` in team `operations`, agent `trigger-demo-b` owned by team `platform` —
+`/agents/{n}/chat` → **403**, `/agents/{n}/deployments/{id}/chat` → **200**, same caller and
+moment. Both entry points now call one shared `_require_agent_access`; extraction rather than
+a second copy, because two doors to one capability is the class this repo has three
+postmortems for. RED-first was honoured properly: `suite-98` ran 18/1 against the unfixed
+`0.2.265` with T-S98-017 failing at 200 and the over-reach guard T-S98-018 already passing.
+Postmortem: `docs/bugs/deployment-pinned-chat-had-no-access-check.md`.
+
+The first probe was inconclusive and the lesson is worth keeping: it used a same-team
+persona, so the own-team fast path would have allowed it regardless. **A 200 is only evidence
+when the control under test is the one that would have said no.**
 
 ## Identity propagation P0 — 2026-08-07 (registry-api 0.2.265 / deploy-controller 0.1.42 / declarative-runner 0.1.68)
 

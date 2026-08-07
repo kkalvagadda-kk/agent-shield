@@ -343,6 +343,90 @@ case "$C16|$B16" in
   *)               record FAIL "T-S98-016 a CONSUMER is refused the playground BY THE ROLE GATE  |  -> $C16 $B16 (want 403 naming the contributor role)" ;;
 esac
 
+# ── G-R3-2 (2026-08-07): the deployment-pinned chat endpoint had NO access check ──
+# `start_chat` (/{name}/chat) enforced team + AssetGrant; `start_deployment_chat`
+# (/{name}/deployments/{id}/chat) did the same job pinned to a deployment and enforced
+# NOTHING — and Studio routes to THAT one from a fleet row. Reproduced on the cluster
+# before the fix: a consumer in team `operations`, agent owned by `platform` ->
+#     /agents/{n}/chat                  -> 403
+#     /agents/{n}/deployments/{id}/chat -> 200
+# Both now call the shared `_require_agent_access`. These two cases are the reason the
+# extraction is the fix rather than a second copy of the check: 017 proves the hole is
+# closed, 018 proves the closure did not take the legitimate path with it.
+S98_XT_TOK="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "e2e-crossteam" "consumer" "$CONTAINER" || true)"
+if [ -n "$S98_XT_TOK" ]; then
+  # Move the persona OFF the agent's team — e2e_ensure_persona pins team=platform, and a
+  # same-team caller passes via the own-team fast path, which would make 017 vacuous.
+  XT_SUB="$(printf '%s' "$S98_XT_TOK" | cut -d. -f2 | python3 -c "
+import base64, json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)))['sub'])
+")"
+  status "$ADMIN_TOK" PATCH "/api/v1/admin/users/${XT_SUB}" '{"team":"operations","role":"consumer"}' >/dev/null 2>&1 || true
+  S98_XT_TOK="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "e2e-crossteam" "consumer" "$CONTAINER" || true)"
+fi
+
+# Find a running deployment whose agent is ACTIVE and owned by a team the persona is NOT in.
+XT="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env T="$S98_XT_TOK" python3 -c '
+import json, os, urllib.request, urllib.error
+B = "http://localhost:8000/api/v1"; tok = os.environ.get("T", "")
+def call(p, b=None, m="GET"):
+    r = urllib.request.Request(B + p, method=m,
+        data=json.dumps(b).encode() if b else None,
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(r, timeout=25) as x: return x.status, x.read().decode()
+    except urllib.error.HTTPError as e: return e.code, e.read().decode()
+    except Exception: return 0, ""
+me = call("/me")[1]
+team = json.loads(me).get("team") if me.startswith("{") else None
+s, b = call("/deployments/?status=running&limit=50")
+for d in (json.loads(b).get("items", []) if s == 200 else []):
+    st, ab = call("/agents/" + d["agent_name"])
+    if st != 200: continue
+    a = json.loads(ab)
+    if a.get("status") != "active" or a.get("team") == team: continue
+    c1 = call("/agents/%s/chat" % d["agent_name"], {"message": "p", "context": "production"}, "POST")[0]
+    c2 = call("/agents/%s/deployments/%s/chat" % (d["agent_name"], d["id"]), {"message": "p"}, "POST")[0]
+    print("%s|%s|%s|%s" % (c1, c2, d["agent_name"], team)); break
+else:
+    print("skip|skip|none|%s" % team)
+' 2>/dev/null | tr -d '\r\n' || true)"
+XT_PINNED="$(echo "$XT" | cut -d'|' -f2)"; XT_AGENT="$(echo "$XT" | cut -d'|' -f3)"; XT_TEAM="$(echo "$XT" | cut -d'|' -f4)"
+case "$XT_PINNED" in
+  403) record PASS "T-S98-017 the DEPLOYMENT-PINNED chat endpoint enforces access  |  cross-team caller (team=${XT_TEAM}) -> 403 on /agents/${XT_AGENT}/deployments/{id}/chat" ;;
+  200) record FAIL "T-S98-017 the DEPLOYMENT-PINNED chat endpoint enforces access  |  200 — G-R3-2 is BACK. A caller in team '${XT_TEAM}' started a run on '${XT_AGENT}', which /{name}/chat refuses. Both endpoints must call _require_agent_access." ;;
+  skip) record PASS "T-S98-017 SKIPPED — no running deployment owned by another team to probe (not a pass of the gate; re-run when one exists)" ;;
+  *)    record FAIL "T-S98-017 the DEPLOYMENT-PINNED chat endpoint enforces access  |  got '${XT_PINNED}' (want 403)" ;;
+esac
+
+# The over-reach guard: the OWNING team must still be able to use the pinned endpoint.
+# A fix that 403s everybody passes 017 and breaks every fleet-row chat in the product.
+OWN="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env T="$ADMIN_TOK" python3 -c '
+import json, os, urllib.request, urllib.error
+B = "http://localhost:8000/api/v1"; tok = os.environ["T"]
+def call(p, b=None, m="GET"):
+    r = urllib.request.Request(B + p, method=m,
+        data=json.dumps(b).encode() if b else None,
+        headers={"Authorization": "Bearer " + tok, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(r, timeout=25) as x: return x.status, x.read().decode()
+    except urllib.error.HTTPError as e: return e.code, e.read().decode()
+    except Exception: return 0, ""
+s, b = call("/deployments/?status=running&limit=50")
+for d in (json.loads(b).get("items", []) if s == 200 else []):
+    st, ab = call("/agents/" + d["agent_name"])
+    if st != 200 or json.loads(ab).get("status") != "active": continue
+    print(call("/agents/%s/deployments/%s/chat" % (d["agent_name"], d["id"]), {"message": "p"}, "POST")[0]); break
+else:
+    print("skip")
+' 2>/dev/null | tr -d '\r\n' || true)"
+case "$OWN" in
+  200|201) record PASS "T-S98-018 the pinned endpoint still WORKS for an entitled caller  |  platform-admin -> ${OWN} (the fix denies the wrong team without denying the right one)" ;;
+  skip)    record PASS "T-S98-018 SKIPPED — no running deployment with an active agent to probe" ;;
+  *)       record FAIL "T-S98-018 the pinned endpoint still WORKS for an entitled caller  |  -> ${OWN} (want 200/201). The G-R3-2 fix over-reached and broke fleet-row chat." ;;
+esac
+
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -gt 0 ]; then
