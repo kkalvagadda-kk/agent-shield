@@ -66,11 +66,11 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT_NAME}', 'team': 'platform',
     'description': 'Memory test agent', 'agent_type': 'declarative',
     'memory_enabled': True,
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'setup mem agent failed: {r.status_code} {r.text}'
 r2 = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${NOMEM_AGENT}', 'team': 'platform', 'agent_type': 'declarative',
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r2.status_code == 201, f'setup nomem agent failed: {r2.status_code} {r2.text}'
 print('OK')
 " || { echo "FATAL: setup failed"; exit 1; }

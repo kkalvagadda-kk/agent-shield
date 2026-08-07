@@ -60,7 +60,7 @@ echo ""
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
 httpx.post('http://localhost:8000/api/v1/agents/',
-    json={'name': 's47-trace-a', 'team': 'platform', 'agent_type': 'declarative'}, timeout=5)
+    json={'name': 's47-trace-a', 'team': 'platform', 'agent_type': 'declarative'}, timeout=5, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 httpx.post('http://localhost:8000/api/v1/agents/s47-trace-a/versions',
     headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)

@@ -373,8 +373,11 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${ALICE_AGENT}/versions',
     data=json.dumps({'image_tag': 'registry.internal/s15:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${ALICE_TOK}',
-             'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
+    # ALICE's token, not the admin's. She created the agent, so the creator auto-grant
+    # gives her agent-admin on it — which is exactly what R3 requires here, and using the
+    # admin token instead would prove the gate for the one role that bypasses every check.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${ALICE_TOK}'},
+    method='POST')
 try:
     urllib.request.urlopen(req)
 except Exception as e:

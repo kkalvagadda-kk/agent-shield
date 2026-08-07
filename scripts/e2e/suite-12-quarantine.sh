@@ -153,7 +153,7 @@ except urllib.error.HTTPError as e:
         'team': 'platform',
         'description': 'Suite 12 quarantine smoke test agent'
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -189,8 +189,8 @@ import urllib.request, json, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
   data=b'',  # no body required
-  headers={'Content-Type': 'application/json'},
-  method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+  headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+  method='POST' 
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -356,7 +356,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  data=b'', headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+  data=b'', headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' 
 )
 urllib.request.urlopen(req)
 " 2>/dev/null || true
@@ -365,7 +365,7 @@ run_test "POST quarantine on already-quarantined agent → 409 Conflict" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$QUARANTINE_AGENT/quarantine',
-  data=b'', headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+  data=b'', headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' 
 )
 try:
   urllib.request.urlopen(req)
@@ -382,10 +382,8 @@ Q_RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 # The trace_id_middleware adds trace_id to request.state and echoes in response
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/${QUARANTINE_AGENT}/quarantine',
-    data=b'{}', headers={
-        'Content-Type': 'application/json',
-        'X-AgentShield-Trace-ID': '${QUARANTINE_TRACE_ID}',
-    }, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=b'{}', headers={'Content-Type': 'application/json',
+        'X-AgentShield-Trace-ID': '${QUARANTINE_TRACE_ID}', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     r = urllib.request.urlopen(req, timeout=5)
     trace_echo = r.headers.get('X-AgentShield-Trace-ID', 'MISSING')

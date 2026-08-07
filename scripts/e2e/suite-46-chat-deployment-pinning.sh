@@ -73,7 +73,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
 for n in ('s46-pin-a', 's46-pin-b'):
     httpx.post('http://localhost:8000/api/v1/agents/',
-        json={'name': n, 'team': 'platform', 'agent_type': 'declarative'}, timeout=5)
+        json={'name': n, 'team': 'platform', 'agent_type': 'declarative'}, timeout=5, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     httpx.post(f'http://localhost:8000/api/v1/agents/{n}/versions',
         headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
         json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)

@@ -68,7 +68,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'team': 'default',
     'agent_type': 'declarative',
     'metadata': {'instructions': 'test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create returned {r.status_code}: {r.text}')
     sys.exit(1)
@@ -97,7 +97,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'execution_shape': 'durable',
     'memory_enabled': True,
     'metadata': {'instructions': 'durable test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create returned {r.status_code}: {r.text}')
     sys.exit(1)

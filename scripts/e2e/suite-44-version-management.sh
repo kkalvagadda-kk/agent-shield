@@ -148,7 +148,7 @@ print("Agent cleanup done")
 # --------------------------------------------------------------------------
 echo "T-S44-005..008 — Workflow: snapshot, deploy, invalid deploy, re-snapshot"
 run '
-import httpx, uuid
+import httpx, os, uuid
 
 c = httpx.Client(base_url="http://localhost:8000", follow_redirects=True,
                  headers={"X-User-Sub": "test-suite-44",

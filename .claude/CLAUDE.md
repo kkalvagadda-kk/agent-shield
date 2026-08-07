@@ -55,6 +55,8 @@ Affected services and their tag variables:
 
 Run `bash scripts/check-tag-content-coupling.sh` before deploying — it is cluster-free, takes ~5s, and catches exactly this.
 
+Run `bash scripts/check-e2e-auth-hygiene.sh` too, whenever a change adds or tightens auth on a router. Also cluster-free (~1s). It fails on the four ways an e2e suite silently stops authenticating: a duplicate `headers=` kwarg (SyntaxError inside the in-pod driver), two `Authorization` keys in one dict (NOT an error — the last wins, so the call goes out as the wrong identity), an agent mutation with no credential, and `${E2E_TOKEN}` referenced without sourcing `lib/e2e-auth.sh`. Three RBAC phases in a row shipped a router change that turned suites red; R2's sweep list was written by hand and missed 28 suites, several of which stayed red for a whole phase. Derive the list from the tree.
+
 ### 3. Experience Docs
 
 `docs/experience/` contains end-user-facing descriptions of each major UX flow. When you change playground UX or APIs — new SSE events, new panels, new endpoints, changed error states, changed routing logic — you **MUST** update `docs/experience/playground.md` to reflect the change before reporting the task done.

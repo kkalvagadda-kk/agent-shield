@@ -134,7 +134,7 @@ except urllib.error.HTTPError as e:
         'team': 'platform',
         'description': 'Suite 9 eval runner smoke test agent'
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -472,7 +472,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 's9-bypass-agent', 'team': 'platform', 'description': 's9 bypass'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:

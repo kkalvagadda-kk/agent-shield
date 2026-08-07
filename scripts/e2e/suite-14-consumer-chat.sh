@@ -145,6 +145,7 @@ httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/versions',
 
 # Submit for publish
 pub = httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/publish',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={'dependency_declaration': {}}, timeout=5)
 if pub.status_code not in (200, 201, 202):
     print(f'publish: {pub.status_code} {pub.text[:80]}')

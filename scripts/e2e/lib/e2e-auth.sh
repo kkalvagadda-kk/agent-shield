@@ -281,6 +281,24 @@ PY_PERSONA
   printf '%s' "$tok"
 }
 
+# e2e_refresh_token <ns> <pod> [container]
+# Re-mint E2E_TOKEN. Call this before any authenticated work that happens LATE in a long
+# suite — cleanup traps above all.
+#
+# WHY: Keycloak issues these with a 300-SECOND lifetime (measured 2026-08-07). Any suite
+# that runs longer than five minutes and then makes an authenticated call is holding an
+# expired token. That did not matter while cleanup was anonymous; R1-R3 made agent
+# DELETE/PATCH/publish require a credential, so every long suite's cleanup became a
+# time-bomb. suite-5 is where it surfaced: its cleanup DELETE returned non-204 while the
+# identical call with a fresh token returned 204.
+#
+# This is a REFRESH, not a second source of truth — it overwrites the same E2E_TOKEN the
+# suite already uses, so there is still one variable and one way to authenticate.
+e2e_refresh_token() {
+  local ns="$1" pod="$2" container="${3:-registry-api}"
+  e2e_set_token "$ns" "$pod" "$container"
+}
+
 e2e_ensure_reviewer() {
   local ns="$1" pod="$2" container="${3:-registry-api}" admin_tok out
   admin_tok="$(e2e_token "$ns" "$pod" "$container")" || {

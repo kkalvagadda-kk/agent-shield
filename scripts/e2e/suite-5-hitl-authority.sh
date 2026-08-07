@@ -42,6 +42,11 @@ e2e_set_token "$NAMESPACE" "$API_POD"
 
 AUTHORITY_ID=""
 cleanup() {
+  # Re-mint first: Keycloak tokens live 300s and this suite runs longer, so the token
+  # from setup is expired by the time cleanup needs it. Cleanup only began needing a
+  # credential when R3 gated agent DELETE — see e2e_refresh_token in lib/e2e-auth.sh.
+  e2e_refresh_token "$NAMESPACE" "$API_POD" || true
+
   echo ""
   echo "==> Cleanup..."
   if [ -n "$AUTHORITY_ID" ]; then
@@ -56,7 +61,7 @@ except Exception: pass
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/hitl-s5-agent', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/hitl-s5-agent', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
 }
@@ -112,7 +117,7 @@ except urllib.error.HTTPError:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/',
         data=json.dumps({'name': name, 'team': 'platform', 'description': 'Suite 5 HITL test'}).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
         method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -367,8 +372,7 @@ run_test "Cleanup: DELETE /agents/hitl-s5-agent → 204 (soft-delete)" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/hitl-s5-agent',
-    method='DELETE'
-)
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
 "

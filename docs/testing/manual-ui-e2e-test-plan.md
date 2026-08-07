@@ -62,25 +62,46 @@ destructive writes stayed open, which made them the biggest remaining hole. Desi
   deciding, so the header was a forged signature on a governance record.
 - **closed — §1.3's orphan list.** `can_deploy_to_production`, `can_use_playground` and
   `can_manage_artifact` all have live callers. Only `can_approve_hitl` remains (R5).
+- **R2's blast-radius sweep was incomplete, and R3's found it.** R2 required auth on
+  `POST /agents/` and I verified a **hand-picked list of 17 suites**. A grep-derived audit
+  during R3 found **41 anonymous create sites across ~28 suites** — so several had been
+  red since `0.2.263` and nobody knew. Worse, some *passed* anyway: their create sits in a
+  `try/except` that swallows the 401 and the fixture silently reuses a stale agent from an
+  earlier run, which is the suite-78 "green while testing nothing" defect wearing a
+  different hat. **Lesson: derive the sweep list from a grep of the changed surface, never
+  from a list you wrote by hand.** All 41 now carry a Bearer; the audit is repeatable and
+  is what should gate the next router change.
+- **closed structurally — `scripts/check-e2e-auth-hygiene.sh`.** Cluster-free, ~1s, run
+  it beside `check-tag-content-coupling.sh` before deploying a router change. It fails on
+  a duplicate `headers=` kwarg, TWO `Authorization` keys in one dict (not a syntax error —
+  the last value silently wins, so a persona's call goes out as someone else), an agent
+  mutation with no credential, and `${E2E_TOKEN}` referenced without sourcing
+  `lib/e2e-auth.sh`. It found a site my hand audit had just missed
+  (`suite-17-eval-gate.sh:473`) on its first run. This is the answer to three phases of
+  hand sweeps: derive the list from the tree, not from memory.
+- **four scripted-edit bugs of my own, all the same shape.** Bulk regex edits across the
+  suites produced: a duplicate `headers=` kwarg (`SyntaxError: keyword argument repeated`,
+  14 sites, caught by the sweep); TWO `Authorization` keys in one dict, which is NOT an
+  error — the last wins, so suite-15's publish went out as platform-admin instead of as
+  alice and the case proved nothing; an anonymous probe rewritten into an authenticated
+  one (suite-15 T-S15-002); and a `/me` case that lost the unauthenticated half it existed
+  to assert (suite-42 T-S42-004). Every one was caught by *running* the thing, never by
+  reading the diff. The replacement pass is now add-**or**-merge, and the first two
+  variants are permanently gated by `check-e2e-auth-hygiene.sh`.
 - **closed — 35 suites mutated agents with no credential.** A router change without the
   suite fixes turns ~31 suites red; that is the R1/HC-3 lesson and it is why they are in
   this commit. 61 call sites across two shapes, all verified to interpolate.
-- **NOT YET VERIFIED ON A CLUSTER — R3 is code-complete but unproven.** The VPN to the
-  EKS test cluster dropped before `0.2.264` could be built, so nothing in this phase has
-  been run against a deployed image. Local gates only (tsc, Vitest, `bash -n` on every
-  touched suite, `ast.parse` on every touched module, coupling 43/43, manifest audit).
-  The RED baseline was NOT captured either — the cluster is still on `0.2.263`, which has
-  R2 but not R3, so it is still capturable and should be taken **before** deploying:
-  ```
-  KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/e2e/suite-98-rbac-role-enforcement.sh
-  #   expect T-S98-011..014 and -016 RED, -015 green (it is the over-reach guard)
-  KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/deploy-eks.sh registry-api
-  #   then suite-98 must go 17/0, plus the blast-radius sweep and the Playwright specs
-  ```
-  Standing evidence that the hole was real, independent of that run: the T-S97-011 canary
-  measured `agents` at **1 protected / 11 exempt** on the deployed `0.2.263`, and 31 e2e
-  suites were successfully deleting agents with **no credential** against it. Both are
-  reproductions; neither is a substitute for the suite going red then green.
+- **RED baseline captured 2026-08-07 against the deployed `0.2.263`** (R2 shipped, R3
+  not) — `docs/testing/evidence-suite98-r3-red-baseline-0.2.263.txt`. T-S98-011 returned
+  **204**: an unauthenticated caller actually deleted the agent. 012/013/014 likewise red;
+  T-S98-015 green as the over-reach guard requires.
+- **the baseline caught a false pass of my own.** T-S98-016 asserted only `403` on the
+  playground, and it was GREEN against an image with no role gate — because the
+  pre-existing owner check already answers 403, and R2 stops a consumer ever OWNING an
+  agent, so a consumer is refused every agent on ownership grounds. Rewritten to assert
+  the refusal REASON. Stated plainly rather than overselling R3: for a consumer,
+  `can_use_playground` is defence in depth and a clearer error, **not a new denial**. It
+  becomes load-bearing when non-owners may run shared or published agents.
 - **not-yet-wired (debt) — G-R3-1, the playground gate is bypassable by header.**
   `can_use_playground` is applied only to a VERIFIED user, because `eval-runner` POSTs
   `/playground/runs` with `X-User-Sub: eval-runner` and no Bearer; gating the route would

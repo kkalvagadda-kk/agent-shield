@@ -89,7 +89,7 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:

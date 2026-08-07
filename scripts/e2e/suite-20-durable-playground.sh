@@ -68,7 +68,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'agent_type': 'declarative',
     'execution_shape': 'durable',
     'metadata': {'instructions': 'durable playground test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create returned {r.status_code}: {r.text}')
     sys.exit(1)

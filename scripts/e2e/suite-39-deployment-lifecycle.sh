@@ -27,7 +27,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -45,7 +45,7 @@ import httpx, sys
 AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
 httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT}', 'team': 'default', 'agent_type': 'declarative',
-    'metadata': {'instructions': 'lifecycle test'}})
+    'metadata': {'instructions': 'lifecycle test'}}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 v1 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', headers=AUTH, json={'eval_passed': True}).json()
 v2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', headers=AUTH, json={'eval_passed': True}).json()
 d = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/deploy', headers=AUTH, json={

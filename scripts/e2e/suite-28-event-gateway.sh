@@ -63,7 +63,7 @@ async def main():
     r = httpx.post('http://localhost:8000/api/v1/agents/', json={
         'name': '${AGENT_NAME}', 'team': 'platform', 'agent_type': 'declarative',
         'execution_shape': 'reactive',
-    })
+    }, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     if r.status_code != 201:
         print('SETUP_FAIL create agent', r.status_code, r.text); sys.exit(1)
     # 2. webhook trigger with a filter (event == order.created)

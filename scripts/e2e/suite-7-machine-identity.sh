@@ -397,7 +397,7 @@ ag_body = json.dumps({'name': 'crit-gate-test-' + ts, 'team': 'platform',
                        'description': 'gate test'}).encode()
 try:
     r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents',
-        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag_body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     agent = json.loads(r.read())
     agent_name = agent.get('name') or ('crit-gate-test-' + ts)
 except Exception as e:
@@ -563,8 +563,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
     data=json.dumps({'publish_status': 'deprecated'}).encode(),
-    headers={'Content-Type': 'application/json'},
-    method='PATCH', headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='PATCH'
 )
 try:
     urllib.request.urlopen(req)

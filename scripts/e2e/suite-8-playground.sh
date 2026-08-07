@@ -121,7 +121,7 @@ name = 'pg-s8-run-agent'
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=json.dumps({'name': name, 'team': 'platform', 'description': 'suite-8 run tests'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -146,7 +146,7 @@ except urllib.error.HTTPError:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/',
         data=json.dumps({'name': name, 'team': 'platform', 'description': 's8 hitl test'}).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
         method='POST'
     )
     r = urllib.request.urlopen(req)

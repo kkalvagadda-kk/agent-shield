@@ -112,7 +112,7 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -209,7 +209,7 @@ try:
             'name': '${GRANT_GATE_AGENT}', 'team': 'platform',
             'description': 'Grant gate pre-flight test', 'agent_type': 'sdk'
         }).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
     gg_agent_id = json.loads(r.read()).get('id', '')
 except urllib.error.HTTPError as e:
@@ -491,7 +491,7 @@ if [ -n "${API_POD:-}" ]; then
 import urllib.request, json
 body = json.dumps({'name': '${BUNDLE_AGENT}', 'team': 'platform', 'description': 'bundle test'}).encode()
 req = urllib.request.Request('http://localhost:8000/api/v1/agents',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     r = urllib.request.urlopen(req, timeout=5)
     print('registered:' + str(r.getcode()))

@@ -26,6 +26,17 @@
 # cannot fail is the defect this repo keeps rediscovering. This suite is the one that
 # can fail.
 #
+# R3 RED BASELINE, captured on the live EKS cluster 2026-08-07 against 0.2.263 (R2 shipped,
+# R3 not yet), immediately before R3's image rolled:
+#     T-S98-011  anonymous   DELETE /api/v1/agents/{name}      -> 204   (want 401)  ** the
+#                agent was ACTUALLY DELETED by an unauthenticated caller **
+#     T-S98-012  contributor DELETE /api/v1/agents/{name}      -> 204   (want 403)
+#     T-S98-013  contributor PATCH  /api/v1/agents/{name}      -> 200   (want 403)
+#     T-S98-014  contributor POST   /api/v1/agents/{n}/quarantine -> 200 (want 403)
+#     T-S98-015 passed, as it must — it is the over-reach guard.
+#     T-S98-016 ALSO passed, which is why it was rewritten: see its comment. The baseline
+#     is what caught it asserting nothing.
+#
 # RED BASELINE, captured on the live EKS cluster 2026-08-06 against 0.2.262, immediately
 # before R2's image rolled — this is the DoD rule 7 artifact, a real run and not an
 # inference:
@@ -90,7 +101,9 @@
 #   T-S98-013 — a NON-OWNER contributor cannot edit it       (PATCH  -> 403)
 #   T-S98-014 — quarantine is platform-admin ONLY            (contributor -> 403)
 #   T-S98-015 — the OWNER may still edit their own agent     (PATCH  -> 200)
-#   T-S98-016 — a CONSUMER is refused the playground         (POST /playground/runs -> 403)
+#   T-S98-016 — a CONSUMER is refused the playground BY THE ROLE GATE (403 naming the
+#               contributor role — NOT by the pre-existing owner check, which already
+#               answers 403 and made a status-only assertion pass against a pre-R3 image)
 #
 # T-S98-003, -005, -007, -008, -010 and -015 are the guards that stop an over-broad "fix": R2/R3
 # must deny the wrong role WITHOUT denying the right one, must not turn authentication
@@ -148,6 +161,28 @@ try:
     with urllib.request.urlopen(req, timeout=20) as r: print(r.status)
 except urllib.error.HTTPError as e: print(e.code)
 except Exception: print(0)
+' 2>/dev/null | tr -d '\r\n'
+}
+
+# status_body <token> <method> <path> [json-body]  ->  "<code>|<response body>"
+# T-S98-016 needs the REASON, not just the code: two independent guards on the playground
+# route both answer 403, and a case that cannot tell them apart proves neither. The R3 RED
+# baseline caught exactly that — see T-S98-016's comment.
+status_body() {
+  local tok="$1" method="$2" path="$3" body="${4:-}"
+  kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env \
+    T="$tok" M="$method" P="$path" B="$body" python3 -c '
+import os, urllib.request, urllib.error
+h={}
+if os.environ["T"]: h["Authorization"]="Bearer "+os.environ["T"]
+d=None
+if os.environ["B"]:
+    d=os.environ["B"].encode(); h["Content-Type"]="application/json"
+req=urllib.request.Request("http://localhost:8000"+os.environ["P"], method=os.environ["M"], data=d, headers=h)
+try:
+    with urllib.request.urlopen(req, timeout=20) as r: print(str(r.status)+"|"+r.read(400).decode("utf-8","replace"))
+except urllib.error.HTTPError as e: print(str(e.code)+"|"+e.read(400).decode("utf-8","replace"))
+except Exception as exc: print("0|"+repr(exc))
 ' 2>/dev/null | tr -d '\r\n'
 }
 
@@ -287,10 +322,26 @@ C15="$(status "$CONTRIB_TOK" PATCH "/api/v1/agents/${S98_OWNED}" '{"description"
   && record PASS "T-S98-015 the OWNER may still edit their own agent  |  PATCH -> 200 (creator auto-grant gives agent-admin)" \
   || record FAIL "T-S98-015 the OWNER may still edit their own agent  |  PATCH -> $C15 (want 200) — R3 over-reached; a contributor cannot manage what they created."
 
-C16="$(status "$CONSUMER_TOK" POST /api/v1/playground/runs "{\"agent_name\":\"${S98_OWNED}\",\"message\":\"probe\"}")"
-[ "$C16" = "403" ] \
-  && record PASS "T-S98-016 a CONSUMER is refused the playground  |  POST /playground/runs -> 403 (OQ-3 resolved: contributor+)" \
-  || record FAIL "T-S98-016 a CONSUMER is refused the playground  |  POST /playground/runs -> $C16 (want 403). can_use_playground had zero callers before R3."
+# ASSERTS THE REASON, not just the code — and that is the whole case.
+# The R3 RED baseline on 0.2.263 caught this passing BEFORE the gate existed: the
+# pre-existing owner check ("Only the agent owner can run it in the playground") already
+# answers 403, because R2 stops a consumer ever OWNING an agent, so a consumer is refused
+# every agent on ownership grounds. A status-only assertion was therefore GREEN against an
+# image with no role gate at all — a guard that could not fail, which is the exact defect
+# this suite's header is about. The role gate runs BEFORE the owner check, so post-R3 the
+# consumer gets the ROLE message and this becomes a real discriminator.
+#
+# Worth stating plainly rather than overselling R3: for a CONSUMER, can_use_playground is
+# defence in depth and a clearer error, NOT a new denial. It becomes load-bearing the
+# moment non-owners may run shared or published agents — exactly when the owner check
+# stops covering for it.
+CB16="$(status_body "$CONSUMER_TOK" POST /api/v1/playground/runs "{\"agent_name\":\"${S98_OWNED}\",\"message\":\"probe\"}")"
+C16="${CB16%%|*}"; B16="${CB16#*|}"
+case "$C16|$B16" in
+  403*contributor*) record PASS "T-S98-016 a CONSUMER is refused the playground BY THE ROLE GATE  |  403 naming the contributor role (OQ-3: contributor+)" ;;
+  403*owner*)       record FAIL "T-S98-016 a CONSUMER is refused the playground BY THE ROLE GATE  |  403 but the reason is the OWNER check, not the role gate: $B16 — can_use_playground is unwired, or runs after the owner check." ;;
+  *)               record FAIL "T-S98-016 a CONSUMER is refused the playground BY THE ROLE GATE  |  -> $C16 $B16 (want 403 naming the contributor role)" ;;
+esac
 
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="

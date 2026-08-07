@@ -202,7 +202,7 @@ agent_body = {
     'tools': ['${TEST_TOOL}'],
 }
 r = httpx.post('http://localhost:8000/api/v1/agents/', json=agent_body,
-               headers={'X-User-Sub': 'test-user-s16'})
+               headers={'X-User-Sub': 'test-user-s16', 'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'Agent create failed: {r.status_code} {r.text}'
 data = r.json()
 assert data['name'] == '${AGENT_NAME}'
@@ -239,7 +239,7 @@ agent_body = {
     'tools': ['nonexistent_tool_xyz'],
 }
 r = httpx.post('http://localhost:8000/api/v1/agents/', json=agent_body,
-               headers={'X-User-Sub': 'test-user-s16'})
+               headers={'X-User-Sub': 'test-user-s16', 'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'Expected 201, got {r.status_code} {r.text}'
 "
 

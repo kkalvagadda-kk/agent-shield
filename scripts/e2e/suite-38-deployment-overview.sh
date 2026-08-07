@@ -56,7 +56,7 @@ AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
 r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT}', 'team': 'default', 'agent_type': 'declarative',
     'metadata': {'instructions': 'dep overview test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create agent {r.status_code}: {r.text}'); sys.exit(1)
 

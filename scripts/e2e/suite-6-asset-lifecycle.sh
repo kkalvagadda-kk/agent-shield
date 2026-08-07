@@ -235,8 +235,8 @@ import urllib.request, urllib.error, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 try:
     r = urllib.request.urlopen(req)
@@ -286,8 +286,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'
@@ -371,8 +371,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'

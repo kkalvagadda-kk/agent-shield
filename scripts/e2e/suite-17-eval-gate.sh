@@ -95,7 +95,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-agent', 'team': 'platform', 'description': 's17 eval gate'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -163,7 +163,7 @@ echo "--- T-S17-003: publish blocked (eval not passed) ---"
 run_test "T-S17-003 POST /agents/eval-gate-s17-agent/publish → 422 eval_not_passed" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -191,7 +191,7 @@ r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'patch expected 200 got {r.status}'
 # now publish
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'publish expected 202 got {r.status}'
 d = json.loads(r.read())
@@ -218,13 +218,13 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-noversion', 'team': 'platform', 'description': 'no versions'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/eval-gate-s17-noversion/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -249,7 +249,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-risky', 'team': 'platform', 'description': 'risky'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -263,7 +263,7 @@ req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions',
 vid = json.loads(urllib.request.urlopen(req).read())['id']
 # publish blocked on adversarial
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -277,7 +277,7 @@ req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions/' + vi
     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 urllib.request.urlopen(req, timeout=5)
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'expected 202 after adversarial passed got {r.status}'
 print('adversarial gate: 422 then 202 after passing')
@@ -320,7 +320,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-auto', 'team': 'platform', 'description': 'auto eval_passed test'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -376,7 +376,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-fail', 'team': 'platform', 'description': 'failing score test'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -470,12 +470,12 @@ import urllib.request, json, urllib.error
 base = 'http://localhost:8000/api/v1'
 name = 's17-dup-publish'
 try:
-    urllib.request.urlopen(urllib.request.Request(base + '/agents/' + name, method='DELETE'))
+    urllib.request.urlopen(urllib.request.Request(base + '/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
 except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': name, 'team': 'platform', 'description': 'double publish'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -493,7 +493,7 @@ urllib.request.urlopen(req)
 def publish():
     r = urllib.request.Request(base + '/agents/' + name + '/publish',
         data=json.dumps({}).encode(),
-        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
+        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
     return json.loads(urllib.request.urlopen(r).read())
 
 first = publish()

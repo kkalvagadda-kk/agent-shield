@@ -306,7 +306,7 @@ except Exception as e:
 # Create agent if needed
 ag_body = json.dumps({'name': 's13-eval-agent', 'team': 'platform', 'description': 'eval test'}).encode()
 ag_req = urllib.request.Request(base + '/api/v1/agents', data=ag_body,
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(ag_req, timeout=5)
 except:
@@ -450,7 +450,7 @@ base = 'http://localhost:8000'
 ag_body = json.dumps({'name': 's13-trace-agent', 'team': 'platform', 'description': 's13 trace test'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag_body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 except urllib.error.HTTPError:
     pass  # 409 is fine
 
@@ -536,7 +536,7 @@ base = 'http://localhost:8000'
 ag_body = json.dumps({'name': 's13-trace-agent', 'team': 'platform', 'description': 's13 trace test'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag_body, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag_body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 except urllib.error.HTTPError:
     pass  # 409 is fine
 

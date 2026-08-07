@@ -103,7 +103,7 @@ except urllib.error.HTTPError as e:
         'description': 'Suite 10 initiator agent — hands off to agent-target',
         'metadata': {'tools': ['handoff_to_agent_target']}
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -129,7 +129,7 @@ except urllib.error.HTTPError as e:
         'description': 'Suite 10 target agent — receives handoff from agent-initiator',
         'metadata': {'tools': ['lookup_order', 'issue_refund']}
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
