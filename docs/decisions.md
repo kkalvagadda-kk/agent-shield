@@ -1166,9 +1166,21 @@ So creating a tool produces the *most permissive* state available: `NULL`, which
 treats as usable by **every** team. Measured: **65 of ~173 tools are `NULL`**. That is not drift —
 it is what the create path produces.
 
-The visibility half is missing too. `GET /tools/` has an `owner_team` filter (`tools.py:202`), but
-all eight Studio callers of `listAllTools()` pass no params — so every tool on the platform is
-listed to every user, in the Create Agent picker, the agent detail tab, Skills, and Credentials.
+> **CORRECTION 2026-08-07.** This decision originally also claimed "every tool on the platform is
+> listed to every user", inferred from all eight Studio callers of `listAllTools()` passing no
+> params. **That was wrong** — the visibility filter is not the `owner_team` query param, it is an
+> unconditional predicate in the handler:
+> `where(or_(Tool.publish_status == "published", Tool.created_by == caller))`. Tools already follow
+> the agent list pattern. I inferred from the call sites without reading the handler body — the
+> exact mistake `docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md` lesson 2 is about.
+>
+> What is true: **every one of the 174 tools is `published`**, because `Tool.publish_status`
+> defaults to `'published'` (`models.py:1258`) where `Agent` and `Workflow` default to `'private'`
+> (`:178`, `:371`). The filter is correct and never bites, because nothing is ever private. Skills
+> have the same default (`:1364`). That is Decision 47.
+>
+> This decision therefore covers only the **use** axis (`owner_team` → `team_may_use_tool`). The
+> **visibility** axis is Decision 47.
 
 | Option | Description | Trade-off |
 |--------|-------------|-----------|
@@ -1208,6 +1220,74 @@ ownership to a team they are not in.
 - **UX consequence either way:** the Deploy modal currently shows Replicas and TTL and says nothing
   about granting tool access, while Admin → Grants presents a "Create Grant" form that has produced
   **zero** of the 147 grants. If the auto-grant survives, the modal must name what it grants.
+
+---
+
+## Decision 47: tools are private by default and publish by riding along with an agent
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Pairs with Decision 46 (use axis); this is the
+visibility axis
+
+**Context:** `Tool.publish_status` defaults to `'published'` (`models.py:1258`); `Agent` and
+`Workflow` default to `'private'` (`:178`, `:371`). `Skill` matches `Tool` (`:1364`). So tools and
+skills are born org-wide visible while agents and workflows are born drafts. All **174** tools on
+the test cluster are `published` — not one is private.
+
+The list filter for the desired behaviour already exists and is correct
+(`where(or_(publish_status == "published", created_by == caller))`). It simply never bites.
+
+There is also **no way to publish a tool**: agents have `POST /agents/{name}/publish`, workflows
+have one, tools have none. The *approve* half exists — `admin.py:341` already sets
+`source_tool.publish_status = "published"` — so someone intended this and stopped halfway. Flipping
+the default without a publish path would make every new tool permanently invisible to everyone but
+its creator.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: leave it** | tools born published | Contradicts the agent model; "drafts are yours" is unachievable for tools |
+| **B: flip the default + build a tool publish workflow** | Mirrors agents fully | A second eval-gated, admin-reviewed workflow for an artifact with no versions and no evals — the agent gate does not transfer |
+| **C: flip the default; tools publish by CASCADE when an agent using them is published** | No separate tool workflow | One review covers both; the reviewer must be shown what cascades |
+
+**Choice: C.**
+
+**Rationale:** it lands entirely on machinery that already exists. `publish_agent` already loads the
+agent's bound tools (for the critical-risk check), already requires manage rights (R3), and already
+blocks `critical_risk_not_publishable` — so critical tools cannot ride along by construction. No new
+workflow, no new queue, no new gate.
+
+**Consequences / trade-offs:**
+- **The reviewer must see what they are approving.** Today the publish queue is one flat row:
+  Asset Type · Asset · Submitted By · Submitted At · Last Eval · Status · Risk · Actions. `Risk` is
+  a single `highest_risk_level` chip — it says *high* without saying which tool, what it does, who
+  owns it, or that approving publishes three tools org-wide. A silent cascade inside an existing
+  approval is an escalation the approver cannot see. **Fix:** a review payload —
+  `GET /admin/publish-requests/{id}/review` — returning the agent's config, every bound tool with
+  `risk_level` / `owner_team` / `publish_status` / a *will be published* flag, and the existing eval
+  summary. Rendered as a drawer.
+- **This removes the need for a `cascade_publish` column.** If the tool rows carry `publish_status`
+  and `owner_team`, the cascade is derivable and shown live — no submit-time snapshot that can go
+  stale between submit and approve. The audit record is written at **approve** time from what
+  actually published, which is more accurate than a snapshot anyway.
+- **Cross-team guard.** Cascade only tools the agent's team OWNS. A foreign, unpublished tool must
+  block the request — 422 `tool_not_publishable_cross_team`, same shape as the existing
+  `critical_risk_not_publishable` and `tool_grants_missing`. Without it, publishing an agent becomes
+  a way to expose another team's private tool.
+- **Published is VISIBILITY, never USE.** A cascade-published tool appears in every team's picker
+  and remains unusable without `owner_team` match or a grant (`team_may_use_tool`, Decision 46).
+  Stated explicitly and asserted in a test, because "published" reads like "granted".
+- **Publishing is one-way.** Nothing un-publishes; delete the agent and its tools stay published.
+  Over time everything drifts to published — which is exactly today's 174/174, reached by a
+  different route. **Deferred (intentional):** no unpublish in this change. The smallest future
+  version is an owner-initiated unpublish blocked while any published agent still uses the tool.
+- **No backfill.** The existing 174 stay `published` and become the platform's shared library. A
+  blanket backfill to `private` would empty every tool picker until each was republished. Two
+  populations, for a stated reason rather than by drift. **Do not "clean this up" later.**
+- **Skills get the same default change**, or the inconsistency simply relocates.
+- **Already built, do not rebuild:** the eval surface. `PublishRequestResponse` carries
+  `last_eval_score` / `last_eval_run_id` / `last_eval_pass_threshold`, and the page renders a
+  score-vs-threshold chip linking to the full run. One thing to verify: that it is pinned to
+  `source_version_id` and not the agent's latest run — otherwise a reviewer can approve v3 while
+  reading v4's score.
 
 ---
 
@@ -1261,3 +1341,4 @@ ownership to a team they are not in.
 | 44 | Role gates need a browser | All 61 bash suites and all 47 Playwright specs ran as `platform-admin`, so no role gate could fail a test. `global-setup.ts` is now multi-role (personas created through the real admin API, fail-loud); `e2e/rbac-role-journeys.spec.ts` drives the app as a consumer and a contributor. Corrects the claim that R5 is the only UX-facing RBAC phase. |
 | 45 | Agent vs tool delegation | **Delegating an agent does NOT delegate its tools — unless it is autonomous.** user_delegated runs intersect the agent's effective tool set with the CALLER's team grants; daemon runs keep the agent's own. Follows the §4.2 identity-model seam the identity floor already branches on. Prereqs: D-1 (registry-side `agent_class`, now load-bearing for two gates), an unowned-tool rule in the bundle, and `user_team` in the OPA input from the verified RunContext (identity P1/P2). |
 | 46 | Tool ownership | **A tool's team comes from its creator; `owner_team = NULL` becomes illegal.** Creation currently leaves it NULL, which the resolver treats as usable by EVERY team — 65 of ~173 tools. Ownership, not an auto-grant (own-team needs no grant row). Builtins get an explicit shared team. Unblocks Decision 45 by making the bundle and the resolver agree on what 'unowned' means. List endpoint reuses `team_may_use_tool`. |
+| 47 | Tool visibility | **Tools are private by default and publish by CASCADE when an agent using them is published.** `Tool`/`Skill` default to `published` where `Agent`/`Workflow` default to `private`; all 174 tools are published and the (correct) list filter never bites. No separate tool publish workflow — `publish_agent` already loads the tools and blocks critical-risk ones. Reviewer gets a full review payload (agent config + every tool with risk/owner/publish_status + eval), cascade limited to own-team tools, published ≠ granted, no backfill, unpublish deferred. |

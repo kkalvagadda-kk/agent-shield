@@ -88,17 +88,46 @@ does not have to be reconstructed later.
 | 10 | OQ-4 was being treated as the route to per-tool authorization; the proxy can do it without touching credentials | de-scope | ✅ done — §4.8.7 |
 | 11 | The agent's tool list is fetched **once at pod startup**, so per-user schema *filtering* is impossible without request-scoped resolution | gap | post-P2 |
 
-**Revised order.** Decision 46 moves ahead of identity P1 — it is not blocked on identity, and it
-removes a P2 blocker (finding 5) rather than forcing a rego special case:
+**THE ROADMAP AFTER R3.** Kept here because it is the canonical gap ledger and because three
+separate design sessions have now added to it. Decisions 46/47 move ahead of identity P1 — they are
+not blocked on identity, and they remove a P2 blocker (finding 5) rather than forcing a rego special
+case.
 
 ```
-now  →  finding 1 (bug fix, no dependencies)
-     →  Decision 46 (tool ownership; unblocks 5)
-     →  identity P1  →  P1.5      (unchanged)
-     →  identity P2: 2a → 2b → 2c → 2d → 2e   (absorbs 2, 3, 4, 6)
-     →  post-P2: finding 11
-     →  R5: finding 8
+SHIPPED   R0 · R1 · R2 · R3 · G-R3-2 fix · identity P0
+────────────────────────────────────────────────────────────────────────
+NEXT      Tool lifecycle  (Decisions 46 + 47)        ← current work
+            A. create_tool sets owner_team from the caller's team
+            B. migration 0083 — publish_status default 'private' for
+               tools AND skills. NO backfill (the 174 stay published).
+            C. cascade in publish_agent + cross-team guard (422)
+            D. GET /admin/publish-requests/{id}/review + reviewer drawer
+            E. tests: suite-6 extension + Playwright drawer case
+          identity P1   → mint at the edge, rct through dispatch, 0080
+          identity P1.5 → resume re-hydration, 0081
+          identity P2   → 2a D-1 (agent_class from the registry) FIRST
+                          2b Decision 46 landed
+                          2c user_teams[] into the OPA input (PLURAL — see below)
+                          2d the intersection, applied twice (rego + proxy Gate 2)
+                          2e x-user-sub stops being load-bearing; closes G-R3-1
+                        absorbs findings 2, 3, 4, 6
+          post-P2       → finding 11 (per-user tool SCHEMA filtering; needs
+                          request-scoped tool resolution)
+          R4            → trigger management (ENFORCE_TRIGGER_MGMT)
+          R5            → one role vocabulary; finding 8 (asset_grants
+                          visibility-vs-authority); split role from membership
+          OPA stage 6   → the one net-new gate (who authorized an autonomous run)
 ```
+
+**Migration numbers:** `0079` is the last on disk. `0080–0082` stay reserved for identity across
+three docs. Tool lifecycle takes **`0083`**.
+
+**Ship `user_teams` as a LIST from day one (2c).** Multi-team membership is currently impossible —
+`user_sub` is the PRIMARY KEY of `user_team_assignments` — so it is a deliberate migration, not
+drift. But the OPA input field is being added in 2c anyway, and a one-element list costs nothing now
+where scalar→list later means touching the rego, the bundle, the input builder and every test.
+Resolution rule, written now even though unimplemented: **union for authorization, explicit for
+ownership.** Splitting `role` from membership belongs in R5, which is already opening that table.
 
 **finding 1 — PROVEN then FIXED, 2026-08-07 (`0.2.266`).** The cross-team reproduction was
 run: a `consumer` in team `operations`, agent `trigger-demo-b` owned by team `platform` —
