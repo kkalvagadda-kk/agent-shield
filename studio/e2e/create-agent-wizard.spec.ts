@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 /**
  * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
@@ -139,6 +140,12 @@ test.describe("route to production", () => {
       timeout: 20_000,
     });
 
-    await page.request.delete(`/api/v1/agents/${name}`).catch(() => undefined);
+    // `page.request` carries Keycloak's SESSION COOKIE, not the access token —
+    // keycloak-js holds that in JS memory (see e2e/lib/apiAuth.ts). So this cleanup has
+    // been a silent no-op since R3 gated DELETE /agents/{name}: the 401 went straight
+    // into .catch(). Agents accumulated on the cluster with nothing reporting it.
+    await page.request
+      .delete(`/api/v1/agents/${name}`, { headers: await adminAuthHeaders() })
+      .catch(() => undefined);
   });
 });

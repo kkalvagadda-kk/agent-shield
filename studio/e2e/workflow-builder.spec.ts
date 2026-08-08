@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // workflow-builder.spec.ts
@@ -15,7 +16,11 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 
 // Seed helper: create agents + a workflow with one conditional edge via the
 // proxied API. Returns the workflow id + created agent ids for cleanup.
-const SYS = { "X-User-Sub": "system" };
+// Was `{ "X-User-Sub": "system" }` — a header, on routes that now require a real JWT
+// (R1/R2/R3 + G-R3-6). Every seed call 401'd, and the failure showed up as "persisted
+// edges survive a builder reload" rather than as an auth problem. Populated in
+// beforeAll because minting a token is async.
+let SYS: Record<string, string> = {};
 async function seedWorkflowWithEdge(request: APIRequestContext, suffix: string) {
   const team = "platform";
   const names = [`wfb-a-${suffix}`, `wfb-b-${suffix}`];
@@ -74,6 +79,11 @@ async function seedForkWorkflow(request: APIRequestContext, suffix: string) {
 }
 
 test.describe("workflow builder", () => {
+  // One mint for the file. Async, so it cannot be a module-level const.
+  test.beforeAll(async () => {
+    SYS = await adminAuthHeaders();
+  });
+
   test("new-workflow canvas renders with toolbar actions", async ({ page }) => {
     await page.goto("/workflows/new");
     await page.waitForLoadState("networkidle");

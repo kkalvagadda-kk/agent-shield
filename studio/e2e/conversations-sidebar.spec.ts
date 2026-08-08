@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 import { resolveSessionSub } from "./lib/apiAuth";
 
 // ---------------------------------------------------------------------------
@@ -129,6 +130,10 @@ test.describe("conversations sidebar — standalone page + docked History", () =
     // Must precede newContext: ADMIN feeds extraHTTPHeaders.
     USER_SUB = await resolveSessionSub(API_BASE);
     ADMIN["X-User-Sub"] = USER_SUB;
+    // The sub above is resolved live (resolveSessionSub) — correct, and it was ahead of
+    // its time. What it never carried is a CREDENTIAL, and R1/R2/R3 + G-R3-6 made these
+    // routes require one. Merge in a real Bearer without disturbing the resolved sub.
+    Object.assign(ADMIN, await adminAuthHeaders(), { "X-User-Sub": USER_SUB });
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

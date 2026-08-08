@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 /**
  * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
@@ -47,10 +48,11 @@ async function pickModel(page: import("@playwright/test").Page) {
 // ---------------------------------------------------------------------------
 
 const TS = Date.now();
-const ADMIN = {
-  "X-User-Sub": "047fad5f-f38c-430a-bfba-6e4d9009314b",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. Those literals have no user_team_assignments row on
+// the current cluster (a realm recreation mints new subs), and header identity stopped
+// being identity when R1/R2/R3 + G-R3-6 gated these routes. adminAuthHeaders() mints a
+// real token and derives the sub FROM it, so the two cannot disagree.
+let ADMIN: Record<string, string> = {};
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 const SERVER_NAME = `e2e-mcp-${TS}`;
@@ -75,6 +77,7 @@ test.describe("MCP servers — register → discover → bind (Studio UI)", () =
   let firstToolName = ""; // RAW upstream name / display_name (e.g. "echo")
 
   test.beforeAll(async () => {
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

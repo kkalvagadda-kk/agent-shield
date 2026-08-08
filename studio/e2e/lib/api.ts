@@ -1,29 +1,107 @@
-// e2e/lib/api.ts — header-auth API contexts + fixtures seeded ahead of time.
+// e2e/lib/api.ts — authenticated API contexts + fixtures seeded ahead of time.
 //
-// The registry-api has no global auth middleware in-cluster; identity comes from the
-// X-User-Sub / X-User-Team headers (same pattern every existing spec uses). We seed
-// slow-to-build fixtures (the deterministic tool + the eval dataset) via API and let the
-// browser test consume them — the user-approved "create the data ahead of time" rule.
+// We seed slow-to-build fixtures (the deterministic tool + the eval dataset) via API and
+// let the browser test consume them — the user-approved "create the data ahead of time"
+// rule.
+//
+// THIS FILE USED TO SAY: "The registry-api has no global auth middleware in-cluster;
+// identity comes from the X-User-Sub / X-User-Team headers (same pattern every existing
+// spec uses)." That was true when it was written and is now false. R1 put `require_user`
+// on ten routers, R2/R3 added role and artifact gates, and G-R3-6 (0.2.267) closed
+// `POST /api/v1/tools/`. The first mutation to hit a closed router was
+// `seedDeterministicTool`, which started failing with a 401 that surfaced as
+// "lifecycle journey leg 1" rather than as an auth problem.
+//
+// So `ctx()` now mints a REAL Keycloak token by direct access grant, the same way
+// global-setup.ts provisions its personas. The X-User-* headers stay: several handlers
+// still read `X-User-Team` for team scoping, and dropping them would change fixture
+// placement in ways unrelated to this fix. What changed is that identity is now
+// ASSERTED with a signature instead of announced in a header.
+//
+// Why a token per identity and not one shared admin token: `userApi()` exists precisely
+// so owner-scoped seeds carry the browser's own sub. Minting both keeps that property —
+// a single admin token would silently make every "the user owns this" fixture wrong.
 import { request as pwRequest, type APIRequestContext } from "@playwright/test";
 
 export const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
-// The two real Keycloak subs (see e2e/lib/README.md). ADMIN seeds team-shared fixtures;
-// USER is the sub the browser logs in as (owner-scoped read-backs must match it).
+// STALE — kept only because they are exported and the README references them. NEITHER of
+// these subs has a `user_team_assignments` row on the current cluster: a realm recreation
+// mints new subs, and nothing updated these literals. `ctx()` no longer reads them; it
+// derives the sub from the token it mints. Do not add a new caller.
 export const ADMIN_SUB = "047fad5f-f38c-430a-bfba-6e4d9009314b";
 export const USER_SUB = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6";
 export const TEAM = "platform";
 
-async function ctx(sub: string, team?: string): Promise<APIRequestContext> {
-  const extraHTTPHeaders: Record<string, string> = { "X-User-Sub": sub };
+// Keycloak usernames for the two subs above. Kept beside them so the pair cannot drift:
+// a sub without its username is unusable now that a token is required.
+const ADMIN_USER = process.env.STUDIO_E2E_USERNAME || "platform-admin";
+const ADMIN_PASS = process.env.STUDIO_E2E_PASSWORD || "PlatformAdmin2024";
+const USER_USER = process.env.STUDIO_E2E_USER_USERNAME || ADMIN_USER;
+const USER_PASS = process.env.STUDIO_E2E_USER_PASSWORD || ADMIN_PASS;
+
+const tokenCache = new Map<string, string>();
+
+/** Direct access grant. Same realm/client/flow as global-setup.ts's adminToken(). */
+async function tokenFor(username: string, password: string): Promise<string> {
+  const cached = tokenCache.get(username);
+  if (cached) return cached;
+  const realm = process.env.E2E_KC_REALM || "agentshield";
+  const clientId = process.env.E2E_KC_CLIENT || "agentshield-studio";
+  const api = await pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true });
+  try {
+    const res = await api.post(`/realms/${realm}/protocol/openid-connect/token`, {
+      form: { grant_type: "password", client_id: clientId, username, password },
+    });
+    if (!res.ok()) {
+      // Loud and specific. A silent fallback to header-only auth is what made the
+      // original failure look like a broken journey instead of a missing credential.
+      throw new Error(
+        `e2e/lib/api.ts: token grant for ${username} -> ${res.status()} ${await res.text()}. ` +
+        `Fixture seeding needs a real JWT since R1/G-R3-6; header identity is no longer accepted ` +
+        `on mutating routes.`,
+      );
+    }
+    const tok = (await res.json()).access_token as string;
+    tokenCache.set(username, tok);
+    return tok;
+  } finally {
+    await api.dispose();
+  }
+}
+
+/** The `sub` claim out of a JWT. No verification — this is a test helper reading its own token. */
+function subOf(token: string): string {
+  const raw = token.split(".")[1] ?? "";
+  const json = Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+  return JSON.parse(json).sub as string;
+}
+
+async function ctx(team: string | undefined, username: string, password: string): Promise<APIRequestContext> {
+  const token = await tokenFor(username, password);
+  const extraHTTPHeaders: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    // Derived FROM THE TOKEN, never a constant. The two hardcoded subs this file used to
+    // send (see ADMIN_SUB / USER_SUB below) have no `user_team_assignments` row on the
+    // current cluster at all — they predate a realm recreation, which mints new subs for
+    // every user. Under header-only identity that was invisible; the moment a real
+    // credential arrived it would have meant the header and the signature naming two
+    // different people, with handlers free to pick either.
+    //
+    // Deriving it here makes disagreement unrepresentable. `deployment-conversations` and
+    // `conversations-sidebar` reached the same conclusion from the other direction and
+    // call resolveSessionSub() at run time; this is the same rule applied where the token
+    // is already in hand.
+    "X-User-Sub": subOf(token),
+  };
   if (team) extraHTTPHeaders["X-User-Team"] = team;
   return pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true, extraHTTPHeaders });
 }
 
 /** Team-shared seed identity (tools/agents/datasets/versions). */
-export const adminApi = () => ctx(ADMIN_SUB, TEAM);
+export const adminApi = () => ctx(TEAM, ADMIN_USER, ADMIN_PASS);
 /** The browser's own identity — for owner-scoped seeds the UI must read back. */
-export const userApi = () => ctx(USER_SUB, TEAM);
+export const userApi = () => ctx(TEAM, USER_USER, USER_PASS);
 
 /** Unique, human-scannable name. Playwright specs may use Date.now(). */
 export function uniqueName(prefix: string): string {
@@ -98,3 +176,29 @@ export async function seedConversation(
   });
   if (!r.ok()) throw new Error(`seedConversation ${r.status()}: ${await r.text()}`);
 }
+
+/**
+ * Auth headers for specs that build their own APIRequestContext.
+ *
+ * Several specs predate `ctx()` and hand-roll `extraHTTPHeaders: { "X-User-Sub": ... }`.
+ * That stopped being identity when R1 put `require_user` on ten routers and G-R3-6 closed
+ * the tool routes — those calls now 401, and the failure surfaces as whatever UI step
+ * depended on the fixture rather than as an auth problem.
+ *
+ * Rather than teach each spec to mint its own token (ten copies of one rule, which is the
+ * exact drift `lib/apiAuth.ts` and `lib/e2e-auth.sh` were both written to stop), they
+ * spread this. `X-User-Sub` comes from the token so the header and the signature cannot
+ * name two different people.
+ *
+ * `scripts/check-e2e-auth-hygiene.sh` fails the build on a mutating call to a gated route
+ * in `studio/e2e` that has neither an Authorization header nor `captureAuthHeaders()`.
+ */
+export async function adminAuthHeaders(team: string = TEAM): Promise<Record<string, string>> {
+  const token = await tokenFor(ADMIN_USER, ADMIN_PASS);
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-User-Sub": subOf(token),
+    "X-User-Team": team,
+  };
+}
+

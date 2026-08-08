@@ -1,10 +1,14 @@
 import { test, request as pwRequest } from "@playwright/test";
-const ADMIN = { "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform" };
+import { adminAuthHeaders } from "./lib/api";
+// Header identity is no longer identity: R1 gated ten routers and G-R3-6 closed the tool
+// routes, so the hardcoded X-User-Sub this used to send produced 401s. The sub is now
+// derived from a real token — and the literal it used to carry has no team assignment on
+// the current cluster anyway (realm recreation mints new subs).
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 test("probe2: fresh fixture full header", async ({ page }) => {
   test.setTimeout(120_000);
-  const api = await pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true, extraHTTPHeaders: ADMIN });
+  const api = await pwRequest.newContext({ baseURL: API_BASE, ignoreHTTPSErrors: true, extraHTTPHeaders: await adminAuthHeaders() });
   const TS = Date.now();
   const prov = await (await api.get("/api/v1/llm-providers/", { params: { team: "platform" } })).json();
   const pid = (Array.isArray(prov)?prov:prov.items)[0].id;

@@ -80,7 +80,10 @@ def header_dicts(t):
 # `/tools` and `/skills` were added 2026-08-07 with G-R3-6. Note the ordering trap: the
 # agents pattern must NOT match `/agents/{n}/tools` (a READ with a machine caller), so
 # tool/skill matching is anchored to the COLLECTION prefix, not the substring.
-GATED = re.compile(r"/api/v1/agents\b|/api/v1/tools\b|/api/v1/skills\b|\+ '/agents/'|base \+ '/agents/'")
+# `/mcp-servers` added 2026-08-07 with 0.2.270: registration now needs a credential
+# because ownership is derived from the caller. suite-87 registered servers with a
+# header and NO token; this gate could not see it until the route was gated.
+GATED = re.compile(r"/api/v1/agents\b|/api/v1/tools\b|/api/v1/skills\b|/api/v1/mcp-servers\b|\{BASE\}/mcp-servers|\+ '/agents/'|base \+ '/agents/'")
 # Sub-resources R2/R3/G-R3-6 did NOT gate — several have in-cluster machine callers that
 # send no Authorization header (declarative-runner, deploy-controller, the SDK resolver).
 NOT_AGENT_CREATE = re.compile(r"/versions|/deploy|/triggers|/identities|/agents/[^'\"]*/tools|/memory|/chat|/runs|/deployments|/stats|/health")
@@ -113,7 +116,7 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             continue
         if "Authorization" in span:
             continue
-        FAIL.append(f"{p.name}:{line_of(k)}  mutation with NO Authorization — 401/403 since R2/R3/G-R3-6")
+        FAIL.append(f"{p.name}:{line_of(k)}  mutation with NO Authorization — 401/403 since R2/R3/G-R3-6/0.2.270")
 
     # 3b — same rule, for httpx. The first version of this script checked httpx only for
     # duplicate `headers=` and missed suite-14's `httpx.post(.../publish, json=...)`,
@@ -125,11 +128,57 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             continue
         if "Authorization" in span:
             continue
-        FAIL.append(f"{p.name}:{line_of(m.start())}  mutation via httpx with NO Authorization (agents/tools/skills)")
+        FAIL.append(f"{p.name}:{line_of(m.start())}  mutation via httpx with NO Authorization (agents/tools/skills/mcp-servers)")
 
     # 4 — the token is referenced but never obtained
     if "E2E_TOKEN" in t and "e2e-auth.sh" not in t:
         FAIL.append(f"{p.name}  references ${{E2E_TOKEN}} but never sources lib/e2e-auth.sh — it expands to empty")
+
+# ── 5 — the OTHER e2e tree ────────────────────────────────────────────────────
+# This script scanned scripts/e2e only, and that omission cost a real failure on
+# 2026-08-07: `studio/e2e/lib/api.ts` seeded its fixtures with X-User-Sub headers and no
+# token, so when G-R3-6 closed POST /api/v1/tools/ the lifecycle journey died at
+# `seedDeterministicTool` with a 401 that surfaced as "leg 1 — create agent with tool
+# (UI)". A gate that covers one of two trees is the blind spot it exists to prevent —
+# the same lesson its own comments record twice above, applied to a directory instead of
+# a client library.
+#
+# The Playwright layer authenticates four legitimate ways, all of which end in a real
+# Bearer, so any of them counts as credentialed:
+#   - an `Authorization` header written inline (roles.ts, rbac-role-journeys)
+#   - `captureAuthHeaders()` (e2e/lib/apiAuth.ts) — lifts the app's own Bearer off page
+#     traffic; the established helper for page-driven specs
+#   - `adminAuthHeaders()` (e2e/lib/api.ts) — mints a token by direct access grant and
+#     derives X-User-Sub FROM it, for specs that build their own APIRequestContext
+#   - `adminApi()` / `userApi()` (e2e/lib/api.ts) — return an already-authenticated context
+# Anything else mutating a gated route is running unauthenticated.
+#
+# This list is deliberately a NAMED SET rather than "does the file mention a token". Add a
+# fifth way and you must add it here, which is the point: a gate that guesses at what
+# counts as credentialed is a gate that quietly stops failing.
+PW_GATED = re.compile(r"/api/v1/(agents|tools|skills|mcp-servers)\b")
+PW_NOT_GATED = re.compile(r"/versions|/deploy|/triggers|/identities|/memory|/chat|/runs|/deployments|/stats|/health|/agents/[^'\"`]*/tools")
+
+pw_root = pathlib.Path("studio/e2e")
+if pw_root.is_dir():
+    for p in sorted(list(pw_root.glob("*.spec.ts")) + list(pw_root.glob("lib/*.ts"))):
+        t = p.read_text()
+        line_of = lambda idx, _t=t: _t[:idx].count("\n") + 1
+        credentialed = any(
+            marker in t
+            for marker in ("Authorization", "captureAuthHeaders", "adminAuthHeaders",
+                           "adminApi(", "userApi(")
+        )
+        if credentialed:
+            continue
+        for m in re.finditer(r"\.(post|put|patch|delete)\(\s*[`'\"][^`'\"]*[`'\"]", t):
+            span = m.group(0)
+            if not PW_GATED.search(span) or PW_NOT_GATED.search(span):
+                continue
+            FAIL.append(
+                f"studio/e2e/{p.relative_to(pw_root)}:{line_of(m.start())}  mutation of a gated route "
+                f"with no Authorization and no captureAuthHeaders() — 401 since R1/R2/R3/G-R3-6"
+            )
 
 if FAIL:
     print(f"=== e2e auth hygiene: {len(FAIL)} FINDING(S) ===")

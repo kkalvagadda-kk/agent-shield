@@ -67,13 +67,20 @@ echo "  Suffix:    $SUFFIX"
 # upstream fixture. So skip the start entirely; cleanup's pkill is a harmless no-op.
 echo "--- stub OAuth fixture NOT started (flow tests 004-008 skipped — redundant w/ CP2/CP3) ---"
 
+# 0.2.270 gated POST /api/v1/mcp-servers/ (it took get_optional_user, so ownership could
+# not be derived from an optional caller). This suite registered servers with an
+# X-User-Sub header and no credential — those calls now 401.
+# Call e2e_set_token BARE: a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # ── Cleanup: kill the fixture, delete the test server + provider blobs + ephemeral SA ──
 EPHEMERAL_SA=""
 cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
     sh -c "pkill -f oauth_mcp_server.py" >/dev/null 2>&1 || true
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-    env SRVNAME="$SERVER_NAME" python3 - <<'PY' 2>/dev/null || true
+    env SRVNAME="$SERVER_NAME" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY' 2>/dev/null || true
 import os, asyncio
 async def main():
     from db import AsyncSessionLocal
@@ -100,7 +107,7 @@ trap cleanup EXIT
 
 # ── Deterministic in-pod block (registry-api pod, all localhost) — 001-008 ─────
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" SERVER_NAME="$SERVER_NAME" USER_A="$USER_A" python3 - <<'PY'
+  env SUFFIX="$SUFFIX" SERVER_NAME="$SERVER_NAME" USER_A="$USER_A" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY'
 import os, asyncio, httpx, json
 from urllib.parse import urlparse, parse_qs
 SUFFIX = os.environ["SUFFIX"]
@@ -109,7 +116,11 @@ USER_A = os.environ["USER_A"]
 USER_B = f"s87-userb-{SUFFIX}"
 BASE = "http://localhost:8000/api/v1"
 TEAM = "platform"
-ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM}
+# Bearer, not just headers: POST /mcp-servers/ requires require_user since 0.2.270.
+# X-User-Team stays — the handler still reads it; what changed is that identity is
+# now signed rather than announced.
+ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 FIX = "http://127.0.0.1:9100"
 fails = []
 
