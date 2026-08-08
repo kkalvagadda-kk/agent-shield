@@ -757,8 +757,10 @@ registry-api:
     #          the production deploy branch; can_use_playground gates the playground.
     # 0.2.265: identity P0 — vendored run_context.py; mints the root run context.
     # 0.2.266: G-R3-2 — the deployment-pinned chat endpoint had no access check.
-    # 0.2.267: G-R3-6 — tools/skills mutations require auth; tools get an owner_team.
-    tag: "0.2.267"
+    # 0.2.268: Decision 47 step B — tools/skills private by default (migration 0080),
+    # team-scoped catalog visibility, and NO publish filter for tokenless in-cluster
+    # agent pods (or the SDK tool_resolver returns zero items and the pod dies).
+    tag: "0.2.268"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1187,7 +1189,9 @@ studio:
     # 0.1.171: Agent-list Delete uses an in-app confirm modal (no native confirm; leg 22).
     # 0.1.184: R2 UI — sidebar/My Agents read /api/v1/me/team, grant picker reads
     #          /api/v1/users/directory; multi-role Playwright global-setup.
-    tag: "0.1.184"
+    # 0.1.185: Decision 46 UI — tool Team field is admin-only; non-admins see their
+    # own team read-only and the payload omits owner_team (the server derives it).
+    tag: "0.1.185"
     pullPolicy: IfNotPresent
 
   service:

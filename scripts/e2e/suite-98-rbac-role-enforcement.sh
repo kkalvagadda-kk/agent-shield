@@ -462,6 +462,134 @@ C22="$(status "" GET /api/v1/tools/)"
   && record PASS "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> 200 (declarative-runner + SDK tool_resolver send no token; closing this is identity Phase 3)" \
   || record FAIL "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> $C22 (want 200). G-R3-6 gated MUTATIONS only; gating the reads breaks every agent pod at startup."
 
+# ── Decision 47 step B — private by default + who can SEE it (2026-08-07) ─────
+# Migration 0080 flips the tools/skills publish_status default to 'private', matching
+# agents and workflows. The DEFAULT alone is a one-line DDL; these cases exist because the
+# flip is only correct together with two visibility changes that shipped with it, and each
+# has a distinct way of being wrong:
+#
+#   023  the default actually took        — the DDL reached the running DB
+#   024  a TEAMMATE can still see it      — visibility is TEAM-scoped, per Decision 46.
+#                                           Before 0080 it was CREATOR-scoped, so a private
+#                                           tool would have been invisible to the rest of
+#                                           the owning team the moment the default flipped.
+#   025  another TEAM cannot see it       — the over-reach guard for 024. Without it, "make
+#                                           teammates see it" is satisfied by showing
+#                                           everything to everyone.
+#   026  an ANONYMOUS resolve still finds it — THE ONE THAT MATTERS. Agent pods hold no
+#                                           token until identity Phase 3, and the SDK
+#                                           tool_resolver fetches GET /tools/?name=X at
+#                                           startup. Under the old published-only branch a
+#                                           private tool returned zero items and the pod
+#                                           died with "Tool 'X' not found in the platform
+#                                           registry". A pod's authority over a tool is its
+#                                           binding plus OPA Gate 3, never the catalog flag.
+#   027  the same two properties for SKILLS — declarative-runner resolves those the same way
+#                                           (workflow_executor.py:232) and skills got the
+#                                           identical default flip, so they can fail
+#                                           independently of tools.
+#
+# 026/027 are the regression guards for a change that would otherwise show up as every
+# newly-built agent CrashLooping, with an error naming a missing tool rather than a
+# visibility filter.
+S98_LC="s98-lifecycle-$(date +%s)"
+
+# These two helpers do the parsing INSIDE the pod and print one scalar. The first version
+# of these cases reused `status_body`, which truncates at `r.read(400)` — a tool row is
+# longer than that, so every json.loads on the bash side failed and 023/024/026 reported
+# "ERR" as if the product were broken. Ship a number across the boundary, not a document.
+
+# tool_field <token> <name> <field>  — reload one row FROM THE BACKEND and print one field.
+tool_field() {
+  kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env \
+    T="$1" N="$2" F="$3" python3 -c '
+import os, json, urllib.request
+h = {}
+if os.environ["T"]: h["Authorization"] = "Bearer " + os.environ["T"]
+url = "http://localhost:8000/api/v1/tools/?name=" + os.environ["N"] + "&limit=1"
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20) as r:
+        items = json.load(r).get("items", [])
+    print(items[0].get(os.environ["F"], "") if items else "NOT_VISIBLE")
+except Exception as exc:
+    print("ERR:" + repr(exc))
+' 2>/dev/null | tr -d '\r\n'
+}
+
+# catalog_hits <token> <tools|skills> <name>  — how many rows of that EXACT name this
+# caller can see. An empty token is the in-cluster machine path on purpose.
+catalog_hits() {
+  kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env \
+    T="$1" C="$2" N="$3" python3 -c '
+import os, json, urllib.request
+h = {}
+if os.environ["T"]: h["Authorization"] = "Bearer " + os.environ["T"]
+c, n = os.environ["C"], os.environ["N"]
+# /tools/ has an exact-name filter; /skills/ does not, so page wide and match here.
+url = ("http://localhost:8000/api/v1/tools/?limit=5&name=" + n) if c == "tools" \
+      else "http://localhost:8000/api/v1/skills/?page_size=500"
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20) as r:
+        items = json.load(r).get("items", [])
+    print(sum(1 for i in items if i.get("name") == n))
+except Exception as exc:
+    print("ERR")
+' 2>/dev/null | tr -d '\r\n'
+}
+
+LC_CODE="$(status "$CONTRIB_TOK" POST /api/v1/tools/ "{\"name\":\"${S98_LC}\",\"type\":\"http\",\"description\":\"lifecycle probe\",\"risk_level\":\"low\"}")"
+
+# 023 — save -> RELOAD FROM THE BACKEND -> assert. The POST response is not evidence on
+# its own: a server_default is applied by Postgres, so reading the row back is the only
+# thing that proves the DDL landed rather than the ORM echoing what it sent.
+if [ "$LC_CODE" = "201" ]; then
+  LC_PS="$(tool_field "$CONTRIB_TOK" "$S98_LC" publish_status)"
+  case "$LC_PS" in
+    private)   record PASS "T-S98-023 a new tool is PRIVATE by default  |  created, reloaded from the backend, publish_status=private (migration 0080)" ;;
+    published) record FAIL "T-S98-023 a new tool is PRIVATE by default  |  reloaded as 'published'. Migration 0080 did not reach this database, so every tool anyone creates is in the shared catalog for every team the moment it exists." ;;
+    *)         record FAIL "T-S98-023 a new tool is PRIVATE by default  |  reload gave '${LC_PS}'" ;;
+  esac
+else
+  record FAIL "T-S98-023 a new tool is PRIVATE by default  |  create returned ${LC_CODE} (want 201) — cannot judge the default."
+fi
+
+# 024 — a teammate. e2e-consumer is pinned to team platform, same as e2e-contributor.
+LC_MATE="$(catalog_hits "$CONSUMER_TOK" tools "$S98_LC")"
+[ "$LC_MATE" = "1" ] \
+  && record PASS "T-S98-024 a TEAMMATE sees the private tool  |  another platform user finds it (visibility is TEAM-scoped, Decision 46)" \
+  || record FAIL "T-S98-024 a TEAMMATE sees the private tool  |  got '${LC_MATE}' (want 1). Visibility is still CREATOR-scoped, so 0080 just hid every new tool from the team that owns it."
+
+# 025 — the over-reach guard for 024. e2e-crossteam was moved to `operations` above.
+if [ -n "$S98_XT_TOK" ]; then
+  LC_XT="$(catalog_hits "$S98_XT_TOK" tools "$S98_LC")"
+  [ "$LC_XT" = "0" ] \
+    && record PASS "T-S98-025 another TEAM does NOT see the private tool  |  an operations user finds 0 rows" \
+    || record FAIL "T-S98-025 another TEAM does NOT see the private tool  |  got '${LC_XT}' (want 0). The team predicate is not filtering — 024 would then pass by showing everything to everybody."
+else
+  record FAIL "T-S98-025 another TEAM does NOT see the private tool  |  no cross-team persona token; 024 is unguarded without this."
+fi
+
+# 026 — THE ONE THAT MATTERS. Agent pods hold no token until identity Phase 3, and the SDK
+# tool_resolver fetches GET /tools/?name=X at startup. A pod's authority over a tool is its
+# binding plus OPA Gate 3, never the catalog flag.
+LC_ANON="$(catalog_hits "" tools "$S98_LC")"
+[ "$LC_ANON" = "1" ] \
+  && record PASS "T-S98-026 an ANONYMOUS in-cluster resolve still finds a private tool  |  the SDK tool_resolver path returns it" \
+  || record FAIL "T-S98-026 an ANONYMOUS in-cluster resolve still finds a private tool  |  got '${LC_ANON}' (want 1). This is the outage shape: every SDK agent bound to a tool created after 0080 dies at startup with \"Tool not found in the platform registry\"."
+
+# 027 — skills get the identical default and the identical machine-resolve path, and can
+# regress on their own: separate router, separate model, and the owning team lives in a
+# differently named column (`Skill.team`, not `owner_team`).
+SK_CODE="$(status "$CONTRIB_TOK" POST /api/v1/skills/ "{\"name\":\"${S98_LC}-skill\",\"description\":\"lifecycle probe\",\"team\":\"platform\"}")"
+if [ "$SK_CODE" = "201" ]; then
+  SK_ANON="$(catalog_hits "" skills "${S98_LC}-skill")"
+  [ "$SK_ANON" = "1" ] \
+    && record PASS "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  declarative-runner workflow_executor.py:232 still finds it after 0080" \
+    || record FAIL "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  got '${SK_ANON}' (want 1). Every workflow binding a skill created after 0080 fails at run time."
+else
+  record FAIL "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  create returned ${SK_CODE} (want 201)."
+fi
+
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -gt 0 ]; then

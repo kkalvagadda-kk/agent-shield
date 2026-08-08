@@ -68,6 +68,52 @@ The third is the smallest and removes the cause rather than sequencing around it
 red browser layer that is really an expired session is indistinguishable from a real break, and the
 instinct will be to go looking in the product.
 
+## G-R3-8 — the tokenless catalog branch now returns EVERY row, not just published ones — 2026-08-07
+
+**not-yet-wired (debt), with a stated expiry.** `catalog_visibility.py`'s
+`IN_CLUSTER_MACHINE` kind applies no `publish_status` filter. That is a deliberate widening
+shipped with migration `0080`: agent pods hold no token until identity Phase 3, the SDK
+`tool_resolver` calls `GET /api/v1/tools/?name=X` at startup, and the previous
+published-only branch would have returned zero items for any tool created after the default
+flip — killing every SDK agent with `RuntimeError: Tool 'X' not found in the platform
+registry`.
+
+**What it costs:** a tokenless in-cluster caller can enumerate every tool and skill,
+including other teams' private drafts, instead of only published ones. registry-api's
+Service is not exposed outside the cluster and agent pods are its only tokenless callers, so
+the exposure is in-cluster. It is still strictly wider than before.
+
+**What closes it:** identity Phase 3 gives these callers a verifiable service identity, at
+which point the predicate becomes "the tools this agent is BOUND to" (`agent_tools`, the
+same set OPA Gate 3 authorizes) and the branch disappears rather than being narrowed.
+`T-S98-026` and `T-S98-027` will have to be rewritten then — they currently assert the
+tokenless read SUCCEEDS, which is the behaviour being retired. That is deliberate: the cases
+are load-bearing until Phase 3 and it should be impossible to remove the branch without
+touching them.
+
+## G-R3-9 — `agents.py` and `composite_workflows.py` still scope catalog visibility by CREATOR, not team — 2026-08-07
+
+**deferred (intentional).** `catalog_visibility.py` unified the predicate for tools and
+skills. Two more copies of the same `or_(publish_status == "published", created_by == caller)`
+remain:
+
+```
+services/registry-api/routers/agents.py:248
+services/registry-api/routers/composite_workflows.py:205
+```
+
+Both are creator-scoped, which is the thing Decision 46 rejects for tools: the creating TEAM
+owns the artifact, so a teammate should see a colleague's private draft. Left alone
+deliberately — retargeting them changes what every user sees on the Agents and Workflows
+screens, and that is a product decision nobody has made, not a mechanical follow-through
+from a tool change.
+
+**Why it is recorded rather than forgotten:** four copies of one predicate is the shape this
+repo has three postmortems for (`start_chat`/`start_deployment_chat`,
+`webhook_clients.py`/`agent_endpoints.py`, `approvals._ADMIN_ROLES`). Two of the four are now
+behind one producer. If the answer for agents turns out to be the same as for tools, the
+producer already takes the parameter and the change is two call sites.
+
 ## G-R3-6 — `tools.py` and `skills.py` are ENTIRELY unauthenticated — 2026-08-07
 
 Found while starting Decision 46's step A. Measured against the deployed `0.2.266` with
@@ -136,17 +182,47 @@ case.
 SHIPPED   R0 · R1 · R2 · R3 · G-R3-2 fix · identity P0
 ────────────────────────────────────────────────────────────────────────
 NEXT      Tool lifecycle  (Decisions 46 + 47)        ← current work
-            A. create_tool sets owner_team from the caller's team
-            B. migration 0083 — publish_status default 'private' for
-               tools AND skills. NO backfill (the 174 stay published).
-            C. cascade in publish_agent + cross-team guard (422)
-            D. GET /admin/publish-requests/{id}/review + reviewer drawer
-            E. owner-initiated unpublish (Decision 47 #4 = option B)
-            F. tests: suite-6 extension + Playwright drawer case
-          NOTE G-R3-6 (tools/skills fully unauthenticated) is a PREREQUISITE
+          [x] A. create_tool sets owner_team from the caller's team
+                 SHIPPED 0.2.267. suite-98 T-S98-019..022.
+          [x] B. migration 0080 — publish_status default 'private' for
+                 tools AND skills. NO backfill: verified on the cluster,
+                 192 tools + 2 skills all still 'published', 0 rows touched.
+                 SHIPPED 0.2.268 / studio 0.1.185.
+                 B WAS NOT THE ONE-LINE DDL IT LOOKED LIKE. Shipping the
+                 default alone would have crashed every SDK agent: pods hold
+                 no token, the tool_resolver calls GET /tools/?name=X, and the
+                 tokenless branch filtered to published-only, so a new tool
+                 returned 0 items and the pod died with "Tool not found in the
+                 platform registry". Three things shipped together —
+                   catalog_visibility.py (ONE producer for both routers)
+                   HUMAN kind          -> published OR owner_team == my team
+                                          (TEAM-scoped; it was CREATOR-scoped,
+                                           which would have hidden a new tool
+                                           from the owner's own teammates)
+                   IN_CLUSTER_MACHINE  -> no publish filter at all
+                   studio 0.1.185      -> the tool Team field is admin-only
+                                          (free text for everyone + derived
+                                           owner_team = a 403 with no recourse)
+                 suite-98 T-S98-023..027, Vitest ToolsPage 14/14,
+                 Playwright T-RJ-012/013. Decision 47 carries a CORRECTION
+                 block; its "the list filter already exists and is correct"
+                 was wrong on both halves.
+          [ ] C. cascade in publish_agent + cross-team guard (422)
+          [ ] D. GET /admin/publish-requests/{id}/review + reviewer drawer
+          [ ] E. owner-initiated unpublish (Decision 47 #4 = option B)
+          [ ] F. tests: suite-6 extension + Playwright drawer case
+          NOTE G-R3-6 (tools/skills fully unauthenticated) was a PREREQUISITE
                of A — owner_team cannot be derived from an optional caller.
-          identity P1   → mint at the edge, rct through dispatch, 0080
-          identity P1.5 → resume re-hydration, 0081
+               Shipped with A in 0.2.267; postmortem in
+               docs/bugs/tools-and-skills-routers-had-no-authentication.md.
+          NOTE MIGRATION NUMBERS RE-ALLOCATED. The tool lifecycle took 0080,
+               not the 0083 reserved here, and identity moves to 0081-0083.
+               Alembic is a linear down_revision chain: writing 0083 while
+               0080-0082 stayed unwritten would have chained 0079 -> 0083 and
+               forced the identity migrations to insert AFTER it, so the file
+               numbers would read backwards against the real order.
+          identity P1   → mint at the edge, rct through dispatch, 0081
+          identity P1.5 → resume re-hydration, 0082
           identity P2   → 2a D-1 (agent_class from the registry) FIRST
                           2b Decision 46 landed
                           2c user_teams[] into the OPA input (PLURAL — see below)

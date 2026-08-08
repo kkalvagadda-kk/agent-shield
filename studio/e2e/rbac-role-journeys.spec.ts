@@ -291,6 +291,103 @@ test.describe("contributor — R3 artifact scope", () => {
   });
 });
 
+// ── Decisions 46 + 47: tool ownership and the private default, in the browser ──
+//
+// suite-98 T-S98-020..027 proves the API side. What only a browser can show is the
+// screen a contributor actually gets: 0.2.267 started deriving `owner_team` from the
+// caller and answering 403 when a non-admin asked for another team, while the form kept
+// offering a free-text Team input to everyone. The API was correct and the form was
+// lying — the exact split this file exists for.
+
+test.describe("contributor — tool ownership (Decisions 46 + 47)", () => {
+  test.use({ storageState: stateFor("contributor") });
+  test.beforeAll(() => assertRoleSession("contributor"));
+
+  const TOOL = `e2e_rj_owned_${Date.now()}`;
+
+  test("T-RJ-012 the Team field is read-only for a non-admin, and the tool saves and survives a reload", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const errors = trackPageErrors(page);
+
+    await page.goto(`${BASE_URL}/tools`);
+    await expect(page.locator(SHELL)).toBeVisible();
+    await page.getByRole("button", { name: /new tool/i }).first().click();
+
+    // The field a contributor does not get to choose. Rendered — not hidden — because
+    // the owning team decides who can see and use the tool.
+    const team = page.getByTestId("tool-owner-team-readonly");
+    await expect(team).toBeVisible({ timeout: 15_000 });
+    await expect(team).toBeDisabled();
+    await expect(team).toHaveValue("platform");
+
+    await page.getByPlaceholder("get_order_status").fill(TOOL);
+    await page
+      .getByPlaceholder("https://api.example.com/orders/{{order_id}}")
+      .fill("https://example.invalid/rj-owned");
+
+    const created = page.waitForResponse(
+      (r) => r.request().method() === "POST" && /\/api\/v1\/tools\/?$/.test(r.url()),
+      { timeout: 30_000 },
+    );
+    await page.getByRole("button", { name: /^Create Tool$/i }).click();
+    const resp = await created;
+
+    // 201, not the 403 the free-text field used to produce — and the request carries NO
+    // owner_team at all. "Sent my own team" and "sent nothing" both yield the right row,
+    // but only the second one is the client declining to assert what it does not decide.
+    expect(resp.status(), await resp.text()).toBe(201);
+    expect(JSON.parse(resp.request().postData() ?? "{}")).not.toHaveProperty("owner_team");
+
+    // Save -> RELOAD FROM THE BACKEND -> assert (DoD #2). A full navigation, so the row
+    // comes from the API and not from any store left behind by the create.
+    await page.goto(`${BASE_URL}/tools`);
+    await expect(page.locator(SHELL)).toBeVisible();
+    const row = page.locator("tr", { hasText: TOOL });
+    await expect(row).toHaveCount(1, { timeout: 20_000 });
+    // The team the SERVER derived, rendered in the row's Team cell.
+    await expect(row).toContainText("platform");
+
+    expectNoPageErrors(errors);
+  });
+
+  test("T-RJ-013 a teammate sees the private tool the contributor just created", async ({
+    page,
+  }) => {
+    // The other half of Decision 47's default flip. A tool created after migration 0080
+    // is `private`, and visibility is TEAM-scoped — so a different platform user must
+    // still find it. If visibility were still CREATOR-scoped (what it was before 0080),
+    // this row would be invisible to everyone but its author and the private default
+    // would have quietly broken team collaboration.
+    //
+    // e2e-consumer is provisioned into team `platform`, same as e2e-contributor.
+    const ctx = await pwRequest.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: true });
+    const tokenRes = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
+      form: {
+        grant_type: "password",
+        client_id: "agentshield-studio",
+        username: "e2e-consumer",
+        password: PERSONA_PASS,
+      },
+    });
+    expect(tokenRes.ok(), `consumer token: ${tokenRes.status()}`).toBeTruthy();
+    const token = (await tokenRes.json()).access_token;
+
+    const res = await ctx.get(`/api/v1/tools/?name=${TOOL}&limit=5`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(res.status()).toBe(200);
+    const items = (await res.json()).items ?? [];
+    expect(
+      items.filter((i: { name: string }) => i.name === TOOL),
+      "a teammate must see a private tool their own team owns",
+    ).toHaveLength(1);
+    expect(items[0].publish_status, "migration 0080 makes new tools private").toBe("private");
+    await ctx.dispose();
+  });
+});
+
 // ── platform-admin (the "did not deny the right role" half) ─────────────────
 
 test.describe("platform-admin", () => {

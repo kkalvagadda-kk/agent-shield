@@ -1255,8 +1255,10 @@ class Tool(Base):
     )
     mcp_tool_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Private by default, like Agent and CompositeWorkflow (Decision 47, migration 0080).
+    # Existing rows were NOT backfilled — see the migration for why.
     publish_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default=text("'published'")
+        String(32), nullable=False, server_default=text("'private'")
     )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
@@ -1361,8 +1363,9 @@ class Skill(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_ids: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+    # Private by default (Decision 47, migration 0080). See Tool.publish_status.
     publish_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default=text("'published'")
+        String(32), nullable=False, server_default=text("'private'")
     )
     created_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
     updated_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)

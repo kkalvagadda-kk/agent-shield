@@ -1304,6 +1304,63 @@ workflow, no new queue, no new gate.
   `source_version_id` and not the agent's latest run — otherwise a reviewer can approve v3 while
   reading v4's score.
 
+### CORRECTION (2026-08-07, while implementing step B) — "the list filter already exists and is correct" was WRONG
+
+The Context above says the visibility predicate "already exists and is correct … it simply never
+bites". Both halves of that turned out to be false, and the error is the same one Decision 46 had to
+correct: a claim about a handler inferred from reading around it rather than from reading its body.
+Recording it here because the sentence would otherwise read as a green light to ship the migration
+alone, and the migration alone is a live outage.
+
+`where(or_(publish_status == "published", created_by == caller))` is **creator-scoped**, and it has
+an `else` branch nobody accounted for:
+
+```python
+if caller:  q = q.where(or_(publish_status == "published", created_by == caller))
+else:       q = q.where(publish_status == "published")          # <- the machine path
+```
+
+Two consequences, neither visible while the default was `'published'` (the first clause matched
+essentially every row, so the predicate was inert — which is what "never bites" was picking up on):
+
+1. **Creator-scoped contradicts Decision 46.** Decision 46 makes the creating TEAM the owner. Under
+   a private default, a creator-scoped filter hides a contributor's new tool from their own
+   teammates — the collaboration this decision exists to enable would have broken on day one.
+
+2. **The `else` branch is the SDK, and it would have crashed every agent.** Agent pods hold no token
+   until identity Phase 3. The SDK `tool_resolver` fetches `GET /api/v1/tools/?name=X` at startup and
+   raises `RuntimeError: Tool 'X' not found in the platform registry` on an empty result. With the
+   default flipped, every SDK agent bound to a newly created tool would have died at startup with an
+   error naming a missing tool rather than a visibility filter. `declarative-runner` uses
+   `GET /tools/{id}`, which has no publish filter, so it would have survived — meaning the outage
+   would have hit only SDK agents and looked like an SDK bug.
+
+**What shipped instead of the one-line DDL** (registry-api `0.2.268`, migration `0080`):
+`catalog_visibility.py`, one producer for both `list_tools` and `list_skills`, taking an explicit
+`CallerKind`:
+
+  - `HUMAN` → `published OR owner_team == caller_team`. Team, per Decision 46.
+  - `IN_CLUSTER_MACHINE` (no token) → **no publish filter at all**. A pod's authority over a tool is
+    its binding plus OPA Gate 3, never the catalog flag. `publish_status` answers "may this be
+    discovered and adopted", which is a different question from "may this pod run what it was
+    deployed with" — conflating them is the same visibility-vs-authority mistake `asset_grants`
+    already makes (G-R3-3).
+
+`CallerKind` is a passed parameter rather than something inferred downstream, because this is exactly
+the shared-helper-needs-explicit-context case, and the alternative — branching on whether `?name=`
+happened to be supplied — is the implicit fallthrough the same rule forbids.
+
+**Accepted trade, ledgered:** the machine branch widens what a tokenless in-cluster caller can
+enumerate, from every published row to every row. registry-api's Service is not exposed outside the
+cluster and agent pods are its only tokenless callers, so the alternative was breaking every SDK
+agent. It closes at identity Phase 3, when the predicate becomes "tools this agent is bound to" and
+the branch disappears.
+
+**Two more copies of the same predicate exist and were deliberately NOT changed:**
+`routers/agents.py:248` and `routers/composite_workflows.py:205` are creator-scoped too. Retargeting
+them to teams is a visibility change to agents and workflows that nobody asked for, so it is a gap
+entry, not a side effect of this one.
+
 ---
 
 ## Summary of Locked Decisions

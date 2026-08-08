@@ -10,10 +10,19 @@ vi.mock("../api/registryApi", () => ({
   listAuthConfigs: vi.fn(),
   listAllTools: vi.fn(),
   updateTool: vi.fn(),
+  getMyTeam: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
-import { createTool, listAuthConfigs, listAllTools, updateTool } from "../api/registryApi";
+// Decision 46: the Team field is admin-only. useAuth's default context already answers
+// isAtLeast() => false, so the DEFAULT for every test here is the non-admin path — which
+// is the one that regressed. The admin case overrides this mock explicitly.
+const isAtLeastMock = vi.fn<(r: string) => boolean>(() => false);
+vi.mock("../contexts/AuthContext", () => ({
+  useAuth: () => ({ isAtLeast: isAtLeastMock, user: null, logout: vi.fn() }),
+}));
+
+import { createTool, listAuthConfigs, listAllTools, updateTool, getMyTeam } from "../api/registryApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -80,6 +89,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mock(listAllTools).mockResolvedValue([EXISTING_TOOL]);
   mock(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
+  mock(getMyTeam).mockResolvedValue({ team: "platform", namespace: "agents-platform", grants: [] });
+  isAtLeastMock.mockReturnValue(false);
   mock(createTool).mockResolvedValue({ ...EXISTING_TOOL, id: "t2" });
   mock(updateTool).mockResolvedValue(EXISTING_TOOL);
 });
@@ -285,5 +296,58 @@ describe("ToolsPage — MCP-sourced rows", () => {
 
     expect(screen.queryByRole("button", { name: /^edit$/i })).toBeNull();
     expect(screen.queryByDisplayValue("github-mcp__search_issues")).toBeNull();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Decision 46 — the creating team owns the tool, and the backend DERIVES it.
+//
+// 0.2.267 made `owner_team` come from the caller's team assignment and started
+// answering 403 when a non-admin asks for another team. The form kept offering a
+// free-text Team input to everybody, so a contributor who typed anything but their own
+// team hit a 403 they could not act on — the UI was still presenting a choice the
+// server had stopped honouring. These two cases pin both halves: the field is not
+// editable for a non-admin AND the payload stops carrying it, because a read-only input
+// that still submits its value is the same bug wearing a disguise.
+// ---------------------------------------------------------------------------
+describe("ToolsPage — tool ownership (Decision 46)", () => {
+  it("shows a NON-ADMIN their own team read-only and omits owner_team from the payload", async () => {
+    await openCreateForm();
+
+    const teamField = await screen.findByTestId("tool-owner-team-readonly");
+    expect(teamField).toHaveValue("platform");
+    expect(teamField).toBeDisabled();
+
+    await userEvent.type(screen.getByPlaceholderText(NAME), "order_status");
+    await userEvent.type(
+      screen.getByPlaceholderText("https://api.example.com/orders/{{order_id}}"),
+      "https://api.example.com/orders",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /create tool/i }));
+
+    await waitFor(() => expect(mock(createTool)).toHaveBeenCalled());
+    // Not "owner_team is empty" — absent. The server derives it; sending any value is the
+    // client asserting something it does not get to choose.
+    expect(mock(createTool).mock.calls[0][0]).not.toHaveProperty("owner_team");
+  });
+
+  it("lets a PLATFORM-ADMIN type a team and sends it", async () => {
+    isAtLeastMock.mockImplementation((r: string) => r === "platform-admin");
+    await openCreateForm();
+
+    expect(screen.queryByTestId("tool-owner-team-readonly")).toBeNull();
+    const teamInput = screen.getByPlaceholderText("platform-team");
+    await userEvent.type(teamInput, "operations");
+
+    await userEvent.type(screen.getByPlaceholderText(NAME), "order_status");
+    await userEvent.type(
+      screen.getByPlaceholderText("https://api.example.com/orders/{{order_id}}"),
+      "https://api.example.com/orders",
+    );
+    await userEvent.click(screen.getByRole("button", { name: /create tool/i }));
+
+    await waitFor(() => expect(mock(createTool)).toHaveBeenCalled());
+    expect(mock(createTool).mock.calls[0][0]).toMatchObject({ owner_team: "operations" });
   });
 });

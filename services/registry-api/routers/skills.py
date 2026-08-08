@@ -22,7 +22,9 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user, require_user
+from catalog_visibility import CallerKind, catalog_visibility_clause
 from db import get_db
+from rbac import get_user_team
 from models import Skill
 from schemas import PaginatedResponse, SkillCreate, SkillResponse, SkillUpdate
 
@@ -100,13 +102,23 @@ async def list_skills(
     base_query = select(Skill)
     count_query = select(func.count()).select_from(Skill)
 
-    # Visibility: published skills visible to all; private only to creator.
-    if caller:
-        vis = or_(Skill.publish_status == "published", Skill.created_by == caller)
-    else:
-        vis = Skill.publish_status == "published"
-    base_query = base_query.where(vis)
-    count_query = count_query.where(vis)
+    # Visibility (Decision 47 / migration 0080) — same producer as list_tools. Note the
+    # owning-team column is `Skill.team` here, not `owner_team`; that name difference is
+    # exactly why catalog_visibility_clause takes keyword-only column arguments.
+    #
+    # No token => declarative-runner resolving a skill it is already bound to
+    # (workflow_executor.py:232). No publish filter for it, or 0080 breaks every workflow
+    # that binds a skill created after the migration.
+    caller_kind = CallerKind.HUMAN if caller else CallerKind.IN_CLUSTER_MACHINE
+    vis = catalog_visibility_clause(
+        publish_status_col=Skill.publish_status,
+        owner_team_col=Skill.team,
+        caller_kind=caller_kind,
+        caller_team=await get_user_team(db, caller) if caller else None,
+    )
+    if vis is not None:
+        base_query = base_query.where(vis)
+        count_query = count_query.where(vis)
 
     if team is not None:
         base_query = base_query.where(Skill.team == team)

@@ -119,7 +119,7 @@ so the table stands unchanged in substance; the deltas are locations, not status
 **Two corrections to this document's own numbers:** latest Alembic migration is **`0078`** (not
 `0050`) and the latest e2e suite is **`suite-96`** (not `suite-44`). §5 and §6 are renumbered
 accordingly; the allocation across the three authorization docs is RBAC `0079`/`suite-97-98`,
-this doc `0080-0082`/`suite-99+`, OPA none.
+this doc `0081-0083`/`suite-99+`, OPA none. (Re-allocated 2026-08-07: the tool lifecycle took `0080` because alembic is a linear `down_revision` chain — reserving a number you have not written yet makes the file order read backwards against the real order.)
 
 **One material plan improvement,** found by reading the running code rather than the original
 survey: all three durable dispatch paths — sandbox playground (`playground.py:356`), workflow
@@ -511,9 +511,9 @@ Renumbered 2026-08-02 — the head on disk is `0078`, and `0079` is reserved for
 
 | Migration | Table | Change |
 |---|---|---|
-| `0080_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
-| `0081_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
-| `0082_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
+| `0081_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
+| `0082_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
+| `0083_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
 
 All idempotent (`IF NOT EXISTS`), data-preserving.
 
@@ -547,7 +547,7 @@ and a missing key all rejected) plus a mechanical check that the three vendored 
 primitive and the wiring, never that a run carries identity — that is P1, and a P0 suite claiming
 otherwise would be green for the wrong reason.
 
-**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0080` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
+**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0081` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
 
 **Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-101` approve after the token would have expired, assert identity still present.
 
@@ -586,7 +586,7 @@ acceptance test is that the *existing* floor stops denying legitimate `user_dele
 unaffected**; self-reported-`daemon` relabel attempt denied (2a's regression guard); cross-team
 caller denied a tool their team lacks while the owning team still gets it (2d's over-reach guard).
 
-**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0081` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
+**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0082` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
 
 > **Blast radius, measured (2026-08-02):** ~15 e2e suites POST to `/internal/runs/start`
 > without any token, and neither `services/scheduler/main.py` nor
@@ -605,7 +605,7 @@ caller denied a tool their team lacks while the owning team still gets it (2d's 
 
 **Phase 4 — Handoff / supervisor lineage.** Reduced by Phase 1: the durable dispatch seam is already threaded, so what remains is the *streaming* and in-pod hops — `_dispatch_stream` (`workflow_orchestrator.py:107`), `dispatch_to_orchestrator_pod`/`_run_step`/`orchestrate_*` gain `rct` and **extend** the chain per hop; SDK `handoff.py` sends the RCT + docstring fix; close the unauthenticated `composite_workflows` edge. *e2e:* `suite-104` 3-hop A→B→C, assert C carries the original human + `actor_chain==["A","B"]`.
 
-**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0082`; writer + reader wiring — note `opa_decisions` is a fully-built table + router with **zero writers** today, so this phase is the one that makes `Approval.opa_decision_id` non-null for the first time; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-105` approval requester + non-null `opa_decision_id`.
+**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0083`; writer + reader wiring — note `opa_decisions` is a fully-built table + router with **zero writers** today, so this phase is the one that makes `Approval.opa_decision_id` non-null for the first time; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-105` approval requester + non-null `opa_decision_id`.
 
 **Phase 6 — Cleanup.** Remove the legacy header shim; fix `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` (a separate approver-identity bug); revisit packaging the three `run_context.py` copies only if a 4th consumer appears.
 

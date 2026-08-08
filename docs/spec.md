@@ -1164,6 +1164,13 @@ Authorization covers three lifecycle stages: authoring (private workspace), cont
 
 **Asset lifecycle** — assets move through `private → pending_review → published`. Admin approval gates the transition and grants access to specific teams. A team must have an active grant to every tool in an agent's dependency graph before deployment is permitted.
 
+**Tools and skills now start `private` too** (Decisions 46 + 47, migration `0080`, registry-api `0.2.268`). They used to default to `published`, so a tool was org-wide visible the moment it existed while agents and workflows were born as drafts. Two rules follow from the flip and are easy to get backwards:
+
+- **`owner_team` is DERIVED from the creator's team, never taken from the request body.** Only a `platform-admin` may assign ownership elsewhere. A null owner was previously the norm (65 of ~173 rows), and `tool_access.team_may_use_tool` reads a null owner as usable by *every* team.
+- **`publish_status` is a DISCOVERY flag, not an authorization one.** Catalog listings scope it (`published OR owner_team == the caller's team`), but an agent pod resolving a tool it is already bound to is not browsing a catalog: its authority is the binding (`agent_tools`) plus OPA Gate 3. The tokenless in-cluster read path therefore applies no `publish_status` filter at all — filtering it returns zero rows and the pod dies at startup with `Tool 'X' not found in the platform registry`. One producer, `catalog_visibility.py`, takes the caller kind as an explicit parameter.
+
+**No backfill.** The ~192 tools and 2 skills that predate `0080` stay `published` and are the platform's shared library. Two populations by decision rather than by drift — see Decision 47 before "cleaning this up".
+
 The `POST /publish` request is itself gated at the **version** level by two flags on the pinned `AgentVersion`: `eval_passed` (always required) and `adversarial_eval_passed` (required only when the version binds a **high/critical-risk** tool — the `has_risky` branch — else skipped). A failed gate returns `422` with a structured `detail` (`eval_not_passed` / `adversarial_eval_not_passed`).
 
 **The two flags are NOT symmetric, and the difference matters:**

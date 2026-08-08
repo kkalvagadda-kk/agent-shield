@@ -12,9 +12,11 @@ import {
   listAuthConfigs,
   listAllTools,
   updateTool,
+  getMyTeam,
   type CreateToolPayload,
   type RegistryTool,
 } from '../api/registryApi';
+import { useAuth } from '../contexts/AuthContext';
 import { cn } from '../lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -324,6 +326,23 @@ function ToolForm({
   const isEdit = tool !== null;
   const [authConfigId, setAuthConfigId] = useState<string>(tool?.auth_config_id ?? '');
 
+  // Decision 46: the creating team OWNS the tool, and `owner_team` is DERIVED by the
+  // backend from the caller's team assignment. Only a platform-admin may assign it
+  // elsewhere; for anyone else the backend answers 403.
+  //
+  // This field used to be a free-text input for everybody, which after 0.2.267 meant a
+  // contributor who typed any team but their own got a 403 they could do nothing about —
+  // the form was still offering a choice the server had stopped honouring. An admin keeps
+  // the input, because seeding and admin-side creation legitimately assign ownership.
+  const { isAtLeast } = useAuth();
+  const canAssignTeam = isAtLeast('platform-admin');
+  const { data: myTeam } = useQuery({
+    queryKey: ['my-team'],
+    queryFn: getMyTeam,
+    staleTime: 60_000,
+    enabled: !canAssignTeam,
+  });
+
   const { data: authConfigsData } = useQuery({
     queryKey: ['auth-configs'],
     queryFn: () => listAuthConfigs(),
@@ -368,7 +387,10 @@ function ToolForm({
           display_name: values.display_name,
           description: values.description,
           risk_level: values.risk_level,
-          owner_team: values.owner_team,
+          // Only an admin sends owner_team. For everyone else the field is read-only and
+          // the server derives ownership, so sending it back would be the client asserting
+          // a value it does not get to choose.
+          ...(canAssignTeam ? { owner_team: values.owner_team } : {}),
           auth_config_id: authConfigId || null,
           pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
           ...(values.tool_type === 'http'
@@ -385,7 +407,7 @@ function ToolForm({
         pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
         ...(values.display_name ? { display_name: values.display_name } : {}),
         ...(values.description ? { description: values.description } : {}),
-        ...(values.owner_team ? { owner_team: values.owner_team } : {}),
+        ...(canAssignTeam && values.owner_team ? { owner_team: values.owner_team } : {}),
         ...(values.tool_type === 'http'
           ? { http_method: values.http_method ?? 'GET', http_url: values.http_url }
           : { python_code: values.python_code }),
@@ -506,11 +528,27 @@ function ToolForm({
             </select>
           </Field>
           <Field label="Team" error={errors.owner_team?.message}>
-            <input
-              {...register('owner_team')}
-              className="input"
-              placeholder="platform-team"
-            />
+            {canAssignTeam ? (
+              <input
+                {...register('owner_team')}
+                className="input"
+                placeholder="platform-team"
+              />
+            ) : (
+              // Read-only, and the submit handler omits owner_team entirely for this
+              // caller — the value shown is what the server will derive, not an input the
+              // server then has to re-check. Rendering the field at all (rather than
+              // hiding it) is deliberate: the owning team decides who can see and use the
+              // tool, so it should not be invisible just because it is not editable.
+              <input
+                value={myTeam?.team ?? ''}
+                readOnly
+                disabled
+                data-testid="tool-owner-team-readonly"
+                className="input bg-slate-50 text-slate-500 cursor-not-allowed"
+                title="Your team owns the tools you create. Only a platform-admin can assign ownership to another team."
+              />
+            )}
           </Field>
         </div>
 
