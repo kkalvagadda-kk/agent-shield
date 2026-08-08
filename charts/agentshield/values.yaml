@@ -757,7 +757,8 @@ registry-api:
     #          the production deploy branch; can_use_playground gates the playground.
     # 0.2.265: identity P0 — vendored run_context.py; mints the root run context.
     # 0.2.266: G-R3-2 — the deployment-pinned chat endpoint had no access check.
-    tag: "0.2.266"
+    # 0.2.267: G-R3-6 — tools/skills mutations require auth; tools get an owner_team.
+    tag: "0.2.267"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"

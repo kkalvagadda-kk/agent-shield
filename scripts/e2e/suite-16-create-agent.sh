@@ -190,7 +190,7 @@ tool_body = {
     'risk_level': 'low',
     'description': 'Look up an order by ID',
 }
-r = httpx.post('http://localhost:8000/api/v1/tools/', json=tool_body)
+r = httpx.post('http://localhost:8000/api/v1/tools/', json=tool_body, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code in (201, 409), f'Tool create failed: {r.status_code} {r.text}'
 
 # Create agent with tools

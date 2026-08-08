@@ -83,7 +83,7 @@ try:
         if t.get('name','').startswith('restricted-tool-'):
             req = urllib.request.Request(
                 'http://localhost:8000/api/v1/tools/' + str(t['id']),
-                method='DELETE')
+                method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
             urllib.request.urlopen(req, timeout=5)
             print('  deleted tool: ' + t['name'])
 except Exception:
@@ -235,7 +235,7 @@ try:
             'name': tool_name, 'type': 'native',
             'risk_level': 'high', 'owner_team': 'other-team-${TS}'
         }).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
     tool_id = json.loads(r.read()).get('id', '')
 except urllib.error.HTTPError as e:

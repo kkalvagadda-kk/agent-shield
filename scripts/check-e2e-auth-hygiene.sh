@@ -74,8 +74,16 @@ def header_dicts(t):
 # matched the collection endpoint and /publish|/quarantine but NEVER /agents/{name} —
 # i.e. it was blind to exactly the routes R3 gated. suite-5's uncredentialed
 # `DELETE /agents/hitl-s5-agent` sailed through it. Start broad, subtract deliberately.
-GATED = re.compile(r"/api/v1/agents\b|\+ '/agents/'|base \+ '/agents/'")
-NOT_AGENT_CREATE = re.compile(r"/versions|/deploy|/triggers|/identities|/tools|/memory|/chat|/runs|/deployments|/stats|/health")
+# Routes gated by R2/R3 (agents) and G-R3-6 (tools, skills). A mutating call to one of
+# these with no Authorization will 401/403 against a current image.
+#
+# `/tools` and `/skills` were added 2026-08-07 with G-R3-6. Note the ordering trap: the
+# agents pattern must NOT match `/agents/{n}/tools` (a READ with a machine caller), so
+# tool/skill matching is anchored to the COLLECTION prefix, not the substring.
+GATED = re.compile(r"/api/v1/agents\b|/api/v1/tools\b|/api/v1/skills\b|\+ '/agents/'|base \+ '/agents/'")
+# Sub-resources R2/R3/G-R3-6 did NOT gate — several have in-cluster machine callers that
+# send no Authorization header (declarative-runner, deploy-controller, the SDK resolver).
+NOT_AGENT_CREATE = re.compile(r"/versions|/deploy|/triggers|/identities|/agents/[^'\"]*/tools|/memory|/chat|/runs|/deployments|/stats|/health")
 
 for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
     t = p.read_text()
@@ -105,7 +113,7 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             continue
         if "Authorization" in span:
             continue
-        FAIL.append(f"{p.name}:{line_of(k)}  agent mutation with NO Authorization — 401/403 since R2/R3")
+        FAIL.append(f"{p.name}:{line_of(k)}  mutation with NO Authorization — 401/403 since R2/R3/G-R3-6")
 
     # 3b — same rule, for httpx. The first version of this script checked httpx only for
     # duplicate `headers=` and missed suite-14's `httpx.post(.../publish, json=...)`,
@@ -117,7 +125,7 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             continue
         if "Authorization" in span:
             continue
-        FAIL.append(f"{p.name}:{line_of(m.start())}  agent mutation via httpx with NO Authorization")
+        FAIL.append(f"{p.name}:{line_of(m.start())}  mutation via httpx with NO Authorization (agents/tools/skills)")
 
     # 4 — the token is referenced but never obtained
     if "E2E_TOKEN" in t and "e2e-auth.sh" not in t:
@@ -132,5 +140,5 @@ if FAIL:
 
 print("=== e2e auth hygiene: clean ===")
 print("  no duplicate headers kwargs, no duplicate Authorization keys,")
-print("  no uncredentialed agent mutations, no unsourced ${E2E_TOKEN}.")
+print("  no uncredentialed agent/tool/skill mutations, no unsourced ${E2E_TOKEN}.")
 PY

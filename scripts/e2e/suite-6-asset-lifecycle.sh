@@ -64,7 +64,7 @@ except Exception: pass
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
@@ -199,7 +199,7 @@ req = urllib.request.Request(
         'risk_level': 'critical',
         'description': 'Suite 6 critical risk test tool'
     }).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -534,8 +534,7 @@ if [ -n "$CRITICAL_TOOL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}',
-    method='DELETE'
-)
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
 "

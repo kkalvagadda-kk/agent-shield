@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
 from db import get_db
 from models import Skill
 from schemas import PaginatedResponse, SkillCreate, SkillResponse, SkillUpdate
@@ -39,6 +39,11 @@ router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
     response_model=SkillResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a new skill",
+    # G-R3-6: skills.py had NO auth on any route. Mutations are gated; the READS stay
+    # open because declarative-runner workflow_executor.py:232 fetches
+    # GET /skills/{id} with no Authorization header. Same exemption shape as R1's
+    # G-R1-*; closing it needs identity Phase 3's service identity.
+    dependencies=[Depends(require_user)],
 )
 async def create_skill(
     body: SkillCreate,
@@ -162,6 +167,7 @@ async def get_skill(
     "/{skill_id}",
     response_model=SkillResponse,
     summary="Update skill",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_skill above
 )
 async def update_skill(
     skill_id: uuid.UUID,
@@ -209,6 +215,7 @@ async def update_skill(
     status_code=status.HTTP_204_NO_CONTENT,
     response_model=None,
     summary="Delete skill",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_skill above
 )
 async def delete_skill(
     skill_id: uuid.UUID,

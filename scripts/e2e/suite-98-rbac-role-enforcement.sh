@@ -427,6 +427,41 @@ case "$OWN" in
   *)       record FAIL "T-S98-018 the pinned endpoint still WORKS for an entitled caller  |  -> ${OWN} (want 200/201). The G-R3-2 fix over-reached and broke fleet-row chat." ;;
 esac
 
+# ── G-R3-6 + Decision 46 step A (2026-08-07) ──────────────────────────────────
+# tools.py and skills.py had ZERO authenticated routes — 7 and 5 exempt, POST/PUT/DELETE
+# included. A tool's risk_level is the input to the HITL gate and OPA's risk->action rule,
+# so an anonymous PUT that lowered it relaxed every control for every agent bound to that
+# tool. The READS stay deliberately exempt (declarative-runner + the SDK resolver call them
+# with no token) — 021 pins that so closing them later is a decision, not an accident.
+S98_TOOL="s98-owner-probe"
+C19="$(status "" POST /api/v1/tools/ "{\"name\":\"${S98_TOOL}-anon\",\"type\":\"http\",\"description\":\"anon probe\",\"risk_level\":\"low\"}")"
+[ "$C19" = "401" ] \
+  && record PASS "T-S98-019 ANONYMOUS cannot create a tool  |  POST /tools/ -> 401 (risk_level drives every downstream gate)" \
+  || record FAIL "T-S98-019 ANONYMOUS cannot create a tool  |  POST /tools/ -> $C19 (want 401)"
+
+# Decision 46: owner_team comes from the CALLER's team, never the body. The contributor is
+# in team `platform`; asking for another team must be refused for a non-admin.
+C20="$(status "$CONTRIB_TOK" POST /api/v1/tools/ "{\"name\":\"${S98_TOOL}-foreign\",\"type\":\"http\",\"description\":\"ownership probe\",\"risk_level\":\"low\",\"owner_team\":\"operations\"}")"
+[ "$C20" = "403" ] \
+  && record PASS "T-S98-020 a non-admin cannot assign tool ownership to another team  |  owner_team='operations' from a platform contributor -> 403" \
+  || record FAIL "T-S98-020 a non-admin cannot assign tool ownership to another team  |  -> $C20 (want 403). A body-supplied owner_team is the same forgeable-attribution shape R2 deleted from create_agent."
+
+# The over-reach guard + the derivation itself: a contributor CAN still create a tool, and
+# it lands owned by THEIR team without them saying so.
+OWNED="$(status_body "$CONTRIB_TOK" POST /api/v1/tools/ "{\"name\":\"${S98_TOOL}\",\"type\":\"http\",\"description\":\"ownership probe\",\"risk_level\":\"low\"}")"
+OC="${OWNED%%|*}"; OB="${OWNED#*|}"
+case "$OC|$OB" in
+  201*'"owner_team":"platform"'*) record PASS "T-S98-021 a contributor creates a tool and it is owned by THEIR team  |  201, owner_team=platform, derived not supplied" ;;
+  409*)                           record PASS "T-S98-021 a contributor creates a tool and it is owned by THEIR team  |  409 (already created by an earlier run — the role gate let them through)" ;;
+  *)                              record FAIL "T-S98-021 a contributor creates a tool and it is owned by THEIR team  |  -> $OC $OB (want 201 with owner_team=platform). Either the gate over-reached, or owner_team is still NULL — which team_may_use_tool reads as usable by EVERY team." ;;
+esac
+
+# The exempt READS must stay open, or the runner and the SDK resolver break at startup.
+C22="$(status "" GET /api/v1/tools/)"
+[ "$C22" = "200" ] \
+  && record PASS "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> 200 (declarative-runner + SDK tool_resolver send no token; closing this is identity Phase 3)" \
+  || record FAIL "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> $C22 (want 200). G-R3-6 gated MUTATIONS only; gating the reads breaks every agent pod at startup."
+
 echo ""
 echo "=== Suite 98 Results: PASS=$PASS FAIL=$FAIL ==="
 if [ "$FAIL" -gt 0 ]; then

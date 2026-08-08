@@ -68,6 +68,45 @@ The third is the smallest and removes the cause rather than sequencing around it
 red browser layer that is really an expired session is indistinguishable from a real break, and the
 instinct will be to go looking in the product.
 
+## G-R3-6 — `tools.py` and `skills.py` are ENTIRELY unauthenticated — 2026-08-07
+
+Found while starting Decision 46's step A. Measured against the deployed `0.2.266` with
+T-S97-011's own algorithm:
+
+```
+tools:  protected=0  exempt=7     skills: protected=0  exempt=5
+   POST   /api/v1/tools/            POST   /api/v1/skills/
+   GET    /api/v1/tools/            GET    /api/v1/skills/
+   GET    /api/v1/tools/{id}        GET    /api/v1/skills/{id}
+   PUT    /api/v1/tools/{id}        PUT    /api/v1/skills/{id}
+   DELETE /api/v1/tools/{id}        DELETE /api/v1/skills/{id}
+   GET    /api/v1/tools/{id}/agents
+   POST   /api/v1/tools/{id}/test
+```
+
+`APIRouter(prefix="/api/v1/tools", tags=["tools"])` — no `dependencies=`, and neither module
+was among R1's ten routers, so the T-S97-011 canary never covered them either.
+
+**Why this is worse than what R3 closed.** A tool's `risk_level` is the input to every
+downstream control: it drives the HITL gate (`high` → park, `critical` → not deployable) and
+OPA's risk→action rule. An anonymous caller can `PUT` an existing tool and lower its
+`risk_level`, and every gate that depends on it silently relaxes — for every agent already
+bound to it. `POST /tools/{id}/test` executes the tool.
+
+**Blocks Decision 46 step A.** "Derive `owner_team` from the caller's team" is not
+implementable while the caller is optional. Auth has to land first, in the same change.
+
+**Scope note — this is R3's pattern, not a new phase.** R3 gated `agents.py` mutations with
+`_require_manage` (platform-admin OR `agent-admin` on the artifact). Tools have no artifact
+role, so the equivalent is `require_user` + own-team-or-platform-admin, using `owner_team`
+once Decision 46 sets it. Chicken-and-egg is resolved by ordering: `require_user` first (so a
+caller exists), then `owner_team` on create, then the ownership check on mutate.
+
+**Blast radius to expect:** the e2e suites create tools. `check-e2e-auth-hygiene.sh` currently
+only knows about `/api/v1/agents` — it must be extended to `/tools` and `/skills` in the same
+change, or the sweep list is hand-written again and misses suites, which is precisely the R2
+mistake that script exists to prevent.
+
 ## Known gaps — authorization review, 2026-08-07 (design session, no code change yet)
 
 A walkthrough of MCP and tool authorization surfaced eleven findings. **Decisions 45 and 46** were
@@ -102,7 +141,10 @@ NEXT      Tool lifecycle  (Decisions 46 + 47)        ← current work
                tools AND skills. NO backfill (the 174 stay published).
             C. cascade in publish_agent + cross-team guard (422)
             D. GET /admin/publish-requests/{id}/review + reviewer drawer
-            E. tests: suite-6 extension + Playwright drawer case
+            E. owner-initiated unpublish (Decision 47 #4 = option B)
+            F. tests: suite-6 extension + Playwright drawer case
+          NOTE G-R3-6 (tools/skills fully unauthenticated) is a PREREQUISITE
+               of A — owner_team cannot be derived from an optional caller.
           identity P1   → mint at the edge, rct through dispatch, 0080
           identity P1.5 → resume re-hydration, 0081
           identity P2   → 2a D-1 (agent_class from the registry) FIRST
@@ -553,20 +595,52 @@ deliberately absent from suite-97's completeness gate until it does.
   `error_code === "no_platform_role"` as a distinct state instead of a null role. Then it becomes
   cheaply testable.
 
-- **G-R1-7 — `suite-18-opa-governance` T-S18-005/006/011 fail on SCAVENGED tool fixtures, not on
-  policy.** Reproduced identically standalone against `0.2.261` (10 passed / 3 failed / 1 skipped).
-  **Not an R1 regression, and R1 cannot cause it:** OPA decisions are served by the agent pod's
-  sidecar at `localhost:8181` and never traverse registry-api, which is the only thing R1 changed.
-  Root cause: the three failing cases assert on **pre-existing shared** tools — `email_notifier`,
-  `cic-echo-tool`, `get_weather` — and a live bundle query shows **zero of the 47 agents grant any
-  of them**. T-S18-007 passes using `opa-s18-crit-1785707664`, a tool minted ~3 days earlier, which
-  confirms the suite reuses cluster tools rather than creating its own. Same scavenged-fixture class
-  as `catalog-overview-parity` (which its own header forbade and then did anyway): the verdict
-  tracks leftover cluster state. Bundle health itself is fine — T-S18-001/002/003 all pass.
-  Fix is to create and grant the tools it asserts on, or skip with a named reason when they are
-  absent. **Process gap this exposed:** R1 shipped without a pre-change baseline of the BASH layer
-  (only the browser layer was baselined), so attribution had to be reconstructed after the fact
-  instead of read off a diff.
+- **G-R1-7 — ✅ CLOSED 2026-08-07. `suite-18` T-S18-005/006/011 died at the OPA IDENTITY FLOOR,
+  not on fixtures. The root cause recorded here was WRONG and is corrected below.**
+  Suite now **14 passed / 0 failed / 1 skipped** (was 10/3/1), no registry-api change involved.
+
+  **What was recorded (2026-08-06), and why it was wrong.** The entry said the three cases assert
+  on scavenged shared tools that "zero of the 47 agents grant". That diagnosis never fit its own
+  evidence: `T-S18-006` reported `allow=False, req_appr=True`, and `require_approval` can only be
+  true if the tool WAS resolved and its risk read. An ungranted tool cannot produce it. The
+  inference was made from a bundle query instead of from the decision the sidecar actually
+  returned — the same shape as the Decision-46 correction (reasoning about a handler without
+  reading its body).
+
+  **Actual root cause, measured.** Every case sent `user_id: ''`. Gate 6 (`user_identity_ok`,
+  `agentshield.rego:22,101-108`) is AND-ed into `allow`, so a `user_delegated` input with no
+  `user_id` is denied `missing_user_identity` regardless of risk or grant. Same tool, same pod,
+  only `user_id` changed:
+
+  | tool | `user_id=''` | `user_id='alice'` |
+  |---|---|---|
+  | `email_notifier` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=allow_medium_risk` |
+  | `cic-echo-tool` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=require_approval_high_risk` |
+  | `get_weather` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=allow_low_risk` |
+
+  All three tools are granted and resolve correctly. The cases were not merely red — they were
+  **asserting nothing about the risk→action mapping they exist to prove**, because the request
+  never reached that rule.
+
+  **Fix — the suite was the defect, in three ways.** (1) Allow-path and deny-path cases now send a
+  synthetic `S18_UID`, i.e. the input a real run sends once identity P1 threads the RunContext.
+  (2) New **`T-S18-015`** asserts the floor's DENY half — the only case that deliberately sends an
+  empty `user_id`, so switching Gate 6 off turns exactly one test red instead of zero.
+  (3) **`T-S18-012` was a tautology** — `if allow == "True" || allow == "False"`, satisfied by
+  every possible boolean. It stayed green through the whole period the floor was denying, which is
+  the gate it is nominally about. It now asserts the EXEMPT half: daemon + empty `user_id` → allow.
+
+  This does **not** weaken a control. The floor is asserted from both sides for the first time, and
+  the live-denial entry above (a real `user_delegated` run still reaches OPA with `user_id=""` until
+  identity P1) is unchanged and still open — `T-S18-015` is now its regression guard, and must keep
+  passing after P1, because P1 changes what the pod SENDS, not what the policy DECIDES.
+
+  **Process gaps this exposed, both worth keeping.** (a) R1 shipped without a pre-change baseline of
+  the BASH layer (only the browser layer was baselined), so attribution had to be reconstructed
+  after the fact instead of read off a diff. (b) **A wrong root cause in this ledger is worse than
+  an open one** — it survived a day and would have sent the next person to rebuild fixtures that
+  were never broken. One `kubectl exec` against the sidecar settled it. Query the component that
+  made the decision, not a table upstream of it.
 
 - **G-R1-8 — `knowledge.spec.ts` "attach agent" picker option never renders; cause NOT established.**
   `expect(picker.locator("option", {hasText: AGENT_NAME})).toHaveCount(1)` gets 0 (`:283`).

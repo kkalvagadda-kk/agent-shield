@@ -283,6 +283,12 @@ Consolidated from the four superseded docs plus the bug record. Tagged per CLAUD
   guarded — the same shape as `webhook_clients.py`/`agent_endpoints.py` and
   `approvals._ADMIN_ROLES`. **not-yet-wired (debt), suspected not proven:** the 200 observed was
   same-team, so the own-team fast path would have allowed it anyway. *(2026-08-07)*
+- G-R3-6 **`tools.py` (7 routes) and `skills.py` (5 routes) are ENTIRELY unauthenticated** —
+  including POST/PUT/DELETE. Measured on `0.2.266`: `protected=0` for both. Neither was among
+  R1's ten routers, so T-S97-011 never covered them. A tool's `risk_level` drives the HITL gate
+  and OPA's risk→action rule, so an anonymous PUT that lowers it relaxes every control for every
+  agent bound to that tool. Blocks Decision 46 (cannot derive `owner_team` from an optional
+  caller). Fix ships with the tool-lifecycle work. *(2026-08-07)*
 - G-R3-3 **`asset_grants` is called visibility in §2 and used as authority in `chat.py:585`.**
   §2 says "visibility ≠ authority", but `_has_grant` on that table is THE gate for cross-team
   invoke. Either the doc is wrong or the code trusts a visibility record as an authorization

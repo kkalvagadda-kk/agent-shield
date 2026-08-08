@@ -25,7 +25,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
+from rbac import get_user_global_role, get_user_team
 from db import get_db
 from models import Agent, AgentTool, AuthConfig, Tool
 from schemas import (
@@ -113,14 +114,53 @@ def _to_tool_response(tool: Tool) -> ToolResponse:
     status_code=status.HTTP_201_CREATED,
     response_model=ToolResponse,
     summary="Register a new tool",
+    # G-R3-6: this router had NO auth at all — POST/PUT/DELETE included. A tool's
+    # risk_level drives the HITL gate and OPA's risk->action rule, so an anonymous
+    # PUT that lowers it relaxes every control for every agent bound to that tool.
+    # MUTATIONS are gated; the READS stay open because in-cluster machine callers
+    # reach them with no Authorization header — declarative-runner
+    # workflow_executor.py:247 (GET /tools/{id}) and the SDK tool_resolver
+    # (GET /tools/). Closing those needs the service identity that
+    # identity-propagation-architecture.md Phase 3 owns.
+    dependencies=[Depends(require_user)],
 )
 async def create_tool(
     body: ToolCreate,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> ToolResponse:
-    caller = (user or {}).get("sub") or x_user_sub
+    """Register a tool. The creating team OWNS it (Decision 46).
+
+    `owner_team` is derived from the CALLER's team assignment, not from the request
+    body. Before this, `Tool(**body.model_dump(...))` took it from the body, which
+    defaults to `None` — and `tool_access.team_may_use_tool` treats a null owner as
+    usable by EVERY team. So creating a tool through Studio produced the most
+    permissive state available: 65 of ~173 rows on the test cluster. Not drift; it is
+    what the create path produced.
+
+    A body-supplied `owner_team` is honoured ONLY for a platform-admin, because
+    seeding and admin-side creation legitimately assign ownership. For anyone else a
+    body field would let a caller assign their tool to a team they are not in, which
+    is the same forgeable-attribution shape as the `X-User-Sub` fallback R2 deleted
+    from `create_agent`.
+    """
+    caller = claims["sub"]
+    caller_team = await get_user_team(db, caller)
+    if body.owner_team and body.owner_team != caller_team:
+        # Only platform-admin may assign ownership elsewhere. get_user_global_role
+        # raises NoPlatformRole for a row-less sub (R0), which main.create_app maps
+        # to 403 — the correct answer for a caller whose identity is corrupt.
+        if await get_user_global_role(db, caller) != "platform-admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Cannot create a tool owned by team '{body.owner_team}': you are in "
+                    f"'{caller_team}'. Only a platform-admin may assign ownership to another team."
+                ),
+            )
+        owner_team = body.owner_team
+    else:
+        owner_team = caller_team
 
     existing = await db.execute(select(Tool).where(Tool.name == body.name))
     if existing.scalar_one_or_none() is not None:
@@ -138,7 +178,9 @@ async def create_tool(
     # over the column default, so resolve it here: an explicit value wins, otherwise
     # infer it from the method (fail-closed). Excluded from the kwargs splat so the
     # two can never both apply.
-    tool = Tool(**body.model_dump(exclude={"side_effecting"}))
+    # owner_team excluded from the splat: it is DERIVED above, never taken from the body.
+    tool = Tool(**body.model_dump(exclude={"side_effecting", "owner_team"}))
+    tool.owner_team = owner_team
     tool.side_effecting = (
         body.side_effecting
         if body.side_effecting is not None
@@ -234,6 +276,7 @@ async def get_tool(
     "/{tool_id}",
     response_model=ToolResponse,
     summary="Update tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def update_tool(
     tool_id: uuid.UUID,
@@ -278,6 +321,7 @@ async def update_tool(
     "/{tool_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Deprecate tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def delete_tool(
     tool_id: uuid.UUID,
@@ -339,6 +383,7 @@ async def list_agents_for_tool(
     "/{tool_id}/test",
     response_model=ToolTestResponse,
     summary="Test-invoke a tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def test_tool(
     tool_id: uuid.UUID,

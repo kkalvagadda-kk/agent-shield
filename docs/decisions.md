@@ -1275,10 +1275,25 @@ workflow, no new queue, no new gate.
 - **Published is VISIBILITY, never USE.** A cascade-published tool appears in every team's picker
   and remains unusable without `owner_team` match or a grant (`team_may_use_tool`, Decision 46).
   Stated explicitly and asserted in a test, because "published" reads like "granted".
-- **Publishing is one-way.** Nothing un-publishes; delete the agent and its tools stay published.
-  Over time everything drifts to published — which is exactly today's 174/174, reached by a
-  different route. **Deferred (intentional):** no unpublish in this change. The smallest future
-  version is an owner-initiated unpublish blocked while any published agent still uses the tool.
+- **Publishing must not be one-way — an owner-initiated unpublish ships WITH the cascade.**
+  (Revised 2026-08-07: originally deferred, then built. The reasoning that changed it is worth
+  keeping.) Without a reverse, everything drifts to published over time — which is exactly today's
+  174/174, reached by a different route — and the drift is unmeasurable because the metric only
+  moves one way. Left alone the ratchet re-creates the very problem this decision exists to solve.
+
+  What made it cheap: **unpublish removes discoverability, never capability.** An agent already
+  bound to the tool keeps working — binding is by id and *use* is governed by `owner_team` and
+  grants, not `publish_status` — so unpublishing cannot break a running agent, and the
+  "is a published agent still using this" check is a courtesy to the clicker, not a safety
+  requirement. Guarded like the cascade: creator or owning team.
+
+  The deciding argument was this platform's record with monotonic states: 174/174 published because
+  a default was never revisited, 120 auto-grants nobody decided on, zero admin-created grants. Every
+  one is a state that only moved one way and nobody went back. Building the reverse while deciding
+  the forward direction is the cheapest it will ever be.
+
+  *Rejected:* cascade-unpublish on agent delete — deleting your agent silently removing tools from
+  other teams' pickers mid-build is a surprise, not a feature.
 - **No backfill.** The existing 174 stay `published` and become the platform's shared library. A
   blanket backfill to `private` would empty every tool picker until each was republished. Two
   populations, for a stated reason rather than by drift. **Do not "clean this up" later.**
@@ -1341,4 +1356,4 @@ workflow, no new queue, no new gate.
 | 44 | Role gates need a browser | All 61 bash suites and all 47 Playwright specs ran as `platform-admin`, so no role gate could fail a test. `global-setup.ts` is now multi-role (personas created through the real admin API, fail-loud); `e2e/rbac-role-journeys.spec.ts` drives the app as a consumer and a contributor. Corrects the claim that R5 is the only UX-facing RBAC phase. |
 | 45 | Agent vs tool delegation | **Delegating an agent does NOT delegate its tools — unless it is autonomous.** user_delegated runs intersect the agent's effective tool set with the CALLER's team grants; daemon runs keep the agent's own. Follows the §4.2 identity-model seam the identity floor already branches on. Prereqs: D-1 (registry-side `agent_class`, now load-bearing for two gates), an unowned-tool rule in the bundle, and `user_team` in the OPA input from the verified RunContext (identity P1/P2). |
 | 46 | Tool ownership | **A tool's team comes from its creator; `owner_team = NULL` becomes illegal.** Creation currently leaves it NULL, which the resolver treats as usable by EVERY team — 65 of ~173 tools. Ownership, not an auto-grant (own-team needs no grant row). Builtins get an explicit shared team. Unblocks Decision 45 by making the bundle and the resolver agree on what 'unowned' means. List endpoint reuses `team_may_use_tool`. |
-| 47 | Tool visibility | **Tools are private by default and publish by CASCADE when an agent using them is published.** `Tool`/`Skill` default to `published` where `Agent`/`Workflow` default to `private`; all 174 tools are published and the (correct) list filter never bites. No separate tool publish workflow — `publish_agent` already loads the tools and blocks critical-risk ones. Reviewer gets a full review payload (agent config + every tool with risk/owner/publish_status + eval), cascade limited to own-team tools, published ≠ granted, no backfill, unpublish deferred. |
+| 47 | Tool visibility | **Tools are private by default and publish by CASCADE when an agent using them is published.** `Tool`/`Skill` default to `published` where `Agent`/`Workflow` default to `private`; all 174 tools are published and the (correct) list filter never bites. No separate tool publish workflow — `publish_agent` already loads the tools and blocks critical-risk ones. Reviewer gets a full review payload (agent config + every tool with risk/owner/publish_status + eval), cascade limited to own-team tools, published ≠ granted, no backfill, owner-initiated unpublish ships with it. |
