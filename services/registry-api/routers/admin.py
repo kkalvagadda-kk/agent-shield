@@ -26,6 +26,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
 from rbac import require_global_role
@@ -297,15 +298,25 @@ async def list_publish_requests(
 async def approve_publish_request(
     request_id: uuid.UUID,
     body: PublishRequestApprove,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Approve a publish request.
 
     - Sets publish_request.status = 'approved'
-    - Sets the asset's publish_status = 'published' (only agents supported for now)
+    - Sets the asset's publish_status = 'published'
     - Creates AssetGrant + GrantAudit records for each grantee_team in the body
+
+    `reviewed_by` / `granted_by` / the audit `admin_id` used to come from an
+    `X-User-Sub` header defaulting to the literal `"system"`. R2 gates this router to
+    platform-admin, so the CALLER is verified — but the header meant a verified admin
+    could still attribute their approval, every grant it creates, and the audit row to
+    anyone at all, including `"system"`. That is a forged signature on a governance
+    record, the same defect R3 deleted from `publish_agent`. Header deleted rather than
+    demoted, for the same reason as there —
+    a secondary identity source that any client can set is not a fallback, it is the bug.
     """
+    x_user_sub = claims["sub"]
     result = await db.execute(
         select(PublishRequest).where(PublishRequest.id == request_id)
     )
@@ -331,6 +342,7 @@ async def approve_publish_request(
         if source_agent is not None:
             source_agent.publish_status = "published"
             source_agent.updated_at = now
+
     elif pr.asset_type == "workflow":
         source_wf = (await db.execute(
             select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
@@ -551,10 +563,16 @@ async def approve_publish_request(
 async def reject_publish_request(
     request_id: uuid.UUID,
     body: PublishRequestReject,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Reject a publish request and revert the agent back to 'private'."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     result = await db.execute(
         select(PublishRequest).where(PublishRequest.id == request_id)
     )
@@ -605,10 +623,16 @@ async def reject_publish_request(
 )
 async def create_grant(
     body: AssetGrantCreate,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AssetGrantResponse:
     """Directly create an asset grant for a team (bypasses publish workflow)."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     grant = AssetGrant(
         asset_id=body.asset_id,
         asset_type=body.asset_type,
@@ -732,10 +756,16 @@ async def list_grant_audit(
 )
 async def revoke_grant(
     grant_id: uuid.UUID,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Soft-revoke an asset grant by setting revoked_at = now()."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     result = await db.execute(select(AssetGrant).where(AssetGrant.id == grant_id))
     grant = result.scalar_one_or_none()
     if grant is None:
@@ -812,10 +842,16 @@ async def list_approval_authority(
 )
 async def create_approval_authority(
     body: ApprovalAuthorityCreate,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalAuthorityResponse:
     """Register an approver (user or role) for a specific resource."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     if not body.approver_user_id and not body.approver_role:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
