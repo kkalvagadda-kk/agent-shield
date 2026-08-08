@@ -120,6 +120,39 @@ not green.**
 like the nine red Playwright specs. Seeding a known-good always-running fixture agent would
 move ~12 tests from "known red" to actually asserting — the highest-leverage test fix left.
 
+### Fixture seeding — `scripts/seed-e2e-fixtures.sh` (2026-08-08)
+
+New script. Creates and deploys the five always-running agents the suites assume exist —
+`hitl-agent` (reactive, bound to `web_search` at risk=high), `wf-router`, `wf-payout`,
+`wf-confirm`, `wf-supervisor`. Idempotent; leaves an already-running deployment alone.
+
+**Result: 5/5 fixture pods Running.** What that did and did not fix:
+
+| | Before | After | Reading |
+|---|---|---|---|
+| `suite-45` | 3 passed / 5 failed / **5 skipped** | 4 passed / 7 failed / **2 skipped** | the fixture gate now passes, so cases that previously SKIPPED now execute and fail on real assertions. More red, more information — the suite went from proving almost nothing to proving something. |
+| `suite-59` | `001_agents_running` FAIL | **001 passes**, 002–005 fail | the agents are up; the orchestration RUNS do not complete |
+| `suite-60` | `001_wf_payout_running` FAIL | still FAILED | same |
+
+**What is still blocking, precisely:**
+
+1. **Stale hardcoded subs — the same class fixed three times already.** `suite-45` runs the
+   playground as `ADMIN="75c7c8b3-…"`, a sub with NO `user_team_assignments` row. R2 derives
+   `created_by` from the verified token, so seeded agents are owned by the REAL platform-admin
+   (`5cf374d6-…`) and the playground refuses: *"Only the agent owner can run it in the
+   playground."* The pre-existing `wf-payout` is owned by that same stale literal, which is
+   why the mismatch never surfaced before something new was created properly.
+   **Fix:** resolve the sub live, exactly as `suite-70` and `studio/e2e/lib/api.ts` now do.
+   Not done — it touches several suites.
+
+2. **Runs do not complete.** `suite-59` 002–005 and `suite-60` need an agent that actually
+   executes a turn (LLM provider reachable, tools resolvable). Seeding the deployment is
+   necessary but not sufficient. This is the same boundary the bash layer states explicitly
+   ("few agent pods are deployed, so runs may not complete") and the browser layer does not.
+
+So the twelve-tests-in-one-fix estimate was **wrong**. The fixture was one of at least three
+prerequisites, and finding that out cost less than assuming it.
+
 ### FIXED after triage (2026-08-08)
 
 | Suite | Now | Was |
