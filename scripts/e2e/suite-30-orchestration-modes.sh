@@ -24,13 +24,19 @@ TEAM="platform"
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
 
 cleanup() {
   echo ""; echo "==> Cleanup: deleting test agents + workflows..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
-c=httpx.Client(base_url='http://localhost:8000/api/v1', timeout=10, headers={'X-User-Sub':'system'})
+c=httpx.Client(base_url='http://localhost:8000/api/v1', timeout=10, headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'})
 for n in ['${AGENT_A}','${AGENT_B}','${AGENT_C}']:
     try: c.delete('/agents/'+n)
     except Exception: pass
@@ -46,7 +52,7 @@ echo "=== Suite 30: Workflow Orchestration Modes ==="
 
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys, time
-B='http://localhost:8000/api/v1'; H={'X-User-Sub':'system'}
+B='http://localhost:8000/api/v1'; H={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}
 c=httpx.Client(base_url=B, timeout=30)
 P=0; F=0
 def ok(n):

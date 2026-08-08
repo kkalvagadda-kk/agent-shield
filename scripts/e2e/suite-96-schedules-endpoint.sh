@@ -88,7 +88,11 @@ from models import Agent, AgentVersion, Deployment
 
 BASE = "http://localhost:8000/api/v1"
 ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
+# Bearer: POST /agents/ is gated (R2). This suite passed only because its agent create
+# tolerates a non-201, so the 401 was absorbed and the later cases ran on rows left
+# behind by earlier runs — green while asserting against stale fixtures.
+H = {"X-User-Sub": ADMIN, "X-User-Team": "platform",
+     "Authorization": "Bearer ${E2E_TOKEN}"}
 OUT = os.environ["S96_OUT"]
 SFX = uuid.uuid4().hex[:6]
 SBX  = f"s96-sbx-{SFX}"      # sandbox only  -> will_fire False, env reason
@@ -329,6 +333,10 @@ if [ -z "$RES" ]; then
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -30 "$RUNLOG" 2>/dev/null || true
   exit 1
 fi
+
+# R2/R3 gated agents mutations; the relative-path call form hid this from earlier greps.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 
 PASS=0; FAIL=0
 while IFS= read -r line; do

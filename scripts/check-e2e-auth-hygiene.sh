@@ -93,6 +93,12 @@ GATED = re.compile(
     r"/api/v1/(agents|tools|skills|mcp-servers)\b"
     r"|\{BASE\}/(agents|tools|skills|mcp-servers)"
     r"|\+ '/agents/'|base \+ '/agents/'"
+    # RELATIVE paths. Suites that build an httpx.Client(base_url=...) call
+    # `c.post('/agents/', ...)` with no prefix at all, so neither the literal
+    # `/api/v1/...` nor the `{BASE}/...` form matches. suite-30 and suite-35 have ZERO
+    # E2E_TOKEN references and were invisible to every rule here for exactly that reason.
+    # Fourth shape of "the pattern was narrower than the thing it was looking for".
+    r"|['\"]/agents/?['\",]|['\"]/tools/?['\",]|['\"]/skills/?['\",]"
 )
 # Reads that now require a caller (0.2.271). Narrower than GATED on purpose: /agents/{n}
 # and /agents/{n}/memory are still open for deploy-controller and eval-runner, which have no
@@ -193,6 +199,77 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
         FAIL.append(
             f"{p.name}  makes a gated agents/tools/skills/mcp-servers call and never sets an "
             f"Authorization header ANYWHERE in the file — every one of those calls is 401/403"
+        )
+
+    # 7 — a SPLIT line continuation.
+    # A line ending in `\` must be followed by more command text. A blank line or a comment
+    # after it means something was inserted BETWEEN the two halves of one command — which is
+    # exactly what the scripted Bearer pass did to six suites in R3: it landed inside
+    #     API_POD=$(kubectl get pods ... \
+    #     <injected auth block>
+    #       --field-selector=... )
+    # leaving `API_POD` assigned from a truncated command and the second half running as its
+    # own. `bash -n` accepts it — it is syntactically valid — so the only symptom was
+    # `API_POD: unbound variable` at runtime, and six suites sat broken until a full run.
+    #
+    # This is the SIXTH scripted-edit defect in this file's history and the first one no
+    # existing rule could see, because every other rule reasons about a call; this one is
+    # about the shape of the file.
+    for _i, _line in enumerate(t.splitlines()):
+        if not _line.rstrip().endswith("\\"):
+            continue
+        # A `\` inside a COMMENT is prose — suites document multi-line kubectl invocations
+        # in their headers, and both halves are comment lines. Only real command text can
+        # have its continuation broken.
+        if _line.lstrip().startswith("#"):
+            continue
+        _nxt = t.splitlines()[_i + 1] if _i + 1 < len(t.splitlines()) else ""
+        if _nxt.strip() == "" or _nxt.lstrip().startswith("#"):
+            FAIL.append(
+                f"{p.name}:{_i + 1}  line continuation `\\` followed by a blank line or a "
+                f"comment — something was inserted between the halves of one command"
+            )
+
+    # 8 — a header VARIABLE that carries no Authorization.
+    # Rule 5 asks "does the file mention Authorization anywhere", which a suite passes by
+    # authenticating just its cleanup. suite-29 and suite-40 did exactly that: the R3 pass
+    # added the Bearer to the DELETE in `cleanup()` and left `H={'X-User-Sub':'system'}`
+    # feeding every setup call, so the whole suite 401'd while the gate saw a clean file.
+    #
+    # So: find single-line header dicts assigned to a variable, and flag any that set an
+    # identity-ish header but no Authorization. Deliberately narrow — a multi-line dict or a
+    # dict built by code is out of scope, because guessing there produces the false
+    # positives that get a gate ignored.
+    for _m in re.finditer(r"^\s*(\w+)\s*=\s*\{[^}\n]*\}", t, re.M):
+        _d = _m.group(0)
+        if "Authorization" in _d:
+            continue
+        if not re.search(r"['\"]X-User-(Sub|Team|Id)['\"]", _d):
+            continue
+        # Only complain if THIS variable actually feeds a gated call. "The file touches a
+        # gated route somewhere" is too loose and immediately produced eight false
+        # positives on suite-9-eval, whose header dicts serve /playground/* — ungated.
+        # Rule 5's first cut made the same mistake; a gate that cries wolf gets skipped.
+        _var = _m.group(1)
+        _fed_gated = False
+        for _k, _span in request_spans(t):
+            if f"headers={_var}" in _span and (
+                (GATED.search(_span) and not NOT_AGENT_CREATE.search(_span))
+                or GATED_READ.search(_span)):
+                _fed_gated = True
+                break
+        if not _fed_gated:
+            for _c in re.finditer(r"(?:httpx\.|await c\.|await client\.|\bc\.|\bclient\.)(?:get|post|put|patch|delete)\((?:[^()]|\([^()]*\))*\)", t):
+                _s = _c.group(0)
+                if f"headers={_var}" in _s and (
+                    (GATED.search(_s) and not NOT_AGENT_CREATE.search(_s)) or GATED_READ.search(_s)):
+                    _fed_gated = True
+                    break
+        if not _fed_gated:
+            continue
+        FAIL.append(
+            f"{p.name}:{t[:_m.start()].count(chr(10)) + 1}  header dict `{_m.group(1)}` sets "
+            f"X-User-* but no Authorization — calls using it are 401 on any gated route"
         )
 
     # 4 — the token is referenced but never obtained

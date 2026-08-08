@@ -42,6 +42,12 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
 # The /workflows/* calls are routers/composite_workflows.py, which R1 does NOT protect.
 # This driver waits for two real sandbox deploys and then a live workflow run, well past

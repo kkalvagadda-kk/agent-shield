@@ -23,6 +23,7 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
 # R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
 # `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
@@ -30,7 +31,6 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 # command substitution swallows its abort (lib/e2e-auth.sh).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_set_token "$NAMESPACE" "$API_POD"
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 [ -z "${API_POD:-}" ] && { echo "FATAL: registry-api pod not found"; exit 1; }
 
 cleanup() {
@@ -50,7 +50,10 @@ echo "=== Suite 29: Composite Workflow (Decision 22) ==="
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys, time, uuid
 B='http://localhost:8000/api/v1'
-H={'X-User-Sub':'system'}
+# The R3 pass added the Bearer to the CLEANUP delete only, so every SETUP call still
+# went out unauthenticated and 401'd. A file that authenticates SOME of its calls
+# defeats the hygiene gate's file-level rule, which is why this survived.
+H={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}
 c=httpx.Client(base_url=B, timeout=30)
 P=0; F=0
 def ok(n):
@@ -126,6 +129,8 @@ RES=$(grep -o '__RESULT__ [0-9]* [0-9]*' /tmp/s29_out.txt | tail -1 || true)
 if [ -n "$RES" ]; then
   PASS=$(echo "$RES" | awk '{print $2}'); FAIL=$(echo "$RES" | awk '{print $3}')
 fi
+
+
 echo ""
 echo "==> Suite 29 Results: ${PASS} passed, ${FAIL} failed"
 [ "${FAIL:-1}" -eq 0 ] || exit 1

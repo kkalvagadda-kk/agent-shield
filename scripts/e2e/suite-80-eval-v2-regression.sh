@@ -81,6 +81,12 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # R1/FR-11: GET /llm-providers/, POST /agents/{name}/deploy and POST /agents/{name}/versions now require a real JWT.
 # This driver is DETACHED (nohup) and runs far past the 300s token lifespan, so a
 # statically-interpolated Bearer would expire mid-run and 401 on whichever case

@@ -41,6 +41,9 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 [ -n "$API_POD" ] || { echo "FATAL: no running registry-api pod"; exit 1; }
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+# Sourcing the lib does not mint a token — the CALL does. Without it every
+# ${E2E_TOKEN} reference is unbound under `set -u`.
+e2e_set_token "$NAMESPACE" "$API_POD"
 
 echo "=== Suite 78: Conversations (POC-5 list) ==="
 echo "  Pod:    $API_POD"
@@ -54,7 +57,7 @@ echo "  Suffix: $SUFFIX"
 e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY'
+  env E2E_TOKEN="$E2E_TOKEN" SUFFIX="$SUFFIX" python3 - <<'PY'
 import os, asyncio, json, base64, httpx
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import delete
@@ -210,7 +213,7 @@ async def main():
         skip_all("USER_A and USER_B resolved to the same sub — cannot prove ownership")
         return
 
-    hdr_a = {"X-User-Sub": sub_a, "X-User-Team": "platform"}
+    hdr_a = {"X-User-Sub": sub_a, "X-User-Team": "platform", "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
     # The scoped endpoint 404s for an unknown agent, so the agent must exist.
     # R2 (0.2.263): POST /agents/ needs a real JWT — the X-User-Sub header alone is an
     # audit stamp, not a credential. tok_a was already fetched above and simply was not

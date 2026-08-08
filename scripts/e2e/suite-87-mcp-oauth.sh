@@ -135,7 +135,7 @@ def skip(tid, msg):
 async def run_dance(c, sid, user_sub):
     """authorize → follow to the stub /authorize → GET the callback. Returns the
     ?oauth= outcome ('connected'|'denied'|'invalid_state'|'error') or a marker string."""
-    hdr = {"X-User-Sub": user_sub, "X-User-Team": TEAM}
+    hdr = {"X-User-Sub": user_sub, "X-User-Team": TEAM, "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
     a = await c.post(f"{BASE}/mcp-servers/{sid}/oauth/authorize", headers=hdr)
     if a.status_code != 200:
         return f"authorize_{a.status_code}"
@@ -248,7 +248,7 @@ async def main():
     if False:  # original 004-008 body retained for reference but intentionally not executed
         async with httpx.AsyncClient(timeout=30) as c:
             # ── T-S87-004 — authorize → authorization_url + needs_auth grant ────
-            hdr_a = {"X-User-Sub": USER_A, "X-User-Team": TEAM}
+            hdr_a = {"X-User-Sub": USER_A, "X-User-Team": TEAM, "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
             a = await c.post(f"{BASE}/mcp-servers/{server_id}/oauth/authorize", headers=hdr_a)
             if a.status_code == 409 and isinstance(a.json().get("detail"), dict) \
                     and a.json()["detail"].get("code") == "oauth_not_configured":
@@ -302,7 +302,7 @@ async def main():
                         MCPOAuthGrant.server_id == server_id,
                         MCPOAuthGrant.user_sub == USER_B))).scalar_one_or_none()
                 ref_b = str(gb.credential_ref) if (gb and gb.credential_ref) else None
-                hdr_b = {"X-User-Sub": USER_B, "X-User-Team": TEAM}
+                hdr_b = {"X-User-Sub": USER_B, "X-User-Team": TEAM, "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
                 dele = await c.delete(f"{BASE}/mcp-servers/{server_id}/oauth", headers=hdr_b)
                 async with AsyncSessionLocal() as s:
                     gb2 = (await s.execute(select(MCPOAuthGrant).where(

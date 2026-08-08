@@ -13,6 +13,12 @@ pass()  { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+if [ -z "${API_POD:-}" ]; then
+  echo "FATAL: Registry API pod not found in $NAMESPACE"
+  exit 1
+fi
 
 # R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
 # `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
@@ -20,12 +26,6 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 # command substitution swallows its abort (lib/e2e-auth.sh).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_set_token "$NAMESPACE" "$API_POD"
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-if [ -z "${API_POD:-}" ]; then
-  echo "FATAL: Registry API pod not found in $NAMESPACE"
-  exit 1
-fi
 
 cleanup() {
   echo ""
