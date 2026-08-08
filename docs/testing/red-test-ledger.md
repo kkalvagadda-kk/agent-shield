@@ -106,17 +106,28 @@ not green.**
 `suite-74-eval-v2-side-effects`, `suite-80-eval-v2-regression`,
 `suite-94-trigger-dispatch-environment`
 
-### STILL RED — not triaged
+### STILL RED — all triaged 2026-08-08
 
-| Suite | Result | Notes |
+| Suite | Result | Cause | Owner |
+|---|---|---|---|
+| `suite-45-hitl-e2e` | 3/5/5 | **G-100** — the `hitl-agent` fixture does not exist. 404s, not auth. | fixture |
+| `suite-37-workflow-hitl-opa` | 1/2 | the production run fails, so no approval is ever parked. `internal.py` does not mint a RunContext, so a `user_delegated` tool call is denied — the **P1 remainder** recorded on G-45. | mine, deferred |
+| `suite-59-workflow-orchestrations-live` | FAILED | `001_agents_running` — its fixture agents are not deployed | fixture |
+| `suite-60-single-agent-durable-hitl` | FAILED | `001_wf_payout_running` — same | fixture |
+| `suite-71-scheduled-e2e` | timeout | genuinely slow; the suite says "can take many min" itself. Needs 900s+, not 300s. | timeout |
+
+**45, 59 and 60 are one problem, not three:** they need pre-seeded *running* agents, exactly
+like the nine red Playwright specs. Seeding a known-good always-running fixture agent would
+move ~12 tests from "known red" to actually asserting — the highest-leverage test fix left.
+
+### FIXED after triage (2026-08-08)
+
+| Suite | Now | Was |
 |---|---|---|
-| `suite-45-hitl-e2e` | 3/5/5 | **G-100** — the `hitl-agent` fixture does not exist. 404s, not auth. |
-| ~~`suite-26-scheduler`~~ | GREEN on re-run | timing flake — the scheduler needed >90s to register a job |
-| `suite-37-workflow-hitl-opa` | 1 passed / 2 failed | untriaged; touches OPA, so re-check against the Decision 45 rego |
-
-| `suite-59-workflow-orchestrations-live` | FAILED | untriaged |
-| `suite-60-single-agent-durable-hitl` | FAILED | untriaged |
-| ~~`suite-67-deployment-gc-and-drift`~~ | GREEN on re-run | timing flake |
+| `suite-54-agent-class-shape-dispatch` | **14/0** | called `create_agent`/`update_agent` DIRECTLY in-pod; R2/R3 replaced their `x_user_sub`/`user` params with `claims` and added gates. Now inserts a real role row and passes `claims`, so it exercises the authorization path rather than bypassing it. |
+| `suite-70-daemon-identity` | **9/0** | three separate causes: (a) `deny_reason` precedence — a real defect, fixed in 0.2.273; (b) a bundle saying `user_delegated` while the input claimed `daemon` — asserting the behaviour D-1 removes; (c) `ADMIN_SUB` hardcoded to a sub with no `user_team_assignments` row, the same staleness that was in `studio/e2e/lib/api.ts`. |
+| ~~`suite-26-scheduler`~~, ~~`suite-67`~~ | GREEN | timing flakes |
+| `suite-94`, `96`, `97`, `98` | GREEN alone | false reds — see the parallel-run distortions above |
 
 ### NEVER RUN in this pass
 
