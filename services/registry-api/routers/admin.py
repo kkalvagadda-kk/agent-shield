@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
+from publish_cascade import plan_tool_cascade
 from rbac import require_global_role
 # THE threshold resolution — imported, never re-implemented. It already handles the
 # pre-E-6 NULL rows, and its docstring is the postmortem for what happens when this
@@ -305,6 +306,7 @@ async def approve_publish_request(
 
     - Sets publish_request.status = 'approved'
     - Sets the asset's publish_status = 'published'
+    - CASCADES: publishes the agent's own-team unpublished tools (Decision 47 option C)
     - Creates AssetGrant + GrantAudit records for each grantee_team in the body
 
     `reviewed_by` / `granted_by` / the audit `admin_id` used to come from an
@@ -312,8 +314,9 @@ async def approve_publish_request(
     platform-admin, so the CALLER is verified — but the header meant a verified admin
     could still attribute their approval, every grant it creates, and the audit row to
     anyone at all, including `"system"`. That is a forged signature on a governance
-    record, the same defect R3 deleted from `publish_agent`. Header deleted rather than
-    demoted, for the same reason as there —
+    record, the same defect R3 deleted from `publish_agent`, and the cascade below makes
+    it worse: approving now publishes tools too, so the record has to name who actually
+    decided that. Header deleted rather than demoted, for the same reason as there —
     a secondary identity source that any client can set is not a fallback, it is the bug.
     """
     x_user_sub = claims["sub"]
@@ -335,6 +338,8 @@ async def approve_publish_request(
     source_tool = None
     source_skill = None
 
+    cascaded_tools: list[str] = []
+
     if pr.asset_type == "agent":
         source_agent = (await db.execute(
             select(Agent).where(Agent.id == pr.asset_id)
@@ -343,6 +348,36 @@ async def approve_publish_request(
             source_agent.publish_status = "published"
             source_agent.updated_at = now
 
+            # Decision 47 option C — the agent's own-team tools ride along. Derived from
+            # LIVE rows by the same producer `publish_agent` used to gate the submission,
+            # not from a snapshot taken then: a tool can be unbound, rebound, or published
+            # by another agent's cascade in between, and the audit should record what
+            # actually happened rather than what was intended.
+            #
+            # `blocked` is not re-raised here. The submit-time guard is where a blocked
+            # cascade gets a usable error, and 422-ing an APPROVAL would leave the request
+            # stuck with no path forward — there is no withdraw endpoint. If a tool became
+            # cross-team between submit and approve, the agent publishes and that tool
+            # simply does not cascade; it stays private and its owning team decides. That
+            # is the fail-safe direction: never publish another team's draft as a side
+            # effect of approving something else.
+            cascade = await plan_tool_cascade(db, source_agent.id, source_agent.team)
+            for tool in cascade.will_publish:
+                tool.publish_status = "published"
+                cascaded_tools.append(tool.name)
+            if cascade.blocked:
+                logger.warning(
+                    "approve_publish_request: agent=%s published, but %d bound tool(s) did "
+                    "NOT cascade (not owned by team %r): %s. They stay private; their "
+                    "owning team decides.",
+                    source_agent.name, len(cascade.blocked), source_agent.team,
+                    [t.name for t in cascade.blocked],
+                )
+            if cascaded_tools:
+                logger.info(
+                    "approve_publish_request: agent=%s cascade published %d tool(s): %s",
+                    source_agent.name, len(cascaded_tools), cascaded_tools,
+                )
     elif pr.asset_type == "workflow":
         source_wf = (await db.execute(
             select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
@@ -550,7 +585,17 @@ async def approve_publish_request(
         version_label,
         pr.source_version_id,
     )
-    return {"approved": True, "grants_created": grants_created, "artifact_id": str(artifact.id), "version_label": version_label}
+    # `cascaded_tools` is in the response because approving an agent now publishes tools
+    # too. A reviewer who clicks approve and gets back only {"approved": true} has no
+    # way to see that three tools just became org-wide discoverable — a silent side
+    # effect inside an existing approval is the escalation Decision 47 flags.
+    return {
+        "approved": True,
+        "grants_created": grants_created,
+        "artifact_id": str(artifact.id),
+        "version_label": version_label,
+        "cascaded_tools": cascaded_tools,
+    }
 
 
 # ---------------------------------------------------------------------------

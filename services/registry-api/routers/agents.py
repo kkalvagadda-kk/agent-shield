@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agent_endpoints import DispatchTargetError, resolve_dispatch_target
 from auth_middleware import get_optional_user, require_user
 from db import get_db
+from publish_cascade import blocked_detail, plan_tool_cascade
 from rbac import (
     can_create_agent,
     can_manage_artifact,
@@ -640,6 +641,22 @@ async def publish_agent(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "critical_risk_not_publishable"},
+        )
+
+    # Decision 47 option C — tools publish by riding along with the agent, so a request
+    # that CANNOT cascade cleanly must be refused here rather than handed to a reviewer.
+    # Blocked = bound, not yet published, and not this team's to publish. Approving such a
+    # request would either publish another team's private draft (turning one team's review
+    # into a publication decision about someone else's work) or leave the agent published
+    # while a tool it depends on stays invisible to everyone the agent was published for.
+    #
+    # The same producer computes the set again at approve time — see publish_cascade.py
+    # for why it is derived twice instead of snapshotted.
+    cascade = await plan_tool_cascade(db, agent.id, agent.team)
+    if cascade.is_blocked:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=blocked_detail(cascade, agent.team),
         )
 
     # Eval gate (Decision 20) — resolve the target version.

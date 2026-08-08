@@ -16,6 +16,10 @@
 #   T-S6-009 (plan T-S6-008) — AssetGrant row visible via GET /admin/grants
 #   T-S6-010 (plan T-S6-009) — DELETE grant → 204; audit row check → MANUAL (no audit API)
 #   T-S6-011 (plan T-S6-010) — Deploy blocked after grant revocation → MANUAL
+#   T-S6-013 — a CROSS-TEAM private tool blocks publish (422 tool_not_publishable_cross_team)
+#   T-S6-014 — an OWN-TEAM private tool does NOT block (the over-reach guard for 013)
+#   T-S6-015 — approve CASCADES: the own-team tool flips to published and the response says so
+#   T-S6-016 — an ALREADY-PUBLISHED cross-team tool does not block either
 #
 # API notes vs. test plan:
 #   - DELETE /admin/grants/{id} returns 204 (no body), not 200
@@ -725,6 +729,164 @@ try:
 except Exception:
     pass
 " 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# T-S6-013..016 — Decision 47 option C: the tool publish CASCADE
+#
+# Publishing an agent publishes the agent's own-team unpublished tools along with it.
+# Tools have no publish endpoint of their own, by design — one review covers both.
+#
+# The four cases are the four ways this goes wrong:
+#   013  a cross-team private tool must BLOCK the request at submit time. Otherwise
+#        approving an agent becomes a way to publish another team's private draft, and
+#        the deciding reviewer never sees whose work they just exposed.
+#   014  an own-team private tool must NOT block. 013 alone is satisfied by refusing
+#        every publish that binds an unpublished tool, which would make the cascade
+#        unreachable and the feature pointless.
+#   015  approve actually flips it, and SAYS SO. A silent side effect inside an existing
+#        approval is the escalation Decision 47 exists to prevent, so the response has to
+#        name what cascaded.
+#   016  an already-published cross-team tool must NOT block. The guard is about
+#        publishing someone else's PRIVATE work; a tool that is already org-wide costs
+#        nothing to keep using, and blocking on it would make most real agents
+#        unpublishable.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-013..016: Decision 47 tool publish cascade ---"
+
+CASCADE_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + TOK}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    # Verdict precomputed — an escaped quote inside an f-string inside a single-quoted
+    # bash string is a SyntaxError, and this repo has paid for it twice (suite-42, suite-99).
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+AGENT = "s6c-cascade-" + TS
+OWN   = "s6c_own_" + TS          # platform, private  -> cascades
+FOREIGN = "s6c_foreign_" + TS    # operations, private -> BLOCKS
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+_, own = call("POST", "/tools/", {"name": OWN, "type": "http", "description": "cascade own",
+                                  "risk_level": "low", "http_method": "GET",
+                                  "http_url": "https://example.invalid/own"})
+# owner_team is honoured for a platform-admin only (Decision 46) — that is what this token is.
+_, foreign = call("POST", "/tools/", {"name": FOREIGN, "type": "http", "description": "cascade foreign",
+                                      "risk_level": "low", "http_method": "GET",
+                                      "http_url": "https://example.invalid/foreign",
+                                      "owner_team": "operations"})
+own_id, foreign_id = own.get("id"), foreign.get("id")
+
+# An ALREADY-published tool this team does not own. Taken from the live catalog rather
+# than minted: tools have no publish endpoint, and the ~192 pre-0080 rows are exactly the
+# shared-library population this case is about.
+pub_id = pub_name = None
+_, listing = call("GET", "/tools/?limit=200")
+for row in listing.get("items", []):
+    if row.get("publish_status") == "published" and row.get("owner_team") != "platform" \
+       and row.get("risk_level") in ("low", "medium") and row.get("status") == "active":
+        pub_id, pub_name = row.get("id"), row.get("name"); break
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "description": "suite 6 cascade probe"})
+call("POST", "/agents/" + AGENT + "/versions",
+     {"image_tag": "registry.internal/s6c:v1", "eval_passed": True, "adversarial_eval_passed": True})
+
+if sc != 201 or not own_id or not foreign_id:
+    for tid in ("T-S6-013", "T-S6-014", "T-S6-015", "T-S6-016"):
+        check(tid, False, "fixture failed: agent=%s own=%s foreign=%s" % (sc, own_id, foreign_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 013: a cross-team PRIVATE tool blocks the submission -----------------
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": foreign_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+detail = body.get("detail") or {}
+err = detail.get("error") if isinstance(detail, dict) else str(detail)
+named = FOREIGN in json.dumps(detail)
+check("T-S6-013", code == 422 and err == "tool_not_publishable_cross_team" and named,
+      "code=%s error=%s names_the_tool=%s" % (code, err, named))
+
+# --- 014: own-team private + already-published foreign do NOT block -------
+call("DELETE", "/agents/" + AGENT + "/tools/" + str(foreign_id))
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": own_id})
+if pub_id:
+    call("POST", "/agents/" + AGENT + "/tools", {"tool_id": pub_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = body.get("publish_request_id")
+check("T-S6-014", code == 202 and bool(pr_id),
+      "code=%s request=%s (own-team private tool must not block)" % (code, str(pr_id)[:8]))
+check("T-S6-016", code == 202 and bool(pub_id),
+      "an already-published cross-team tool (%s) did not block: code=%s" % (pub_name, code))
+
+# --- 015: approve cascades, and the response says what it published -------
+if pr_id:
+    code, body = call("POST", "/admin/publish-requests/" + pr_id + "/approve", {"grantee_teams": ["platform"]})
+    cascaded = body.get("cascaded_tools") or []
+    _, reread = call("GET", "/tools/?name=" + OWN + "&limit=1")
+    items = reread.get("items", [])
+    now_pub = items[0].get("publish_status") if items else "NOT_VISIBLE"
+    # The foreign one must be untouched — it was unbound before this publish, and nothing
+    # about approving this agent confers authority over a tool another team owns.
+    # (No apostrophe on purpose: this whole driver is inside a single-quoted bash string.)
+    _, fre = call("GET", "/tools/?name=" + FOREIGN + "&limit=1")
+    fitems = fre.get("items", [])
+    foreign_ps = fitems[0].get("publish_status") if fitems else "NOT_VISIBLE"
+    # The foreign tool must NOT be published. Asserted as "not published" rather than
+    # "== private" because this reader is a platform-admin in team `platform`, and
+    # catalog visibility is team-scoped with NO admin exemption by design
+    # (catalog_visibility.py) — so another team private tool reads as NOT_VISIBLE here.
+    # That is conclusive, not a weaker check: published implies visible to everyone, so
+    # NOT_VISIBLE proves it did not cascade. Pinning "private" instead would make this
+    # case fail the day the admin exemption question is settled either way.
+    check("T-S6-015",
+          code == 200 and OWN in cascaded and now_pub == "published"
+          and foreign_ps != "published",
+          "approve=%s cascaded=%s own_now=%s foreign_still=%s" % (code, cascaded, now_pub, foreign_ps))
+else:
+    check("T-S6-015", False, "no publish_request_id from 014 — nothing to approve")
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+for tid in (own_id, foreign_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-013 T-S6-014 T-S6-015 T-S6-016; do
+  line="$(echo "$CASCADE_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$CASCADE_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Summary

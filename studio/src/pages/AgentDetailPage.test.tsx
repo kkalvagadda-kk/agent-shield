@@ -20,6 +20,9 @@ vi.mock("../api/registryApi", () => ({
   deleteTrigger: vi.fn(),
   updateAgentMemory: vi.fn(),
 }));
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() },
+}));
 vi.mock("../api/knowledgeApi", () => ({
   listKBs: vi.fn().mockResolvedValue([]),
   getAgentKnowledgeBases: vi.fn().mockResolvedValue([]),
@@ -29,6 +32,8 @@ vi.mock("../api/knowledgeApi", () => ({
 
 import { getAgent, getDeployments, listVersions, deleteAgentVersion, updateAgent, listTriggers } from "../api/registryApi";
 import { listKBs, getAgentKnowledgeBases, bindAgent } from "../api/knowledgeApi";
+import { publishAgent } from "../api/registryApi";
+import { toast } from "sonner";
 
 const NOW = new Date().toISOString();
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -272,5 +277,74 @@ describe("AgentDetailPage — Settings tab (Knowledge Bases)", () => {
     await userEvent.click(within(picker).getByRole("button", { name: /^done$/i }));
     await userEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
     await waitFor(() => expect(bindAgent).toHaveBeenCalledWith("kb-1", "agent-uuid-1"));
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Decision 47 option C — publishing an agent cascades its own-team tools, and a bound
+// tool that is still private and owned by ANOTHER team blocks the request (422).
+//
+// The 422 `detail` is an OBJECT, not a string. The handler's fallback stringifies only
+// strings, so without a branch for this code the user would get the generic
+// "Failed to submit publish request." — and the fix ("ask that team to publish it, or
+// unbind it") is impossible to act on without knowing which tool and whose. An error
+// path nobody tests is how "[object Object]" reaches a screen.
+// ---------------------------------------------------------------------------
+describe("AgentDetailPage — cross-team tool blocks publish (Decision 47)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mock(getAgent).mockResolvedValue({
+      name: "my-agent", team: "platform", agent_type: "declarative", status: "active",
+      publish_status: "private", execution_shape: "reactive",
+      created_at: NOW, updated_at: NOW, created_by: "dev", memory_enabled: false,
+    });
+    mock(listVersions).mockResolvedValue([
+      { id: "v1", version_number: 1, eval_passed: true, created_at: NOW, notes: null },
+    ]);
+    mock(getDeployments).mockResolvedValue([]);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("names the blocking tools and their owning team", async () => {
+    mock(publishAgent).mockRejectedValue({
+      response: {
+        data: {
+          detail: {
+            error: "tool_not_publishable_cross_team",
+            agent_team: "platform",
+            tools: [
+              { id: "t1", name: "issue_refund", owner_team: "finance", publish_status: "private" },
+              { id: "t2", name: "lookup_ledger", owner_team: "finance", publish_status: "private" },
+            ],
+          },
+        },
+      },
+    });
+
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /publish/i }));
+
+    await waitFor(() => expect(mock(toast.error)).toHaveBeenCalled());
+    const msg = String(mock(toast.error).mock.calls[0][0]);
+    expect(msg).toContain("issue_refund");
+    expect(msg).toContain("lookup_ledger");
+    expect(msg).toContain("finance");
+    // The generic fallback must NOT be what the user sees.
+    expect(msg).not.toBe("Failed to submit publish request.");
+  });
+
+  it("still degrades sensibly when the payload carries no tool list", async () => {
+    mock(publishAgent).mockRejectedValue({
+      response: { data: { detail: { error: "tool_not_publishable_cross_team" } } },
+    });
+
+    renderPage();
+    await userEvent.click(await screen.findByRole("button", { name: /publish/i }));
+
+    await waitFor(() => expect(mock(toast.error)).toHaveBeenCalled());
+    const msg = String(mock(toast.error).mock.calls[0][0]);
+    expect(msg).toContain("another team");
+    expect(msg).not.toContain("undefined");
   });
 });

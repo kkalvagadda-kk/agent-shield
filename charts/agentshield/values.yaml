@@ -760,7 +760,11 @@ registry-api:
     # 0.2.268: Decision 47 step B — tools/skills private by default (migration 0080),
     # team-scoped catalog visibility, and NO publish filter for tokenless in-cluster
     # agent pods (or the SDK tool_resolver returns zero items and the pod dies).
-    tag: "0.2.268"
+    # 0.2.269: Decision 47 step C — tool publish cascade + cross-team 422;
+    # five admin handlers stop taking reviewer identity from a header.
+    # 0.2.270: regression fix — MCP server registration derives owner_team, or its
+    # discovered tools are private with no owning team and nobody can see them.
+    tag: "0.2.270"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -1191,7 +1195,8 @@ studio:
     #          /api/v1/users/directory; multi-role Playwright global-setup.
     # 0.1.185: Decision 46 UI — tool Team field is admin-only; non-admins see their
     # own team read-only and the payload omits owner_team (the server derives it).
-    tag: "0.1.185"
+    # 0.1.186: Decision 47 step C UI — the cross-team publish block names the tools.
+    tag: "0.1.186"
     pullPolicy: IfNotPresent
 
   service:
