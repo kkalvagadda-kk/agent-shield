@@ -202,9 +202,15 @@ async def main():
         # deprecated fixture rather than a live MCP row so the suite does not depend
         # on an upstream server having dropped something.
         async with AsyncSessionLocal() as s:
+            # publish_status is EXPLICIT because this row is inserted straight into the DB,
+            # bypassing create_tool. Migration 0080 defaults it to 'private', and catalog
+            # visibility is `published OR created_by == caller` — a direct insert has no
+            # created_by, so the row would match neither arm and the fetch below would
+            # return zero items. This case is about the STATUS filter, not visibility;
+            # saying so explicitly keeps the two independent.
             retired = Tool(name=f"s84-retired-{SUFFIX}", type="http", risk_level="low",
                            owner_team=TEAM, http_url="https://example.com", http_method="GET",
-                           status="deprecated")
+                           status="deprecated", publish_status="published")
             s.add(retired); await s.commit()
         act = await c.get(f"{BASE}/tools/", params={"status": "active", "limit": 200}, headers=ADMIN)
         act_names = [t["name"] for t in act.json().get("items", [])]

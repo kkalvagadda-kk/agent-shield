@@ -83,7 +83,25 @@ def header_dicts(t):
 # `/mcp-servers` added 2026-08-07 with 0.2.270: registration now needs a credential
 # because ownership is derived from the caller. suite-87 registered servers with a
 # header and NO token; this gate could not see it until the route was gated.
-GATED = re.compile(r"/api/v1/agents\b|/api/v1/tools\b|/api/v1/skills\b|/api/v1/mcp-servers\b|\{BASE\}/mcp-servers|\+ '/agents/'|base \+ '/agents/'")
+# THE F-STRING FORM. Suites write both `'/api/v1/tools/'` and `f"{BASE}/tools/"`, and every
+# literal-path pattern here was blind to the second — which is how suite-87 (zero E2E_TOKEN,
+# registering MCP servers with a bare header) and suite-80 (POST /tools/ and /agents/ with no
+# credential, red since 0.2.267) both sat unnoticed through three sweeps whose lists were
+# derived by grepping for the literal path. Third instance of "the grep pattern was narrower
+# than the thing it was looking for". Match BOTH shapes.
+GATED = re.compile(
+    r"/api/v1/(agents|tools|skills|mcp-servers)\b"
+    r"|\{BASE\}/(agents|tools|skills|mcp-servers)"
+    r"|\+ '/agents/'|base \+ '/agents/'"
+)
+# Reads that now require a caller (0.2.271). Narrower than GATED on purpose: /agents/{n}
+# and /agents/{n}/memory are still open for deploy-controller and eval-runner, which have no
+# credential until identity Phase 3, so flagging them would be noise a reader learns to skip.
+GATED_READ = re.compile(
+    r"/api/v1/tools/|\{BASE\}/tools/|/tools/\?|/api/v1/skills/|\{BASE\}/skills/|/tools\?limit"
+    r"|/agents/[^'\"]*/tools"   # the BINDING endpoint — user token OR agent SA token
+)
+
 # Sub-resources R2/R3/G-R3-6 did NOT gate — several have in-cluster machine callers that
 # send no Authorization header (declarative-runner, deploy-controller, the SDK resolver).
 NOT_AGENT_CREATE = re.compile(r"/versions|/deploy|/triggers|/identities|/agents/[^'\"]*/tools|/memory|/chat|/runs|/deployments|/stats|/health")
@@ -129,6 +147,53 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
         if "Authorization" in span:
             continue
         FAIL.append(f"{p.name}:{line_of(m.start())}  mutation via httpx with NO Authorization (agents/tools/skills/mcp-servers)")
+
+    # 6 — a gated READ with no credential.
+    # Reads used to be exempt because agent pods called them anonymously. 0.2.271 closed
+    # that: pods now ask GET /agents/{name}/tools with a ServiceAccount token, so
+    # GET /api/v1/tools/ and the binding endpoint both require a caller. A rule that only
+    # watches mutations stops covering the routes the moment the reads are gated too.
+    for k, span in request_spans(t):
+        if not GATED_READ.search(span):
+            continue
+        if "Authorization" in span:
+            continue
+        FAIL.append(f"{p.name}:{line_of(k)}  gated READ with NO Authorization — 401 since 0.2.271")
+    for m in re.finditer(r"(?:httpx\.|await c\.|await client\.|\bc\.|\bclient\.)get\((?:[^()]|\([^()]*\))*\)", t):
+        span = m.group(0)
+        if not GATED_READ.search(span) or "Authorization" in span or "headers=" in span:
+            continue
+        FAIL.append(f"{p.name}:{line_of(m.start())}  gated READ via a client with NO Authorization — 401 since 0.2.271")
+
+    # 5 — FILE-LEVEL: this suite makes a call we have PRECISELY identified as gated, and the
+    # word "Authorization" does not appear anywhere in the file. A span-level regex cannot
+    # follow `headers=HDR` to a dict defined 80 lines up, and that is exactly how suite-80
+    # shipped `HDR = {"X-User-Sub": USER, "X-User-Team": TEAM}` and stayed red from 0.2.267
+    # onward with nothing noticing.
+    #
+    # Keyed on the SPANS rules 3/3b/6 already matched, NOT on "does the file mention
+    # /api/v1/agents anywhere". The first version did the latter and immediately flagged
+    # suite-11 (GET /agents/ — the list, ungated) and suite-91 (/agents/{n}/memory — a
+    # different router, ungated). A gate that cries wolf is one people learn to skip, which
+    # is the failure this whole script exists to prevent.
+    gated_call_seen = False
+    for _k, _span in request_spans(t):
+        if (GATED.search(_span) and not NOT_AGENT_CREATE.search(_span)
+                and re.search(r"method=['\"](POST|PUT|PATCH|DELETE)['\"]", _span)) \
+           or GATED_READ.search(_span):
+            gated_call_seen = True
+            break
+    if not gated_call_seen:
+        for _m in re.finditer(r"(?:httpx\.|await c\.|await client\.|\bc\.|\bclient\.)(?:get|post|put|patch|delete)\((?:[^()]|\([^()]*\))*\)", t):
+            _s = _m.group(0)
+            if (GATED.search(_s) and not NOT_AGENT_CREATE.search(_s)) or GATED_READ.search(_s):
+                gated_call_seen = True
+                break
+    if gated_call_seen and "Authorization" not in t:
+        FAIL.append(
+            f"{p.name}  makes a gated agents/tools/skills/mcp-servers call and never sets an "
+            f"Authorization header ANYWHERE in the file — every one of those calls is 401/403"
+        )
 
     # 4 — the token is referenced but never obtained
     if "E2E_TOKEN" in t and "e2e-auth.sh" not in t:

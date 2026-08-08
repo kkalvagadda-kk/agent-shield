@@ -17,7 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import require_user
+from agent_identity import AgentIdentity, get_optional_agent
+from auth_middleware import get_optional_user, require_user
 from db import get_db
 from models import Agent, AgentTool, Tool
 from schemas import AgentToolBind, AgentToolResponse, PaginatedResponse, ToolResponse
@@ -147,8 +148,46 @@ async def list_agent_tools(
     name: str,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    agent_ident: AgentIdentity | None = Depends(get_optional_agent),
+    user: dict | None = Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ToolResponse]:
+    """The tools bound to one agent — the BINDING question, not a catalog question.
+
+    Two legitimate caller kinds, checked explicitly rather than by priority fallthrough:
+
+      * an AGENT POD resolving its own tools at startup (the SDK tool_resolver and
+        declarative-runner). It presents a projected Kubernetes ServiceAccount token, and the
+        agent named in the path MUST equal the agent named in the verified token — otherwise
+        any pod could read any agent's bindings by editing the URL.
+      * a HUMAN in Studio (the tools picker, the agent detail page).
+
+    No `publish_status` filter, deliberately. A pod's authority over a tool is its binding
+    plus OPA Gate 3, never the catalog flag; this is the same set Gate 3 authorizes, which is
+    why the registry and the policy engine now agree by construction.
+    """
+    if agent_ident is not None:
+        if agent_ident.agent_name != name:
+            logger.warning(
+                "list_agent_tools: DENY pod %s asked for agent %r",
+                agent_ident.sa_subject, name,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"This ServiceAccount belongs to agent '{agent_ident.agent_name}'; "
+                    f"it cannot read '{name}'."
+                ),
+            )
+    elif user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Requires either a user token or an agent ServiceAccount token "
+                "(audience 'agentshield-registry-api')."
+            ),
+        )
+
     agent = await _resolve_agent(name, db)
 
     q = (

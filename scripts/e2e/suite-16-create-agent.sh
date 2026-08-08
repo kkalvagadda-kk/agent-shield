@@ -216,7 +216,10 @@ echo ""
 echo "--- T-S16-004: Verify tools are bound to agent ---"
 run_test "T-S16-004 — GET /agents/{name}/tools returns bound tools" "
 import httpx
-r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools')
+# The binding endpoint takes a user token OR an agent SA token since 0.2.271 —
+# it is what every agent pod resolves its tools through, so it cannot stay open.
+r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 200, f'Expected 200, got {r.status_code}'
 data = r.json()
 items = data.get('items', data) if isinstance(data, dict) else data

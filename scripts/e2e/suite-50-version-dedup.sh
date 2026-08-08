@@ -60,8 +60,12 @@ async def m():
                 await db.delete(v)
             await db.delete(old); await db.commit()
 
+    # POST /agents/ requires a real JWT since R2 (0.2.263). This call had none and has
+    # been 401ing silently — the f-string form `{BASE}/agents/` was invisible to every
+    # literal-path grep used to build the earlier sweep lists.
     httpx.post(f'{BASE}/agents/', json={'name':AG,'team':'platform','agent_type':'declarative',
-               'metadata':{'instructions':'be helpful'}}, timeout=8)
+               'metadata':{'instructions':'be helpful'}}, timeout=8,
+               headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 
     def deploy():
         return httpx.post(f'{BASE}/agents/{AG}/deploy', json={'environment':'sandbox'}, headers=H, timeout=15)

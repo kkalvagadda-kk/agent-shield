@@ -764,7 +764,8 @@ registry-api:
     # five admin handlers stop taking reviewer identity from a header.
     # 0.2.270: regression fix — MCP server registration derives owner_team, or its
     # discovered tools are private with no owning team and nobody can see them.
-    tag: "0.2.270"
+    # 0.2.271: creator-scoped catalog; tokenless pod read path closed (SA token).
+    tag: "0.2.271"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -857,7 +858,7 @@ deploy-controller:
     #   deployment's `environment`. See docs/bugs/sandbox-hitl-playground-context.md.
     # 0.1.42: identity P0 — copies agentshield-run-context into each agent namespace
     #         and injects AGENTSHIELD_INTERNAL_SIGNING_KEY into every agent pod.
-    tag: "0.1.42"
+    tag: "0.1.43"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
@@ -873,7 +874,7 @@ deploy-controller:
   # 0.1.66: rebuilds sdk 0.2.9 — F-E (Issue 2) message_start + reasoning SSE events.
   # 0.1.67: memory decouple — _load_memory_context sends for_agent_context (scope=agent).
   # 0.1.68: identity P0 — vendored run_context.py (verify/extend only).
-  declarativeRunnerTag: "0.1.68"
+  declarativeRunnerTag: "0.1.69"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

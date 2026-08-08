@@ -456,11 +456,14 @@ case "$OC|$OB" in
   *)                              record FAIL "T-S98-021 a contributor creates a tool and it is owned by THEIR team  |  -> $OC $OB (want 201 with owner_team=platform). Either the gate over-reached, or owner_team is still NULL — which team_may_use_tool reads as usable by EVERY team." ;;
 esac
 
-# The exempt READS must stay open, or the runner and the SDK resolver break at startup.
+# The catalog READ is now closed too. It was open for agent pods, which asked the wrong
+# question — the global catalog by tool name — and got answered with a visibility filter
+# that had to be widened to "no filter" so they would not die at startup. They now ask
+# GET /agents/{name}/tools with a ServiceAccount token, so nothing anonymous needs this.
 C22="$(status "" GET /api/v1/tools/)"
-[ "$C22" = "200" ] \
-  && record PASS "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> 200 (declarative-runner + SDK tool_resolver send no token; closing this is identity Phase 3)" \
-  || record FAIL "T-S98-022 the tool READS stay open for in-cluster machine callers  |  anonymous GET /tools/ -> $C22 (want 200). G-R3-6 gated MUTATIONS only; gating the reads breaks every agent pod at startup."
+[ "$C22" = "401" ] \
+  && record PASS "T-S98-022 the tool CATALOG requires a user  |  anonymous GET /tools/ -> 401 (pods read /agents/{name}/tools with an SA token instead)" \
+  || record FAIL "T-S98-022 the tool CATALOG requires a user  |  anonymous GET /tools/ -> $C22 (want 401). Any workload in the cluster can enumerate every team's private tools, including http_url, python_code and auth_config_id."
 
 # ── Decision 47 step B — private by default + who can SEE it (2026-08-07) ─────
 # Migration 0080 flips the tools/skills publish_status default to 'private', matching
@@ -553,11 +556,23 @@ else
   record FAIL "T-S98-023 a new tool is PRIVATE by default  |  create returned ${LC_CODE} (want 201) — cannot judge the default."
 fi
 
-# 024 — a teammate. e2e-consumer is pinned to team platform, same as e2e-contributor.
+# 024 — CREATOR-scoped, matching agents and workflows. A teammate does NOT see another
+# person's private draft, exactly as they do not see a draft agent. "Drafts are yours until
+# you share" — the pattern Decision 47 is named for. This case briefly asserted the
+# opposite (team-scoped) and was wrong: it conflated Decision 46's USE axis (owner_team,
+# who may CALL the tool) with Decision 47's VISIBILITY axis (who SEES it).
 LC_MATE="$(catalog_hits "$CONSUMER_TOK" tools "$S98_LC")"
-[ "$LC_MATE" = "1" ] \
-  && record PASS "T-S98-024 a TEAMMATE sees the private tool  |  another platform user finds it (visibility is TEAM-scoped, Decision 46)" \
-  || record FAIL "T-S98-024 a TEAMMATE sees the private tool  |  got '${LC_MATE}' (want 1). Visibility is still CREATOR-scoped, so 0080 just hid every new tool from the team that owns it."
+[ "$LC_MATE" = "0" ] \
+  && record PASS "T-S98-024 a TEAMMATE does NOT see someone else's private draft  |  0 rows (creator-scoped, same as agents/workflows)" \
+  || record FAIL "T-S98-024 a TEAMMATE does NOT see someone else's private draft  |  got '${LC_MATE}' (want 0). Visibility is wider than the agent pattern Decision 47 is named for."
+
+# 024b — the over-reach guard for 024: the CREATOR still sees their own draft. Without
+# this, "nobody sees it" passes 024 and the tool is invisible to its author too — which is
+# exactly the shape of the MCP regression (a NULL created_by matched neither arm).
+LC_OWN="$(catalog_hits "$CONTRIB_TOK" tools "$S98_LC")"
+[ "$LC_OWN" = "1" ] \
+  && record PASS "T-S98-024b the CREATOR sees their own private draft  |  1 row" \
+  || record FAIL "T-S98-024b the CREATOR sees their own private draft  |  got '${LC_OWN}' (want 1). created_by is not being set on create, so the row is invisible to everyone."
 
 # 025 — the over-reach guard for 024. e2e-crossteam was moved to `operations` above.
 if [ -n "$S98_XT_TOK" ]; then
@@ -569,25 +584,44 @@ else
   record FAIL "T-S98-025 another TEAM does NOT see the private tool  |  no cross-team persona token; 024 is unguarded without this."
 fi
 
-# 026 — THE ONE THAT MATTERS. Agent pods hold no token until identity Phase 3, and the SDK
-# tool_resolver fetches GET /tools/?name=X at startup. A pod's authority over a tool is its
-# binding plus OPA Gate 3, never the catalog flag.
-LC_ANON="$(catalog_hits "" tools "$S98_LC")"
-[ "$LC_ANON" = "1" ] \
-  && record PASS "T-S98-026 an ANONYMOUS in-cluster resolve still finds a private tool  |  the SDK tool_resolver path returns it" \
-  || record FAIL "T-S98-026 an ANONYMOUS in-cluster resolve still finds a private tool  |  got '${LC_ANON}' (want 1). This is the outage shape: every SDK agent bound to a tool created after 0080 dies at startup with \"Tool not found in the platform registry\"."
+# 026 — the binding endpoint is what a pod actually asks, and it carries NO publish filter.
+# A private tool bound to an agent must still resolve, or every agent bound to a tool
+# created after 0080 dies at startup with "Tool not found in the platform registry".
+# Asked here as the OWNER (a human) — the SA-token path is exercised by the real pods and
+# by suite-2/16's deploy legs; what this pins is that the endpoint does not filter.
+LC_ID="$(tool_field "$CONTRIB_TOK" "$S98_LC" id)"
+status "$CONTRIB_TOK" POST "/api/v1/agents/${S98_AGENT}/tools" "{\"tool_id\":\"${LC_ID}\"}" >/dev/null 2>&1 || true
+BIND_OUT="$(status_body "$CONTRIB_TOK" GET "/api/v1/agents/${S98_AGENT}/tools?limit=200")"
+case "${BIND_OUT%%|*}|${BIND_OUT#*|}" in
+  200*"${S98_LC}"*) record PASS "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  GET /agents/{name}/tools returns it (no publish filter — a pod's authority is its binding + OPA Gate 3)" ;;
+  200*)             record FAIL "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  200 but '${S98_LC}' is NOT in the response. The binding endpoint is filtering on publish_status, so every agent bound to a tool created after 0080 dies at startup with \"Tool not found in the platform registry\"." ;;
+  *)                record FAIL "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  -> ${BIND_OUT%%|*} (want 200). This is the path every agent pod resolves through." ;;
+esac
 
-# 027 — skills get the identical default and the identical machine-resolve path, and can
-# regress on their own: separate router, separate model, and the owning team lives in a
-# differently named column (`Skill.team`, not `owner_team`).
+# 026b — and it refuses an unauthenticated caller. Without this, the endpoint that replaced
+# the anonymous catalog read is itself anonymous and nothing was closed.
+C26B="$(status "" GET "/api/v1/agents/${S98_AGENT}/tools")"
+[ "$C26B" = "401" ] \
+  && record PASS "T-S98-026b the BINDING endpoint refuses an unauthenticated caller  |  401 (needs a user token or an agent SA token)" \
+  || record FAIL "T-S98-026b the BINDING endpoint refuses an unauthenticated caller  |  -> $C26B (want 401). Any pod could read any agent's bindings by editing the path."
+
+# 027 — skills get the identical default and the identical creator-scoping, and can regress
+# on their own: separate router, separate model, and create_skill did NOT set created_by at
+# all until this change. A private row with a NULL creator matches neither arm of
+# `published OR created_by == caller` — invisible to everyone including its author.
 SK_CODE="$(status "$CONTRIB_TOK" POST /api/v1/skills/ "{\"name\":\"${S98_LC}-skill\",\"description\":\"lifecycle probe\",\"team\":\"platform\"}")"
 if [ "$SK_CODE" = "201" ]; then
-  SK_ANON="$(catalog_hits "" skills "${S98_LC}-skill")"
-  [ "$SK_ANON" = "1" ] \
-    && record PASS "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  declarative-runner workflow_executor.py:232 still finds it after 0080" \
-    || record FAIL "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  got '${SK_ANON}' (want 1). Every workflow binding a skill created after 0080 fails at run time."
+  SK_OWN="$(catalog_hits "$CONTRIB_TOK" skills "${S98_LC}-skill")"
+  SK_MATE="$(catalog_hits "$CONSUMER_TOK" skills "${S98_LC}-skill")"
+  if [ "$SK_OWN" = "1" ] && [ "$SK_MATE" = "0" ]; then
+    record PASS "T-S98-027 a new SKILL is private to its CREATOR  |  author sees it, a teammate does not (create_skill now sets created_by)"
+  elif [ "$SK_OWN" = "0" ]; then
+    record FAIL "T-S98-027 a new SKILL is private to its CREATOR  |  the AUTHOR cannot see it (own=${SK_OWN}). created_by is NULL, so the row is invisible to everyone."
+  else
+    record FAIL "T-S98-027 a new SKILL is private to its CREATOR  |  own=${SK_OWN} teammate=${SK_MATE} (want 1 and 0)."
+  fi
 else
-  record FAIL "T-S98-027 a new SKILL stays resolvable by the tokenless runner  |  create returned ${SK_CODE} (want 201)."
+  record FAIL "T-S98-027 a new SKILL is private to its CREATOR  |  create returned ${SK_CODE} (want 201)."
 fi
 
 echo ""

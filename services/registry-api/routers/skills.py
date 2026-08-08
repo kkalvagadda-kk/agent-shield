@@ -22,7 +22,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user, require_user
-from catalog_visibility import CallerKind, catalog_visibility_clause
+from catalog_visibility import catalog_visibility_clause
 from db import get_db
 from rbac import get_user_team
 from models import Skill
@@ -49,9 +49,16 @@ router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 )
 async def create_skill(
     body: SkillCreate,
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> SkillResponse:
-    """Create a new skill record.  Returns 409 if (name, team) already exists."""
+    """Create a new skill record.  Returns 409 if (name, team) already exists.
+
+    Sets `created_by`. It never did — the column existed and stayed NULL on every row.
+    Harmless while skills defaulted to `published`; after migration 0080 a private skill
+    with a NULL creator matches neither arm of `published OR created_by == caller` and is
+    invisible to everyone, including the person who just created it.
+    """
     existing = await db.execute(
         select(Skill).where(Skill.name == body.name, Skill.team == body.team)
     )
@@ -71,6 +78,7 @@ async def create_skill(
         team=body.team,
         description=body.description,
         tool_ids=body.tool_ids,
+        created_by=claims["sub"],
     )
     db.add(skill)
     await db.flush()
@@ -92,33 +100,24 @@ async def list_skills(
     team: Optional[str] = Query(None, description="Filter by team name"),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(50, ge=1, le=500, description="Records per page"),
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[SkillResponse]:
     """Return a paginated list of skills, optionally filtered by team."""
-    caller = (user or {}).get("sub") or x_user_sub
+    caller = claims["sub"]
 
     base_query = select(Skill)
     count_query = select(func.count()).select_from(Skill)
 
-    # Visibility (Decision 47 / migration 0080) — same producer as list_tools. Note the
-    # owning-team column is `Skill.team` here, not `owner_team`; that name difference is
-    # exactly why catalog_visibility_clause takes keyword-only column arguments.
-    #
-    # No token => declarative-runner resolving a skill it is already bound to
-    # (workflow_executor.py:232). No publish filter for it, or 0080 breaks every workflow
-    # that binds a skill created after the migration.
-    caller_kind = CallerKind.HUMAN if caller else CallerKind.IN_CLUSTER_MACHINE
+    # Visibility (Decision 47 / migration 0080) — same producer as list_tools.
+    # CREATOR-scoped, matching agents and workflows.
     vis = catalog_visibility_clause(
         publish_status_col=Skill.publish_status,
-        owner_team_col=Skill.team,
-        caller_kind=caller_kind,
-        caller_team=await get_user_team(db, caller) if caller else None,
+        created_by_col=Skill.created_by,
+        caller_sub=caller,
     )
-    if vis is not None:
-        base_query = base_query.where(vis)
-        count_query = count_query.where(vis)
+    base_query = base_query.where(vis)
+    count_query = count_query.where(vis)
 
     if team is not None:
         base_query = base_query.where(Skill.team == team)

@@ -60,6 +60,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# Gated routes (agents/tools/skills) need a real JWT since R1/R2/R3 + G-R3-6, and the
+# catalog READS since 0.2.271. This suite authenticated with X-User-Sub headers alone and
+# has been silently 401ing; scripts/check-e2e-auth-hygiene.sh now catches that shape.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 77: Team Knowledge Base / RAG (POC-4) — real path, no fakes ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
@@ -86,7 +93,7 @@ tally() {
 }
 
 BLOCK=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
 import os, time, json, httpx
 
 SUFFIX = os.environ["SUFFIX"]
@@ -95,7 +102,8 @@ BASE = "http://localhost:8000/api/v1"
 # --- Team A (the owner) — platform, via the header seam (no Keycloak token) -----
 TEAM_A = "platform"
 USER_A = f"s77-user-{SUFFIX}"
-HDR_A = {"X-User-Sub": USER_A, "X-User-Team": TEAM_A}
+HDR_A = {"X-User-Sub": USER_A, "X-User-Team": TEAM_A,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 FACT_A = "The Zorblax project launched on 2031-04-12."
 QUERY_A = "When did the Zorblax project launch?"
 MARKER_A = "Zorblax"     # unique token that proves A's own content
@@ -103,7 +111,8 @@ MARKER_A = "Zorblax"     # unique token that proves A's own content
 # --- Team B (the isolation victim) — a distinct team, distinct fact -------------
 TEAM_B = f"s77-teamb-{SUFFIX}"
 USER_B = f"s77-userb-{SUFFIX}"
-HDR_B = {"X-User-Sub": USER_B, "X-User-Team": TEAM_B}
+HDR_B = {"X-User-Sub": USER_B, "X-User-Team": TEAM_B,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 FACT_B = "The Qorvex initiative concluded on 2029-11-03."
 QUERY_B = "When did the Qorvex initiative conclude?"
 MARKER_B = "Qorvex"      # unique token; team A seeing it ⇒ a real tenancy LEAK

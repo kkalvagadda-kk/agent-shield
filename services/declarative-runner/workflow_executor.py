@@ -61,6 +61,31 @@ from node_executors import AgentNodeExecutor, EndNodeExecutor, HttpToolNodeExecu
 
 logger = logging.getLogger(__name__)
 
+# Projected bound ServiceAccount token, audience `agentshield-registry-api`, mounted by
+# deploy-controller/manifest_builder.py. registry-api verifies it via TokenReview and
+# refuses any request whose path names a different agent.
+#
+# These calls used to be anonymous. That was survivable only because the registry left the
+# routes open, which meant any workload in the cluster could read any agent's bindings and
+# every team's private tools. The pod has had a verifiable identity all along (OPA Gate 2
+# already trusts this same ServiceAccount) — it simply never presented it.
+SA_TOKEN_PATH = "/var/run/secrets/agentshield/registry-token/token"
+
+
+def _registry_headers() -> dict:
+    """The pod's bearer, or {} if the projection is absent (pre-rollout manifests)."""
+    try:
+        with open(SA_TOKEN_PATH) as fh:
+            return {"Authorization": "Bearer " + fh.read().strip()}
+    except OSError:
+        logger.warning(
+            "No ServiceAccount token at %s — registry calls will be refused. The pod "
+            "manifest predates the agentshield-registry-api token projection.",
+            SA_TOKEN_PATH,
+        )
+        return {}
+
+
 # Daemon/scheduled/webhook runs carry NO live user, so their "input" may be empty
 # (a schedule can fire with no job spec at all). We must still never hand the LLM an
 # empty user turn — providers reject non-whitespace-empty content — so when there is
@@ -154,7 +179,7 @@ class WorkflowExecutor:
         import httpx
         from config import AGENT_NAME, REGISTRY_API_URL, LLM_MODEL
 
-        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10) as client:
+        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10, headers=_registry_headers()) as client:
             # Fetch agent metadata (instructions live in agent.metadata)
             resp = await client.get(f"/api/v1/agents/{AGENT_NAME}")
             resp.raise_for_status()
@@ -225,7 +250,7 @@ class WorkflowExecutor:
         from config import REGISTRY_API_URL
 
         all_tool_ids = list(tool_ids)
-        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10) as client:
+        async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=10, headers=_registry_headers()) as client:
             # Flatten skill_ids → their constituent tool_ids
             for skill_id in skill_ids:
                 try:
@@ -703,13 +728,16 @@ class WorkflowExecutor:
         """
         # Fetch tools from Registry API for new-schema workflows
         if self._is_new_schema():
-            try:
-                await self._prefetch_agent_tools()
-            except Exception as exc:
-                logger.warning(
-                    "WorkflowExecutor.setup: tool prefetch failed (continuing with empty tools): %s",
-                    exc,
-                )
+            # FAIL LOUDLY. This used to catch and continue "with empty tools", so a pod that
+            # could not resolve its tools started anyway: Ready, readiness green, chat
+            # answering — and silently toolless. The agent would then answer by inventing
+            # what `lookup_order` would have returned instead of calling it. No error, no
+            # failed run, just wrong output.
+            #
+            # That is strictly worse than not starting. A CrashLoopBackOff is visible in one
+            # `kubectl get pods`; a confidently wrong answer is visible to a customer. The
+            # SDK path has always raised here — this makes the two agree.
+            await self._prefetch_agent_tools()
 
         checkpointer = await get_checkpointer()
         self.graph = self._build_compiled_graph(checkpointer)

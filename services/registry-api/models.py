@@ -1083,6 +1083,10 @@ class MCPServer(Base):
     # credentials {client_id, client_secret?}, per server. Null until the first authorize
     # registers a client (RFC 7591 Dynamic Client Registration).
     oauth_client_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # WHO registered this server. Its discovered tools inherit it as their
+    # `created_by`, or a private mcp_tool would have no creator and catalog
+    # visibility (published OR created_by == caller) would hide it from everyone.
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )

@@ -352,16 +352,17 @@ test.describe("contributor — tool ownership (Decisions 46 + 47)", () => {
     expectNoPageErrors(errors);
   });
 
-  test("T-RJ-013 a teammate sees the private tool the contributor just created", async ({
-    page,
-  }) => {
-    // The other half of Decision 47's default flip. A tool created after migration 0080
-    // is `private`, and visibility is TEAM-scoped — so a different platform user must
-    // still find it. If visibility were still CREATOR-scoped (what it was before 0080),
-    // this row would be invisible to everyone but its author and the private default
-    // would have quietly broken team collaboration.
+  test("T-RJ-013 a teammate does NOT see the contributor's private draft", async () => {
+    // The other half of Decision 47's default flip. A tool created after migration 0080 is
+    // `private`, and visibility is CREATOR-scoped — the same rule agents and workflows have
+    // always used. "Drafts are yours until you share."
     //
-    // e2e-consumer is provisioned into team `platform`, same as e2e-contributor.
+    // This case briefly asserted the OPPOSITE (that a teammate sees it) while visibility was
+    // team-scoped. That was wrong: it conflated Decision 46's USE axis — owner_team, who may
+    // CALL the tool — with Decision 47's VISIBILITY axis, who SEES it in a catalog.
+    //
+    // e2e-consumer is provisioned into team `platform`, same team as e2e-contributor, so a
+    // 0 here is specifically "not my draft" and not "wrong team".
     const ctx = await pwRequest.newContext({ baseURL: BASE_URL, ignoreHTTPSErrors: true });
     const tokenRes = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
       form: {
@@ -381,9 +382,8 @@ test.describe("contributor — tool ownership (Decisions 46 + 47)", () => {
     const items = (await res.json()).items ?? [];
     expect(
       items.filter((i: { name: string }) => i.name === TOOL),
-      "a teammate must see a private tool their own team owns",
-    ).toHaveLength(1);
-    expect(items[0].publish_status, "migration 0080 makes new tools private").toBe("private");
+      "a teammate must NOT see another person's private draft — same as a draft agent",
+    ).toHaveLength(0);
     await ctx.dispose();
   });
 });

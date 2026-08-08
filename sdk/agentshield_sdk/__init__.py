@@ -17,4 +17,4 @@ from .handoff import handoff
 __all__ = ["Agent", "Runner", "tool", "build_graph", "handoff"]
 # 0.2.9: F-E (Issue 2) — stream_events emits message_start per LLM turn (bubble
 # boundary) + reasoning as its own event (Bedrock thinking blocks no longer dropped/merged).
-__version__ = "0.2.9"
+__version__ = "0.2.10"

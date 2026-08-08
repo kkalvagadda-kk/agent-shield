@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from auth_middleware import get_optional_user, require_user
-from catalog_visibility import CallerKind, catalog_visibility_clause
+from catalog_visibility import catalog_visibility_clause
 from rbac import get_user_global_role, get_user_team
 from db import get_db
 from models import Agent, AgentTool, AuthConfig, Tool
@@ -220,32 +220,28 @@ async def list_tools(
     owner_team: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ToolResponse]:
-    caller = (user or {}).get("sub") or x_user_sub
+    caller = claims["sub"]
 
     q = select(Tool).options(selectinload(Tool.mcp_server))
 
-    # Visibility (Decision 47 / migration 0080). One producer, shared with list_skills —
-    # this predicate used to be an inline `published OR created_by == caller` copied into
-    # both handlers, and 0080 made it load-bearing by flipping the default to 'private'.
+    # Visibility (Decision 47 / migration 0080). One producer, shared with list_skills.
+    # CREATOR-scoped, identical to agents.py:248 and composite_workflows.py:205 —
+    # "drafts are yours until you share", the pattern Decision 47 is named for.
     #
-    # A caller with no token is an in-cluster agent pod (the SDK tool_resolver, which calls
-    # this exact endpoint with ?name=X at startup). It gets NO publish filter: a pod's
-    # authority over a tool is its binding plus OPA Gate 3, not the catalog flag. Filtering
-    # it would kill every agent bound to a tool created after 0080. See
-    # catalog_visibility.py for why this is a named parameter and not a sniff.
-    caller_kind = CallerKind.HUMAN if caller else CallerKind.IN_CLUSTER_MACHINE
-    vis = catalog_visibility_clause(
-        publish_status_col=Tool.publish_status,
-        owner_team_col=Tool.owner_team,
-        caller_kind=caller_kind,
-        caller_team=await get_user_team(db, caller) if caller else None,
+    # This route no longer has an anonymous arm. It used to, because agent pods fetched the
+    # global catalog by tool name with no credential; they now ask
+    # GET /agents/{name}/tools instead — the binding question, which is what a pod's
+    # authority over a tool has always actually been.
+    q = q.where(
+        catalog_visibility_clause(
+            publish_status_col=Tool.publish_status,
+            created_by_col=Tool.created_by,
+            caller_sub=caller,
+        )
     )
-    if vis is not None:
-        q = q.where(vis)
 
     if name:
         q = q.where(Tool.name == name)

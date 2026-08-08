@@ -158,6 +158,8 @@ async def create_mcp_server(
     # reach the row by a path the guard does not cover.
     server = MCPServer(**body.model_dump(exclude={"owner_team"}))
     server.owner_team = owner_team
+    # Propagated onto every tool discovery creates from this server (migration 0081).
+    server.created_by = caller
     db.add(server)
     await db.flush()  # need the generated id for the Secret + discover
 

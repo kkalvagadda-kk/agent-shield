@@ -282,7 +282,25 @@ The **submitter** gets the full picture at submit time: a cross-team private too
 `AgentDetailPage` (studio `0.1.186`). That informs the person who already knows what they
 built. It tells the reviewer nothing.
 
-## G-R3-8 — the tokenless catalog branch now returns EVERY row, not just published ones — 2026-08-07
+## G-R3-8 — ✅ CLOSED 2026-08-08. The tokenless catalog branch is DELETED, not narrowed.
+
+Closed sooner than the "identity Phase 3" this entry originally deferred it to, because the
+premise it rested on turned out to be false. The branch existed to keep agent pods alive;
+Kalyan pointed out the platform is in active development, most agents are test litter, and
+regressions are not a constraint — so "breaking pods" stopped being a cost worth trading a
+security property for.
+
+It also turned out the pods were asking the wrong question. `GET /agents/{name}/tools`
+already existed (`agent_tools.py:141`), already returned full `ToolResponse` rows joined on
+`agent_tools`, and already carried no publish filter — because a pod's authority over a tool
+has always been its BINDING, never the catalog flag. The resolver now calls that,
+authenticated with the pod's projected ServiceAccount token (`agent_identity.py`, TokenReview,
+audience `agentshield-registry-api`), and registry-api refuses any request naming a different
+agent than the verified token does.
+
+Original entry follows for the reasoning.
+
+### (superseded) 
 
 **not-yet-wired (debt), with a stated expiry.** `catalog_visibility.py`'s
 `IN_CLUSTER_MACHINE` kind applies no `publish_status` filter. That is a deliberate widening
@@ -305,7 +323,17 @@ tokenless read SUCCEEDS, which is the behaviour being retired. That is deliberat
 are load-bearing until Phase 3 and it should be impossible to remove the branch without
 touching them.
 
-## G-R3-9 — `agents.py` and `composite_workflows.py` still scope catalog visibility by CREATOR, not team — 2026-08-07
+## G-R3-9 — ✅ DISSOLVED 2026-08-08. Tools and skills went back to CREATOR-scoped, so all
+four artifact types agree again.
+
+This entry existed because I had changed tools/skills to team-scoped and left agents and
+workflows creator-scoped. Kalyan asked why tools should differ from agents when Decision 47
+is named for the agent pattern — and the answer was that they should not. Reverting removed
+the inconsistency rather than documenting it.
+
+Original entry follows.
+
+### (superseded) 
 
 **deferred (intentional).** `catalog_visibility.py` unified the predicate for tools and
 skills. Two more copies of the same `or_(publish_status == "published", created_by == caller)`
@@ -413,7 +441,8 @@ are the VISIBILITY axis and block nothing.
 Rule going forward: order by the capability being delivered, and say plainly
 which phases are scaffolding for it.
 
-  [1] REVERT + CLOSE THE POD READ PATH            <- current work
+  [x] 1. REVERT + CLOSE THE POD READ PATH   SHIPPED 0.2.271 / runner 0.1.69 /
+      deploy-controller 0.1.43 / sdk 0.2.10 / migration 0081. suite-98 30/0.
       Small, and it is shipped code we have agreed is wrong. Building the
       step-D reviewer surface on a filter we are about to change is waste.
         a. catalog visibility back to CREATOR-scoped for tools and skills,

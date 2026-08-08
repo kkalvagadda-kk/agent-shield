@@ -77,7 +77,10 @@ except Exception as e:
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 try:
-    r = urllib.request.urlopen('http://localhost:8000/api/v1/tools/?limit=200', timeout=5)
+    # GET /api/v1/tools/ now requires a user token (Decision 47 revert, 0.2.271): the
+    # anonymous arm existed only for agent pods, which now ask
+    # GET /agents/{name}/tools with a ServiceAccount token instead.
+    r = urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/?limit=200', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     tools = json.loads(r.read()).get('items', [])
     for t in tools:
         if t.get('name','').startswith('restricted-tool-'):

@@ -1304,6 +1304,62 @@ workflow, no new queue, no new gate.
   `source_version_id` and not the agent's latest run — otherwise a reviewer can approve v3 while
   reading v4's score.
 
+### CORRECTION 2 (2026-08-08) — the FIX in Correction 1 was itself wrong, twice
+
+Correction 1 replaced creator-scoped visibility with **team-scoped**, and added a tokenless
+arm for agent pods. Kalyan rejected both. Recording it because the reasoning matters more
+than the diff, and because getting the same paragraph wrong twice is worth being explicit
+about.
+
+**Team-scoped broke the pattern this decision is named for.** Decision 47 exists because
+Kalyan asked for tools to "take same pattern as agents — *drafts are yours until you
+share*". Agents are creator-scoped (`agents.py:248`); workflows are creator-scoped
+(`composite_workflows.py:205`). Making tools team-scoped made them behave differently from
+the model they were supposed to copy, and left four artifact types with two different rules
+where they had previously agreed.
+
+The justification I gave — *"otherwise a contributor's new tool is invisible to their own
+teammates"* — describes exactly how a draft agent already behaves, and has behaved all
+along. I called the shipped, accepted model a bug in order to justify a change I had
+already made.
+
+It also **conflated the two axes Kalyan separated explicitly**: Decision 46 is the USE axis
+(`owner_team`, who may CALL a tool, `team_may_use_tool`, the cascade) and Decision 47 is the
+VISIBILITY axis (who SEES it). Ownership is team-level; discoverability is creator-level. I
+answered the second question with the first one's column because it was the one already in
+scope.
+
+**The tokenless arm traded a security property for a cost that did not exist.** It applied
+no publish filter at all to any caller without a token, so any workload in the cluster could
+enumerate every team's private tools — `http_url`, `python_code`, `auth_config_id`. I chose
+that over "breaking every SDK agent at startup". Kalyan's correction: the platform is in
+active development, most agents are test fixtures due for cleanup, and regressions are not a
+constraint. The trade was production risk calculus applied to a dev platform — the
+escalate-don't-degrade failure, in the direction of degrading.
+
+**And the pods were asking the wrong question anyway.** `GET /agents/{name}/tools` already
+existed, already returned full `ToolResponse` rows joined on `agent_tools`, and already had
+no publish filter — because a pod's authority over a tool has always been its BINDING. That
+is also the exact set OPA Gate 3 authorizes, so the registry and the policy engine now agree
+by construction instead of by coincidence.
+
+**What shipped instead** (registry-api `0.2.271`, runner `0.1.69`, deploy-controller
+`0.1.43`, sdk `0.2.10`, migration `0081`):
+
+  - visibility back to `published OR created_by == caller`, for tools AND skills
+  - `CallerKind` deleted; there is no anonymous arm
+  - the SDK resolver and the runner call the binding endpoint, authenticated with the pod's
+    projected ServiceAccount token (audience `agentshield-registry-api`), verified by
+    TokenReview in `agent_identity.py` — registry-api already held the ClusterRole
+  - `create_skill` sets `created_by` (it never did) and migration `0081` adds
+    `mcp_servers.created_by` so discovery has one to propagate — a private row with a NULL
+    creator matches neither arm and is invisible to everyone, which is the same defect shape
+    as the MCP regression, caught this time by auditing the writers BEFORE shipping
+
+**Do not re-derive this a third time.** If team-level draft sharing is ever wanted, it is a
+product decision that applies to agents and workflows too, taken deliberately for all four —
+not a side effect of a tool migration.
+
 ### CORRECTION (2026-08-07, while implementing step B) — "the list filter already exists and is correct" was WRONG
 
 The Context above says the visibility predicate "already exists and is correct … it simply never
