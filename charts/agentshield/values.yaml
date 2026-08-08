@@ -765,7 +765,9 @@ registry-api:
     # 0.2.270: regression fix — MCP server registration derives owner_team, or its
     # discovered tools are private with no owning team and nobody can see them.
     # 0.2.271: creator-scoped catalog; tokenless pod read path closed (SA token).
-    tag: "0.2.271"
+    # 0.2.272: Decision 45 — user grants enforced for user_delegated (OPA Gate 3
+    # intersects the agent reach with the caller's teams); agent_class from the bundle.
+    tag: "0.2.272"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
@@ -874,7 +876,7 @@ deploy-controller:
   # 0.1.66: rebuilds sdk 0.2.9 — F-E (Issue 2) message_start + reasoning SSE events.
   # 0.1.67: memory decouple — _load_memory_context sends for_agent_context (scope=agent).
   # 0.1.68: identity P0 — vendored run_context.py (verify/extend only).
-  declarativeRunnerTag: "0.1.69"
+  declarativeRunnerTag: "0.1.70"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"

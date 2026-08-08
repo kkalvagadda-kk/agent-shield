@@ -62,6 +62,7 @@ api|governance|suite-15-artifact-isolation.sh|Artifact Isolation
 api|agent|suite-16-create-agent.sh|Create Agent Flow
 api|eval,agent|suite-17-eval-gate.sh|Eval Gate (Decision 20)
 api|governance|suite-18-opa-governance.sh|OPA Governance
+api|governance,rbac|suite-100-decision-45-user-grants.sh|Decision 45 — user grants enforced for user_delegated
 api|execution|suite-19-execution-shape.sh|Execution Shape & Triggers
 api|chat,execution|suite-20-durable-playground.sh|Durable Playground
 api|chat,execution|suite-21-scheduled-playground.sh|Scheduled Playground

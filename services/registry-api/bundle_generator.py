@@ -203,11 +203,48 @@ async def generate_bundle_data(db: AsyncSession) -> dict[str, Any]:
         team: list(tools.values()) for team, tools in grants_by_team.items()
     }
 
-    bundle_data = {"agents": agents, "grants": grants}
+    # team -> tools that team OWNS. Decision 45's intersection needs "tools the CALLER's
+    # team may use", and `tool_access.team_may_use_tool` answers that as
+    # `owner_team is None or owner_team == team` — i.e. own-team tools are usable WITHOUT a
+    # grant. `grants` alone therefore under-reports: it carries only the cross-team half, so
+    # intersecting on it would deny a user their own team's tools.
+    #
+    # NULL owner_team is EXCLUDED. `team_may_use_tool` treats it as usable by every team,
+    # which is the permissive default Decision 46 exists to remove; carrying it here would
+    # reintroduce that hole inside the intersection, where it is much harder to see. Those
+    # rows are pre-0.2.267 and shrinking.
+    owned_rows = await db.execute(
+        text("""
+            SELECT t.owner_team              AS team,
+                   t.name                    AS tool_name,
+                   t.risk_level              AS risk,
+                   t.pii_deanonymize_allowed AS pii_deanonymize_allowed
+            FROM tools t
+            WHERE t.owner_team IS NOT NULL
+              AND t.status = 'active'
+        """)
+    )
+    owned_by_team: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in owned_rows.mappings():
+        team, name = row["team"], row["tool_name"]
+        if not name:
+            continue
+        owned_by_team.setdefault(team, {})[name] = {
+            "name": name,
+            "risk": _normalize_risk(row["risk"]),
+            "pii_deanonymize_allowed": bool(row["pii_deanonymize_allowed"]),
+        }
+    team_tools: dict[str, list[dict[str, Any]]] = {
+        team: list(tools.values()) for team, tools in owned_by_team.items()
+    }
+
+    bundle_data = {"agents": agents, "grants": grants, "team_tools": team_tools}
     logger.info(
-        "Generated OPA bundle: %d agent identities, %d teams with grants",
+        "Generated OPA bundle: %d agent identities, %d teams with grants, "
+        "%d teams owning tools",
         len(agents),
         len(grants),
+        len(team_tools),
     )
     return bundle_data
 

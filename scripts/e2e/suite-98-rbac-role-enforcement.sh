@@ -591,12 +591,25 @@ fi
 # by suite-2/16's deploy legs; what this pins is that the endpoint does not filter.
 LC_ID="$(tool_field "$CONTRIB_TOK" "$S98_LC" id)"
 status "$CONTRIB_TOK" POST "/api/v1/agents/${S98_AGENT}/tools" "{\"tool_id\":\"${LC_ID}\"}" >/dev/null 2>&1 || true
-BIND_OUT="$(status_body "$CONTRIB_TOK" GET "/api/v1/agents/${S98_AGENT}/tools?limit=200")"
-case "${BIND_OUT%%|*}|${BIND_OUT#*|}" in
-  200*"${S98_LC}"*) record PASS "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  GET /agents/{name}/tools returns it (no publish filter — a pod's authority is its binding + OPA Gate 3)" ;;
-  200*)             record FAIL "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  200 but '${S98_LC}' is NOT in the response. The binding endpoint is filtering on publish_status, so every agent bound to a tool created after 0080 dies at startup with \"Tool not found in the platform registry\"." ;;
-  *)                record FAIL "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  -> ${BIND_OUT%%|*} (want 200). This is the path every agent pod resolves through." ;;
-esac
+# Counted IN THE POD. status_body truncates at r.read(400) and an agent with three bound
+# tools answers with ~2KB, so the name being looked for sits past the cut — the same
+# truncation that made T-S98-023/024/026 report "ERR" the first time these were written.
+# Ship a number across the boundary, not a document.
+BOUND_HIT="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c "$CONTAINER" -- env \
+  T="$CONTRIB_TOK" A="$S98_AGENT" N="$S98_LC" python3 -c '
+import os, json, urllib.request
+h = {"Authorization": "Bearer " + os.environ["T"]}
+url = "http://localhost:8000/api/v1/agents/" + os.environ["A"] + "/tools?limit=200"
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20) as r:
+        items = json.load(r).get("items", [])
+    print(sum(1 for i in items if i.get("name") == os.environ["N"]))
+except Exception:
+    print("ERR")
+' 2>/dev/null | tr -d '\r\n')"
+[ "$BOUND_HIT" = "1" ] \
+  && record PASS "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  GET /agents/{name}/tools returns it (no publish filter — a pod's authority is its binding + OPA Gate 3)" \
+  || record FAIL "T-S98-026 a PRIVATE tool bound to an agent still resolves  |  got '${BOUND_HIT}' (want 1). The binding endpoint is filtering on publish_status, so every agent bound to a tool created after 0080 dies at startup with \"Tool not found in the platform registry\"."
 
 # 026b — and it refuses an unauthenticated caller. Without this, the endpoint that replaced
 # the anonymous catalog read is itself anonymous and nothing was closed.

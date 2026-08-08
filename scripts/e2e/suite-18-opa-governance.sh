@@ -489,7 +489,7 @@ else
   echo ""
   echo "--- T-S18-004: Low-risk tool → allow ---"
   if [ -n "$LOW_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${LOW_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${LOW_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "False" ]; then
@@ -519,7 +519,7 @@ for g in grants:
 " 2>/dev/null || true)
   fi
   if [ -n "$MEDIUM_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${MEDIUM_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${MEDIUM_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "False" ]; then
@@ -535,7 +535,7 @@ for g in grants:
   echo ""
   echo "--- T-S18-006: High-risk tool → require_approval (HITL) ---"
   if [ -n "$HIGH_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${HIGH_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${HIGH_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "True" ]; then
@@ -564,7 +564,7 @@ for g in grants:
         print(g['name']); break
 " 2>/dev/null || true)
   if [ -n "$CRITICAL_GRANT" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_GRANT}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_GRANT}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
     if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_risk_denied" ]; then
@@ -573,7 +573,7 @@ for g in grants:
       fail "T-S18-007 — Critical '${CRITICAL_GRANT}' got allow=${ALLOW}, deny_reason=${DENY_R}"
     fi
   elif [ -n "$CRITICAL_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
     if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_risk_denied" ]; then
@@ -591,7 +591,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S18-008: Unknown tool → deny (tool_not_granted) ---"
-RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'nonexistent_tool_xyz_$$','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'nonexistent_tool_xyz_$$','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
 DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
 if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_not_granted" ]; then
@@ -605,7 +605,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S18-009: Unknown SA subject → deny ---"
-RESULT=$(opa_query "{'sa_subject':'system:serviceaccount:${AGENTS_NS}:ghost-agent-$$-sa','tool_name':'lookup_order','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+RESULT=$(opa_query "{'sa_subject':'system:serviceaccount:${AGENTS_NS}:ghost-agent-$$-sa','tool_name':'lookup_order','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
 DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
 if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "agent_unauthenticated" ]; then
@@ -639,7 +639,7 @@ for g in grants:
 " 2>/dev/null || true)
 
 if [ -n "$GRANT_TOOL" ]; then
-  RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${GRANT_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}'}")
+  RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${GRANT_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
   ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
   if [ "$ALLOW" = "True" ]; then
     pass "T-S18-011 — Team-granted tool '${GRANT_TOOL}' → allow"
@@ -651,31 +651,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T-S18-012 — Daemon agent_class is EXEMPT from the identity floor
+# T-S18-012 — a pod CANNOT relabel itself `daemon` (D-1)
 #
-# WAS A TAUTOLOGY until 2026-08-07: the assertion read
-#   if [ "$ALLOW" = "True" ] || [ "$ALLOW" = "False" ]
-# which is satisfied by every possible boolean. It could not fail while OPA answered at
-# all, so it proved only that the sidecar was up — already covered by T-S18-001. It went
-# green through the entire period T-S18-005/006/011 were red for the identity floor,
-# which is precisely the gate this case is supposed to be about.
+# REWRITTEN 2026-08-08. This case used to send `agent_class: daemon` in the INPUT against a
+# `user_delegated` agent and assert it was allowed — i.e. it asserted the defect. The SDK
+# composes that input inside the agent pod, so a compromised pod could claim `daemon`, skip
+# the identity floor AND skip Decision 45's intersection, which is the branch that requires
+# no human at all. The policy now reads `agent_class` from the BUNDLE, keyed on the
+# sa_subject Gates 1 and 2 already verified.
 #
-# What it asserts now: a DAEMON with NO user_id is allowed. That is the exempt half of
-# Gate 6 and the reason a scheduled/triggered run works today while a user_delegated one
-# does not. Paired with T-S18-015 (the deny half) it pins the floor from both sides.
+# The daemon-EXEMPT half moved to suite-100 T-S100-006, which picks a genuine daemon out of
+# the live bundle instead of asserting one into existence from the input.
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- T-S18-012: Daemon agent_class → exempt from the identity floor ---"
+echo "--- T-S18-012: a pod cannot relabel itself daemon (D-1) ---"
 TOOL_FOR_TEST="${ANY_TOOL:-lookup_order}"
-RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${TOOL_FOR_TEST}','args':{},'agent_class':'daemon','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${TOOL_FOR_TEST}','args':{},'agent_class':'daemon','playground':False,'sandbox':False,'user_id':'','user_team':'','user_teams':[]}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
-DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
-if [ "$ALLOW" = "True" ]; then
-  pass "T-S18-012 — Daemon '${TOOL_FOR_TEST}' with EMPTY user_id → allow (identity floor exempts daemons)"
-elif [ "$DENY_R" = "missing_user_identity" ]; then
-  fail "T-S18-012 — Daemon '${TOOL_FOR_TEST}' denied ${DENY_R}. The floor is no longer exempting daemons — every scheduled/triggered run's tool calls are now denied."
+if [ "$ALLOW" = "False" ]; then
+  pass "T-S18-012 — input claiming 'daemon' against a user_delegated agent is DENIED (agent_class comes from the bundle, not the pod)"
 else
-  fail "T-S18-012 — Daemon '${TOOL_FOR_TEST}' got allow=${ALLOW}, deny_reason=${DENY_R} (want allow=True). If the reason is a risk/grant one, the tool picked for this probe is not a valid daemon fixture."
+  fail "T-S18-012 — a pod claiming 'daemon' got allow=${ALLOW}. input.agent_class is being trusted, so any pod can skip the identity floor and Decision 45's intersection by relabelling itself."
 fi
 
 # ---------------------------------------------------------------------------
@@ -694,7 +690,7 @@ fi
 echo ""
 echo "--- T-S18-015: identity floor → deny when user_delegated has no user_id ---"
 FLOOR_TOOL="${LOW_TOOL:-${MEDIUM_TOOL:-${ANY_TOOL:-lookup_order}}}"
-RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${FLOOR_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${FLOOR_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
 DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
 if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "missing_user_identity" ]; then

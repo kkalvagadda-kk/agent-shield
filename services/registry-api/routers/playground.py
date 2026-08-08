@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_middleware import get_optional_user
 from db import get_db
+from rbac import get_user_team
+from run_context import RunContext, mint as mint_run_context
 from rbac import can_use_playground, get_user_global_role
 from models import Agent, Deployment, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
@@ -157,11 +159,38 @@ async def _create_and_dispatch_playground_run(
         run_id, agent.name, caller, shape, trigger_type, eval_mode, trace_id,
     )
 
+    # ─── Identity P1: mint the run context at the EDGE ───────────────────────
+    # This is the only place in the durable path that knows who asked, so it is the only
+    # place that can honestly name them. Everything downstream verifies a signature rather
+    # than trusting a header — which is the whole difference between this and the
+    # `X-User-Sub` fallbacks R2/R3 deleted.
+    #
+    # Best-effort: minting raises when AGENTSHIELD_INTERNAL_SIGNING_KEY is absent, and a
+    # run that proceeds with no context is denied `missing_user_identity` at the first tool
+    # call. That is the SAME outcome as before P1, so a missing key degrades to the old
+    # behaviour rather than to a run that silently acts unattributed.
+    rct = None
+    if caller:
+        try:
+            rct = mint_run_context(
+                RunContext(
+                    user_sub=caller,
+                    user_team=await get_user_team(db, caller) or "",
+                    origin="playground",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "playground run %s: could not mint a run context (%s) — tool calls will be "
+                "denied missing_user_identity",
+                run_id, exc,
+            )
+
     # For durable runs, dispatch to the runner pod's /run endpoint.
     if shape == "durable":
         background_tasks.add_task(
             _dispatch_durable_run, run_id, agent.name, input_payload, db,
-            eval_mode,
+            eval_mode, rct,
         )
 
     return {
@@ -352,6 +381,7 @@ async def _dispatch_durable_run(
     input_payload: dict | None,
     db: AsyncSession,
     eval_mode: str = "live",
+    rct: str | None = None,
 ) -> None:
     """Dispatch a durable playground run to the declarative-runner /run endpoint.
 
@@ -392,6 +422,7 @@ async def _dispatch_durable_run(
         callback_url=callback,
         runner_url=runner_url,
         eval_mode=eval_mode,
+        rct=rct,
     )
     if not ok:
         logger.warning("_dispatch_durable_run: marking playground run %s failed: %s", run_id, err)

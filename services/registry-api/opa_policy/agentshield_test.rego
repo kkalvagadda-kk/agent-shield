@@ -25,6 +25,28 @@ base_agents := {"system:serviceaccount:agents-platform:agent-refunds-sa": {
 # Team grants: a tool the agent does NOT own but its team is granted.
 base_grants := {"platform": [{"name": "send_email", "risk": "high"}, {"name": "read_kb", "risk": "low"}]}
 
+# Decision 45 — tools OWNED by each team. `team_may_use_tool` is
+# `owner_team is None or owner_team == team`, so own-team tools are usable WITHOUT a grant;
+# intersecting on `grants` alone would deny a user their own team's tools.
+base_team_tools := {"platform": [
+	{"name": "lookup_order", "risk": "low"},
+	{"name": "audit_log", "risk": "medium"},
+	{"name": "issue_refund", "risk": "high"},
+	{"name": "delete_account", "risk": "critical"},
+	{"name": "mystery_tool", "risk": "banana"},
+	{"name": "legacy_bare_tool", "risk": "critical"},
+]}
+
+# The SAME agent, registered as a daemon. `agent_class` now comes from the bundle rather
+# than from `input`, because the SDK composes the input inside the pod and a compromised pod
+# could otherwise relabel itself `daemon` and skip both the identity floor and Decision 45's
+# intersection (D-1). Tests that mean "this is a daemon" must say so in the BUNDLE.
+daemon_agents := {subject: object.union(base_agents[subject], {"agent_class": "daemon"})}
+
+# A team that owns nothing and is granted nothing — the "Alice has no grant" side of
+# Decision 45's canonical scenario.
+empty_team_tools := {"outsiders": []}
+
 # user_delegated fixture — carries a live principal ("alice") so these tests
 # exercise the risk gate under the WS-2 identity floor (user_identity_ok). The
 # floor's empty-principal deny is covered separately by the WS-2 truth-table tests.
@@ -37,100 +59,101 @@ input_for(tool) := {
 	"sandbox": false,
 	"user_id": "alice",
 	"user_team": "",
+	"user_teams": ["platform"],
 }
 
 # ─── Gate 4: risk → action ───────────────────────────────────────────────────
 test_low_risk_allows if {
 	allow with input as input_for("lookup_order")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	not require_approval with input as input_for("lookup_order")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	reason == "allow_low_risk" with input as input_for("lookup_order")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_medium_risk_allows_no_approval if {
 	allow with input as input_for("audit_log")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	not require_approval with input as input_for("audit_log")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	reason == "allow_medium_risk" with input as input_for("audit_log")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_high_risk_requires_approval if {
 	allow with input as input_for("issue_refund")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	require_approval with input as input_for("issue_refund")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	reason == "require_approval_high_risk" with input as input_for("issue_refund")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_critical_risk_denies if {
 	not allow with input as input_for("delete_account")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "tool_risk_denied" with input as input_for("delete_account")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_unknown_risk_denies if {
 	not allow with input as input_for("mystery_tool")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "tool_risk_denied" with input as input_for("mystery_tool")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Bare-string tool entry → treated as critical → deny ─────────────────────
 test_bare_string_tool_treated_as_critical if {
 	not allow with input as input_for("legacy_bare_tool")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "tool_risk_denied" with input as input_for("legacy_bare_tool")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Gate 3: membership ──────────────────────────────────────────────────────
 test_tool_not_granted_denies if {
 	not allow with input as input_for("format_hard_drive")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "tool_not_granted" with input as input_for("format_hard_drive")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_tool_via_team_grant_allows if {
 	# read_kb is not in the agent's own tools; it comes from the team grant.
 	allow with input as input_for("read_kb")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	reason == "allow_low_risk" with input as input_for("read_kb")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_high_risk_team_grant_requires_approval if {
 	allow with input as input_for("send_email")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	require_approval with input as input_for("send_email")
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Gate 1: identity present ────────────────────────────────────────────────
@@ -144,11 +167,12 @@ test_unknown_subject_denies if {
 		"sandbox": false,
 		"user_id": "",
 		"user_team": "",
+		"user_teams": ["platform"],
 	}
-	not allow with input as i with data.agents as base_agents with data.grants as base_grants
+	not allow with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "agent_unauthenticated" with input as i
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Gate 2: identity match ──────────────────────────────────────────────────
@@ -163,10 +187,10 @@ test_identity_mismatch_denies if {
 	}}
 	not allow with input as input_for("lookup_order")
 		with data.agents as mismatched
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "identity_mismatch" with input as input_for("lookup_order")
 		with data.agents as mismatched
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Class A (daemon) vs Class B (user_delegated) both decided by risk ───────
@@ -180,8 +204,9 @@ test_daemon_class_low_risk_allows if {
 		"sandbox": false,
 		"user_id": "",
 		"user_team": "",
+		"user_teams": ["platform"],
 	}
-	allow with input as i with data.agents as base_agents with data.grants as base_grants
+	allow with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 test_daemon_class_high_risk_requires_approval if {
@@ -194,8 +219,9 @@ test_daemon_class_high_risk_requires_approval if {
 		"sandbox": false,
 		"user_id": "",
 		"user_team": "",
+		"user_teams": ["platform"],
 	}
-	require_approval with input as i with data.agents as base_agents with data.grants as base_grants
+	require_approval with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Empty bundle → deny everything (fail-closed) ────────────────────────────
@@ -223,10 +249,11 @@ test_daemon_empty_user_identity_ok if {
 		"sandbox": false,
 		"user_id": "",
 		"user_team": "",
+		"user_teams": ["platform"],
 		"trigger_type": "schedule",
 	}
-	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
-	allow with input as i with data.agents as base_agents with data.grants as base_grants
+	user_identity_ok with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
+	allow with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # Row 2 — daemon + "alice" + manual → floor holds (present user honored, not capped).
@@ -240,10 +267,11 @@ test_daemon_present_user_identity_ok if {
 		"sandbox": false,
 		"user_id": "alice",
 		"user_team": "",
+		"user_teams": ["platform"],
 		"trigger_type": "manual",
 	}
-	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
-	allow with input as i with data.agents as base_agents with data.grants as base_grants
+	user_identity_ok with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
+	allow with input as i with data.agents as daemon_agents with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # Row 3 — user_delegated + "alice" + manual → floor holds → allow.
@@ -257,10 +285,11 @@ test_user_delegated_present_user_identity_ok if {
 		"sandbox": false,
 		"user_id": "alice",
 		"user_team": "",
+		"user_teams": ["platform"],
 		"trigger_type": "manual",
 	}
-	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
-	allow with input as i with data.agents as base_agents with data.grants as base_grants
+	user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
+	allow with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # Row 4 — user_delegated + empty user + schedule → floor fails → deny (fail-closed).
@@ -274,13 +303,14 @@ test_user_delegated_missing_user_denies if {
 		"sandbox": false,
 		"user_id": "",
 		"user_team": "",
+		"user_teams": ["platform"],
 		"trigger_type": "schedule",
 	}
-	not user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants
-	not allow with input as i with data.agents as base_agents with data.grants as base_grants
+	not user_identity_ok with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
+	not allow with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
 	deny_reason == "missing_user_identity" with input as i
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # Regression — the risk-based require_approval is UNCHANGED by the identity floor.
@@ -297,13 +327,14 @@ test_identity_floor_leaves_require_approval_unchanged if {
 		"sandbox": false,
 		"user_id": "alice",
 		"user_team": "",
+		"user_teams": ["platform"],
 		"trigger_type": "manual",
 	}
-	allow with input as i with data.agents as base_agents with data.grants as base_grants
-	require_approval with input as i with data.agents as base_agents with data.grants as base_grants
+	allow with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
+	require_approval with input as i with data.agents as base_agents with data.grants as base_grants with data.team_tools as base_team_tools
 	reason == "require_approval_high_risk" with input as i
 		with data.agents as base_agents
-		with data.grants as base_grants
+		with data.grants as base_grants with data.team_tools as base_team_tools
 }
 
 # ─── Decision 27: allow_deanonymize gate ─────────────────────────────────────
@@ -331,6 +362,7 @@ deanon_input(tool) := {
 	"sandbox": false,
 	"user_id": "",
 	"user_team": "",
+	"user_teams": ["platform"],
 }
 
 test_allow_deanonymize_true_when_flagged_and_allowed if {
@@ -359,4 +391,115 @@ test_allow_deanonymize_false_when_denied if {
 	not allow_deanonymize with input as deanon_input("danger_deanon")
 		with data.agents as deanon_agents
 		with data.grants as {}
+}
+
+# ─── Decision 45: user grants are enforced for user_delegated ────────────────
+#
+# Kalyan's canonical scenario: "Alice queries agent X. X is bound to tool-1 and tool-2.
+# Alice's team has a grant to tool-1 only." Expected: tool-1 runs, tool-2 is denied naming
+# the GRANT, and the agent answers using tool-1.
+#
+# Both halves are required. The allow-half alone passes against a policy that ignores the
+# caller entirely (which is what shipped before this), and the deny-half alone passes
+# against one that denies everything.
+
+# Alice is in `outsiders`, which owns nothing. She is GRANTED lookup_order and nothing else.
+alice_grants := {"outsiders": [{"name": "lookup_order", "risk": "low"}]}
+
+alice_input(tool) := {
+	"sa_subject": subject,
+	"tool_name": tool,
+	"args": {},
+	# Deliberately claims "daemon" in the INPUT while the bundle says user_delegated.
+	# A compromised pod would do exactly this to skip the identity floor and the
+	# intersection. The policy must read the bundle and ignore the claim (D-1).
+	"agent_class": "daemon",
+	"playground": false,
+	"sandbox": false,
+	"user_id": "alice",
+	"user_team": "outsiders",
+	"user_teams": ["outsiders"],
+}
+
+test_user_delegated_allows_a_tool_the_caller_is_granted if {
+	allow with input as alice_input("lookup_order")
+		with data.agents as base_agents
+		with data.grants as alice_grants
+		with data.team_tools as empty_team_tools
+}
+
+test_user_delegated_denies_a_bound_tool_the_caller_is_not_granted if {
+	# issue_refund IS bound to the agent — the old policy allowed it on that basis alone.
+	not allow with input as alice_input("issue_refund")
+		with data.agents as base_agents
+		with data.grants as alice_grants
+		with data.team_tools as empty_team_tools
+}
+
+test_the_denial_names_the_grant_not_the_binding if {
+	# `tool_not_granted` would mean "the agent cannot do this" (fix: bind the tool).
+	# `tool_not_granted_to_user` means "you cannot ask it to" (fix: grant the team).
+	# Same 403, different remedy — an operator handed the wrong reason applies the wrong fix.
+	deny_reason == "tool_not_granted_to_user" with input as alice_input("issue_refund")
+		with data.agents as base_agents
+		with data.grants as alice_grants
+		with data.team_tools as empty_team_tools
+}
+
+test_a_tool_bound_to_nothing_still_reads_as_not_granted if {
+	# The over-reach guard for the split above: an UNBOUND tool must keep the original
+	# reason, or the new one swallows the old one and both remedies point the same way.
+	deny_reason == "tool_not_granted" with input as alice_input("never_heard_of_it")
+		with data.agents as base_agents
+		with data.grants as alice_grants
+		with data.team_tools as empty_team_tools
+}
+
+test_agent_class_comes_from_the_bundle_not_the_input if {
+	# alice_input claims "daemon". If the policy trusted it, the daemon branch would UNION
+	# the agent's own tools and issue_refund would be ALLOWED — skipping Decision 45
+	# entirely. The bundle says user_delegated, so it is denied. This is D-1: a pod must not
+	# be able to relabel itself out of the rules that apply to it.
+	not allow with input as alice_input("issue_refund")
+		with data.agents as base_agents
+		with data.grants as alice_grants
+		with data.team_tools as empty_team_tools
+}
+
+test_daemon_still_unions_its_own_tools if {
+	# The other side of D-1: a genuine daemon (per the BUNDLE) keeps the union rule, with no
+	# caller grants at all. "If the agent is deamon and is not acting on behalf of the user,
+	# agent delegate its capabilities."
+	daemon_agents := {subject: {
+		"tools": [{"name": "issue_refund", "risk": "high"}],
+		"team": "platform",
+		"agent_class": "daemon",
+		"expected_sa_subject": subject,
+		"sa_namespace": "agents-platform",
+	}}
+	i := {
+		"sa_subject": subject,
+		"tool_name": "issue_refund",
+		"args": {},
+		"agent_class": "user_delegated",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "",
+		"user_team": "",
+		"user_teams": [],
+	}
+	allow with input as i
+		with data.agents as daemon_agents
+		with data.grants as {}
+		with data.team_tools as {}
+}
+
+test_own_team_tools_need_no_grant if {
+	# team_may_use_tool is `owner_team is None or owner_team == team`. A user whose team
+	# OWNS the tool needs no asset_grant row, so the intersection must read team_tools and
+	# not just grants — otherwise every team is denied its own tools.
+	allow with input as input_for("lookup_order")
+		with data.agents as base_agents
+		with data.grants as {}
+		with data.team_tools as base_team_tools
 }

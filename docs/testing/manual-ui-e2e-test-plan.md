@@ -68,7 +68,44 @@ The third is the smallest and removes the cause rather than sequencing around it
 red browser layer that is really an expired session is indistinguishable from a real break, and the
 instinct will be to go looking in the product.
 
-## G-45 — Decision 45 is UNIMPLEMENTED, and identity P1 shipped alone makes it WORSE — 2026-08-08
+## G-100 — suite-45's `hitl-agent` fixture does not exist — 2026-08-08
+
+**not-yet-wired (debt), NOT in the Decision 45 blast radius.** `suite-45-hitl-e2e` is
+3 passed / 5 failed / 5 skipped, and every failure traces to one missing row:
+
+```
+T-S45-001  OPA bundle has hitl-agent with web_search risk=high  -> NOT_IN_BUNDLE
+T-S45-003  sandbox approve journey                               -> CREATE_FAIL:404 "Agent 'hitl-agent' not found."
+```
+
+`select ... from agents where name like 'hitl-agent%'` returns **NONE**. The suite's own
+setup is not producing it, so every case downstream skips or fails on a 404.
+
+Attributed away from today's work deliberately: the failures are **404s, not 401/403**, and
+nothing in the Decision 45 change deletes agents or gates agent lookup. Recording it rather
+than fixing it because it is a fixture bug in a suite I did not touch, and folding it into
+an authorization commit would make the commit's blast radius unreadable.
+
+Worth noting the shape though: like `suite-78` before it, this suite reports a summary line
+and a non-zero exit while most of its cases never ran. A suite whose fixture vanishes should
+say "I proved nothing", not "3 passed".
+
+## G-45 — ✅ IMPLEMENTED 2026-08-08 (registry-api 0.2.272 / runner 0.1.70 / sdk 0.2.11).
+Proven on the cluster by `suite-100` 6/0 and 29/29 rego unit tests.
+
+The P1-ships-alone hazard this entry warned about never materialised because P1 and
+2a/2c/2d shipped as ONE slice — which is what the hazard implied they had to be.
+
+REMAINING: the intersection is enforced for the DURABLE playground path (where the
+RunContext is minted). The reactive `/chat/stream` path and the production
+`internal.py` path still reach the pod without a minted context, so they fall back to
+the legacy `x-user-sub` header in the runner and are denied `missing_user_identity`
+for a user_delegated agent — fail-closed, same as before. Threading those two is the
+rest of P1.
+
+Original analysis follows.
+
+### (implemented) 
 
 **not-yet-wired (debt). This is the headline authorization requirement, not a footnote.**
 Filed under the capability, not under a phase, because burying it as two sub-bullets of
