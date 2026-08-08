@@ -503,3 +503,29 @@ test_own_team_tools_need_no_grant if {
 		with data.grants as {}
 		with data.team_tools as base_team_tools
 }
+
+test_no_user_reads_as_missing_identity_not_as_a_missing_grant if {
+	# Both are true: there is no principal, AND the intersection is empty. The reason must
+	# name the CAUSE (no identity) and not the CONSEQUENCE (no grant) — otherwise an
+	# operator handed `tool_not_granted_to_user` goes and grants a team, which fixes
+	# nothing because the run never carried a user.
+	#
+	# Caught by suite-70 T-S70-002b against a real deployed agent. The rego suite could not
+	# see it: every user_delegated fixture here carries a live principal, so this pairing
+	# never occurred.
+	i := {
+		"sa_subject": subject,
+		"tool_name": "lookup_order",
+		"args": {},
+		"agent_class": "user_delegated",
+		"playground": false,
+		"sandbox": false,
+		"user_id": "",
+		"user_team": "",
+		"user_teams": [],
+	}
+	deny_reason == "missing_user_identity" with input as i
+		with data.agents as base_agents
+		with data.grants as base_grants
+		with data.team_tools as base_team_tools
+}

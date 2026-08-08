@@ -252,6 +252,13 @@ deny_reason := "tool_not_granted_to_user" if {
 	identity_matches
 	not tool_in_set
 	_in_agent_reach
+	# The identity floor OUTRANKS this. With no user at all, the intersection is empty for
+	# the trivial reason that there is nobody to intersect with — and answering
+	# "tool_not_granted_to_user" then sends the operator to grant a team, when the actual
+	# problem is that the run carries no principal. Two wrongs, and this reason names the
+	# consequence rather than the cause. Caught by suite-70 T-S70-002b against a REAL
+	# deployed agent, which is the only place the two can be told apart.
+	user_identity_ok
 }
 
 deny_reason := "tool_risk_denied" if {
@@ -271,8 +278,17 @@ deny_reason := "tool_risk_denied" if {
 deny_reason := "missing_user_identity" if {
 	identity_present
 	identity_matches
-	tool_in_set
-	risk_allows
+	# `_in_agent_reach`, NOT `tool_in_set`. Decision 45 made `tool_in_set` depend on the
+	# caller's grants, so with no principal it is ALWAYS false — which silently made this
+	# rule unreachable and let `tool_not_granted_to_user` answer instead. The question here
+	# is "could the AGENT do this", asked so the reason names the missing principal rather
+	# than a grant nobody could have held.
+	_in_agent_reach
+	# `risk_allows` is NOT a precondition here, and cannot be: it derives from
+	# max(_matching_ranks), which the Decision 45 intersection empties whenever there is no
+	# caller — so requiring it made this rule unreachable for a second reason. Risk is a
+	# different axis from identity, and `tool_risk_denied` stays mutually exclusive with
+	# this because it requires `tool_in_set`, which is false in exactly this case.
 	agent_class == "user_delegated"
 	input.user_id == ""
 }

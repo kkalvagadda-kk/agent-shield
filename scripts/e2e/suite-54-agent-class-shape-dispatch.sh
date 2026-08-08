@@ -78,7 +78,19 @@ async def main():
 
     # T-S54-001: create w/o class -> user_delegated
     async with AsyncSessionLocal() as db:
-        r=await agents_r.create_agent(AgentCreate(name=AG, team=TEAM, agent_type='declarative', execution_shape='durable'), x_user_sub=SUB, user=None, db=db)
+        # R2 (0.2.263) replaced create_agent's `x_user_sub`/`user` params with a single
+        # `claims` dict from the verified token, and added can_create_agent — so a caller
+        # now needs a real user_team_assignments row. This suite calls the handler
+        # DIRECTLY in-pod, bypassing FastAPI's Depends, so it must supply both.
+        #
+        # The role row is INSERTED rather than the gate bypassed: exercising the real
+        # authorization path is the point, and a synthetic sub with no row would raise
+        # NoPlatformRole (R0's invariant) rather than quietly defaulting to contributor.
+        await db.execute(text('INSERT INTO user_team_assignments (user_sub, team_name, role) '
+                              'VALUES (:s, :t, :r) ON CONFLICT (user_sub) DO NOTHING'),
+                         {'s': SUB, 't': TEAM, 'r': 'contributor'})
+        await db.flush()
+        r=await agents_r.create_agent(AgentCreate(name=AG, team=TEAM, agent_type='declarative', execution_shape='durable'), claims={'sub': SUB}, db=db)
         await db.commit()
         out['t1_class']=r.agent_class
 
@@ -90,7 +102,11 @@ async def main():
 
     # T-S54-003: PATCH daemon -> reload daemon (update_agent orphan wired)
     async with AsyncSessionLocal() as db:
-        await agents_r.update_agent(AG, AgentUpdate(agent_class='daemon'), db=db)
+        # R3 gated PATCH behind _require_manage(db, claims, agent) — platform-admin OR
+        # agent-admin on the artifact. SUB created AG above, so create_agent's
+        # grant_creator_admin already gave it agent-admin; passing claims exercises
+        # that grant rather than sidestepping the check.
+        await agents_r.update_agent(AG, AgentUpdate(agent_class='daemon'), claims={'sub': SUB}, db=db)
         await db.commit()
     async with AsyncSessionLocal() as db:
         a=(await db.execute(select(Agent).where(Agent.name==AG))).scalar_one()

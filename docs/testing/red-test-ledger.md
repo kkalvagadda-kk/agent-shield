@@ -11,6 +11,30 @@ the OPA identity floor), the first file-level hygiene rule (flagged two suites w
 are not gated), and `suite-45` (looks like an auth regression, is a missing fixture). Every
 one of those cost time that a written attribution would have saved.
 
+## Running the suites — use the shared runner, and know its two failure modes
+
+```bash
+bash scripts/run-tests.sh --groups                 # what groups exist
+bash scripts/run-tests.sh --group tools,rbac       # the minimum that discriminates
+bash scripts/run-tests.sh --audit                  # registration hygiene, cluster-free
+```
+
+**Never hand-roll a `while read ... < manifest` loop.** Without `</dev/null` on the suite
+invocation a suite consumes the rest of the manifest from stdin and the loop ends *silently,
+reporting success*. That guard is at `run-tests.sh:190`. A hand-rolled loop stopped at 68/105
+and then 69/105 on 2026-08-08 and both times the early stop was misread as cluster contention.
+
+**Two things distort a parallel run, and both look like regressions:**
+
+| Symptom | Real cause |
+|---|---|
+| `rc=124`, no result line | the per-suite timeout. 300s is too short for suites that poll for cluster state (schedulers, triggers, deployment GC). Use 300s for a scoped run, 700s+ for the full manifest. |
+| a suite red in parallel, green alone | contention — suites share personas, fixture names and the token endpoint. `suite-94`, `suite-96`, `suite-97`, `suite-98` all did this on 2026-08-08. |
+
+So: **a red from a parallel or short-timeout run is a hypothesis, not a result.** Re-run the
+suite alone before believing it. 4-way parallel did 37 suites in ~10 min vs ~2 h serially, so
+the speed is worth the re-check — but only if the re-check actually happens.
+
 ## How to use it
 
 - **Before fixing a red test**, check here. If it is listed, the cause is already known.
@@ -31,9 +55,22 @@ one of those cost time that a written attribution would have saved.
 
 ## API layer (bash, `scripts/e2e/`)
 
-Ground truth: a full-manifest run on 2026-08-08 reached **68 of 105** suites before it
-contended with concurrent repair runs — **53 green, 15 red**. That run is what produced this
-table; nothing here is from memory.
+Ground truth: full-manifest runs on 2026-08-08.
+
+**CORRECTION.** This section first said the run "contended with concurrent repair runs" and
+stopped at 68 of 105. That attribution was wrong. The runner was a hand-rolled
+`while IFS='|' read ... done < manifest` loop with no `</dev/null` on the suite invocation —
+so a suite that reads stdin consumed the rest of the manifest and the loop ended silently,
+reporting success. It stopped at 68 and then at 69 for the same reason, twice, and I blamed
+the cluster both times.
+
+`scripts/run-tests.sh:190` has carried the `</dev/null` guard all along. Copying the loop
+without the guard is the same shape as every other defect in this file: the mechanism was
+already solved somewhere in the repo and I reimplemented the broken half.
+
+The replacement runner also drops the per-suite timeout from 900s to 300s (almost every
+suite finishes under 60s; the few that poll for cluster state were burning 15 minutes each)
+and runs 4-way parallel.
 
 ### FIXED AND RE-VERIFIED GREEN (2026-08-08)
 
@@ -74,12 +111,12 @@ not green.**
 | Suite | Result | Notes |
 |---|---|---|
 | `suite-45-hitl-e2e` | 3/5/5 | **G-100** — the `hitl-agent` fixture does not exist. 404s, not auth. |
-| `suite-26-scheduler` | 3 passed / 1 failed | untriaged |
+| ~~`suite-26-scheduler`~~ | GREEN on re-run | timing flake — the scheduler needed >90s to register a job |
 | `suite-37-workflow-hitl-opa` | 1 passed / 2 failed | untriaged; touches OPA, so re-check against the Decision 45 rego |
-| `suite-54-agent-class-shape-dispatch` | traceback | untriaged |
+
 | `suite-59-workflow-orchestrations-live` | FAILED | untriaged |
 | `suite-60-single-agent-durable-hitl` | FAILED | untriaged |
-| `suite-67-deployment-gc-and-drift` | no result line | untriaged |
+| ~~`suite-67-deployment-gc-and-drift`~~ | GREEN on re-run | timing flake |
 
 ### NEVER RUN in this pass
 

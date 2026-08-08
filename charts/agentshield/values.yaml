@@ -767,7 +767,9 @@ registry-api:
     # 0.2.271: creator-scoped catalog; tokenless pod read path closed (SA token).
     # 0.2.272: Decision 45 — user grants enforced for user_delegated (OPA Gate 3
     # intersects the agent reach with the caller's teams); agent_class from the bundle.
-    tag: "0.2.272"
+    # 0.2.273: deny_reason precedence — the identity floor outranks the Decision 45
+    # intersection, and two rules it made unreachable are guarded on agent reach.
+    tag: "0.2.273"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
