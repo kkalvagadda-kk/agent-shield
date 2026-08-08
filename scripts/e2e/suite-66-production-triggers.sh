@@ -55,7 +55,10 @@ import sys as _sys; _sys.path.insert(0, "/tmp")
 # A static Authorization header is evaluated once at client construction and dies
 # mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
 from e2e_auth import BearerAuth
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+# Sourcing does not mint — the CALL does. Without it ${E2E_SUB} is empty.
+e2e_set_token "$NAMESPACE" "$API_POD"
+
+H={"X-User-Sub":"${E2E_SUB}","X-User-Team":"platform"}
 GW="http://agentshield-event-gateway:8091"
 SFX=uuid.uuid4().hex[:6]; NAMES=[f"s66-a-{SFX}",f"s66-b-{SFX}"]; WFN=f"s66-wf-{SFX}"
 INSTR="You answer factual questions. Reply with ONLY the answer — no preamble."
@@ -202,6 +205,8 @@ else
   echo "PASS  T-S66-COMPLETE every gate assertion ran (001-002, none skipped)"
   PASS=$((PASS+1))
 fi
+
+
 
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   rm -f "$DRIVER" "$OUTFILE" 2>/dev/null || true

@@ -140,6 +140,9 @@ if [ -z "$API_POD" ]; then
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
   exit 1
 fi
+
+# Sourcing does not mint — the CALL does. Without it ${E2E_SUB} is empty.
+e2e_set_token "$NAMESPACE" "$API_POD"
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
@@ -169,7 +172,7 @@ from models import (Agent, AgentRun, AgentTrigger, AgentVersion, Deployment,
                     EvalRun, EvalRunResult, PlaygroundRun, RunStep)
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = "${E2E_SUB}"
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies

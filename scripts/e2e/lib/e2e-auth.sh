@@ -145,8 +145,34 @@ e2e_require_token() {
 # command substitution exits only that subshell, so `E2E_TOKEN="$(e2e_require_token
 # ...)"` silently yields an EMPTY token and the suite then fails later with a wall of
 # 401s — the misdirected-failure mode this whole helper exists to end.
+# Sets E2E_TOKEN and, alongside it, E2E_SUB — the `sub` claim DECODED FROM THAT TOKEN.
+#
+# WHY E2E_SUB EXISTS
+#   Twenty-five call sites across the suites hardcoded `75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6`
+#   as "the admin sub", and three more used `047fad5f-…`. NEITHER has a
+#   `user_team_assignments` row on the current cluster: a realm recreation mints new subs and
+#   nothing updated the literals. They were harmless while identity came from a header nobody
+#   verified. They stopped being harmless when R2 made `created_by` come from the VERIFIED
+#   token — a seeded agent is then owned by the real admin, and a suite asserting against the
+#   literal gets "Only the agent owner can run it in the playground."
+#
+#   Deriving it from the token makes the two unable to disagree, which is the same rule
+#   already applied in studio/e2e/lib/api.ts and suite-70. A suite that authenticates as X
+#   and asserts about Y is testing nothing it thinks it is.
+#
+#   No signature verification here on purpose — this is a test helper reading its own token,
+#   and the server verifies it for real on every call the suite makes.
 e2e_set_token() {
   E2E_TOKEN="$(e2e_token "$@")" || true
+  E2E_SUB="$(printf '%s' "${E2E_TOKEN:-}" | cut -d. -f2 | python3 -c '
+import base64, json, sys
+raw = sys.stdin.read().strip()
+try:
+    print(json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))["sub"])
+except Exception:
+    print("")
+' 2>/dev/null || true)"
+  export E2E_SUB
   if [ -z "${E2E_TOKEN:-}" ]; then
     echo "FATAL: could not obtain a Keycloak token for ${E2E_KC_USER} (client ${E2E_KC_CLIENT})." >&2
     echo "       Trigger CRUD requires a real JWT since 76b3570 — X-User-Sub alone returns 401." >&2

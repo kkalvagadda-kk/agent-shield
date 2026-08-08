@@ -195,7 +195,11 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             if (GATED.search(_s) and not NOT_AGENT_CREATE.search(_s)) or GATED_READ.search(_s):
                 gated_call_seen = True
                 break
-    if gated_call_seen and "Authorization" not in t:
+    # `auth=BearerAuth()` is httpx's own credential hook — the header never appears as a
+    # literal, so a text search for "Authorization" cannot see it. suite-95 authenticates
+    # that way and was flagged. Recognise the marker rather than widen the search.
+    credentialed_bash = ("Authorization" in t) or ("BearerAuth" in t)
+    if gated_call_seen and not credentialed_bash:
         FAIL.append(
             f"{p.name}  makes a gated agents/tools/skills/mcp-servers call and never sets an "
             f"Authorization header ANYWHERE in the file — every one of those calls is 401/403"
@@ -271,6 +275,30 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             f"{p.name}:{t[:_m.start()].count(chr(10)) + 1}  header dict `{_m.group(1)}` sets "
             f"X-User-* but no Authorization — calls using it are 401 on any gated route"
         )
+
+    # 9 — the token/sub is USED before it is MINTED.
+    # Sourcing lib/e2e-auth.sh does not mint anything; `e2e_set_token` does. A suite that
+    # references ${E2E_TOKEN} or ${E2E_SUB} above that call gets an empty string under
+    # `set -u`, or an "unbound variable" abort — and either way every identity assertion
+    # below silently compares against "".
+    #
+    # THIRD time this shape shipped from a mechanical edit pass (suite-20/23/24/25/29/40,
+    # then suite-70, then nine more when ${E2E_SUB} replaced the stale literals). Each time
+    # the insertion point was chosen without checking where the variable was first read.
+    # Remembering has not worked; this rule is the substitute.
+    _mint = next((i for i, l in enumerate(t.splitlines())
+                  if re.match(r"\s*e2e_set_token\s", l)), None)
+    if _mint is not None:
+        _use = next((i for i, l in enumerate(t.splitlines())
+                     if ("${E2E_SUB}" in l or "${E2E_TOKEN}" in l)
+                     and not l.lstrip().startswith("#")
+                     and "e2e_set_token" not in l
+                     and 'E2E_TOKEN="$(e2e' not in l), None)
+        if _use is not None and _use < _mint:
+            FAIL.append(
+                f"{p.name}:{_use + 1}  uses ${{E2E_TOKEN}}/${{E2E_SUB}} at line {_use + 1} but "
+                f"e2e_set_token is not called until line {_mint + 1} — it expands to empty"
+            )
 
     # 4 — the token is referenced but never obtained
     if "E2E_TOKEN" in t and "e2e-auth.sh" not in t:

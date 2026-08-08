@@ -24,6 +24,12 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# ${E2E_SUB} is the sub DECODED FROM the minted token (lib/e2e-auth.sh). Sourcing alone
+# does not mint — the CALL does, and without it E2E_SUB expands to empty and every
+# identity assertion silently compares against "".
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 [ -z "$API_POD" ] && { echo "ERROR: no registry-api pod"; exit 1; }
 
 echo "=== Suite 60: single-agent durable HITL (T4) — real pods, no fakes ==="
@@ -36,7 +42,7 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun, Approval
 
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+H={"X-User-Sub":"${E2E_SUB}","X-User-Team":"platform"}
 AGENT="wf-payout"
 
 async def running(name):

@@ -53,7 +53,13 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun
 BASE = "http://localhost:8000/api/v1"
-H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
+H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
 OUT = os.environ["S68_OUT"]
 SFX = uuid.uuid4().hex[:6]
 NAME = f"s68-daemon-{SFX}"
@@ -169,11 +175,7 @@ if [ -z "$RES" ]; then
   exit 1
 fi
 
-# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
-# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
-# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
+
 
 PASS=0; FAIL=0
 while IFS= read -r line; do

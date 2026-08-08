@@ -130,7 +130,7 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, EvalRun, EvalRunResult, PlaygroundRun
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = "${E2E_SUB}"
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 # Both are injected by the bash layer so this invocation's fixtures and its result
 # file share ONE identity and cannot collide with a concurrent run.

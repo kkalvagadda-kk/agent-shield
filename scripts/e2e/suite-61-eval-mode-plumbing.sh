@@ -87,7 +87,7 @@ from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult, PlaygroundDataset
 
 BASE = "http://localhost:8000/api/v1"
-SUB = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+SUB = "${E2E_SUB}"
 H = {"X-User-Sub": SUB, "X-User-Team": "platform"}
 SUFFIX = uuid.uuid4().hex[:8]
 AGENT = f"s61-eval-agent-{SUFFIX}"

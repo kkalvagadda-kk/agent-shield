@@ -116,7 +116,7 @@ from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = "${E2E_SUB}"
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 SFX = uuid.uuid4().hex[:8]
 AGENT = f"s72-durable-{SFX}"

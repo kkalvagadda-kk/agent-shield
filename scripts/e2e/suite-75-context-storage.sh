@@ -665,7 +665,7 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun, Approval
 
 BASE = "http://localhost:8000/api/v1"
-H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
+H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
 AGENT = "wf-payout"
 
 def out(tid, verdict, detail=""):

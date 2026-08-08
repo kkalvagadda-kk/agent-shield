@@ -47,7 +47,7 @@ api_create_deploy() {  # $1 = agent name
   dbq "
 import asyncio, httpx
 # X-User-* remain AUDIT STAMPS; the Bearer is the R1 authentication.
-H={'X-User-Sub':'75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6','X-User-Team':'platform','Authorization':'Bearer ${E2E_TOKEN}'}
+H={'X-User-Sub':'${E2E_SUB}','X-User-Team':'platform','Authorization':'Bearer ${E2E_TOKEN}'}
 async def m():
     async with httpx.AsyncClient(base_url='http://localhost:8000/api/v1', headers=H, timeout=40) as c:
         pid=(await c.get('/llm-providers/', params={'team':'platform'})).json()['items'][0]['id']
@@ -72,7 +72,7 @@ asyncio.run(m())"
 }
 api_delete() { dbq "
 import asyncio, httpx
-H={'X-User-Sub':'75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6','X-User-Team':'platform'}
+H={'X-User-Sub':'${E2E_SUB}','X-User-Team':'platform'}
 async def m():
     async with httpx.AsyncClient(base_url='http://localhost:8000/api/v1', headers=H, timeout=40) as c:
         print((await c.delete('/agents/$1')).status_code)

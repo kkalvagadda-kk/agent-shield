@@ -20,10 +20,25 @@ set -euo pipefail
 
 PASS=0; FAIL=0; SKIP=0
 AGENT="${HITL_AGENT:-hitl-agent}"
-KALYAN="643b0e62-b437-40f8-8104-57c34203624b"
-ADMIN="75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-
 POD=$(kubectl get pods -n agentshield-platform -l app.kubernetes.io/name=registry-api --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# ${E2E_SUB} is the sub DECODED FROM the minted token (lib/e2e-auth.sh). This suite used a
+# hardcoded literal with no user_team_assignments row, so once R2 made created_by come from
+# the verified token its playground runs 403'd: "Only the agent owner can run it".
+# This suite names its pod POD, not API_POD.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "agentshield-platform" "$POD"
+
+# The playground refuses a caller that is not the agent owner, and `created_by` comes
+# from the VERIFIED token since R2 — so the caller here must be the same identity the
+# suite authenticates as, not a second platform-admin picked by hand. There are two
+# platform-admin subs on this cluster; hardcoding either one is a coin flip.
+KALYAN="${E2E_SUB}"
+
+ADMIN="${E2E_SUB}"
+
+
+
 if [ -z "$POD" ]; then
   echo "FATAL: registry-api pod not found"
   exit 1

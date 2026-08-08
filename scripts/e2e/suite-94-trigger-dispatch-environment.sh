@@ -93,6 +93,12 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, AgentRun
 
 BASE = "http://localhost:8000/api/v1"
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # Trigger CRUD is gated by `require_user` (routers/triggers.py), and since R1/FR-11 so
 # are /llm-providers/, /agents/{name}/deploy and /agents/{name}/versions — `X-User-Sub`
 # alone returns 401. X-User-Sub STAYS: it is the audit stamp `armed_by` reads.
@@ -101,7 +107,7 @@ BASE = "http://localhost:8000/api/v1"
 # detached and its last deploy lands long after a single token would have expired. The
 # grant itself lives in lib/e2e_auth.py — one definition, every suite — rather than a
 # private token_for() copy.
-H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
+H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
 try:
     mint()  # prove a token is obtainable NOW so a bad fixture fails loud, not at case 6
 except Exception as _exc:  # surfaced as a case failure below, never a silent skip
@@ -440,11 +446,7 @@ if [ -z "$RES" ]; then
   exit 1
 fi
 
-# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
-# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
-# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
+
 
 PASS=0; FAIL=0
 while IFS= read -r line; do

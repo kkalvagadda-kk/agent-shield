@@ -153,6 +153,34 @@ New script. Creates and deploys the five always-running agents the suites assume
 So the twelve-tests-in-one-fix estimate was **wrong**. The fixture was one of at least three
 prerequisites, and finding that out cost less than assuming it.
 
+### Stale subs — fixed across 21 suites (2026-08-08)
+
+`lib/e2e-auth.sh` now exports **`E2E_SUB`, decoded from the token it just minted**. 28 hardcoded
+occurrences of two stale subs (`75c7c8b3-…` ×25, `047fad5f-…` ×3) were replaced with it. Neither
+literal has a `user_team_assignments` row — a realm recreation mints new subs and nothing updated
+them. Same rule as `studio/e2e/lib/api.ts` and `suite-70`: derive the sub FROM the credential, so
+the two cannot disagree.
+
+**It did not fix the six reds, exactly as predicted before starting.** What it changed:
+`suite-45` T-S45-003/004 stopped returning 403. `suite-45` is still 4 passed / 7 failed — the
+remaining failures need a run that actually parks an approval, which needs agent execution.
+
+**Ordering was the hard part, and it bit three times.** A mechanical pass that inserts a
+definition without checking where the variable is first *read* produces:
+
+- `e2e_set_token` before `API_POD` is assigned (the mint needs the pod)
+- `${E2E_SUB}` read before `e2e_set_token` (expands to empty under `set -u`, or aborts)
+- both at once, needing the pod resolution itself hoisted
+
+Now **gate rule 9** — `${E2E_TOKEN}`/`${E2E_SUB}` used above the `e2e_set_token` call. Remembering
+had not worked across three passes; the rule is the substitute. Also: rule 5 now recognises
+`BearerAuth` (httpx's credential hook never writes a literal `Authorization`, so `suite-95` was a
+false positive).
+
+**Two platform-admin subs exist on this cluster** (`643b0e62-…`, `5cf374d6-…`). `suite-45`
+authenticated as one and called the playground as the other, so the owner check refused it.
+Hardcoding either is a coin flip; the caller now comes from the token.
+
 ### FIXED after triage (2026-08-08)
 
 | Suite | Now | Was |
