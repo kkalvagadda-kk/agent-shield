@@ -55,7 +55,12 @@ Affected services and their tag variables:
 
 Run `bash scripts/check-tag-content-coupling.sh` before deploying — it is cluster-free, takes ~5s, and catches exactly this.
 
-Run `bash scripts/check-e2e-auth-hygiene.sh` too, whenever a change adds or tightens auth on a router. Also cluster-free (~1s). It fails on the four ways an e2e suite silently stops authenticating: a duplicate `headers=` kwarg (SyntaxError inside the in-pod driver), two `Authorization` keys in one dict (NOT an error — the last wins, so the call goes out as the wrong identity), an agent mutation with no credential, and `${E2E_TOKEN}` referenced without sourcing `lib/e2e-auth.sh`. Three RBAC phases in a row shipped a router change that turned suites red; R2's sweep list was written by hand and missed 28 suites, several of which stayed red for a whole phase. Derive the list from the tree.
+Run `bash scripts/check-e2e-auth-hygiene.sh` too, whenever a change adds or tightens auth on a router — **and after any scripted multi-file edit under `scripts/e2e/`**. Cluster-free (~1s). Its rules are derived from the tree and from `lib/e2e-auth.sh`, never from a hand-written list. They cover two families:
+
+- **A suite silently stops authenticating** — a duplicate `headers=` kwarg (SyntaxError inside the in-pod driver); two `Authorization` keys in one dict (NOT an error — the last wins, so the call goes out as the wrong identity); a mutation or gated read with no credential; a header dict that authenticates only the cleanup; `${E2E_TOKEN}` referenced without sourcing `lib/e2e-auth.sh`.
+- **A scripted edit breaks runtime order** — a split line continuation (something inserted between the halves of one command); a value read above the call that provides it; a lib helper called with an argument that is not assigned until further down.
+
+`bash -n` catches **none** of these: ordering is not syntax, and a broken header dict lives inside a Python string. Do not read "parses clean" as "the edit is sound" — that gap is where every one of these shipped from. Three RBAC phases in a row shipped a router change that turned suites red; R2's sweep list was written by hand and missed 28 suites, several of which stayed red for a whole phase. Derive the list from the tree.
 
 ### 3. Experience Docs
 

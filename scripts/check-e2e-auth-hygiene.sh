@@ -112,6 +112,64 @@ GATED_READ = re.compile(
 # send no Authorization header (declarative-runner, deploy-controller, the SDK resolver).
 NOT_AGENT_CREATE = re.compile(r"/versions|/deploy|/triggers|/identities|/agents/[^'\"]*/tools|/memory|/chat|/runs|/deployments|/stats|/health")
 
+# ── The lib's contract, DERIVED from lib/e2e-auth.sh ──────────────────────────
+# Rule 9 needs two facts about the shared auth library, and must not be told them:
+#
+#   * which variables it sets, and whether they land at SOURCE time (a top-level
+#     assignment — live the instant a suite sources the file) or at CALL time
+#     (assigned inside a function body — live only once that function has run)
+#   * which function calls provide each call-time variable, transitively
+#     (`e2e_refresh_token` provides E2E_TOKEN because it calls `e2e_set_token`)
+#
+# Derived, never listed. Every miss in this file's history came from a hand-written
+# list going stale: four grep patterns each narrower than their target, and one
+# 17-suite sweep that missed 28. Add a helper to the lib and rule 9 covers it with
+# no edit here.
+LIB_PATH = pathlib.Path("scripts/e2e/lib/e2e-auth.sh")
+CALL_TIME_VARS = {}   # VAR -> {function names that provide it, transitively}
+LIB_FUNCS = set()     # every e2e_* function the lib defines
+if LIB_PATH.is_file():
+    fn, direct, calls, source_time = None, {}, {}, set()
+    heredoc = None
+    for ln in LIB_PATH.read_text().splitlines():
+        # Skip heredoc bodies. The lib embeds whole Python programs, and `H={...}` in
+        # one of them would otherwise register as a variable the lib provides — a
+        # false positive on every suite that names a header dict `H`.
+        if heredoc is not None:
+            if ln.strip() == heredoc:
+                heredoc = None
+            continue
+        hd = re.search(r"<<-?\s*'?\"?([A-Za-z_][A-Za-z0-9_]*)'?\"?\s*$", ln)
+        if hd:
+            heredoc = hd.group(1)
+            continue
+        # Function bodies here open with `name() {` and close with `}` in column 0.
+        # Brace COUNTING would be wrong: the embedded Python is full of braces.
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", ln)
+        if m:
+            fn = m.group(1)
+            LIB_FUNCS.add(fn)
+            direct.setdefault(fn, set())
+            calls.setdefault(fn, set())
+            continue
+        if fn and ln.startswith("}"):
+            fn = None
+            continue
+        a = re.match(r"\s*(?:export\s+)?([A-Z][A-Z0-9_]+)=", ln)
+        if a:
+            (direct[fn].add(a.group(1)) if fn else source_time.add(a.group(1)))
+        if fn:
+            calls[fn] |= {c for c in re.findall(r"\b(e2e_[a-z0-9_]+)\b", ln) if c != fn}
+    provides = {f: set(v) for f, v in direct.items()}
+    for _ in range(len(provides) + 1):          # transitive closure
+        for f, cs in calls.items():
+            for c in cs:
+                provides[f] |= provides.get(c, set())
+    for f, vs in provides.items():
+        for v in vs:
+            if v not in source_time:            # source-time vars need no call
+                CALL_TIME_VARS.setdefault(v, set()).add(f)
+
 for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
     t = p.read_text()
     line_of = lambda idx: t[:idx].count("\n") + 1
@@ -276,29 +334,90 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
             f"X-User-* but no Authorization — calls using it are 401 on any gated route"
         )
 
-    # 9 — the token/sub is USED before it is MINTED.
-    # Sourcing lib/e2e-auth.sh does not mint anything; `e2e_set_token` does. A suite that
-    # references ${E2E_TOKEN} or ${E2E_SUB} above that call gets an empty string under
-    # `set -u`, or an "unbound variable" abort — and either way every identity assertion
-    # below silently compares against "".
+    # 9 — RUNTIME ORDER: something is used before the thing that provides it.
     #
-    # THIRD time this shape shipped from a mechanical edit pass (suite-20/23/24/25/29/40,
-    # then suite-70, then nine more when ${E2E_SUB} replaced the stale literals). Each time
-    # the insertion point was chosen without checking where the variable was first read.
-    # Remembering has not worked; this rule is the substitute.
-    _mint = next((i for i, l in enumerate(t.splitlines())
-                  if re.match(r"\s*e2e_set_token\s", l)), None)
-    if _mint is not None:
-        _use = next((i for i, l in enumerate(t.splitlines())
-                     if ("${E2E_SUB}" in l or "${E2E_TOKEN}" in l)
-                     and not l.lstrip().startswith("#")
-                     and "e2e_set_token" not in l
-                     and 'E2E_TOKEN="$(e2e' not in l), None)
-        if _use is not None and _use < _mint:
+    # THE CLASS, not one instance of it. Two shapes, both invisible to `bash -n` because
+    # ordering is not syntax:
+    #
+    #   A. use before define      `${E2E_SUB}` read above the `e2e_set_token` that sets it
+    #   B. call before its args   `e2e_set_token "$NS" "$API_POD"` above `API_POD=`
+    #
+    # Shape A shipped three times from mechanical edit passes (suite-20/23/24/25/29/40 in
+    # R3, then suite-70, then nine more when ${E2E_SUB} replaced the stale sub literals).
+    # Shape B shipped in that same E2E_SUB pass. Each time the insertion point was chosen
+    # from a TEXTUAL landmark ("after the source line") while correctness depended on
+    # DATAFLOW — and those two agree on the uniform majority of suites and diverge exactly
+    # in the tail that resolves API_POD late or inside a function.
+    #
+    # The first version of this rule hardcoded `E2E_TOKEN`, `E2E_SUB` and `e2e_set_token`.
+    # It therefore caught shape A only and could not have seen shape B at all: an instance
+    # fix wearing a class fix's clothes. Both names and functions are now derived from the
+    # lib above.
+    #
+    # NOTE — neither shape is silent. All 105 suites run `set -euo pipefail`, so both abort
+    # naming the variable. The problem was never silence; it is that the only signal costs a
+    # CLUSTER RUN, while the cheap post-edit check is `bash -n`, which answers a different
+    # question. This rule is the cheap check that answers the right one.
+    _lines = t.splitlines()
+
+    def _scan(pred):
+        """First non-comment line index satisfying pred, or None. `trap` lines are skipped:
+        their body runs at EXIT, so a trap referencing a variable assigned below it is
+        correct, not a bug — flagging it is the kind of noise that gets a gate ignored."""
+        for _i, _l in enumerate(_lines):
+            _s = _l.lstrip()
+            if _s.startswith("#") or _s.startswith("trap "):
+                continue
+            if pred(_l):
+                return _i
+        return None
+
+    # (a) shape A — a call-time variable read above everything that could provide it.
+    for _var, _provs in sorted(CALL_TIME_VARS.items()):
+        _call = re.compile(r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])" % "|".join(sorted(_provs)))
+        # A suite may also mint into the variable itself
+        # (`E2E_TOKEN="$(e2e_require_token …)"`) — that assignment is a provider too.
+        _assign = re.compile(r"^\s*(?:export\s+)?%s=" % _var)
+        _read = re.compile(r"\$\{%s[}:]|\$%s(?![A-Za-z0-9_])" % (_var, _var))
+        _prov_at = _scan(lambda l, _c=_call, _a=_assign: bool(_c.search(l) or _a.match(l)))
+        _read_at = _scan(lambda l, _r=_read, _c=_call, _a=_assign:
+                         bool(_r.search(l)) and not _c.search(l) and not _a.match(l))
+        if _read_at is None:
+            continue
+        if _prov_at is None:
             FAIL.append(
-                f"{p.name}:{_use + 1}  uses ${{E2E_TOKEN}}/${{E2E_SUB}} at line {_use + 1} but "
-                f"e2e_set_token is not called until line {_mint + 1} — it expands to empty"
+                f"{p.name}:{_read_at + 1}  reads ${{{_var}}} but never calls anything that "
+                f"sets it ({', '.join(sorted(_provs))}) — it expands to empty"
             )
+        elif _read_at < _prov_at:
+            FAIL.append(
+                f"{p.name}:{_read_at + 1}  reads ${{{_var}}} at line {_read_at + 1}, but the "
+                f"call that provides it is not until line {_prov_at + 1}"
+            )
+
+    # (b) shape B — a lib call whose own ARGUMENTS are assigned further down the file.
+    # Only flagged when the assignment exists BELOW the call: a variable never assigned in
+    # the file may legitimately arrive from the environment (run-tests.sh:190 passes
+    # NAMESPACE), and guessing there produces false positives.
+    if LIB_FUNCS:
+        _anyfn = re.compile(r"(?<![A-Za-z0-9_])(?:%s)(?![A-Za-z0-9_])" % "|".join(sorted(LIB_FUNCS)))
+        _assigned_at = {}
+        for _i, _l in enumerate(_lines):
+            _a = re.match(r"\s*(?:export\s+|local\s+)?([A-Za-z_][A-Za-z0-9_]*)=", _l)
+            if _a and _a.group(1) not in _assigned_at:
+                _assigned_at[_a.group(1)] = _i
+        for _i, _l in enumerate(_lines):
+            _s = _l.lstrip()
+            if _s.startswith("#") or _s.startswith("trap ") or not _anyfn.search(_l):
+                continue
+            for _v in set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[}:]|\$([A-Za-z_][A-Za-z0-9_]*)", _l)):
+                _name = _v[0] or _v[1]
+                _at = _assigned_at.get(_name)
+                if _at is not None and _at > _i:
+                    FAIL.append(
+                        f"{p.name}:{_i + 1}  calls a lib helper with ${_name}, which is not "
+                        f"assigned until line {_at + 1} — unbound at that point under `set -u`"
+                    )
 
     # 4 — the token is referenced but never obtained
     if "E2E_TOKEN" in t and "e2e-auth.sh" not in t:
@@ -359,5 +478,6 @@ if FAIL:
 
 print("=== e2e auth hygiene: clean ===")
 print("  no duplicate headers kwargs, no duplicate Authorization keys,")
-print("  no uncredentialed agent/tool/skill mutations, no unsourced ${E2E_TOKEN}.")
+print("  no uncredentialed agent/tool/skill mutations, no unsourced ${E2E_TOKEN},")
+print("  no split line continuations, and nothing used before the call that provides it.")
 PY
