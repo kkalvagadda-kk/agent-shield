@@ -1155,6 +1155,98 @@ export const listPublishRequests = async (params?: {
   return data;
 };
 
+// ---------------------------------------------------------------------------
+// The reviewer surface (Decision 47 step D, gap G-R3-11)
+//
+// The approve button is the only place in the authorization stack where a HUMAN
+// decides, and until this payload existed the human was shown a name, a submitter,
+// a timestamp, a percentage and a colour. Not the prompt, not the tools, not where
+// those tools send data, and not which of them become org-wide on approve.
+// ---------------------------------------------------------------------------
+export interface PublishReviewTool {
+  id: string;
+  name: string;
+  description: string | null;
+  type: string;
+  risk_level: string | null;
+  owner_team: string | null;
+  publish_status: string | null;
+  /** The CASCADE verdict from the server's `plan_tool_cascade` — the same producer the
+   *  submit guard and the approve action use. Never re-derived in the client: a UI that
+   *  computed "will this publish?" itself would eventually disagree with what approve
+   *  actually does, and the reviewer would be the last to know. */
+  disposition: "will_publish" | "blocked" | "already_published";
+  side_effecting: boolean | null;
+  pii_deanonymize_allowed: boolean | null;
+  /** Where the data goes — the single highest-signal field on this screen. */
+  http_method: string | null;
+  http_url: string | null;
+  /** D-1: in full. It is what is being approved. */
+  python_code: string | null;
+  /** D-2: the credential's NAME, never its value. */
+  auth_config_name: string | null;
+  mcp_server_name: string | null;
+  mcp_tool_name: string | null;
+}
+
+export interface PublishReview {
+  request_id: string;
+  asset_type: string;
+  /** D-3. `false` for workflows — their tools arrive through member agents, so the
+   *  payload shape genuinely differs. The drawer must say so rather than render an
+   *  empty tool list, which would read as "this workflow has no tools". */
+  review_supported: boolean;
+  unsupported_reason?: string;
+  submitted_by?: string;
+  submitted_at?: string | null;
+  status?: string;
+  agent?: {
+    id: string;
+    name: string;
+    team: string | null;
+    created_by: string | null;
+    description: string | null;
+    /** `daemon` is exempt from OPA's identity floor — a materially different risk
+     *  decision, and the queue row has never said which kind it is. */
+    agent_class: string | null;
+    agent_type: string | null;
+    execution_shape: string | null;
+    memory_enabled: boolean | null;
+    publish_status: string | null;
+    instructions: string | null;
+  };
+  version?: {
+    id: string;
+    version_number: number | null;
+    image_tag: string | null;
+    git_sha: string | null;
+    git_branch: string | null;
+    eval_passed: boolean | null;
+    adversarial_eval_passed: boolean | null;
+    notes: string | null;
+  } | null;
+  eval?: {
+    score: number | null;
+    run_id: string | null;
+    pass_threshold: number | null;
+    source: "version" | "agent_latest" | "none";
+  };
+  tools?: PublishReviewTool[];
+  cascade?: {
+    will_publish: string[];
+    blocked: { name: string; owner_team: string | null }[];
+    already_published: string[];
+  };
+  knowledge_bases?: { id: string; name: string; team: string | null }[];
+}
+
+export const getPublishReview = async (id: string): Promise<PublishReview> => {
+  const { data } = await http.get<PublishReview>(
+    `/admin/publish-requests/${id}/review`
+  );
+  return data;
+};
+
 export const approvePublishRequest = async (
   id: string,
   body: { grantee_teams?: string[]; expires_at?: string } = {}

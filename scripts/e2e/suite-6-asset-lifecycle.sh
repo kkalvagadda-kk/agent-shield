@@ -20,6 +20,12 @@
 #   T-S6-014 — an OWN-TEAM private tool does NOT block (the over-reach guard for 013)
 #   T-S6-015 — approve CASCADES: the own-team tool flips to published and the response says so
 #   T-S6-016 — an ALREADY-PUBLISHED cross-team tool does not block either
+#   T-S6-017 — the /review payload names EVERY bound tool, not just the cascade
+#   T-S6-018 — it flags EXACTLY the cascade set (asserted both ways)
+#   T-S6-019 — the payload is derived at REQUEST time: a tool bound after submit shows up
+#   T-S6-020 — the credential NAME is shown; the credential VALUE never appears
+#   T-S6-021 — a workflow request says review_supported=false WITH a reason, not a 404
+#   T-S6-022 — agent_class + image_tag + instructions are present
 #
 # API notes vs. test plan:
 #   - DELETE /admin/grants/{id} returns 204 (no body), not 200
@@ -878,6 +884,221 @@ for tid in T-S6-013 T-S6-014 T-S6-015 T-S6-016; do
   line="$(echo "$CASCADE_OUT" | grep "^${tid}|" || true)"
   if [ -z "$line" ]; then
     echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$CASCADE_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T-S6-017..022 — Decision 47 step D: the REVIEWER payload
+#
+# The approve button is the only place in the authorization stack where a HUMAN decides,
+# and until GET /admin/publish-requests/{id}/review existed that human was shown a name,
+# a submitter, a timestamp, a percentage and a colour. G-R3-11.
+#
+# The six cases are the six ways this goes wrong:
+#   017  the payload must name EVERY bound tool, not only the ones that cascade. "2 tools
+#        become org-wide" reads very differently from "this agent uses 4 tools, 2 of which
+#        become org-wide", and the second is the decision being made.
+#   018  it must flag EXACTLY the set the cascade would publish. Asserted BOTH WAYS on
+#        purpose: a payload that marked everything will_publish passes a naive "is the
+#        cascade listed" check, so the already-published tool must come back as
+#        already_published in the same assertion.
+#   019  the payload is derived AT REQUEST TIME from live rows, never snapshotted at
+#        submit. Proven by binding a cross-team private tool AFTER the request was
+#        submitted clean: a snapshot cannot see it, and the reviewer would approve
+#        blind to the one tool the cascade will refuse.
+#   020  the credential NAME is shown and the credential VALUE never appears anywhere in
+#        the payload (D-2). The name is the signal; the value is the leak.
+#   021  a workflow request answers review_supported=false WITH A REASON — not a 404 and
+#        not an agent-shaped payload with an empty tool list, which would read as "this
+#        workflow has no tools" (D-3).
+#   022  agent_class and image_tag are present. `daemon` is exempt from OPA identity
+#        floor and an sdk image is user-built; neither has ever been on the queue row.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-017..022: Decision 47 step D reviewer payload ---"
+
+REVIEW_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + TOK}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+IDS = ("T-S6-017", "T-S6-018", "T-S6-019", "T-S6-020", "T-S6-021", "T-S6-022")
+AGENT   = "s6d-review-" + TS
+OWN     = "s6d_own_" + TS        # platform, private  -> will_publish
+FOREIGN = "s6d_foreign_" + TS    # operations, private -> blocked, bound AFTER submit
+CRED    = "s6d-cred-" + TS
+SECRET_VALUE = "sk-do-not-leak-" + TS
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+_, cred = call("POST", "/auth-configs/", {"name": CRED, "type": "api_key",
+                                          "credentials": {"apikey": SECRET_VALUE},
+                                          "owner_team": "platform"})
+cred_id = cred.get("id")
+_, own = call("POST", "/tools/", {"name": OWN, "type": "http", "description": "review own",
+                                  "risk_level": "high", "http_method": "POST",
+                                  "http_url": "https://payments.example.invalid/refund",
+                                  "side_effecting": True,
+                                  "auth_config_id": cred_id})
+_, foreign = call("POST", "/tools/", {"name": FOREIGN, "type": "http", "description": "review foreign",
+                                      "risk_level": "low", "http_method": "GET",
+                                      "http_url": "https://example.invalid/foreign",
+                                      "owner_team": "operations"})
+own_id, foreign_id = own.get("id"), foreign.get("id")
+
+pub_id = pub_name = None
+_, listing = call("GET", "/tools/?limit=200")
+for row in listing.get("items", []):
+    if row.get("publish_status") == "published" and row.get("owner_team") != "platform" \
+       and row.get("risk_level") in ("low", "medium") and row.get("status") == "active":
+        pub_id, pub_name = row.get("id"), row.get("name"); break
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "agent_class": "daemon",
+                                  "description": "suite 6 reviewer probe",
+                                  "metadata": {"instructions": "REVIEW-PROBE-INSTRUCTIONS"}})
+_, ver = call("POST", "/agents/" + AGENT + "/versions",
+              {"image_tag": "registry.internal/s6d:v7", "eval_passed": True,
+               "adversarial_eval_passed": True})
+
+if sc != 201 or not own_id or not foreign_id or not cred_id:
+    for tid in IDS:
+        check(tid, False, "fixture failed: agent=%s own=%s foreign=%s cred=%s"
+              % (sc, own_id, foreign_id, cred_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+# Submit CLEAN: own-team private + an already-published foreign. Both are publishable, so
+# the submit guard lets it through and we get a pending request to review.
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": own_id})
+if pub_id:
+    call("POST", "/agents/" + AGENT + "/tools", {"tool_id": pub_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = body.get("publish_request_id")
+
+if not pr_id:
+    for tid in IDS:
+        check(tid, False, "no publish_request_id (publish -> %s %s)" % (code, str(body)[:120]))
+    call("DELETE", "/agents/" + AGENT)
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 017 / 018 / 020 / 022 on the clean payload ---------------------------
+rc, rev = call("GET", "/admin/publish-requests/" + pr_id + "/review")
+tools = rev.get("tools") or []
+by_name = {t.get("name"): t for t in tools}
+expected = {OWN} | ({pub_name} if pub_name else set())
+check("T-S6-017", rc == 200 and expected.issubset(set(by_name)),
+      "code=%s payload_tools=%s expected=%s" % (rc, sorted(by_name), sorted(expected)))
+
+own_disp = (by_name.get(OWN) or {}).get("disposition")
+pub_disp = (by_name.get(pub_name) or {}).get("disposition") if pub_name else "already_published"
+cascade = set((rev.get("cascade") or {}).get("will_publish") or [])
+# BOTH WAYS: the own tool cascades AND the published one does not. Either half alone is
+# satisfied by a payload that flags everything.
+check("T-S6-018",
+      own_disp == "will_publish" and pub_disp == "already_published" and cascade == {OWN},
+      "own=%s published(%s)=%s cascade=%s" % (own_disp, pub_name, pub_disp, sorted(cascade)))
+
+blob = json.dumps(rev)
+check("T-S6-020",
+      (by_name.get(OWN) or {}).get("auth_config_name") == CRED and SECRET_VALUE not in blob,
+      "cred_name=%s value_leaked=%s"
+      % ((by_name.get(OWN) or {}).get("auth_config_name"), SECRET_VALUE in blob))
+
+agent_blk = rev.get("agent") or {}
+ver_blk = rev.get("version") or {}
+check("T-S6-022",
+      agent_blk.get("agent_class") == "daemon"
+      and ver_blk.get("image_tag") == "registry.internal/s6d:v7"
+      and agent_blk.get("instructions") == "REVIEW-PROBE-INSTRUCTIONS",
+      "class=%s image=%s instructions=%s"
+      % (agent_blk.get("agent_class"), ver_blk.get("image_tag"),
+         (agent_blk.get("instructions") or "")[:32]))
+
+# --- 019: bind a cross-team private tool AFTER submit ---------------------
+# A payload snapshotted at submit CANNOT see this. The reviewer would then approve
+# blind to the one tool the cascade is about to refuse.
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": foreign_id})
+rc2, rev2 = call("GET", "/admin/publish-requests/" + pr_id + "/review")
+by2 = {t.get("name"): t for t in (rev2.get("tools") or [])}
+blocked = {b.get("name"): b.get("owner_team") for b in ((rev2.get("cascade") or {}).get("blocked") or [])}
+check("T-S6-019",
+      rc2 == 200 and (by2.get(FOREIGN) or {}).get("disposition") == "blocked"
+      and blocked.get(FOREIGN) == "operations",
+      "code=%s disposition=%s blocked=%s" % (rc2, (by2.get(FOREIGN) or {}).get("disposition"), blocked))
+
+# --- 021: a WORKFLOW request is explicitly unreviewable, not silently empty
+# NOTE the router prefix is /api/v1/workflows (not /composite-workflows) and both the
+# publish and delete routes key on the workflow UUID, not its name. Checked in
+# routers/composite_workflows.py rather than assumed.
+WF = "s6d-wf-" + TS
+wsc, wf = call("POST", "/workflows", {"name": WF, "team": "platform",
+                                      "description": "suite 6 reviewer probe wf"})
+wf_id = wf.get("id") if wsc in (200, 201) else None
+wf_pr = None
+wsc2 = None
+if wf_id:
+    # publish_workflow 409s with "No version exists" unless a version is present, and
+    # 403s unless that version passed eval. Measured, not assumed: the first cut of this
+    # case created only the workflow and reported "proved nothing" — correctly, which is
+    # the point of that branch existing.
+    wsc2, _ = call("POST", "/workflows/" + str(wf_id) + "/versions", {"eval_passed": True})
+    _, wb = call("POST", "/workflows/" + str(wf_id) + "/publish", {})
+    wf_pr = wb.get("publish_request_id")
+if wf_pr:
+    rc3, rev3 = call("GET", "/admin/publish-requests/" + wf_pr + "/review")
+    check("T-S6-021",
+          rc3 == 200 and rev3.get("review_supported") is False
+          and bool(rev3.get("unsupported_reason")) and "tools" not in rev3,
+          "code=%s supported=%s reason=%s has_tools_key=%s"
+          % (rc3, rev3.get("review_supported"), (rev3.get("unsupported_reason") or "")[:60],
+             "tools" in rev3))
+else:
+    check("T-S6-021", False,
+          "could not create a workflow publish request (wf=%s id=%s version=%s) — case proved nothing"
+          % (wsc, wf_id, wsc2))
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+if wf_id: call("DELETE", "/workflows/" + str(wf_id))
+for tid in (own_id, foreign_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+if cred_id: call("DELETE", "/auth-configs/" + str(cred_id))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-017 T-S6-018 T-S6-019 T-S6-020 T-S6-021 T-S6-022; do
+  line="$(echo "$REVIEW_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$REVIEW_OUT" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
   elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
     echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"

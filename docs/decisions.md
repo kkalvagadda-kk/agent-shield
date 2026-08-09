@@ -1419,6 +1419,33 @@ entry, not a side effect of this one.
 
 ---
 
+### Step D — the reviewer surface. Five sub-decisions, taken 2026-08-08.
+
+Consequence 1 of option C was that approving an agent silently publishes its tools. The
+control that makes that safe is a human who was *shown* the cascade — and the queue row
+showed a name, a submitter, a timestamp, a percentage and a colour. `grep -c "tool"
+AdminPublishRequestsPage.tsx` returned **0**. Gap G-R3-11.
+
+| Sub-decision | Options | **Choice** | Rationale |
+|---|---|---|---|
+| **D-1** python_code | full text · redacted · hidden | **full text** | It is the thing being approved. A redactor with false negatives advertises a safety it does not have, and this exposes nothing new — the route is platform-admin only and `GET /tools/{id}` already returns the field. |
+| **D-2** credential | name · existence only · name+value | **name only** | The name is the signal ("this tool carries a real credential"); the value is the leak. |
+| **D-3** workflows | in scope · 404 · explicitly unsupported | **explicitly unsupported** | Their tools come through members, so the shape differs. A 404 hides a real request; an empty tool list reads as "no tools". Saying so on screen is the only option that does not mislead. |
+| **D-4** granularity | all-or-nothing · per-tool | **all-or-nothing** | Per-tool refusal needs a partial-cascade concept this decision does not have, and would put a second cascade rule beside `plan_tool_cascade`. |
+| **D-5** grants | show · omit | **show** | `grantee_teams` is already an approve input and was invisible. |
+| **gate** | A optional drawer · B approve inside it · C B + acknowledgement | **B + C when the cascade is non-empty** | B makes "was shown" structural. C reserved for the case that escalates scope, so it does not decay into a click-through. |
+
+**One producer, three readers.** The cascade shown to the reviewer comes from
+`publish_cascade.plan_tool_cascade` — the same function the submit guard and the approve
+action call — derived at request time, never snapshotted. `T-S6-019` proves it: a
+cross-team tool bound *after* submit appears in the payload as `blocked`, which a
+snapshot could not show. The eval triple moved out of `admin.list_publish_requests` into
+`publish_review.resolve_request_evals` for the same reason (Decision 32 is the postmortem
+for that rule being copied).
+
+Implemented: registry-api `0.2.274`, studio `0.1.187`.
+Design: `docs/design/publish-review-surface.md`.
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |

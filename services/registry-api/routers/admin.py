@@ -5,6 +5,7 @@ Endpoints
 ---------
   POST /api/v1/admin/bundle/regenerate              — regenerate OPA bundle data.json from DB
   GET  /api/v1/admin/publish-requests               — list publish requests (?status=pending_review)
+  GET  /api/v1/admin/publish-requests/{id}/review    — full reviewer payload (Decision 47 step D)
   POST /api/v1/admin/publish-requests/{id}/approve  — approve a publish request
   POST /api/v1/admin/publish-requests/{id}/reject   — reject a publish request
   POST /api/v1/admin/grants                         — create an asset grant directly
@@ -30,12 +31,13 @@ from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
 from publish_cascade import plan_tool_cascade
+from publish_review import build_review_payload, resolve_request_evals
 from rbac import require_global_role
-# THE threshold resolution — imported, never re-implemented. It already handles the
-# pre-E-6 NULL rows, and its docstring is the postmortem for what happens when this
-# rule gets copied: "the threshold used to exist four times across three services...
-# they agreed, so nothing ever errored." A fifth copy here would be the same bug.
-from routers.eval_runner import effective_pass_threshold
+# NOTE `effective_pass_threshold` used to be imported here. It moved with the eval
+# resolution into `publish_review`, which is now its only caller in this path — the
+# threshold rule has ONE importer per consumer, which is the whole point of its own
+# docstring ("it used to exist four times across three services... they agreed, so nothing
+# ever errored"). Leaving a dead import here would invite the fifth copy.
 from models import (
     Agent, AgentVersion, ApprovalAuthority, AssetGrant, CompositeWorkflow,
     EvalRun, GrantAudit, PublishRequest, PublishedArtifact, PublishedVersion,
@@ -189,84 +191,23 @@ async def list_publish_requests(
             asset_name_map[row.id] = (row.name, row.team)
 
     # ------------------------------------------------------------------
-    # Resolve each request's eval PER REQUEST, against the version it pins.
+    # Each request's eval, resolved AGAINST THE VERSION IT PINS.
     #
-    # This map used to be keyed by ASSET_ID and resolved by `agent_name` alone
-    # (`.order_by(agent_name, completed_at.desc()).distinct(agent_name)`), so
-    # `PublishRequest.source_version_id` was never read and EVERY pending request
-    # for one agent received the SAME latest eval. A reviewer approves a release on
-    # that number, which made it a correctness bug rather than a missing feature.
-    # Keying by request id is what makes per-request resolution expressible at all.
+    # This block used to live inline here. It moved to `publish_review.resolve_request_evals`
+    # when the reviewer drawer (step D) needed the identical triple for ONE request: a
+    # single-request copy would have been the fourth implementation of a rule that already
+    # has a postmortem (Decision 32 — the map was keyed by ASSET id, so every pending
+    # request for one agent got the same latest eval and a reviewer approved a release on a
+    # number that did not describe it). Same producer, two callers.
     #
-    # Two batched queries, never per-request: this is an admin list view whose whole
-    # job is showing many rows, so an N+1 here is a page-load regression.
-    #
-    # Decision 32. Regression: suite-89 T-S89-001..004.
+    # Still batched: two queries regardless of row count. Regression: suite-89 T-S89-001..004.
     # ------------------------------------------------------------------
-    eval_map: dict[
-        uuid.UUID, tuple[float | None, uuid.UUID | None, float | None, str]
-    ] = {}
-    agent_ids = set(ids_by_type.get("agent") or [])
-    agent_requests = [r for r in rows if r.asset_id in agent_ids]
-
-    pinned = {r.id: r.source_version_id for r in agent_requests if r.source_version_id}
-    unpinned = [r for r in agent_requests if not r.source_version_id]
-
-    # (1) Version-pinned requests — the common case, and the one that was wrong.
-    if pinned:
-        version_rows = (await db.execute(
-            select(EvalRun)
-            .where(
-                EvalRun.agent_version_id.in_(set(pinned.values())),
-                EvalRun.status == "completed",
-            )
-            .order_by(EvalRun.agent_version_id, EvalRun.completed_at.desc())
-            .distinct(EvalRun.agent_version_id)
-        )).scalars().all()
-        by_version = {run.agent_version_id: run for run in version_rows}
-        for req_id, version_id in pinned.items():
-            run = by_version.get(version_id)
-            if run is not None:
-                eval_map[req_id] = (
-                    run.overall_score,
-                    run.id,
-                    effective_pass_threshold(run),
-                    "version",
-                )
-            # else: left out of the map entirely -> eval_source stays "none".
-            # A pinned version with no eval must NEVER borrow another version's
-            # score. That silent borrow IS the bug.
-
-    # (2) Legacy requests that pin no version. `POST /agents/{name}/publish` always
-    #     pins one, so this covers rows written before that landed. The fallback is
-    #     LABELLED `agent_latest` rather than silent, so the reviewer can see that
-    #     the number is not evidence about the thing being published.
-    if unpinned:
-        names = [
-            asset_name_map.get(r.asset_id, (None, None))[0] for r in unpinned
-        ]
-        names = [n for n in names if n]
-        if names:
-            latest_rows = (await db.execute(
-                select(EvalRun)
-                .where(
-                    EvalRun.agent_name.in_(names),
-                    EvalRun.status == "completed",
-                )
-                .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
-                .distinct(EvalRun.agent_name)
-            )).scalars().all()
-            by_name = {run.agent_name: run for run in latest_rows}
-            for r in unpinned:
-                aname = asset_name_map.get(r.asset_id, (None, None))[0]
-                run = by_name.get(aname) if aname else None
-                if run is not None:
-                    eval_map[r.id] = (
-                        run.overall_score,
-                        run.id,
-                        effective_pass_threshold(run),
-                        "agent_latest",
-                    )
+    agent_names = {
+        aid: asset_name_map[aid][0]
+        for aid in (ids_by_type.get("agent") or [])
+        if aid in asset_name_map
+    }
+    eval_map = await resolve_request_evals(db, list(rows), agent_names)
 
     items: list[PublishRequestResponse] = []
     for r in rows:
@@ -276,17 +217,59 @@ async def list_publish_requests(
             resp.asset_team = asset_name_map[r.asset_id][1]
         # Keyed by REQUEST id, not asset id — see the resolution block above.
         if r.id in eval_map:
-            score, run_id, threshold, source = eval_map[r.id]
-            resp.last_eval_score = score
-            resp.last_eval_run_id = run_id
-            resp.last_eval_pass_threshold = threshold
-            resp.eval_source = source
+            facts = eval_map[r.id]
+            resp.last_eval_score = facts.score
+            resp.last_eval_run_id = facts.run_id
+            resp.last_eval_pass_threshold = facts.threshold
+            resp.eval_source = facts.source
         items.append(resp)
 
     return PaginatedResponse[PublishRequestResponse](
         items=items,
         total=total,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /publish-requests/{id}/review
+# ---------------------------------------------------------------------------
+@router.get(
+    "/publish-requests/{request_id}/review",
+    summary="Everything a reviewer must see before approving a publish request",
+)
+async def review_publish_request(
+    request_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The read surface behind the reviewer drawer. Decision 47 step D, gap G-R3-11.
+
+    Read-only by construction. Approve and reject stay where they are — this endpoint
+    exists so the human at the only non-machine gate in the authorization stack is shown
+    what they are authorizing: the prompt, which container, which tools, where those tools
+    send data, which credential each carries, and WHICH TOOLS BECOME ORG-WIDE ON APPROVE.
+
+    Authorization is the router's: R2 put `require_global_role("platform-admin")` on every
+    route here, so no per-route check is added — a second, weaker copy of the guard is how
+    `production-hitl-decide-403-authority.md` happened.
+
+    ONE request, one payload. A drawer that fanned out to six endpoints would render
+    half-populated and the reviewer could not tell which half was missing — a partially
+    rendered review screen is worse than none, because it looks like it worked.
+
+    The cascade is derived HERE, at request time, by `plan_tool_cascade` — the same
+    producer the submit guard and the approve action use, never a snapshot. Decision 47
+    rejected a `cascade_publish` column precisely so the reviewer sees current truth: a
+    tool can be unbound, rebound, or published by another agent's cascade between submit
+    and approve.
+    """
+    pr = (await db.execute(
+        select(PublishRequest).where(PublishRequest.id == request_id)
+    )).scalar_one_or_none()
+    if pr is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Publish request not found."
+        )
+    return await build_review_payload(db, pr)
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle, Loader2, RefreshCw, XCircle, FlaskConical } from "lucide-react";
+import { CheckCircle, Eye, Loader2, RefreshCw, XCircle, FlaskConical } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { scoreColor, thresholdLabel } from "../lib/evalVerdict";
+import PublishReviewDrawer from "../components/admin/PublishReviewDrawer";
 import {
   approvePublishRequest,
   listPublishRequests,
@@ -27,7 +28,12 @@ export default function AdminPublishRequestsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [statusFilter, setStatusFilter] = useState<string>("pending_review");
-  const [approvingId, setApprovingId] = useState<string | null>(null);
+  // The row no longer approves. Decision 47 step D option B: Approve moved INTO the
+  // review drawer, so "the reviewer was shown the tools, the endpoints, the credentials
+  // and the cascade" is structurally true rather than hoped-for. Leaving an Approve on
+  // the row would have made the drawer optional, which is today's behaviour for anyone
+  // in a hurry — and today's behaviour is the gap (G-R3-11).
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectNotes, setRejectNotes] = useState("");
 
@@ -42,7 +48,7 @@ export default function AdminPublishRequestsPage() {
       approvePublishRequest(id),
     onSuccess: () => {
       toast.success("Promoted to catalog. Go to Access Control to grant team access.");
-      setApprovingId(null);
+      setReviewingId(null);
       qc.invalidateQueries({ queryKey: ["publish-requests"] });
     },
     onError: (err: unknown) => {
@@ -68,9 +74,6 @@ export default function AdminPublishRequestsPage() {
     },
   });
 
-  const handleApprove = (pr: PublishRequest) => {
-    approveMutation.mutate({ id: pr.id });
-  };
 
   const handleReject = (pr: PublishRequest) => {
     rejectMutation.mutate({ id: pr.id, notes: rejectNotes });
@@ -218,18 +221,19 @@ export default function AdminPublishRequestsPage() {
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => {
-                                setApprovingId(approvingId === pr.id ? null : pr.id);
+                                setReviewingId(pr.id);
                                 setRejectingId(null);
                               }}
-                              className="inline-flex items-center gap-1 text-xs text-green-600 hover:text-green-800 font-medium"
+                              className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 font-medium"
+                              data-testid={`review-open-${pr.id}`}
                             >
-                              <CheckCircle size={12} />
-                              Promote
+                              <Eye size={12} />
+                              Review &amp; Promote
                             </button>
                             <button
                               onClick={() => {
                                 setRejectingId(rejectingId === pr.id ? null : pr.id);
-                                setApprovingId(null);
+                                setReviewingId(null);
                               }}
                               className="inline-flex items-center gap-1 text-xs text-red-600 hover:text-red-800 font-medium"
                             >
@@ -243,36 +247,6 @@ export default function AdminPublishRequestsPage() {
                         )}
                       </td>
                     </tr>
-
-                    {/* Inline Promote form */}
-                    {approvingId === pr.id && (
-                      <tr key={`approve-${pr.id}`} className="bg-green-50 border-b border-green-100">
-                        <td colSpan={7} className="px-4 py-3">
-                          <div className="flex items-center gap-3">
-                            <p className="text-xs text-slate-600 flex-1">
-                              This will promote the asset to the catalog. Use Access Control to grant team access afterwards.
-                            </p>
-                            <button
-                              onClick={() => handleApprove(pr)}
-                              disabled={approveMutation.isPending}
-                              className="btn-primary text-xs py-2"
-                            >
-                              {approveMutation.isPending ? (
-                                <Loader2 size={12} className="animate-spin" />
-                              ) : (
-                                "Promote to Catalog"
-                              )}
-                            </button>
-                            <button
-                              onClick={() => setApprovingId(null)}
-                              className="btn-secondary text-xs py-2"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
 
                     {/* Inline Reject form */}
                     {rejectingId === pr.id && (
@@ -315,6 +289,15 @@ export default function AdminPublishRequestsPage() {
             </table>
           )}
         </div>
+      )}
+
+      {reviewingId && (
+        <PublishReviewDrawer
+          requestId={reviewingId}
+          onClose={() => setReviewingId(null)}
+          onApprove={() => approveMutation.mutate({ id: reviewingId })}
+          approving={approveMutation.isPending}
+        />
       )}
 
       {data && (

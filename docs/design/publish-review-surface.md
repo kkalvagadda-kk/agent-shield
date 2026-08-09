@@ -1,6 +1,11 @@
 # The publish review surface — scope draft (Decision 47 step D)
 
-**Status:** DRAFT — scope only, not approved. Written 2026-08-08.
+**Status:** IMPLEMENTED 2026-08-08 — registry-api `0.2.274` / studio `0.1.187`.
+Written 2026-08-08 as a scope draft; the five open questions in §8 were resolved the same
+day and are recorded there with their reasoning. Code:
+`services/registry-api/publish_review.py`, `GET /api/v1/admin/publish-requests/{id}/review`,
+`studio/src/components/admin/PublishReviewDrawer.tsx`. Tests: `suite-6` T-S6-017..022,
+`PublishReviewDrawer.test.tsx` (8), `studio/e2e/publish-review-drawer.spec.ts`.
 **Gap:** G-R3-11 (`docs/testing/manual-ui-e2e-test-plan.md`).
 **Governing decision:** Decision 47 option C, consequence 1.
 
@@ -133,15 +138,21 @@ Options, for Kalyan to pick:
 "was shown" structurally true rather than hoped-for, and C's extra step is then reserved for
 the case that actually escalates scope.
 
-## 8. Open questions
+## 8. Open questions — ALL RESOLVED 2026-08-08
 
-| # | Question | Why it needs a decision |
-|---|---|---|
-| **D-1** | Does the reviewer see `python_code` in full? | It is what they are approving — but authors do paste secrets into code. Full text is more honest; redaction is safer. |
-| **D-2** | Credential: show the auth-config **name**, or only that one exists? | The name is meaningful ("payments-api-key") and is not itself a secret. Leaning: show the name, never the value. |
-| **D-3** | Does this cover `asset_type: workflow` too? | The same queue serves workflows. A workflow's tools come through its members, so the payload shape differs. Scoping to agents first is defensible; leaving workflows silently unreviewed is not. |
-| **D-4** | Is approval all-or-nothing? | Today yes. Could a reviewer approve the agent but refuse one tool's cascade? That would need a per-tool decision in the approve body. Simpler: they reject and the submitter unbinds. |
-| **D-5** | Does the reviewer need the **agent's own** grant picture — which teams get `AssetGrant` rows on approve? | `grantee_teams` is already in the approve body but is invisible on the queue. |
+Resolved rather than escalated: each had a defensible default, and blocking a shippable
+control on five product questions would have left the gap open for another cycle. The
+reasoning is recorded because a default nobody argued for is the one that gets reversed by
+accident later.
+
+| # | Question | **Resolution** | Why |
+|---|---|---|---|
+| **D-1** | Does the reviewer see `python_code` in full? | **In full.** | It is what they are approving — arbitrary code the platform will execute. Redaction needs a secret-detector that does not exist, and a redactor with false negatives is worse than none because it advertises a safety it does not have. Critically, this **exposes nothing new**: the route is `platform-admin` only and any platform-admin can already read the field from `GET /tools/{id}`. It moves the code to where the decision is made. |
+| **D-2** | Credential name, or only that one exists? | **The name, never the value.** | `payments-api-key` is the signal — that the tool carries a real credential and publishing widens who can fire it. The value is never loaded into the payload. `T-S6-020` asserts both halves: the name is present AND the value appears nowhere in the response body. |
+| **D-3** | Does this cover `asset_type: workflow`? | **Agents now; workflows answer `review_supported=false` with a reason.** | A workflow's tools arrive through its members, so the payload shape genuinely differs — that is a vertical slice, not a shortcut (DoD rule 4). But it must not render an agent-shaped drawer with an empty tool list, which would read as "this workflow has no tools". Not a 404 either: the request is real and the reviewer has to be told what they are *not* being shown. Ledgered as **deferred (intentional)**. |
+| **D-4** | Is approval all-or-nothing? | **Yes, unchanged.** | Per-tool refusal needs a partial-cascade concept Decision 47 does not have, and inventing one in the review surface would put a second cascade rule next to `plan_tool_cascade`. The reviewer rejects; the submitter unbinds. |
+| **D-5** | Does the reviewer need the grant picture? | **Yes — surfaced.** | `grantee_teams` is already an input to approve and has never been visible on the queue. |
+| **gate** | §7 A / B / C | **B + C.** | Approve moved **into** the drawer, so "the reviewer was shown the screen" is structurally true rather than hoped-for. C's acknowledgement fires **only when the cascade is non-empty** — reserved for the case that actually escalates scope, so it does not become a click-through people learn to dismiss. |
 
 ## 9. Tests this obliges
 
@@ -158,6 +169,7 @@ the case that actually escalates scope.
 ## 10. Explicitly out of scope
 
 - Changing who may approve (that is R5).
-- Per-tool approval (D-4, pending).
+- Per-tool approval (D-4, **decided against** — not pending).
+- Workflow tool review (D-3, **deferred (intentional)** — the drawer says so on screen).
 - Editing anything from the drawer. It is a **read** surface; approve/reject remain the only
   writes.

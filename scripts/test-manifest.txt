@@ -49,7 +49,7 @@ api|agent,deploy|suite-2-lifecycle.sh|Agent Lifecycle
 api|governance|suite-3-safety.sh|Safety Scanning
 api|hitl|suite-4-hitl.sh|HITL Approval Flow
 api|hitl,governance|suite-5-hitl-authority.sh|HITL Authority Scoping
-api|agent,tools|suite-6-asset-lifecycle.sh|Asset Lifecycle
+api|agent,tools,governance|suite-6-asset-lifecycle.sh|Asset Lifecycle — publish, grants, the Decision 47 tool cascade, and the step-D reviewer payload
 api|governance|suite-7-machine-identity.sh|Machine Identity
 api|chat|suite-8-playground.sh|Playground
 api|eval|suite-9-eval.sh|Eval Runner
@@ -198,4 +198,5 @@ browser|eval,workflow|e2e/eval-v2-workflow.spec.ts|Eval v2 workflow
 browser|debug|e2e/zz-debug.spec.ts|Scratch — debug probe
 browser|debug|e2e/zzprobe.spec.ts|Scratch — probe
 browser|eval|e2e/eval-verdict-publish-queue.spec.ts|Publish-queue verdict against the run's own threshold + reload
+browser|governance,tools|e2e/publish-review-drawer.spec.ts|Decision 47 step D — the reviewer drawer: row opens it instead of approving, tools/endpoint/credential/cascade render, Approve gated on the cascade ack, approve then reload proves the agent AND the cascaded tool are published
 browser|agent,workflow,deploy,chat,eval,memory|e2e/lifecycle-journey.spec.ts|Full lifecycle journey — create→workflow→deploy→chat+memory→eval+trace→publish→catalog→observability

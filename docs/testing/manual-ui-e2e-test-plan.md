@@ -253,10 +253,38 @@ was invisible to a green suite for three phases.
 Deferred to **R5**, which already has to stand up a second admin identity for the
 approval-authority rework. Doing it earlier means building that fixture twice.
 
-## G-R3-11 — the publish reviewer approves BLIND — 2026-08-07 (rewritten 2026-08-08)
+## G-R3-11 — ✅ CLOSED 2026-08-08. The publish reviewer no longer approves blind.
 
-**not-yet-wired (debt). This is Decision 47 step D, and step D is a one-line roadmap bullet,
-not a plan.** Scope draft: `docs/design/publish-review-surface.md`.
+**Shipped: registry-api `0.2.274` / studio `0.1.187`.** `GET /api/v1/admin/publish-requests/
+{id}/review` + `PublishReviewDrawer.tsx`. Design (now IMPLEMENTED, with all five open
+questions resolved and their reasoning recorded): `docs/design/publish-review-surface.md`.
+Decision 47 step D in `docs/decisions.md`.
+
+**What closed it, against the "measured, not inferred" table further down:** every row of
+that table is now populated — tools (name, risk, owner, `http_method`+`http_url`,
+`python_code` in full, the credential NAME, `side_effecting`, `pii_deanonymize_allowed`,
+MCP server), agent config (`agent_class`, instructions, execution shape, memory), the
+version (`image_tag`, `git_sha`, both eval gate flags), and the **publish cascade** —
+which tools become org-wide on approve, which are already public, and which are blocked
+because they belong to another team.
+
+**The gate, not just the display.** The requirement said *"before he can approve"*, so
+Approve moved OFF the queue row and INTO the drawer (option B): a reviewer cannot authorize
+publication without the screen having rendered. When the cascade is non-empty an extra
+acknowledgement names the tools going org-wide (option C) — reserved for the case that
+escalates scope, so it does not decay into a click-through.
+
+**Proven by** `suite-6` T-S6-017..022 (**33/0** on EKS) and
+`studio/e2e/publish-review-drawer.spec.ts` — the bash layer proves the payload, the
+Playwright spec proves the journey and the approve→reload round-trip, because a bash suite
+`kubectl exec`s into a pod and cannot see a screen (DoD rule 1). `T-S6-019` is the one worth
+naming: it binds a cross-team tool AFTER submit and asserts the payload shows it as
+`blocked` — which a submit-time snapshot could not do, and is why Decision 47 refused a
+`cascade_publish` column.
+
+**One deliberate gap remains — see G-D3 below.**
+
+### (superseded — kept because it is the measurement that justified the work)
 
 ### The requirement, in Kalyan's words
 
@@ -318,6 +346,25 @@ The **submitter** gets the full picture at submit time: a cross-team private too
 422 `tool_not_publishable_cross_team` naming every blocking tool and its owner, rendered by
 `AgentDetailPage` (studio `0.1.186`). That informs the person who already knows what they
 built. It tells the reviewer nothing.
+
+## G-D3 — workflow publish requests are NOT reviewable — 2026-08-08
+
+**deferred (intentional).** Decision 47 step D, sub-decision D-3.
+
+The same admin queue serves `asset_type: workflow`. A workflow's tools arrive through its
+member agents, so the review payload's shape genuinely differs — building it was scoped out
+to keep step D a vertical slice (DoD rule 4) rather than a half-finished horizontal one.
+
+**It is not silent.** `GET /admin/publish-requests/{id}/review` answers **200** with
+`review_supported: false` and a reason naming exactly what is not being shown, and the
+drawer renders that as a banner. Deliberately not a 404 (the request is real) and
+deliberately not an agent-shaped payload with an empty `tools` list — that would read as
+"this workflow has no tools", which is the silently-unreviewed outcome the whole requirement
+rules out. Regression: `T-S6-021` asserts `review_supported=false`, a non-empty reason, and
+that the payload carries **no** `tools` key at all.
+
+**What closing it needs:** resolve a workflow's members → each member's bound tools →
+a cascade plan across the union. `plan_tool_cascade` is per-agent today.
 
 ## G-R3-8 — ✅ CLOSED 2026-08-08. The tokenless catalog branch is DELETED, not narrowed.
 
@@ -536,7 +583,13 @@ which phases are scaffolding for it.
         [x] A. create_tool derives owner_team          SHIPPED 0.2.267
         [x] B. migration 0080, private by default      SHIPPED 0.2.268 / 0.1.185
         [x] C. cascade + cross-team 422                SHIPPED 0.2.269 / 0.1.186
-        [ ] D. GET /admin/publish-requests/{id}/review + reviewer drawer
+        [x] D. GET /admin/publish-requests/{id}/review + reviewer drawer
+                                                       SHIPPED 0.2.274 / 0.1.187.
+               Approve moved INTO the drawer (option B) + a cascade acknowledgement
+               (option C) so "the reviewer was shown it" is structural, not hoped-for.
+               D-1..D-5 resolved in docs/decisions.md; D-3 (workflows) deferred and
+               ledgered as G-D3 -- review_supported=false WITH a reason, never an
+               empty tool list. suite-6 33/0.
         [ ] E. owner-initiated unpublish (Decision 47 #4 = option B)
         [ ] F. tests: suite-6 extension + Playwright drawer case
       NOTE G-R3-6 (tools/skills fully unauthenticated) was a PREREQUISITE of A
