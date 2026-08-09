@@ -1477,6 +1477,71 @@ absorbed here.
 
 Implemented: registry-api `0.2.275`, studio `0.1.188`.
 
+## Decision 48: identity comes from the credential — a header is never an identity
+
+**Context:** Identity propagation Phase 3 set out to give eval-runner, scheduler and
+event-gateway verifiable identities. Reading the code to do it turned up something larger:
+FOUR endpoints each had their OWN answer to "who is calling", and they disagreed. Three of
+the four could be driven by a string the caller types. All three were confirmed against the
+running cluster before anything was changed — none of this is inferred from source.
+
+| Endpoint | How it resolved the caller | What that allowed |
+|---|---|---|
+| `POST /playground/runs` | `(user or {}).get("sub") or x_user_sub or "dev"` | a request with **no credential at all** reached the handler; `caller` became `"dev"` and both gates below are written `caller != "dev"`, so it skipped the contributor role gate AND the per-agent authority check |
+| `PATCH`/`GET /approvals` | `x_user_sub or x_user_id or JWT.sub or body.reviewer_id` | a **plaintext header outranked the verified token** — name any platform-admin's sub and approve any pending HITL tool call, or read every team's queue |
+| `POST /internal/runs/start` | no auth dependency; `run_by` from the body | start any team's production agent and choose whose authority it ran under |
+| everything else | `require_user` | correct |
+
+The approvals ordering is the worst of the three and deserves naming precisely: it is not
+"missing authentication", it is **authentication that loses to a forged header**. A caller
+presenting a genuine JWT could still be attributed to whoever the header named. A route with
+no auth at least looks like one; this looked authenticated and was not.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: one producer, `Caller`/`resolve_caller`** | A single dependency resolves the caller from the credential and ONLY the credential, returning an explicit `kind` of `user` / `service` / `anonymous`. Endpoints branch on `kind`. | Every reader gets the same answer by construction. Costs a signature change at each of the four endpoints and turns ~7 header-authenticated e2e suites red until they carry tokens. |
+| **B: fix the precedence in place** | Reorder each site so the JWT wins, keep the headers as a fallback. | Small diff, no suite churn. Keeps four implementations of one rule — the exact shape three postmortems in this repo already cover (`start_chat`/`start_deployment_chat`, `webhook_clients`/`agent_endpoints`, `approvals._ADMIN_ROLES`/`rbac`) — and leaves a typed string as a valid identity whenever a token is absent. |
+| **C: `require_user` on all four** | Blanket the routes. | Breaks eval-runner and the scheduler, which are legitimate non-human callers. Would have forced the "degrade the feature to silence the auth error" move this repo forbids. |
+
+**Choice: Option A.** Confirmed by Kalyan 2026-08-09 after reviewing the behavioural blast
+radius rather than the diff.
+
+`auth_middleware.is_trusted_service(claims)` reads `azp` — the client-id Keycloak issued the
+token to, carried INSIDE the RS256 signature, so reproducing it needs the client's secret. The
+same JWKS verification `require_user` already performs is what makes it unforgeable; there is
+no second crypto path to get wrong. Services are a distinct `kind`, not "a user whose sub is
+in a magic set" (`_SERVICE_IDENTITIES = {"eval-runner"}` is deleted).
+
+There is deliberately **no `"dev"` escape hatch**. An implicit anonymous fallback is what
+produced the playground hole; a local-dev bypass belongs behind an explicit flag, not behind
+the absence of a header.
+
+### The playground authority check (the sub-decision)
+
+`playground.py` also carried the only authority decision in the service that never consulted
+`rbac`: a bare `agent.created_by != caller`. Every `can_*` helper short-circuits
+`platform-admin`, and the role table says platform-admin short-circuits every artifact check —
+so this endpoint was the outlier. It now routes through `rbac.can_manage_artifact`
+**additively**: the creator arm is KEPT rather than replaced.
+
+That "additively" is load-bearing and was nearly got wrong. `grant_creator_admin` auto-grants
+the creator `agent-admin`, which makes the grant look equivalent to being the creator —
+**measured on the test cluster, only 956 of 1211 agents carry it.** Replacing the creator arm
+would have silently revoked playground access from the creators of the other 255, a regression
+invisible in the diff and in every green test.
+
+What it unblocks concretely: an agent whose `created_by` names a user deleted by a Keycloak
+realm rebuild (`wf-payout` → `75c7c8b3…`, 404 in Keycloak) could be run in the playground by
+NOBODY, because no live caller can ever equal a deleted sub.
+
+### Consequence for the tests
+
+`suite-93 T-S93-004` **was asserting the vulnerability** — it sent `X-User-Id` with no token
+and expected 200. It is inverted, not deleted: 004a proves a forged header is 401, 004b proves
+`body.reviewer_id` is a label and never an identity. Suites that "acted as" invented subs by
+typing them in a header now use real Keycloak personas, which is strictly better — they
+exercise the path a human actually takes.
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -1528,3 +1593,4 @@ Implemented: registry-api `0.2.275`, studio `0.1.188`.
 | 45 | Agent vs tool delegation | **Delegating an agent does NOT delegate its tools — unless it is autonomous.** user_delegated runs intersect the agent's effective tool set with the CALLER's team grants; daemon runs keep the agent's own. Follows the §4.2 identity-model seam the identity floor already branches on. Prereqs: D-1 (registry-side `agent_class`, now load-bearing for two gates), an unowned-tool rule in the bundle, and `user_team` in the OPA input from the verified RunContext (identity P1/P2). |
 | 46 | Tool ownership | **A tool's team comes from its creator; `owner_team = NULL` becomes illegal.** Creation currently leaves it NULL, which the resolver treats as usable by EVERY team — 65 of ~173 tools. Ownership, not an auto-grant (own-team needs no grant row). Builtins get an explicit shared team. Unblocks Decision 45 by making the bundle and the resolver agree on what 'unowned' means. List endpoint reuses `team_may_use_tool`. |
 | 47 | Tool visibility | **Tools are private by default and publish by CASCADE when an agent using them is published.** `Tool`/`Skill` default to `published` where `Agent`/`Workflow` default to `private`; all 174 tools are published and the (correct) list filter never bites. No separate tool publish workflow — `publish_agent` already loads the tools and blocks critical-risk ones. Reviewer gets a full review payload (agent config + every tool with risk/owner/publish_status + eval), cascade limited to own-team tools, published ≠ granted, no backfill, owner-initiated unpublish ships with it. |
+| 48 | Identity comes from the credential | **A header is never an identity.** Four endpoints each had their own answer to "who is calling" and three could be driven by a typed string: `/playground/runs` reached the handler with NO credential (`caller = ... or "dev"` then skipped both gates), `/approvals` put a plaintext header AHEAD of the verified JWT (forge an admin sub, approve any HITL call), `/internal/runs/start` had no auth at all. One `Caller`/`resolve_caller` producer now resolves from the credential only, with an explicit user/service/anonymous kind; `is_trusted_service` reads `azp` from inside the RS256 signature. No "dev" fallback. Sub-decision: the playground owner check routes through `rbac.can_manage_artifact` ADDITIVELY — the creator arm stays, because only 956 of 1211 agents carry the creator auto-grant. |

@@ -560,7 +560,7 @@ fi
 echo ""
 echo "--- Section C: T-S75-002 recall survives pod restart ---"
 SECTION_C=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" S75_RESTARTED="$RESTARTED" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" S75_RESTARTED="$RESTARTED" env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
 import asyncio, os, json, base64, httpx
 
 ROOT = "http://localhost:8000"; BASE = ROOT + "/api/v1"
@@ -658,14 +658,14 @@ tally "$SECTION_C"
 echo ""
 echo "--- Section D: T-S75-005 durable resume unaffected by shared conversation_id ---"
 SECTION_D=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  python3 - <<'PY' 2>/dev/null || true
-import asyncio, uuid, httpx
+  env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
+import asyncio, os, uuid, httpx
 from sqlalchemy import select
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun, Approval
 
 BASE = "http://localhost:8000/api/v1"
-H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
+H = {"X-User-Sub": os.environ["E2E_ADMIN_SUB"], "X-User-Team": "platform"}
 AGENT = "wf-payout"
 
 def out(tid, verdict, detail=""):
@@ -761,7 +761,7 @@ tally "$SECTION_D"
 echo ""
 echo "--- Section E: T-S75-009/010/011 rich workflow stream (chips + rationale + parity) ---"
 SECTION_E=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
 import asyncio, os, uuid, json, base64, httpx
 import sys as _sys; _sys.path.insert(0, "/tmp")
 from e2e_auth import BearerAuth

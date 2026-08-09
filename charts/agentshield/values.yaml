@@ -131,7 +131,7 @@ scheduler:
     # 0.1.5: reads the trigger_liveness view (migration 0077) instead of restating
     #   the artifact-liveness predicate — one definition shared with the
     #   event-gateway and registry-api.
-    tag: "0.1.5"
+    tag: "0.1.6"
 
 # embedding-sidecar: POC-4 Knowledge Base / RAG embedding service. A small FastAPI
 # app that turns text into 384-dim vectors (bge-small-en-v1.5, ONNX via fastembed).
@@ -177,7 +177,7 @@ event-gateway:
     #   webhook_clients for client_signed verification.
     # 0.1.5: read-side status filter in _TRIGGER_SQL — a deleted agent's webhook must
     #   not stay live (defence in depth behind registry-api's write-side disarm).
-    tag: "0.1.8"
+    tag: "0.1.9"
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
@@ -769,10 +769,10 @@ registry-api:
     # intersects the agent reach with the caller's teams); agent_class from the bundle.
     # 0.2.273: deny_reason precedence — the identity floor outranks the Decision 45
     # intersection, and two rules it made unreachable are guarded on agent reach.
-    tag: "0.2.278"
+    tag: "0.2.280"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.15"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   # Credential provider (Decision 31 — pluggable credential store). Default
@@ -808,7 +808,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.14"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.15"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   # OOMKilled under the full 101-suite sweep on 2026-08-02, twice. It idles at

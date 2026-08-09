@@ -22,6 +22,8 @@ from typing import Any
 
 import httpx
 
+import service_token
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -126,7 +128,6 @@ async def _call_score_api(
         resp = await client.post(
             "/api/v1/playground/eval/score",
             json=payload,
-            headers={"X-User-Sub": "eval-runner"},
             timeout=40.0,
         )
         if resp.status_code == 200:
@@ -142,10 +143,33 @@ async def _call_score_api(
     return None
 
 
+class _ServiceAuth(httpx.Auth):
+    """Attach this Job's verified service credential to every registry-api request.
+
+    Identity propagation P3 (§4.5). This replaces `_EVAL_HEADERS =
+    {"X-User-Sub": "eval-runner"}`, which 19 call sites carried by hand. That string was
+    not just an audit label: `playground.py::_SERVICE_IDENTITIES` matched on it and
+    skipped BOTH the contributor role gate and the agent-owner check, so anyone who could
+    reach the API could send it and run any agent in anyone's playground.
+
+    Attached to the ONE `AsyncClient` rather than passed per call, for two reasons:
+
+      1. A credential belongs to the connection. 19 hand-carried copies meant 19 chances
+         for a new call site to omit it — and a call that omits it does not fail loudly,
+         it silently becomes an anonymous request.
+      2. A token expires. A module-level dict is built once at import; an eval Job runs
+         for many minutes. `token_async()` re-mints past expiry, and it is only consulted
+         because this hook runs per request.
+    """
+
+    async def async_auth_flow(self, request):
+        request.headers["Authorization"] = f"Bearer {await service_token.token_async()}"
+        yield request
+
+
 # ---------------------------------------------------------------------------
 # Eval v2 E-1 — durable trajectory eval (MODE=durable)
 # ---------------------------------------------------------------------------
-_EVAL_HEADERS = {"X-User-Sub": "eval-runner"}
 
 
 # A run_step whose status is one of these is an IN-FLIGHT boundary — the tool call
@@ -313,7 +337,6 @@ async def _self_approve(client: httpx.AsyncClient, run_id: str, approval_id: str
         dec = await client.post(
             f"/api/v1/playground/approvals/{approval_id}/decide",
             json={"decision": "approved"},
-            headers=_EVAL_HEADERS,
         )
         logger.info("durable self-approve run=%s approval=%s -> %d", run_id, approval_id, dec.status_code)
     except Exception as exc:
@@ -325,7 +348,7 @@ async def _self_approve(client: httpx.AsyncClient, run_id: str, approval_id: str
         async with client.stream(
             "GET",
             f"/api/v1/playground/runs/{run_id}/resume-stream",
-            headers={"Accept": "text/event-stream", **_EVAL_HEADERS},
+            headers={"Accept": "text/event-stream"},
             timeout=_DURABLE_POLL_TIMEOUT,
         ) as stream:
             async for _line in stream.aiter_lines():
@@ -349,10 +372,10 @@ async def _poll_durable(
     while loop.time() < deadline:
         await asyncio.sleep(_DURABLE_POLL_INTERVAL)
         try:
-            run_resp = await client.get(f"/api/v1/playground/runs/{run_id}", headers=_EVAL_HEADERS)
+            run_resp = await client.get(f"/api/v1/playground/runs/{run_id}")
             if run_resp.status_code == 200:
                 run_data = run_resp.json()
-            steps_resp = await client.get(f"/api/v1/playground/runs/{run_id}/steps", headers=_EVAL_HEADERS)
+            steps_resp = await client.get(f"/api/v1/playground/runs/{run_id}/steps")
             if steps_resp.status_code == 200:
                 steps = steps_resp.json()
         except Exception as exc:
@@ -477,7 +500,6 @@ async def _call_score_api_run(
         resp = await client.post(
             "/api/v1/playground/eval/score",
             json=payload,
-            headers=_EVAL_HEADERS,
             timeout=60.0,
         )
         if resp.status_code == 200:
@@ -537,7 +559,7 @@ async def _run_durable_item(
         run_body["agent_version_id"] = AGENT_VERSION_ID
 
     try:
-        run_resp = await client.post("/api/v1/playground/runs", json=run_body, headers=_EVAL_HEADERS)
+        run_resp = await client.post("/api/v1/playground/runs", json=run_body)
         run_resp.raise_for_status()
         run_id = run_resp.json().get("run_id")
     except Exception as exc:
@@ -709,7 +731,7 @@ async def _resolve_inner_shape(client: httpx.AsyncClient) -> str | None:
     (a quiet hole), and defaulting to 'durable' would hang every reactive run in the
     poll loop. Neither guess is safe, so we refuse."""
     try:
-        resp = await client.get(f"/api/v1/agents/{AGENT_NAME}", headers=_EVAL_HEADERS)
+        resp = await client.get(f"/api/v1/agents/{AGENT_NAME}")
         if resp.status_code == 200:
             shape = (resp.json() or {}).get("execution_shape")
             if shape in ("reactive", "durable"):
@@ -827,7 +849,7 @@ async def _run_scheduled_item(
         run_body["agent_version_id"] = AGENT_VERSION_ID
 
     try:
-        run_resp = await client.post("/api/v1/playground/runs", json=run_body, headers=_EVAL_HEADERS)
+        run_resp = await client.post("/api/v1/playground/runs", json=run_body)
         run_resp.raise_for_status()
         run_id = run_resp.json().get("run_id")
     except Exception as exc:
@@ -1028,7 +1050,7 @@ async def _run_webhook_item(
 
     try:
         ev_resp = await client.post(
-            "/api/v1/playground/test-event", json=test_body, headers=_EVAL_HEADERS,
+            "/api/v1/playground/test-event", json=test_body,
         )
         ev_resp.raise_for_status()
         decision = ev_resp.json()
@@ -1201,7 +1223,7 @@ async def _run_workflow_tree_item(
         run_body["input_payload"] = input_payload
     try:
         resp = await client.post(
-            f"/api/v1/workflows/{workflow_id}/runs", json=run_body, headers=_EVAL_HEADERS,
+            f"/api/v1/workflows/{workflow_id}/runs", json=run_body,
         )
         resp.raise_for_status()
         parent_run_id = resp.json()["run_id"]
@@ -1218,7 +1240,6 @@ async def _run_workflow_tree_item(
         try:
             tree_resp = await client.get(
                 f"/api/v1/workflows/{workflow_id}/runs/{parent_run_id}/tree",
-                headers=_EVAL_HEADERS,
             )
             tree_resp.raise_for_status()
             tree = tree_resp.json()
@@ -1251,7 +1272,7 @@ async def _run_workflow_tree_item(
             continue
         try:
             steps_resp = await client.get(
-                f"/api/v1/agent-runs/{child['id']}/steps", headers=_EVAL_HEADERS,
+                f"/api/v1/agent-runs/{child['id']}/steps",
             )
             steps_resp.raise_for_status()
             per_member_steps[member] = _project_trajectory(steps_resp.json())
@@ -1286,7 +1307,6 @@ async def _call_score_api_workflow(
                 "per_member_steps": per_member_steps,
                 "run_id": run_id,
             },
-            headers=_EVAL_HEADERS,
             timeout=60.0,
         )
         if resp.status_code == 200:
@@ -1429,7 +1449,7 @@ async def _run_reactive_item(
 
     try:
         run_resp = await client.post(
-            "/api/v1/playground/runs", json=run_body, headers=_EVAL_HEADERS,
+            "/api/v1/playground/runs", json=run_body,
         )
         run_resp.raise_for_status()
         run_id = run_resp.json().get("run_id")
@@ -1544,7 +1564,6 @@ async def _resolve_run_policy(client: httpx.AsyncClient) -> None:
     try:
         resp = await client.get(
             f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}",
-            headers=_EVAL_HEADERS,
             timeout=30.0,
         )
         resp.raise_for_status()
@@ -1574,7 +1593,9 @@ async def _resolve_run_policy(client: httpx.AsyncClient) -> None:
 
 
 async def run_eval() -> None:
-    async with httpx.AsyncClient(base_url=REGISTRY_API_URL, timeout=120.0) as client:
+    async with httpx.AsyncClient(
+        base_url=REGISTRY_API_URL, timeout=120.0, auth=_ServiceAuth()
+    ) as client:
         # 0. Eval v2 E-6: resolve the run's pass policy BEFORE any item is scored.
         await _resolve_run_policy(client)
 
@@ -1635,7 +1656,6 @@ async def run_eval() -> None:
                 rec_resp = await client.post(
                     f"/api/v1/playground/eval-runs/{EVAL_RUN_ID}/results",
                     json=outcome["record"],
-                    headers=_EVAL_HEADERS,
                 )
                 rec_resp.raise_for_status()
             except Exception as exc:
@@ -1664,7 +1684,6 @@ async def run_eval() -> None:
                     "failed_count": failed_count,
                     "overall_score": overall,
                 },
-                headers={"X-User-Sub": "eval-runner"},
             )
             patch_resp.raise_for_status()
         except Exception as exc:

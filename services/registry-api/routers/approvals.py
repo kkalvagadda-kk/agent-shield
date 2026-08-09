@@ -24,7 +24,7 @@ from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from approval_timeout_worker import _agent_pod_url
-from auth_middleware import get_optional_user
+from auth_middleware import Caller, get_optional_user, resolve_caller
 from db import AsyncSessionLocal, get_db
 from identity import principal_display as _principal_display
 from models import AgentRun, Approval, ApprovalAuthority
@@ -553,12 +553,10 @@ async def list_approvals(
     ),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    # Browser requests carry a JWT Bearer (decoded here); in-cluster callers send
-    # X-User-Sub. Without a caller the console ran UNSCOPED (the `if caller_sub:` block
-    # skipped), showing every team's approvals to everyone.
-    caller_claims: Optional[dict] = Depends(get_optional_user),
+    # Identity P3 (2026-08-09): the caller comes from the VERIFIED credential and from
+    # nothing else. `X-User-Sub` / `X-User-Id` are gone from this signature — see
+    # decide_approval below for why reading them was worse than reading nothing.
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ApprovalResponse]:
     """List approvals. Defaults to production context. Pass context=playground
@@ -578,7 +576,16 @@ async def list_approvals(
     if team:
         q = q.where(Approval.team == team)
 
-    caller_sub = x_user_sub or x_user_id or (caller_claims or {}).get("sub")
+    # An unauthenticated caller used to fall through with caller_sub=None, which SKIPPED
+    # the scoping block entirely and returned every team's approval queue. "No identity"
+    # must never be the widest identity.
+    if not identity.is_authenticated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to list approvals.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    caller_sub = identity.sub
     if caller_sub and not (await _caller_roles(caller_sub, db)) & _ADMIN_ROLES:
         # Non-admin caller → scope to tools where they hold authority OR a tool that has
         # an admin-role authority record. (Admins skip this block and see everything.)
@@ -794,26 +801,53 @@ async def get_approval(
 async def decide_approval(
     approval_id: uuid.UUID,
     body: ApprovalDecision,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
-    # The browser authenticates with a JWT Bearer token (there is NO Envoy SecurityPolicy
-    # injecting claim headers in this deployment), so decode it for the real caller sub.
-    # Reading only the X-User-Sub header made every gateway decide fall back to the
-    # frontend's body.reviewer_id="studio-user" → 403. In-cluster e2e suites send
-    # X-User-Sub directly (no Bearer). Order: header, gateway header, JWT sub, body.
-    caller_claims: Optional[dict] = Depends(get_optional_user),
+    # ── Identity P3 (2026-08-09): the credential IS the identity ─────────────
+    # This signature used to take `X-User-Sub` and `X-User-Id` headers and resolve:
+    #
+    #     caller = x_user_sub or x_user_id or (caller_claims or {}).get("sub") or body.reviewer_id
+    #
+    # Read left to right: a PLAINTEXT HEADER OUTRANKED THE VERIFIED TOKEN. That is worse
+    # than having no authentication, because the route looked authenticated — a caller
+    # presenting a real JWT could still be attributed to whoever the header named. The
+    # route is `get_optional_user`, so no credential was required at all: sending
+    # `X-User-Sub: <any platform-admin sub>` made `caller_is_admin` true below and
+    # allowed approving ANY pending tool call on the platform.
+    #
+    # HITL is the control that stops an agent taking a dangerous action. This was the
+    # bypass for it, and it also leaked every team's queue through list_approvals above.
+    #
+    # `body.reviewer_id` remains in the payload but is now a LABEL, never an identity —
+    # it is written to `approval.reviewer_id` for display and nothing branches on it.
+    # The old `caller == "system"` bypass dies with the header: "system" was reachable
+    # only by typing it, and the timeout worker never used this route (it updates the row
+    # in-process and POSTs the pod directly).
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
     """Submit approve/reject. Caller must have an active ApprovalAuthority
     record for this approval's tool_name. 'system' bypasses authority check
     (testing only). `version` must match current row version (optimistic lock)."""
+    # AUTHENTICATE BEFORE TOUCHING THE ROW. This check sat AFTER `_resolve` in the first
+    # cut of the P3 change and `T-S102-005` caught it: an uncredentialed caller got
+    # 404 "Approval '<id>' not found" instead of 401, which both leaks existence — probe
+    # IDs until one stops 404ing — and puts a database read before the auth decision.
+    # Same rule as the tool-unpublish path (Decision 47 step E), where 403 must win over
+    # 409 so publish state is not disclosed to a caller with no authority: the FIRST
+    # question is always "who are you", never "what are you asking about".
+    if not identity.is_authenticated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to decide an approval.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    caller = identity.sub
+
     approval = await _resolve(approval_id, db)
 
     # Authority check. A DAEMON trigger-run's approval is routed ASYNC to a reviewer
     # role (WS-2 T011) — no live user is on the connection — so it is gated by the
     # routed reviewer scope, NOT the per-tool ApprovalAuthority path. Deriving a
     # non-None reviewer_scope IS the discriminator (explicit, no agent_class sniffing).
-    caller = x_user_sub or x_user_id or (caller_claims or {}).get("sub") or body.reviewer_id
     # PLATFORM-ADMIN SPECIAL CASE: an admin-role caller may decide ANY approval, in any
     # context, without also holding a per-tool ApprovalAuthority grant. Admins are the
     # trusted reviewers the console is built for; requiring a per-tool grant on top of the

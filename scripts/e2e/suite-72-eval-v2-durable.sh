@@ -116,7 +116,7 @@ from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "${E2E_SUB}"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 SFX = uuid.uuid4().hex[:8]
 AGENT = f"s72-durable-{SFX}"
@@ -521,7 +521,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+4 durable runs+park/approve can take ~10-20 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S72_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S72_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 360); do   # up to ~30 min

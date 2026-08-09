@@ -130,7 +130,7 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, EvalRun, EvalRunResult, PlaygroundRun
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "${E2E_SUB}"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 # Both are injected by the bash layer so this invocation's fixtures and its result
 # file share ONE identity and cannot collide with a concurrent run.
@@ -781,7 +781,7 @@ PY
 
 echo "  running detached in-pod driver (2 real agent deploys + 2 real durable runs + 2 real eval Jobs — can take ~20-40 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S74_SFX=$RUN_SFX S74_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S74_SFX=$RUN_SFX S74_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 600); do   # up to ~50 min

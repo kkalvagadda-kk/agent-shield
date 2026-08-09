@@ -45,6 +45,84 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## G-D45-1 — Decision 45 filters tools at CALL time, not at PLAN time — 2026-08-09
+
+**not-yet-wired (debt).** Raised by Kalyan while reviewing identity P3. **Agreed — this is real.**
+Scheduled to be picked up AFTER the currently planned work (identity P3, the fixture/red-suite
+pass) is implemented. Related roadmap item: **[6] post-P2 — per-user tool schema filtering.**
+
+### What is built
+
+Decision 45 (`opa_policy/agentshield.rego:96-135`) makes the effective tool set depend on WHO the
+run acts for. For `user_delegated`, allowed = `agent.tools ∩ _caller_usable`, where
+`_caller_usable` is built from `input.user_teams`. A denied call returns the dedicated reason
+`tool_not_granted_to_user` (`:250`). This is correct and it works.
+
+### Where it is applied
+
+**Only inside the tool wrapper, per call.** Confirmed in the SDK:
+
+| Stage | Code | Has user context? |
+|---|---|---|
+| Resolve the agent's tools | `graph_builder.py:485` `resolve_tools(platform_names)` | **no** |
+| Bind them to the model | `graph_builder.py:541` `tools=lc_tools` | **no** |
+| Governed call | `graph_builder.py:283` `_current_user_context.get({})` → `opa_client.check_tool` | yes |
+
+So the model is handed the schemas for **every tool bound to the agent**, regardless of who is
+asking. The intersection is enforced one layer later, when the call is already in flight.
+
+### The consequence Kalyan identified
+
+Take `refund-bot`, bound to `web_search`, `refund_action`, `payroll_export`. Alice (team
+`support`) cannot use `payroll_export`; Bob (team `finance`) can.
+
+Alice asks for something payroll-shaped. The model sees `payroll_export` in its tool list, has no
+signal it is unavailable, and **plans to use it**. The plan is stated to Alice as if it will
+happen. Execution then denies at the wrapper.
+
+Four distinct problems follow, in rough order of severity:
+
+1. **Partial execution of a multi-step plan.** Steps 1..n-1 run and commit real side effects; step
+   n denies. The run halts having half-applied work, with no compensating action. This is the
+   serious one for a governance platform — the denial is correct but its *timing* creates an
+   inconsistent state that a plan-time filter would have prevented entirely.
+2. **Capability disclosure.** The schema itself tells Alice a `payroll_export` tool exists, its
+   description and its parameter names. That is information about a capability she has no
+   authority over, leaked before any authorization check runs.
+3. **The agent misleads the user.** It announces an intent it cannot fulfil. From Alice's side the
+   product looks broken rather than governed.
+4. **Wasted turns and tokens.** Plan → attempt → deny → replan, every time.
+
+### Why this is NOT "enforcement is in the wrong place"
+
+Call-time enforcement is the correct security boundary and must stay. Schema filtering alone would
+be advisory — the model can emit a call for a tool that was never in its list, and a filtered list
+is a UX affordance, not a control. **Both are needed:** filter the schemas so the model never
+plans the impossible, AND keep the wrapper check so a plan that goes off-list is still refused.
+
+Do not let the fix become "filter the list and drop the OPA call".
+
+### Why it could not have been built earlier
+
+Plan-time filtering needs the acting user's teams at bind time. Before identity P3 the propagated
+`user_id`/`user_team` was caller-supplied on unauthenticated routes, so a plan-time filter would
+have been trivially bypassed by sending a different sub — and unlike the call-time check, a
+bypassed *filter* fails open and silently. P3 is the prerequisite.
+
+### What closing it involves (sketch, not a plan)
+
+- Make the resolved user context available at `graph_builder` bind time, not only inside the wrapper.
+- Ask OPA (or the same bundle data) for the caller-usable set ONCE per run, and bind only the
+  intersection.
+- Handle the empty-intersection case explicitly rather than binding zero tools silently.
+- Daemons keep the UNION — there is no human to intersect with, so plan-time and call-time agree.
+- Bundle refresh lag means the bind-time and call-time answers can disagree across a refresh; the
+  call-time check must remain authoritative when they do.
+
+**Test that would prove it:** two users on different teams run the SAME agent; assert the tool
+schemas offered to the model differ, and that the previously-denied tool is absent from the plan
+rather than denied during it.
+
 ## Known gaps — the two test layers share personas and can invalidate each other — 2026-08-07
 
 **not-yet-wired (debt).** `e2e_ensure_persona` (bash) calls `POST /admin/users/{id}/reset-password`

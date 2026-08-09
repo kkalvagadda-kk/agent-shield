@@ -372,6 +372,53 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
                 f"spliced INSIDE the heredoc, which makes the driver never run at all"
             )
 
+    # 8d — ${E2E_SUB} / ${E2E_TOKEN} inside a QUOTED heredoc never expands.
+    #
+    # A quoted heredoc (`<<'PY'`) performs NO parameter expansion, so `${E2E_SUB}` reaches
+    # Python as those twelve literal characters. Rule 9 does not catch this: it checks that
+    # a suite reading ${E2E_SUB} also CALLS e2e_set_token, and these suites do — above the
+    # heredoc, correctly. The reference is well-ordered and still meaningless.
+    #
+    # Why this is its own rule rather than a footnote: the 2026-08-09 sweep classified 16 of
+    # 17 such references as "decorative" (they landed in X-User-Sub, which handlers consult
+    # only as a fallback) and fixed only suite-71, where the value was compared. That
+    # classification was reasoning about how the value is USED, and it was incomplete — it
+    # only inspected header dicts, and missed `ADMIN = "${E2E_SUB}"` assignments feeding
+    # assertions in 11 further suites. `suite-59` and `suite-60` compounded it: the literal
+    # was the ONLY identity they sent, so every call went out anonymous and both suites died
+    # at the first gated write.
+    #
+    # So the rule does not try to decide whether a given occurrence matters. A reference
+    # that CANNOT expand is a defect regardless of where the value flows; judging intent is
+    # what let this survive two sweeps.
+    #
+    # Comment lines are excluded — the postmortem notes left in these very files explain the
+    # bug and quote the broken form, and a rule that flags its own documentation gets muted.
+    _lines = t.split("\n")
+    _i = 0
+    while _i < len(_lines):
+        _m = re.search(r"<<-?'([A-Za-z_][A-Za-z0-9_]*)'", _lines[_i])
+        if not _m:
+            _i += 1
+            continue
+        _term = _m.group(1)
+        for _j in range(_i + 1, len(_lines)):
+            if _lines[_j].strip() == _term:
+                break
+            _body_line = _lines[_j]
+            if _body_line.lstrip().startswith("#"):
+                continue
+            for _var in ("E2E_SUB", "E2E_TOKEN"):
+                if "${%s}" % _var in _body_line or re.search(r"\$%s\b" % _var, _body_line):
+                    FAIL.append(
+                        f"{p.name}:{_j + 1}  ${{{_var}}} inside a QUOTED heredoc (<<'{_term}') — "
+                        f"bash performs no expansion there, so the driver receives the literal "
+                        f"text '${{{_var}}}'. Pass it through the environment instead "
+                        f"(env {_var.replace('E2E_','S00_')}=\"${_var}\" python3 -) and read it "
+                        f"with os.environ."
+                    )
+        _i += 1
+
     # 8 — a header VARIABLE that carries no Authorization.
     # Rule 5 asks "does the file mention Authorization anywhere", which a suite passes by
     # authenticating just its cleanup. suite-29 and suite-40 did exactly that: the R3 pass

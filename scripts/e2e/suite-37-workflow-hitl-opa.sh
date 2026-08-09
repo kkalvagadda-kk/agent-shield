@@ -54,11 +54,18 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 # exists. If one exists but its pod lacks AGENTSHIELD_OPA_URL (deployed by an old
 # controller) or the bundle isn't loaded, T-S37-002 fails loudly (the canary).
 
+# Identity P3: BOTH doors this suite drives now require a verified credential —
+# /internal/runs/start (was no auth at all, run_by taken from the body) and
+# PATCH /approvals (was: a plaintext header outranked the token). `H = {"X-User-Sub":
+# "system"}` below was exactly the forged-identity shape those changes closed.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 37: Organic Workflow HITL via OPA (gated) ==="
 
 # NOTE: unquoted heredoc — bash expands ${TS}; Python body uses no bare '$'
 # beyond that substitution.
-kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<PY 2>&1 | grep -v "Defaulted container" | tee /tmp/s37_out.txt
+kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- env S37_TOKEN="$E2E_TOKEN" python3 - <<PY 2>&1 | grep -v "Defaulted container" | tee /tmp/s37_out.txt
 import asyncio, sys, time as _time
 from datetime import datetime, timezone
 import httpx
@@ -93,7 +100,7 @@ from models import Agent, AgentTool, Tool, Deployment, Approval
 TS   = "${TS}"
 TEAM = "platform"
 B    = "http://localhost:8000/api/v1"
-H    = {"X-User-Sub": "system"}
+H    = {"Authorization": "Bearer " + os.environ["S37_TOKEN"]}
 P = 0; F = 0
 
 def ok(n):        global P; P+=1; print("  PASS:", n)

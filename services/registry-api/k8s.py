@@ -27,6 +27,11 @@ _EVAL_RUNNER_IMAGE = os.getenv(
     "EVAL_RUNNER_IMAGE",
     "registry.internal/agentshield/eval-runner:0.1.4",
 )
+# Passed THROUGH to the eval-runner Job (identity P3) rather than re-derived there, so the
+# Job and registry-api agree on which Keycloak they are talking to by construction. Same
+# defaults as auth_middleware, which is the other reader of these two values.
+_KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://agentshield-keycloak")
+_KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "agentshield")
 
 
 def _init_k8s() -> None:
@@ -215,6 +220,30 @@ def _create_eval_job_sync(
                                     client.V1EnvVar(name="MODE", value=mode),
                                     client.V1EnvVar(name="WORKFLOW_ID", value=workflow_id) if workflow_id else None,
                                     client.V1EnvVar(name="AGENT_VERSION_ID", value=agent_version_id) if agent_version_id else None,
+                                    # ── Identity P3 (§4.5) ───────────────────────────
+                                    # The Job's own Keycloak credential. It used to identify
+                                    # itself with `X-User-Sub: eval-runner` on ~19 calls —
+                                    # a string any caller could send, and one that
+                                    # `playground.py::_SERVICE_IDENTITIES` matched to skip
+                                    # BOTH the contributor role gate and the agent-owner
+                                    # check. Now it mints a client_credentials token and
+                                    # registry-api reads `azp` from inside the signature.
+                                    #
+                                    # secretKeyRef, not a literal: the secret is rotated by
+                                    # the deploy script, and baking a value into the Job
+                                    # spec would pin a stale one into every future eval.
+                                    client.V1EnvVar(name="SERVICE_CLIENT_ID", value="eval-runner"),
+                                    client.V1EnvVar(
+                                        name="SERVICE_CLIENT_SECRET",
+                                        value_from=client.V1EnvVarSource(
+                                            secret_key_ref=client.V1SecretKeySelector(
+                                                name="agentshield-service-clients",
+                                                key="eval-runner",
+                                            )
+                                        ),
+                                    ),
+                                    client.V1EnvVar(name="KEYCLOAK_URL", value=_KEYCLOAK_URL),
+                                    client.V1EnvVar(name="KEYCLOAK_REALM", value=_KEYCLOAK_REALM),
                                 ] if e is not None
                             ],
                             resources=client.V1ResourceRequirements(

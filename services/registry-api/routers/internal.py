@@ -21,8 +21,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import Caller, resolve_caller
 from db import AsyncSessionLocal
 from embedding_client import embed
+from rbac import get_user_global_role
 from run_context import RCT_HEADER
 from run_context_anchor import anchor_value, build_context, mint_for
 from identity import (
@@ -474,8 +476,44 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
 )
 async def start_internal_run(
     body: InternalRunStartRequest,
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(_get_db),
 ) -> AgentRun:
+    # ── Authenticate the caller (identity P3, §4.5) ──────────────────────────
+    # This endpoint declared NO auth dependency at all, while taking `run_by` verbatim
+    # from the body — so any workload with VPC network reach could start a production
+    # agent run AND choose whose authority it was recorded under. Measured 2026-08-02: a
+    # POST with an empty body returned 422, i.e. it reached the handler. It also sidestepped
+    # R7 entirely — the schedules READ is deny-by-default and team-scoped, so one team
+    # could not SEE another's schedules but could FIRE them through this door.
+    # Postmortem: docs/bugs/internal-run-door-has-no-authentication.md.
+    #
+    # Two callers are legitimate, and they are named explicitly rather than inferred:
+    #   * a trusted service — scheduler / event-gateway, proven by `azp` inside a
+    #     Keycloak-signed token, not by the "serviceaccount:scheduler" string in the body.
+    #   * a platform-admin — the e2e suites and any future operator manual-fire. A
+    #     team-scoped human "Run now" is Phase 3a and needs its own authenticated,
+    #     team-checked route; it is deliberately NOT enabled here, because a route that
+    #     accepted any contributor would let one team fire another team's production agent.
+    if identity.is_service:
+        logger.info("start_internal_run: service caller %s", identity.service_name)
+    elif identity.kind == "user":
+        role = await get_user_global_role(db, identity.sub)
+        if role != "platform-admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Starting an internal run requires a trusted service credential or "
+                    "the platform-admin role."
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to start an internal run.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Composite-workflow target (Decision 22): create a parent run + orchestrate.
     if body.workflow_id is not None:
         return await _start_workflow_run(body, db)

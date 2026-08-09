@@ -172,7 +172,7 @@ from models import (Agent, AgentRun, AgentTrigger, AgentVersion, Deployment,
                     EvalRun, EvalRunResult, PlaygroundRun, RunStep)
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "${E2E_SUB}"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
@@ -1024,7 +1024,7 @@ echo "--- T-S75-001..009: real scheduled datasets + real eval Jobs + live contro
 echo "  running detached in-pod driver (2 real agent deploys + 1 real production deploy +"
 echo "  2 real eval Jobs + a real live scheduled run — can take ~25-45 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S75_SFX=$RUN_SFX S75_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S75_SFX=$RUN_SFX S75_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 720); do   # up to ~60 min

@@ -157,7 +157,7 @@ from sqlalchemy import text
 from db import AsyncSessionLocal
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "${E2E_SUB}"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 OUT = os.environ["S95_OUT"]
 SFX = uuid.uuid4().hex[:6]
@@ -399,7 +399,7 @@ PY
 
 echo "Running driver detached in-pod…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S95_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S95_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 60); do
   sleep 5
