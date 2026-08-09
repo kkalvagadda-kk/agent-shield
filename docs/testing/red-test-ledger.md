@@ -111,12 +111,13 @@ not green.**
 | Suite | Result | Cause | Owner |
 |---|---|---|---|
 | `suite-45-hitl-e2e` | 3/5/5 | **G-100** — the `hitl-agent` fixture does not exist. 404s, not auth. | fixture |
-| `suite-37-workflow-hitl-opa` | 1/2 | the production run fails, so no approval is ever parked. `internal.py` does not mint a RunContext, so a `user_delegated` tool call is denied — the **P1 remainder** recorded on G-45. | mine, deferred |
+| `suite-37-workflow-hitl-opa` | 1/2 | **ROOT CAUSE CORRECTED 2026-08-09.** This said "`internal.py` does not mint a RunContext, so a `user_delegated` tool call is denied — the P1 remainder". `internal.py` now mints (`0.2.277`) and the suite is **unchanged at 1/2**, which is how the misdiagnosis surfaced. The run never reaches a pod at all: `agent_runs.error_message` reads *"agent 'serper-agent-4' has no running production deployment — it is deployed to sandbox"*. It fails the ADMISSION check, so identity is never consulted. Same family as 45/59/60 — a fixture gap, not an identity gap. | fixture |
 | `suite-59-workflow-orchestrations-live` | FAILED | `001_agents_running` — its fixture agents are not deployed | fixture |
 | `suite-60-single-agent-durable-hitl` | FAILED | `001_wf_payout_running` — same | fixture |
 | `suite-71-scheduled-e2e` | timeout | genuinely slow; the suite says "can take many min" itself. Needs 900s+, not 300s. | timeout |
 
-**45, 59 and 60 are one problem, not three:** they need pre-seeded *running* agents, exactly
+**37, 45, 59 and 60 are one problem, not four** (37 joined the list 2026-08-09 when its
+recorded identity root cause turned out to be wrong — see its row): they need pre-seeded *running* agents, exactly
 like the nine red Playwright specs. Seeding a known-good always-running fixture agent would
 move ~12 tests from "known red" to actually asserting — the highest-leverage test fix left.
 

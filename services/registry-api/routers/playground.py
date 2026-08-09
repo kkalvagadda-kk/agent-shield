@@ -31,7 +31,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth_middleware import get_optional_user
 from db import get_db
 from rbac import get_user_team
-from run_context import RunContext, mint as mint_run_context
+# The raw primitive is no longer imported here. Minting and anchoring are ONE act
+# (run_context_anchor), and leaving `mint` reachable from this module invites the next
+# edit to mint without anchoring — which is exactly the divergence P1.5 depends on not
+# happening.
+from run_context import RCT_HEADER
+from run_context_anchor import anchor_value, build_context, mint_for, rehydrate
 from rbac import can_use_playground, get_user_global_role
 from models import Agent, Deployment, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
@@ -151,6 +156,27 @@ async def _create_and_dispatch_playground_run(
         run.langfuse_trace_id = trace_id
         await db.flush()
 
+    # ─── Identity P1: build the run context at the EDGE, and ANCHOR it ───────
+    # This is the only place in the durable path that knows who asked, so it is the only
+    # place that can honestly name them. Everything downstream verifies a signature rather
+    # than trusting a header — which is the whole difference between this and the
+    # `X-User-Sub` fallbacks R2/R3 deleted.
+    #
+    # ANCHORED BEFORE THE COMMIT, ON PURPOSE. The first cut set this after `db.commit()`
+    # and relied on `get_db`'s request-end commit to persist it. That works right up until
+    # anything later in the request raises: the rollback would drop the ANCHOR while the
+    # run row — committed here — survived, leaving a run that exists with no identity and
+    # no error anywhere. Writing it in the same transaction makes "a run row exists" and
+    # "its anchor exists" the same fact instead of two facts that usually agree.
+    ctx = None
+    if caller:
+        ctx = build_context(
+            user_sub=caller,
+            user_team=await get_user_team(db, caller) or "",
+            origin="playground",
+        )
+        run.run_context = anchor_value(ctx)
+
     await db.commit()
 
     logger.info(
@@ -159,32 +185,17 @@ async def _create_and_dispatch_playground_run(
         run_id, agent.name, caller, shape, trigger_type, eval_mode, trace_id,
     )
 
-    # ─── Identity P1: mint the run context at the EDGE ───────────────────────
-    # This is the only place in the durable path that knows who asked, so it is the only
-    # place that can honestly name them. Everything downstream verifies a signature rather
-    # than trusting a header — which is the whole difference between this and the
-    # `X-User-Sub` fallbacks R2/R3 deleted.
+    # Minting is deliberately AFTER the commit and is best-effort: it fails when
+    # AGENTSHIELD_INTERNAL_SIGNING_KEY is absent, and a run that proceeds with no token is
+    # denied `missing_user_identity` at the first tool call — the SAME outcome as before
+    # P1. So a missing key degrades to the old behaviour rather than to a run that silently
+    # acts unattributed, and the anchor is already durable either way, so a resume after
+    # the key is fixed still knows whose run this is.
     #
-    # Best-effort: minting raises when AGENTSHIELD_INTERNAL_SIGNING_KEY is absent, and a
-    # run that proceeds with no context is denied `missing_user_identity` at the first tool
-    # call. That is the SAME outcome as before P1, so a missing key degrades to the old
-    # behaviour rather than to a run that silently acts unattributed.
-    rct = None
-    if caller:
-        try:
-            rct = mint_run_context(
-                RunContext(
-                    user_sub=caller,
-                    user_team=await get_user_team(db, caller) or "",
-                    origin="playground",
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "playground run %s: could not mint a run context (%s) — tool calls will be "
-                "denied missing_user_identity",
-                run_id, exc,
-            )
+    # The token and the row come from the SAME RunContext object. Building them separately
+    # would let a run start as one user and resume as another, with OPA correctly
+    # authorizing both — a divergence no test finds by accident.
+    rct = mint_for(ctx, label=f"playground run {run_id}") if ctx else None
 
     # For durable runs, dispatch to the runner pod's /run endpoint.
     if shape == "durable":
@@ -2097,6 +2108,13 @@ async def resume_stream_playground_run(
     decision_str = approval.status  # "approved" or "denied"
     reviewer = approval.reviewer_id or "playground-user"
 
+    # Identity P1.5 — re-mint from the durable anchor before the pod re-enters the graph.
+    # This is the SELF-SERVICE approval path (the user approves their own sandbox run in
+    # the Playground), and it re-crosses the governed tool edge exactly like the console
+    # decide does. Covering the console path and not this one would make identity survive
+    # a reviewer's approval but not the user's own — the sandbox/production split again.
+    _resume_rct = await rehydrate(db, str(thread_id))
+
     async def _proxy_resume() -> AsyncIterator[str]:
         try:
             async with httpx.AsyncClient(timeout=_AGENT_STREAM_TIMEOUT) as aclient:
@@ -2115,7 +2133,10 @@ async def resume_stream_playground_run(
                         # deliver its post-approval tool calls for real.
                         "eval_mode": run.eval_mode,
                     },
-                    headers={"Accept": "text/event-stream"},
+                    headers={
+                        "Accept": "text/event-stream",
+                        **({RCT_HEADER: _resume_rct} if _resume_rct else {}),
+                    },
                 ) as response:
                     if response.status_code != 200:
                         err = await response.aread()

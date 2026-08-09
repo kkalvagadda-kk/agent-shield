@@ -28,6 +28,8 @@ from sqlalchemy import text, update
 
 from db import AsyncSessionLocal
 from models import AgentRun, Approval, PlaygroundRun, RunStep
+from run_context import RCT_HEADER
+from run_context_anchor import rehydrate
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +56,22 @@ async def _notify_agent(agent_name: str, team: str, thread_id: str, approval_id:
         "reviewer_id": None,
         "reason": "Approval window expired",
     }
+    # ─── Identity P1.5 ───────────────────────────────────────────────────────
+    # A timed-out approval is still a RESUME: the pod re-enters the graph and may make
+    # further governed tool calls, each of which re-runs the OPA check. So it needs the
+    # same re-hydrated identity as an approved one.
+    #
+    # This site was NOT on the hand-written list of resume doors — `T-S101-009` derived
+    # the list from the tree and found it. That is the whole argument for deriving sweeps
+    # rather than enumerating them: this repo has shipped a hand-written sweep that missed
+    # 28 suites, and an unidentified resume fails as an OPA tool denial three layers from
+    # the cause.
+    async with AsyncSessionLocal() as s:
+        _rct = await rehydrate(s, thread_id)
+    headers = {RCT_HEADER: _rct} if _rct else {}
     try:
         async with httpx.AsyncClient(timeout=_RESUME_TIMEOUT_SECONDS) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in (200, 404):
                 # 404 = thread already completed (race with normal completion), safe to ignore
                 logger.info(

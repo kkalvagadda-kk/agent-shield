@@ -96,12 +96,20 @@ Proven on the cluster by `suite-100` 6/0 and 29/29 rego unit tests.
 The P1-ships-alone hazard this entry warned about never materialised because P1 and
 2a/2c/2d shipped as ONE slice — which is what the hazard implied they had to be.
 
-REMAINING: the intersection is enforced for the DURABLE playground path (where the
-RunContext is minted). The reactive `/chat/stream` path and the production
-`internal.py` path still reach the pod without a minted context, so they fall back to
-the legacy `x-user-sub` header in the runner and are denied `missing_user_identity`
-for a user_delegated agent — fail-closed, same as before. Threading those two is the
-rest of P1.
+REMAINING — ✅ HALF CLOSED 2026-08-08 (registry-api 0.2.277).
+This entry said "the reactive `/chat/stream` path and the production `internal.py` path
+still reach the pod without a minted context ... threading those two is the rest of P1",
+and it was right — that was P1's own undone scope, not a later phase's.
+
+  * **`internal.py` — CLOSED.** Both branches now carry identity: the durable dispatch
+    (`rct` through `_dispatch_and_complete`) and the reactive `/chat` POST. The context is
+    built from the already-resolved `Principal`, so a daemon keeps `user_id=""` and its
+    service subject stays in `service_name` instead of being laundered into `user_sub`.
+  * **`/chat/stream` — STILL OPEN.** The consumer-facing streaming chat entry point does
+    not mint. Tracked here; it is the last unminted producer besides eval-runner (P3).
+
+Postmortem for why this was ledgered as future work while being P1's own scope:
+`docs/bugs/identity-p1-wired-one-caller-of-three.md`.
 
 Original analysis follows.
 
@@ -365,6 +373,33 @@ that the payload carries **no** `tools` key at all.
 
 **What closing it needs:** resolve a workflow's members → each member's bound tools →
 a cascade plan across the union. `plan_tool_cascade` is per-agent today.
+
+## G-P1-PROD — the PRODUCTION identity anchor is not proven on the cluster — 2026-08-09
+
+**not-yet-wired (debt) — verification debt, not code debt.**
+
+`internal.py::start_internal_run` now builds a `RunContext` from the resolved `Principal`,
+writes it to `agent_runs.run_context` in the same transaction as the row, and passes the
+minted token to both the durable dispatch and the reactive `/chat` POST (`0.2.277`). That is
+proven by code review, an in-pod import check, and `suite-101`'s coverage of the anchor
+mechanics — but **not end to end**, because the cluster has **no running production agent
+deployment**. Every production run currently dies at the admission check
+(*"agent X has no running production deployment — it is deployed to sandbox"*) before
+identity is consulted.
+
+So the sandbox/playground path is proven end to end (`T-S101-002/003/004`) and the
+production path is proven only structurally. Do not read `suite-101` 9/0 as "production
+identity works".
+
+**What closes it:** the same fixture that closes `suite-37/45/59/60` — a pre-seeded,
+always-running PRODUCTION agent deployment. That one fixture is the highest-leverage test
+work left (see `docs/testing/red-test-ledger.md`), and it would turn this from a structural
+claim into an assertion.
+
+**How it was found:** `suite-37`'s ledger entry blamed exactly this code for its red. The
+code shipped, the suite did not move, and reading `agent_runs.error_message` showed it never
+reached a pod. A red-test root cause that is wrong is worse than none — it makes a suite look
+self-healing.
 
 ## G-E1 — re-publishing an unpublished tool costs a trip through the AGENT's review — 2026-08-08
 
@@ -650,8 +685,25 @@ which phases are scaffolding for it.
            -- owner_team cannot be derived from an optional caller. Shipped with
            A; postmortem in tools-and-skills-routers-had-no-authentication.md.
 
-  [4] identity P1.5   resume re-hydration, migration 0082. Mandatory before any
-                      approval can outlive its token.
+  [4] identity P1 + P1.5  [x] SHIPPED 0.2.277. Migration 0082 (NOT 0081 -- tool
+                      lifecycle took 0080 and mcp took 0081). run_context JSONB on
+                      playground_runs AND agent_runs; run_context_anchor.py is one
+                      producer for the row + the token, built from the SAME object so
+                      a run cannot start as one user and resume as another.
+                      P1 WAS ONLY HALF-WIRED: "one kwarg covers all three durable
+                      callers" was true of the dispatcher and false of the callers --
+                      only playground passed it, so every production/scheduled durable
+                      run reached the pod with user_id="" and the identity floor denied
+                      it. internal.py (durable + reactive) and workflow members are
+                      wired now; postmortem in
+                      docs/bugs/identity-p1-wired-one-caller-of-three.md.
+                      P1.5: all FIVE resume doors re-mint from the anchor. The fifth
+                      (approval_timeout_worker) was NOT on the hand list -- T-S101-009
+                      derives the set from the tree and found it. declarative-runner
+                      needed NO change (_bind_user_context is app-wide), verified by
+                      checking no route overrides it rather than assuming.
+                      suite-101 9 cases; T-S101-004 is the point (token expires, anchor
+                      still resolves the same human).
   [5] identity P3     verifiable SERVICE identity. Currently listed as
                       eval-runner + scheduler + event-gateway; DEPLOY-CONTROLLER
                       IS MISSING FROM THAT LIST and is tokenless today,

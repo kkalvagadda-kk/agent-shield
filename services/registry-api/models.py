@@ -1550,6 +1550,14 @@ class PlaygroundRun(Base):
     # HITL console (username instead of raw sub; the requester's own team).
     requested_by_username: Mapped[str | None] = mapped_column(String(256), nullable=True)
     requested_by_team: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # ── Identity P1 durable anchor (migration 0082) ──────────────────────────
+    # The serialized RunContext this run acts under. NOT derivable from `user_id`
+    # above: that column carries no team, no origin and no actor_chain, and for a
+    # service-driven run it holds a service subject rather than a human. See
+    # run_context_anchor.py for why re-deriving it at resume is wrong three ways.
+    # The in-flight RCT token expires in 900s; a HITL pause can last hours, so THIS
+    # row — not the token — is the system of record for who a paused run acts for.
+    run_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     context: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'playground'")
     )
@@ -1778,6 +1786,13 @@ class AgentRun(Base):
     run_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     team: Mapped[str | None] = mapped_column(String(100), nullable=True)
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # ── Identity P1 durable anchor (migration 0082) ──────────────────────────
+    # Mirrors PlaygroundRun.run_context — see that column and run_context_anchor.py.
+    # Note this row's `run_by` is a SERVICE subject for a daemon run, which is exactly
+    # why the anchor cannot be re-derived from it: minting user_sub=run_by would hand a
+    # daemon a fabricated human identity and walk it through the user_delegated arm of
+    # OPA's identity floor.
+    run_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("agent_runs.id"), nullable=True
     )

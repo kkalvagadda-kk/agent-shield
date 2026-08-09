@@ -509,11 +509,17 @@ Two properties are absent by design. Both are decisions, not oversights, and bot
 Renumbered 2026-08-02 — the head on disk is `0078`, and `0079` is reserved for RBAC phase R5
 (`rbac-and-artifact-authorization.md` §5).
 
-| Migration | Table | Change |
-|---|---|---|
-| `0081_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
-| `0082_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
-| `0083_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
+> **Renumbered again 2026-08-08 — these numbers moved twice and the doc was stale both times.**
+> `0079` went to RBAC R0, `0080` to the tool-lifecycle private-by-default change, `0081` to
+> `mcp_servers.created_by`. Alembic is a linear `down_revision` chain, so the identity
+> migrations take the next FREE numbers rather than the reserved ones. Do not re-reserve a
+> number without checking `ls services/registry-api/alembic/versions | tail -1`.
+
+| Migration | Table | Change | Status |
+|---|---|---|---|
+| `0082_run_context_anchor.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor | ✅ **SHIPPED** `0.2.277` |
+| `0083_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner | P3 |
+| `0084_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index | P5 |
 
 All idempotent (`IF NOT EXISTS`), data-preserving.
 
@@ -547,9 +553,54 @@ and a missing key all rejected) plus a mechanical check that the three vendored 
 primitive and the wiring, never that a run carries identity — that is P1, and a P0 suite claiming
 otherwise would be green for the wrong reason.
 
-**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0081` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
+**Phase 1 — ✅ SHIPPED 2026-08-08 (registry-api `0.2.277`), completing a partial 2026-08-07 landing.**
+Mint at `create_playground_run`; `rct` keyword on `durable_dispatch.dispatch_durable_run`; runner
+verifies and sets the ContextVar before `workflow_executor.run`; **migration `0082`** (not `0081`)
+writes the durable anchor at insert. *e2e:* `suite-101`.
 
-**Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-101` approve after the token would have expired, assert identity still present.
+> **CORRECTION — the sentence below was true about the dispatcher and false about the callers,
+> and that gap shipped.** This phase originally read: *"add an `rct` keyword to the shared
+> `dispatch_durable_run` and send the header there — **one edit covers all three durable
+> callers** (`playground.py` sandbox, `workflow_orchestrator.py` workflow member,
+> `internal.py` production)."*
+>
+> One edit is indeed all the DISPATCHER needs. But `rct: str | None = None` changes nothing
+> for a caller that does not pass it, and only `playground.py` did. `grep -n "rct"
+> routers/internal.py workflow_orchestrator.py` returned nothing while the phase was marked
+> complete — so **every production and scheduled durable run reached the pod with
+> `user_id=""`** and was denied by the identity floor this phase exists to satisfy. Postmortem:
+> `docs/bugs/identity-p1-wired-one-caller-of-three.md`.
+>
+> Now wired: `internal.py` builds the context from the already-resolved `Principal` (never
+> re-derived — `run_by` holds a SERVICE subject for a daemon, and minting `user_sub=run_by`
+> would hand it a fabricated human) and passes it to BOTH the durable dispatch and the reactive
+> `/chat` POST; `workflow_orchestrator` inherits the parent's anchor onto each member child and
+> mints from that. The reactive half also closes the `internal.py` side of ledgered gap **G-45**.
+>
+> *Docs:* spec.md Identity Propagation subsection.
+
+**Phase 1.5 — ✅ SHIPPED 2026-08-08 (registry-api `0.2.277`).** Resume re-hydration. All FIVE
+registry-side resume doors load the anchor by run id (or, for the chat resume, straight off the
+already-loaded row — its LangGraph thread key is a `session_id`, not a run id) and re-mint a
+fresh RCT immediately before the pod re-enters the governed tool.
+
+**The runner needed no change**: `_bind_user_context` is an **app-wide** FastAPI dependency
+(`main.py:257`), so it already ran on `/resume` and only ever lacked a header to read. Verified
+by checking that no route declares its own `dependencies=` override, rather than assumed — which
+is why this phase bumps no declarative-runner tag. `ResumeRequest` therefore did **not** gain a
+`run_context` body field as originally designed: one carrier (the header) for every hop beats a
+second shape of the same thing on one door.
+
+**The fifth door was not on the list.** The hand-written set was
+`approvals` · `workflow_orchestrator` · `playground` · `chat`. `T-S101-009` derives the set from
+the tree and found `approval_timeout_worker.py` — a timed-out approval still resumes the pod,
+re-enters the graph, and can make further governed tool calls. It would have shipped
+unidentified in the very change that exists to end unidentified resumes.
+
+*e2e:* `suite-101` — 9 cases; `T-S101-004` is the one that matters: mint with a 1-second TTL,
+wait for it to genuinely die, then prove re-hydration still yields the same human.
+
+
 
 **Phase 2 — SDK pod runtime + Gate 5/6 hardening. SCOPE GREW 2026-08-07 (Decisions 45/46).**
 Phase 2 now carries the tool-scope work, in this order — the order is forced, not stylistic:

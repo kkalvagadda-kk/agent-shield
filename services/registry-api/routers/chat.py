@@ -40,6 +40,8 @@ from auth_middleware import require_user
 from db import get_db
 from identity import resolve_principal
 from models import Agent, AgentRun, AssetGrant, Deployment, PlaygroundRun
+from run_context import RCT_HEADER
+from run_context_anchor import remint
 from pod_stream import stream_pod_chat_frames
 from preferences import compose_directive_for_user
 
@@ -1048,6 +1050,13 @@ async def resume_stream_chat(
     # poll MUST use this same helper so it can never drift from this resume path again.
     thread_id = _chat_thread_id(run, run_id)
 
+    # Identity P1.5 — remint from THIS row's anchor, not by a thread_id lookup. The chat
+    # thread key is the conversation `session_id` (see _chat_thread_id), which is NOT a
+    # run id, so `rehydrate` would search for a row that does not exist and silently
+    # return None. The run is already loaded and ownership-checked above; its anchor is
+    # the right source.
+    _resume_rct = remint(run.run_context, label=f"chat resume {run_id}")
+
     approval_result = await db.execute(
         select(Approval)
         .where(
@@ -1093,6 +1102,11 @@ async def resume_stream_chat(
         resume_headers = {"Accept": "text/event-stream"}
         if trace_id:
             resume_headers["X-AgentShield-Trace-ID"] = trace_id
+        # Identity P1.5 — the production chat resume. Re-hydrated from the durable anchor
+        # rather than carried across the pause: the original RCT has a 900s TTL and an
+        # approval routinely outlives it.
+        if _resume_rct:
+            resume_headers[RCT_HEADER] = _resume_rct
         try:
             async with httpx.AsyncClient() as client:
                 async with client.stream(

@@ -292,6 +292,41 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
                 f"comment — something was inserted between the halves of one command"
             )
 
+    # 8b — the in-pod DRIVER must compile as Python.
+    #
+    # `kubectl exec ... python3 -c '<program>'` wraps a whole Python program in a bash
+    # SINGLE-quoted string, so the program ends at the very next apostrophe. One `'` in a
+    # comment or a message — a contraction is enough — closes it early, bash splices the
+    # remainder as shell text, and Python receives a truncated file. The symptom is
+    # `SyntaxError: unterminated string literal` at a line number in the DRIVER, which
+    # matches no line in the suite file, and EVERY case in that driver fails at once. It
+    # reads as "the feature is broken" rather than "the quoting is broken".
+    #
+    # Same family as rule 7: `bash -n` accepts it, because the suite file IS valid bash —
+    # the driver is just a string to it. So the only signal is a cluster run. suite-42 and
+    # suite-99 each paid for this; suite-101 paid for it a third time on its first run,
+    # over the contraction in "we do not know".
+    #
+    # The check is the EXACT property, not a proxy for it: slice from the opening quote to
+    # the next `'` — which is precisely what bash will hand to python3 — and `compile()` it.
+    # That catches the apostrophe case and any other syntax error in a driver, and it
+    # cannot false-positive the way an apostrophe-hunt does (an early version flagged
+    # suite-99, whose one-line driver legitimately closes mid-line).
+    for _m in re.finditer(r"python3 -c '\n", t):
+        _start = _m.end()
+        _end = t.find("'", _start)
+        if _end == -1:
+            continue
+        _base = t[:_start].count("\n") + 1
+        try:
+            compile(t[_start:_end], "<driver>", "exec")
+        except SyntaxError as _se:
+            FAIL.append(
+                f"{p.name}:{_base + (_se.lineno or 1) - 1}  in-pod driver does not compile "
+                f"as Python ({_se.msg}) — usually an apostrophe closing the single-quoted "
+                f"block early, which truncates the program bash hands to python3"
+            )
+
     # 8 — a header VARIABLE that carries no Authorization.
     # Rule 5 asks "does the file mention Authorization anywhere", which a suite passes by
     # authenticating just its cleanup. suite-29 and suite-40 did exactly that: the R3 pass

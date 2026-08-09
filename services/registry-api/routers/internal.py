@@ -23,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db import AsyncSessionLocal
 from embedding_client import embed
+from run_context import RCT_HEADER
+from run_context_anchor import anchor_value, build_context, mint_for
 from identity import (
     PrincipalResolutionError,
     resolve_principal,
@@ -170,6 +172,7 @@ async def _dispatch_and_complete(
     trigger_id=None,
     *,
     target: DispatchTarget,
+    rct: str | None = None,
 ) -> None:
     """Shape-aware production dispatch (WS-0 parity core).
 
@@ -201,6 +204,7 @@ async def _dispatch_and_complete(
             input_payload=input_payload,
             callback_url=callback,
             runner_url=target.base_url,
+            rct=rct,
         )
         if not ok:
             await _mark_agent_run_failed(run_id, err, agent_name, trigger_id)
@@ -214,9 +218,14 @@ async def _dispatch_and_complete(
     url = f"{target.base_url}/chat"
     start = time.perf_counter()
     status_val, output, err = "completed", None, None
+    # The REACTIVE branch carries identity too. `_bind_user_context` is an app-wide
+    # dependency on the runner, so the same header works on /chat with no runner change —
+    # and without it a reactive production run reaches OPA with user_id="" exactly like a
+    # durable one did. This is the internal.py half of the ledgered G-45 gap.
+    _hdrs = {RCT_HEADER: rct} if rct else {}
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json={"message": message})
+            resp = await client.post(url, json={"message": message}, headers=_hdrs)
         if resp.status_code == 200:
             data = resp.json()
             output = data.get("output") or data.get("response") or json.dumps(data)
@@ -554,8 +563,31 @@ async def start_internal_run(
     if trace_id:
         run.langfuse_trace_id = trace_id
 
+    # ─── Identity P1: anchor + mint for the PRODUCTION path ──────────────────
+    # P1 threaded `rct` into dispatch_durable_run and claimed "one kwarg covers all three
+    # durable callers". The kwarg landed; only the playground actually passed it, so every
+    # production and scheduled durable run still reached the pod with no identity. Wiring
+    # it here is the rest of P1, not new scope.
+    #
+    # The identity comes from the ALREADY-RESOLVED `Principal`, never re-derived. That
+    # object is the one place this codebase decides "who is acting" for a trigger-run, and
+    # it deliberately keeps `user_id` EMPTY for a daemon while `run_by` holds the service
+    # subject. Mapping those onto the RunContext one-for-one is what keeps a daemon out of
+    # OPA's `user_delegated` arm — reading `run_by` into `user_sub` would hand it a
+    # fabricated human and defeat the identity floor.
+    run_ctx = build_context(
+        user_sub=principal.user_id,
+        user_team=agent.team or "",
+        origin="production",
+        is_service_call=principal.is_service,
+        service_name=principal.run_by if principal.is_service else None,
+    )
+    run.run_context = anchor_value(run_ctx)
+
     await db.commit()
     await db.refresh(run)
+
+    rct = mint_for(run_ctx, label=f"internal run {run.id}")
 
     # Fire-and-forget dispatch; completion is recorded by _dispatch_and_complete.
     import asyncio
@@ -563,7 +595,7 @@ async def start_internal_run(
         _dispatch_and_complete(
             str(run.id), body.agent_name, agent.team, message,
             agent.execution_shape, effective_payload, body.trigger_id,
-            target=target,
+            target=target, rct=rct,
         )
     )
 

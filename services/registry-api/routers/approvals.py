@@ -28,6 +28,8 @@ from auth_middleware import get_optional_user
 from db import AsyncSessionLocal, get_db
 from identity import principal_display as _principal_display
 from models import AgentRun, Approval, ApprovalAuthority
+from run_context import RCT_HEADER
+from run_context_anchor import rehydrate
 from schemas import ApprovalCreate, ApprovalDecision, ApprovalResponse, PaginatedResponse
 
 # Roles that always have authority to see/decide production approvals,
@@ -157,8 +159,29 @@ async def _resume_and_advance(
 
         env = await _resolve_agent_environment(agent_name)
         pod_url = _agent_pod_url(agent_name, team, env)
+
+        # ─── Identity P1.5: re-hydrate from the durable anchor ───────────────
+        # THE reason P1.5 is mandatory. The RCT minted at run start has a 900s TTL and
+        # this approval may have sat for hours, so the original token is long dead. The
+        # anchor on the run row is the system of record; a fresh token is minted from it
+        # here, immediately before the pod re-enters the governed tool and re-runs the
+        # OPA check.
+        #
+        # Without this the resumed run reaches OPA with user_id="" and the identity floor
+        # (live since WS-2) denies it — the approval succeeds and the work it unblocked
+        # then fails, which reads as a broken agent rather than a missing identity.
+        #
+        # No fallback to a header: rehydrate() returning None means "we do not know", and
+        # sending nothing is the honest, fail-closed answer. Minting user_sub="" instead
+        # would be an ASSERTION that the run has no user.
+        async with AsyncSessionLocal() as s:
+            resume_rct = await rehydrate(s, thread_id)
+        resume_headers = {RCT_HEADER: resume_rct} if resume_rct else {}
+
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(f"{pod_url}/resume/{thread_id}", json=resume_body)
+            resp = await client.post(
+                f"{pod_url}/resume/{thread_id}", json=resume_body, headers=resume_headers,
+            )
         member_status = "completed" if resp.status_code == 200 else "failed"
         try:
             member_output = (resp.json() or {}).get("response", "") or ""
