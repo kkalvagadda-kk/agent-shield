@@ -106,6 +106,63 @@ not green.**
 `suite-74-eval-v2-side-effects`, `suite-80-eval-v2-regression`,
 `suite-94-trigger-dispatch-environment`
 
+### Identity P3 fallout — measured 2026-08-09 on `0.2.281` / `0.2.282`
+
+`8392a61` (identity P3) required a credential on `list_approvals` and `decide_approval` and
+**did not update this file**, so its four deliberately-carried reds were invisible here. Then
+`0.2.281`/`0.2.282` closed four more routes. Both waves broke suites that were passing only
+because a route accepted no credential. Split by cause, because they are not one thing:
+
+| Suite | Now | Cause | Mine? |
+|---|---|---|---|
+| `suite-102-verifiable-service-identity` | **15/0** | 5 new cases (`T-S102-010`…`014b`). All were red first: `010` returned **200** — a verified scheduler token granted `platform-admin` approved a real pending HITL request; `011/012/013/014a` returned **404**, i.e. the row lookup ran with no auth decision at all. | fixed |
+| `suite-70-daemon-identity` | **9/0** | `T-S70-003` was a FIXTURE defect, NOT the guard bug `8392a61` claimed: the driver's client carried `auth=BearerAuth()` (module-level **admin** token) and expressed "non-reviewer" as a per-request `X-User-Sub`, which `httpx` overrides with `auth=` on every request. It also needed the per-tool grant revoked — see the auto-grant row below. `T-S70-004` was **green for the wrong reason** (admin bypass, never the reviewer scope). | fixed |
+| `suite-93-hitl-admin-approve-authority` | **5/5** | unchanged. Reference implementation for the persona pattern. | n/a |
+| `suite-89-publish-queue-verdict` | **8/0** | `T-S89-006` accepted `200 []` for an anonymous dataset list; now requires **401**. Assertion INVERTED, not deleted — an empty 200 is indistinguishable from "you own nothing". | fixed |
+| `suite-4-hitl` | **8/0** (was 2/5) | **P3, not 0.2.281.** Four `PATCH /approvals/{id}` and the pending-list `GET` carried no credential → 401. `GET /approvals/{id}` (which 0.2.281 closed) fixed in the same pass. | fixed |
+| `suite-5-hitl-authority` | **10/0** (was 5 red) | **P3.** `T-S5-002/003/004/005` sent only `X-User-Sub`, so they 401'd — **not** the 403 the cases assert. Rewritten onto two real `contributor` personas via `e2e_ensure_persona`, each acting with its OWN token, subs read out of those tokens. Both are `contributor` on purpose: the only thing separating them is the ApprovalAuthority grant, which IS the subject. Was missing from this file entirely. | fixed |
+| `suite-9-eval` | **15/0** (was 4 red) | dataset PATCH/DELETE/create/list fixed. `T-S9-011` **INVERTED, not repaired** — it asserted that a forged `X-User-Sub: eval-runner` with NO credential starts a run on an agent the caller does not own, i.e. it asserted the bypass as the feature, exactly like `T-S93-004`. Now asserts 401. `T-S9-012`'s subject is the judge fields, so it just needed a real credential. | fixed |
+| `suite-17-eval-gate` | **10/0** (was 8/2) | **MINE.** `T-S17-008/009` created a dataset with `X-User-Sub` and no Bearer → 401 → no eval run → the eval-gate assertion never ran. | fixed |
+| `suite-8-playground` | 11/16 (was 9/18) | `T-S8-018/018b` were mine (playground decide gained auth) — **fixed**. The 5 remaining are all `POST /playground/runs` and are **P3 debt, not this change**: `T-S8-001/002/024` need a credential, and `T-S8-022/023` assert forged `X-User-Sub: eval-runner` / `mallory-not-owner` identities that P3 deliberately killed. Invert `022/023` the way `T-S9-011` and `T-S93-004` were; repair `001/002/024` with a token. **Not done.** | pre-existing (P3) |
+| `suite-13-observability` | SKIPPED | environmental, unrelated: `safety-orchestrator` is `enabled=false`, so the suite exits before asserting. Its dataset cleanup was fixed anyway. | n/a |
+| `suite-13`, `suite-17`, `suite-9` cleanups | fixed | dataset cleanup looped over invented owner strings (`'dev'`, `'s13-user'`, `'s9'`) and 401'd inside `except Exception: pass` — silently leaving rows, which is the worst property a cleanup can have. `'dev'` was never a user; it was `create_dataset`'s literal `or "dev"` fallback, removed in 0.2.282. Note each of `suite-9` and `suite-17` has TWO dataset-cleanup blocks; fixing one is not fixing the suite. | mine |
+
+**Two self-inflicted bugs worth naming, because neither gate catches them:**
+* A comment containing **backticks inside `run_test`'s double-quoted bash string** made bash
+  execute it — `suite-9-eval.sh: line 206: require_owner: command not found`. `bash -n` passes,
+  and `check-e2e-auth-hygiene.sh` does not look inside comments.
+* A `replace_all` on a header dict matched **three** POSTs, not the two datasets ones — it also
+  hit the eval-run create, so create used the credential while the list still used
+  `X-User-Sub` and the run was invisible to the test that made it. Same owner/modifier split as
+  the dataset 403. **Count the occurrences before a `replace_all`.**
+
+The backtick one is not a new discovery — `suite-8-playground.sh` already carries a comment
+saying a previous fix to `T-S8-018` produced `line 565: decided: command not found` for exactly
+this reason. The warning existed, in the file being edited, and was still repeated. Neither
+`bash -n` nor `check-e2e-auth-hygiene.sh` looks inside a comment, so **grep your own diff for a
+backtick before running anything**:
+`git diff -U0 -- scripts/e2e | grep -n '^+.*`'`
+
+### suite-97 isolation is now a control, not a habit (2026-08-09)
+
+`test-manifest.txt` encoded "DESTRUCTIVE" as prose in the **title** column, which
+`scripts/run-tests.sh` never reads — so `--group rbac` scheduled suite-97 against the very
+platform-admin it deletes. There is now a reserved `destructive` group that `select_rows`
+excludes **unless you name it yourself**, checked before any other group match (naming
+`rbac` is not enough, because suite-97 also carries `rbac`). Verified: absent from
+`--list --group rbac` (8 suites) and from a plain `--list --layer api`; present only under
+`--group destructive`. `--groups` still counts it as a member and now prints a note saying so,
+because otherwise the census and the schedule disagree by one and someone goes hunting.
+
+**A finding that is NOT a test bug — needs a decision (gap `G-ID-0`).** `_caller_can_review`
+allows an explicit per-tool `ApprovalAuthority` grant as a third arm, and
+`routers/deployments.py:92-118` auto-grants every risky tool to **every member of the team** on
+deploy. Measured: `refund_action` carries **27 active grants**; every `contributor` in
+`user_team_assignments` holds one. So a daemon approval routed to `agent:reviewer` is decidable
+by any team contributor and the routing is decorative. `suite-70` now revokes both personas'
+grants and asserts the revoke, so `003`/`004` differ in exactly one thing — whether the caller
+holds the routed role.
+
 ### STILL RED — all triaged 2026-08-08
 
 | Suite | Result | Cause | Owner |
@@ -144,7 +201,12 @@ New script. Creates and deploys the five always-running agents the suites assume
    (`5cf374d6-…`) and the playground refuses: *"Only the agent owner can run it in the
    playground."* The pre-existing `wf-payout` is owned by that same stale literal, which is
    why the mismatch never surfaced before something new was created properly.
-   **Fix:** resolve the sub live, exactly as `suite-70` and `studio/e2e/lib/api.ts` now do.
+   **Fix:** resolve the sub live, exactly as `studio/e2e/lib/api.ts` does — and as `suite-70`
+   does **for the admin sub only**. Do not copy suite-70 wholesale: until 2026-08-09 it also
+   INVENTED two `uuid.uuid4()` subs for its reviewer/non-reviewer personas and typed them into
+   `X-User-Sub`, which is the opposite lesson. It now mints real personas via
+   `e2e_ensure_persona` and reads each sub out of that persona's own token
+   (`e2e_auth.sub_of`). Copy the post-fix version, or copy `suite-93`.
    Not done — it touches several suites.
 
 2. **Runs do not complete.** `suite-59` 002–005 and `suite-60` need an agent that actually
@@ -160,8 +222,9 @@ prerequisites, and finding that out cost less than assuming it.
 `lib/e2e-auth.sh` now exports **`E2E_SUB`, decoded from the token it just minted**. 28 hardcoded
 occurrences of two stale subs (`75c7c8b3-…` ×25, `047fad5f-…` ×3) were replaced with it. Neither
 literal has a `user_team_assignments` row — a realm recreation mints new subs and nothing updated
-them. Same rule as `studio/e2e/lib/api.ts` and `suite-70`: derive the sub FROM the credential, so
-the two cannot disagree.
+them. Same rule as `studio/e2e/lib/api.ts`: derive the sub FROM the credential, so the two cannot
+disagree. (`suite-70` was cited here as a model too; it followed the rule for its ADMIN sub and
+broke it for its two personas until 2026-08-09 — see its row above.)
 
 **It did not fix the six reds, exactly as predicted before starting.** What it changed:
 `suite-45` T-S45-003/004 stopped returning 403. `suite-45` is still 4 passed / 7 failed — the
@@ -188,7 +251,7 @@ Hardcoding either is a coin flip; the caller now comes from the token.
 | Suite | Now | Was |
 |---|---|---|
 | `suite-54-agent-class-shape-dispatch` | **14/0** | called `create_agent`/`update_agent` DIRECTLY in-pod; R2/R3 replaced their `x_user_sub`/`user` params with `claims` and added gates. Now inserts a real role row and passes `claims`, so it exercises the authorization path rather than bypassing it. |
-| `suite-70-daemon-identity` | **9/0** | three separate causes: (a) `deny_reason` precedence — a real defect, fixed in 0.2.273; (b) a bundle saying `user_delegated` while the input claimed `daemon` — asserting the behaviour D-1 removes; (c) `ADMIN_SUB` hardcoded to a sub with no `user_team_assignments` row, the same staleness that was in `studio/e2e/lib/api.ts`. |
+| `suite-70-daemon-identity` | **9/0** on `0.2.281` (re-verified 2026-08-09 after the identity-P3 fallout — see the 0.2.281/0.2.282 section below) | three separate causes: (a) `deny_reason` precedence — a real defect, fixed in 0.2.273; (b) a bundle saying `user_delegated` while the input claimed `daemon` — asserting the behaviour D-1 removes; (c) `ADMIN_SUB` hardcoded to a sub with no `user_team_assignments` row, the same staleness that was in `studio/e2e/lib/api.ts`. **This row said 9/0 while `T-S70-003` was red under `8392a61` — the commit carried the red deliberately but never updated the ledger, so for a day the file called suite-70 green AND cited it twice as the exemplar of deriving a sub from the credential while it typed invented subs into a header.** |
 | ~~`suite-26-scheduler`~~, ~~`suite-67`~~ | GREEN | timing flakes |
 | `suite-94`, `96`, `97`, `98` | GREEN alone | false reds — see the parallel-run distortions above |
 

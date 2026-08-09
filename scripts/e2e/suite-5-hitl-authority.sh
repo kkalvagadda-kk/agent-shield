@@ -4,13 +4,15 @@
 # E2E Suite 5: HITL Authority Scoping (Phase 9.3)
 # Tests T-S5-001 through T-S5-005.
 #
-# What this proves:
-#   T-S5-001 — ApprovalAuthority created for issue_refund → reviewer-1 (201)
+# What this proves — with TWO REAL Keycloak personas, both 'contributor', so the only thing
+# separating them is the ApprovalAuthority grant this suite creates (that grant IS the
+# subject). Each acts with its OWN token; neither is named by a header:
+#   T-S5-001 — ApprovalAuthority created for issue_refund → s5-reviewer-1's sub (201)
 #   T-S5-001 — GET /admin/approval-authority returns the record
-#   T-S5-002 — reviewer-1 sees pending approval for issue_refund
-#   T-S5-003 — reviewer-2 (no authority) sees empty list
-#   T-S5-004 — reviewer-2 PATCH decide → 403 not_authorized_to_decide
-#   T-S5-005 — reviewer-1 PATCH decide → 200 approved; status=approved confirmed
+#   T-S5-002 — s5-reviewer-1 (granted) sees the pending approval for issue_refund
+#   T-S5-003 — s5-reviewer-2 (no grant) sees an empty list
+#   T-S5-004 — s5-reviewer-2 PATCH decide → 403 not_authorized_to_decide, row still pending
+#   T-S5-005 — s5-reviewer-1 PATCH decide → 200 approved; reviewer_id is its verified sub
 #
 # API notes vs. test plan:
 #   - Endpoint is /api/v1/admin/approval-authority (not /api/v1/approval-authorities)
@@ -33,12 +35,47 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
-# R1/FR-11: every /api/v1/admin/* route (routers/admin.py) now requires a real JWT —
-# here that is the approval-authority create / list / delete. /api/v1/approvals/* and
-# /api/v1/agents/* are NOT among R1's ten routers and stay as they are. Call
-# e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+# R1/FR-11: every /api/v1/admin/* route (routers/admin.py) requires a real JWT — here that
+# is the approval-authority create / list / delete.
+#
+# THE REST OF THIS COMMENT USED TO SAY '/api/v1/approvals/*' and '/api/v1/agents/*' "are NOT
+# among R1's ten routers and stay as they are". That is no longer true and following it is
+# what left this suite red:
+#   * identity P3 (0.2.279) required a credential on GET /approvals/ and PATCH /approvals/{id}
+#   * 0.2.281 added GET /approvals/{id} and POST /approvals/{id}/reopen
+#   * R3 (0.2.264) gated DELETE /api/v1/agents/{name}
+# EVERY call in this suite carries a credential now, and the two reviewers are real Keycloak
+# personas rather than header strings. Call e2e_set_token BARE — a command substitution
+# swallows its abort (lib/e2e-auth.sh).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_set_token "$NAMESPACE" "$API_POD"
+
+# ── REAL reviewer personas, not the strings 'reviewer-1' / 'reviewer-2' ───────
+# This suite identified its two reviewers by typing 'X-User-Sub: reviewer-1' on requests
+# that carried no credential at all. Identity P3 made the caller come from the credential
+# and ONLY the credential, so those cases stopped testing authority and started returning
+# 401 — T-S5-004 expects 403 and got 401, which is a different rule failing. Worse, a sub
+# no Keycloak user owns cannot authenticate at all, so "act as reviewer-1" is no longer a
+# thing a test can express with a header. It needs a CREDENTIAL.
+#
+# 'e2e_ensure_persona' creates each user through the real POST /api/v1/admin/users (which
+# also writes its user_team_assignments row) and echoes a token. Both are 'contributor':
+# the authority difference between them must come from the ApprovalAuthority grant this
+# suite creates, which is the thing under test — not from one of them being an admin.
+S5_R1_TOKEN="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "s5-reviewer-1" "contributor")"
+S5_R2_TOKEN="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "s5-reviewer-2" "contributor")"
+# The subs come OUT of the tokens — never chosen here. 'python3 -' reads the token from the
+# environment rather than the command line so it does not land in a process listing.
+S5_R1_SUB="$(S5_TOK="$S5_R1_TOKEN" python3 -c '
+import base64, json, os
+p = os.environ["S5_TOK"].split(".")[1]; p += "=" * (-len(p) % 4)
+print(json.loads(base64.urlsafe_b64decode(p))["sub"])')"
+S5_R2_SUB="$(S5_TOK="$S5_R2_TOKEN" python3 -c '
+import base64, json, os
+p = os.environ["S5_TOK"].split(".")[1]; p += "=" * (-len(p) % 4)
+print(json.loads(base64.urlsafe_b64decode(p))["sub"])')"
+[ -z "$S5_R1_SUB" ] || [ -z "$S5_R2_SUB" ] && { echo "ERROR: could not resolve persona subs"; exit 1; }
+echo "  personas: s5-reviewer-1=${S5_R1_SUB:0:8}… (granted below)  s5-reviewer-2=${S5_R2_SUB:0:8}… (no grant)"
 
 AUTHORITY_ID=""
 cleanup() {
@@ -142,7 +179,7 @@ import urllib.request, json
 body = json.dumps({
     'resource_type': 'tool',
     'resource_id': 'issue_refund',
-    'approver_user_id': 'reviewer-1'
+    'approver_user_id': '${S5_R1_SUB}'
 }).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority',
@@ -154,7 +191,7 @@ req = urllib.request.Request(
 r = urllib.request.urlopen(req)
 assert r.status == 201, f'expected 201 got {r.status}'
 data = json.loads(r.read())
-assert data.get('approver_user_id') == 'reviewer-1', f'unexpected: {data}'
+assert data.get('approver_user_id') == '${S5_R1_SUB}', f'unexpected: {data}'
 print(data['id'])
 " 2>/dev/null || true)
 
@@ -166,7 +203,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-run_test "T-S5-001 GET /admin/approval-authority?resource_id=issue_refund → reviewer-1 record present" "
+run_test "T-S5-001 GET /admin/approval-authority?resource_id=issue_refund → granted reviewer's record present" "
 import urllib.request, json
 r = urllib.request.urlopen(urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority?resource_type=tool&resource_id=issue_refund',
@@ -175,8 +212,8 @@ r = urllib.request.urlopen(urllib.request.Request(
 data = json.loads(r.read())
 items = data.get('items', [])
 assert len(items) > 0, 'no records returned'
-assert any(i.get('approver_user_id') == 'reviewer-1' for i in items), \
-    f'reviewer-1 not in items: {[i.get(\"approver_user_id\") for i in items]}'
+assert any(i.get('approver_user_id') == '${S5_R1_SUB}' for i in items), \
+    f'granted reviewer not in items: {[i.get(\"approver_user_id\") for i in items]}'
 "
 
 # ---------------------------------------------------------------------------
@@ -246,11 +283,11 @@ echo "  approval id=${APPROVAL_ID:0:8}... version=${APPROVAL_VERSION}"
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S5-002: Authorized reviewer sees pending approval ---"
-run_test "T-S5-002 GET /approvals?status=pending X-User-Sub=reviewer-1 → issue_refund visible" "
+run_test "T-S5-002 GET /approvals?status=pending as granted reviewer (own token) → issue_refund visible" "
 import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/?status=pending',
-    headers={'X-User-Sub': 'reviewer-1'}
+    headers={'Authorization': 'Bearer ${S5_R1_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -265,11 +302,11 @@ assert any(i.get('tool_name') == 'issue_refund' for i in items), \
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S5-003: Unauthorized reviewer sees empty list ---"
-run_test "T-S5-003 GET /approvals?status=pending X-User-Sub=reviewer-2 → total=0" "
+run_test "T-S5-003 GET /approvals?status=pending as ungranted reviewer (own token) → total=0" "
 import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/?status=pending',
-    headers={'X-User-Sub': 'reviewer-2'}
+    headers={'Authorization': 'Bearer ${S5_R2_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -284,17 +321,17 @@ assert total == 0 and items == [], f'expected empty list got total={total} items
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S5-004: Unauthorized PATCH decide → 403 not_authorized_to_decide ---"
-run_test "T-S5-004 PATCH /approvals/${APPROVAL_ID:0:8}... X-User-Sub=reviewer-2 → 403" "
+run_test "T-S5-004 PATCH /approvals/${APPROVAL_ID:0:8}... as ungranted reviewer (own token) → 403" "
 import urllib.request, urllib.error, json
 body = json.dumps({
     'decision': 'approved',
-    'reviewer_id': 'reviewer-2',
+    'reviewer_id': '${S5_R2_SUB}',
     'version': ${APPROVAL_VERSION:-0}
 }).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${APPROVAL_ID}',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'reviewer-2'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${S5_R2_TOKEN}'},
     method='PATCH'
 )
 try:
@@ -310,7 +347,12 @@ except urllib.error.HTTPError as e:
 # Confirm approval is still pending after the 403 attempt
 run_test "T-S5-004 GET /approvals/${APPROVAL_ID:0:8}... → status still pending after 403" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/approvals/${APPROVAL_ID}')
+# GET /approvals/{id} requires a credential since 0.2.281 — it returns the full record
+# plus principal_display/requested_by/team. This read only checks status, so the admin
+# token is the right caller: the AUTHORITY question is already settled above.
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/approvals/${APPROVAL_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
 data = json.loads(r.read())
 assert data.get('status') == 'pending', f'expected pending got {data.get(\"status\")}'
 "
@@ -320,32 +362,37 @@ assert data.get('status') == 'pending', f'expected pending got {data.get(\"statu
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S5-005: Authorized PATCH decide → 200 approved ---"
-run_test "T-S5-005 PATCH /approvals/${APPROVAL_ID:0:8}... X-User-Sub=reviewer-1 → 200 approved" "
+run_test "T-S5-005 PATCH /approvals/${APPROVAL_ID:0:8}... as granted reviewer (own token) → 200 approved" "
 import urllib.request, json
 body = json.dumps({
     'decision': 'approved',
-    'reviewer_id': 'reviewer-1',
+    'reviewer_id': '${S5_R1_SUB}',
     'version': ${APPROVAL_VERSION:-0}
 }).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${APPROVAL_ID}',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'reviewer-1'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${S5_R1_TOKEN}'},
     method='PATCH'
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
 data = json.loads(r.read())
 assert data.get('status') == 'approved', f'expected approved got {data.get(\"status\")}'
-assert data.get('reviewer_id') == 'reviewer-1', f'unexpected reviewer_id: {data.get(\"reviewer_id\")}'
+assert data.get('reviewer_id') == '${S5_R1_SUB}', f'unexpected reviewer_id: {data.get(\"reviewer_id\")}'
 "
 
-run_test "T-S5-005 GET /approvals/${APPROVAL_ID:0:8}... → status=approved, reviewer_id=reviewer-1" "
+run_test "T-S5-005 GET /approvals/${APPROVAL_ID:0:8}... → status=approved, reviewer_id=the granted reviewer's sub" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/approvals/${APPROVAL_ID}')
+# GET /approvals/{id} requires a credential since 0.2.281 — it returns the full record
+# plus principal_display/requested_by/team. This read only checks status, so the admin
+# token is the right caller: the AUTHORITY question is already settled above.
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/approvals/${APPROVAL_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
 data = json.loads(r.read())
 assert data.get('status') == 'approved', f'expected approved got {data.get(\"status\")}'
-assert data.get('reviewer_id') == 'reviewer-1', f'unexpected reviewer_id: {data.get(\"reviewer_id\")}'
+assert data.get('reviewer_id') == '${S5_R1_SUB}', f'unexpected reviewer_id: {data.get(\"reviewer_id\")}'
 assert data.get('decision_at') is not None, 'decision_at should be set'
 "
 

@@ -61,10 +61,28 @@ case "$LAYER" in api|browser|all) ;; *) echo "FATAL: --layer must be api|browser
 select_rows() {
   local want_layer="$1"
   awk -F'|' -v layer="$want_layer" -v groups="$FILTER_GROUPS" '
+    # Is <g> one of the groups the caller explicitly asked for?
+    function requested(g,   n, want, i, t) {
+      n = split(groups, want, ",")
+      for (i = 1; i <= n; i++) { t = want[i]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == g) return 1 }
+      return 0
+    }
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF < 4 { next }
     $1 != layer { next }
     {
+      # DESTRUCTIVE rows are opt-in by NAME, and that is checked before any other
+      # match. `suite-97` deletes the Keycloak platform-admin and restarts registry-api
+      # mid-run, and every other suite authenticates AS platform-admin — so scheduling it
+      # alongside anything turns one real result into a screen of unattributable reds
+      # (2026-08-08: 94/96/97/98 all red together, all green alone).
+      #
+      # It is NOT enough to exclude it from an unfiltered run: suite-97 also carries
+      # `governance` and `rbac`, so `--group rbac` would still pick it up. The only way in
+      # is to say `destructive` yourself. This used to be prose in the TITLE column, which
+      # the runner never reads — a comment is not a control.
+      if ($2 ~ /(^|,)destructive(,|$)/ && !requested("destructive")) next
+
       if (groups == "") {
         # No filter: skip scratch/debug rows so a plain run stays meaningful.
         if ($2 ~ /(^|,)debug(,|$)/) next
@@ -105,6 +123,15 @@ if [ "$MODE" = "groups" ]; then
   echo ""
   echo "Run one:   bash scripts/run-tests.sh --group <group>"
   echo "Preview:   bash scripts/run-tests.sh --list --group <group>"
+  # These counts are MEMBERSHIP, not what a run would schedule — otherwise the two
+  # disagree by one and the reader goes looking for a bug. `rbac` reads 9 here and
+  # `--list --group rbac` shows 8, because suite-97 is destructive.
+  if [ -n "$(printf '%s\n' "$PAIRS" | grep -x 'destructive|api' || true)" ]; then
+    echo ""
+    echo "Note:      'destructive' rows are counted above but are NOT scheduled unless you"
+    echo "           name the group yourself — not by --group rbac, not by a plain run."
+    echo "           They damage shared state mid-run (suite-97 deletes the Keycloak admin)."
+  fi
   exit 0
 fi
 
