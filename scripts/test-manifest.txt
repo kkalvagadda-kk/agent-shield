@@ -49,7 +49,7 @@ api|agent,deploy|suite-2-lifecycle.sh|Agent Lifecycle
 api|governance|suite-3-safety.sh|Safety Scanning
 api|hitl|suite-4-hitl.sh|HITL Approval Flow
 api|hitl,governance|suite-5-hitl-authority.sh|HITL Authority Scoping
-api|agent,tools|suite-6-asset-lifecycle.sh|Asset Lifecycle
+api|agent,tools,governance|suite-6-asset-lifecycle.sh|Asset Lifecycle — publish, grants, the Decision 47 tool cascade, the step-D reviewer payload, and the step-E owner-initiated unpublish
 api|governance|suite-7-machine-identity.sh|Machine Identity
 api|chat|suite-8-playground.sh|Playground
 api|eval|suite-9-eval.sh|Eval Runner
@@ -62,6 +62,7 @@ api|governance|suite-15-artifact-isolation.sh|Artifact Isolation
 api|agent|suite-16-create-agent.sh|Create Agent Flow
 api|eval,agent|suite-17-eval-gate.sh|Eval Gate (Decision 20)
 api|governance|suite-18-opa-governance.sh|OPA Governance
+api|governance,rbac|suite-100-decision-45-user-grants.sh|Decision 45 — user grants enforced for user_delegated
 api|execution|suite-19-execution-shape.sh|Execution Shape & Triggers
 api|chat,execution|suite-20-durable-playground.sh|Durable Playground
 api|chat,execution|suite-21-scheduled-playground.sh|Scheduled Playground
@@ -145,9 +146,16 @@ api|hitl,rbac|suite-93-hitl-admin-approve-authority.sh|HITL decide honors platfo
 api|execution|suite-94-trigger-dispatch-environment.sh|Trigger dispatch resolves ONE environment (admission+address agree); refusal is a legible run row, not a DNS error
 api|execution,governance|suite-95-trigger-lifecycle-disarm.sh|Deleting/archiving/quarantining an artifact disarms its triggers (write gate + scheduler read filter)
 api|execution,rbac|suite-96-schedules-endpoint.sh|GET /api/v1/schedules — cross-artifact read, deny-by-default, will_fire from the same predicate dispatch uses
+api|governance,rbac|suite-97-rbac-bootstrap-and-router-auth.sh|R0/R1 — platform-admin bootstrap re-pins onto a new sub after realm recreation (DESTRUCTIVE: deletes the Keycloak admin + restarts registry-api)
+api|governance,rbac|suite-98-rbac-role-enforcement.sh|R2+R3 GATE — authenticates as a real consumer and contributor (not platform-admin, which every other suite uses) and asserts the 403s R2/R3 introduced: admin surface, agent create, artifact-scoped PATCH/DELETE/quarantine, and the playground. Plus the over-reach guards: platform-admin still 200, anonymous still 401, the OWNER can still edit their own agent, /me/team and /users/directory still open to non-admins
+api|governance,identity|suite-99-run-context-p0.sh|Identity P0 — RunContext mint/verify/extend exercised INSIDE the pod (tamper, wrong key, expiry and a missing key all rejected), the signing key is actually mounted, and the three vendored run_context.py copies agree
+api|governance,identity|suite-101-run-context-anchor-p1.sh|Identity P1 durable anchor + P1.5 resume re-hydration — a real playground run persists run_context naming its caller, re-hydration mints a fresh verifiable token AFTER the original has expired (the reason P1.5 exists), a missing or corrupt anchor yields NO token rather than a fabricated user_sub="", a service/daemon anchor never gains a human on the round trip, and every registry-side /resume POST is checked (derived from the tree) for the header
+api|governance,identity,rbac|suite-102-verifiable-service-identity.sh|Identity P3 verifiable service identity — the NEGATIVE cases are the deliverable: an uncredentialed or header-forged caller is refused at all three doors that used to believe a typed string (internal run-start, playground runs, approvals decide/list), is_trusted_service rejects a user token and accepts a real scheduler client_credentials token (azp inside the RS256 signature), and a verified user still reaches the handler so the suite cannot pass by refusing everything
 
 # ── Browser layer (Playwright specs) ───────────────────────────────────────
 browser|health|e2e/smoke.spec.ts|Smoke — app loads and routes
+browser|health,rbac|e2e/app-shell-resilience.spec.ts|App shell survives a 401/non-array from /admin/teams-summary (blank-page regression)
+browser|governance,rbac|e2e/rbac-role-journeys.spec.ts|R2 JOURNEY — drives the deployed Studio as a real consumer and contributor (not platform-admin): no Admin nav, /admin/access deep link refused across a reload, Shared With Me still renders, grant picker still populates, zero uncaught page errors
 browser|governance,rbac|e2e/admin-access-roles.spec.ts|Admin access — canonical role names + persistence
 browser|governance,rbac|e2e/artifact-grants.spec.ts|Artifact grants — mixed roles, create + revoke
 browser|agent|e2e/agents.spec.ts|Agents list + detail
@@ -192,4 +200,6 @@ browser|eval,workflow|e2e/eval-v2-workflow.spec.ts|Eval v2 workflow
 browser|debug|e2e/zz-debug.spec.ts|Scratch — debug probe
 browser|debug|e2e/zzprobe.spec.ts|Scratch — probe
 browser|eval|e2e/eval-verdict-publish-queue.spec.ts|Publish-queue verdict against the run's own threshold + reload
+browser|governance,tools|e2e/publish-review-drawer.spec.ts|Decision 47 step D — the reviewer drawer: row opens it instead of approving, tools/endpoint/credential/cascade render, Approve gated on the cascade ack, approve then reload proves the agent AND the cascaded tool are published
+browser|governance,tools|e2e/tool-unpublish.spec.ts|Decision 47 step E — owner-initiated unpublish: the Tools page shows Published vs Private, the dialog names the published agents still bound without blocking, confirm then RELOAD proves the tool is private while the agent and its binding are untouched
 browser|agent,workflow,deploy,chat,eval,memory|e2e/lifecycle-journey.spec.ts|Full lifecycle journey — create→workflow→deploy→chat+memory→eval+trace→publish→catalog→observability

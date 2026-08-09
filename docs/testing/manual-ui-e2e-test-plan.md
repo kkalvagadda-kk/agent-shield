@@ -45,6 +45,1323 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## G-D45-1 — Decision 45 filters tools at CALL time, not at PLAN time — 2026-08-09
+
+**not-yet-wired (debt).** Raised by Kalyan while reviewing identity P3. **Agreed — this is real.**
+Scheduled to be picked up AFTER the currently planned work (identity P3, the fixture/red-suite
+pass) is implemented. Related roadmap item: **[6] post-P2 — per-user tool schema filtering.**
+
+### What is built
+
+Decision 45 (`opa_policy/agentshield.rego:96-135`) makes the effective tool set depend on WHO the
+run acts for. For `user_delegated`, allowed = `agent.tools ∩ _caller_usable`, where
+`_caller_usable` is built from `input.user_teams`. A denied call returns the dedicated reason
+`tool_not_granted_to_user` (`:250`). This is correct and it works.
+
+### Where it is applied
+
+**Only inside the tool wrapper, per call.** Confirmed in the SDK:
+
+| Stage | Code | Has user context? |
+|---|---|---|
+| Resolve the agent's tools | `graph_builder.py:485` `resolve_tools(platform_names)` | **no** |
+| Bind them to the model | `graph_builder.py:541` `tools=lc_tools` | **no** |
+| Governed call | `graph_builder.py:283` `_current_user_context.get({})` → `opa_client.check_tool` | yes |
+
+So the model is handed the schemas for **every tool bound to the agent**, regardless of who is
+asking. The intersection is enforced one layer later, when the call is already in flight.
+
+### The consequence Kalyan identified
+
+Take `refund-bot`, bound to `web_search`, `refund_action`, `payroll_export`. Alice (team
+`support`) cannot use `payroll_export`; Bob (team `finance`) can.
+
+Alice asks for something payroll-shaped. The model sees `payroll_export` in its tool list, has no
+signal it is unavailable, and **plans to use it**. The plan is stated to Alice as if it will
+happen. Execution then denies at the wrapper.
+
+Four distinct problems follow, in rough order of severity:
+
+1. **Partial execution of a multi-step plan.** Steps 1..n-1 run and commit real side effects; step
+   n denies. The run halts having half-applied work, with no compensating action. This is the
+   serious one for a governance platform — the denial is correct but its *timing* creates an
+   inconsistent state that a plan-time filter would have prevented entirely.
+2. **Capability disclosure.** The schema itself tells Alice a `payroll_export` tool exists, its
+   description and its parameter names. That is information about a capability she has no
+   authority over, leaked before any authorization check runs.
+3. **The agent misleads the user.** It announces an intent it cannot fulfil. From Alice's side the
+   product looks broken rather than governed.
+4. **Wasted turns and tokens.** Plan → attempt → deny → replan, every time.
+
+### Why this is NOT "enforcement is in the wrong place"
+
+Call-time enforcement is the correct security boundary and must stay. Schema filtering alone would
+be advisory — the model can emit a call for a tool that was never in its list, and a filtered list
+is a UX affordance, not a control. **Both are needed:** filter the schemas so the model never
+plans the impossible, AND keep the wrapper check so a plan that goes off-list is still refused.
+
+Do not let the fix become "filter the list and drop the OPA call".
+
+### Why it could not have been built earlier
+
+Plan-time filtering needs the acting user's teams at bind time. Before identity P3 the propagated
+`user_id`/`user_team` was caller-supplied on unauthenticated routes, so a plan-time filter would
+have been trivially bypassed by sending a different sub — and unlike the call-time check, a
+bypassed *filter* fails open and silently. P3 is the prerequisite.
+
+### What closing it involves (sketch, not a plan)
+
+- Make the resolved user context available at `graph_builder` bind time, not only inside the wrapper.
+- Ask OPA (or the same bundle data) for the caller-usable set ONCE per run, and bind only the
+  intersection.
+- Handle the empty-intersection case explicitly rather than binding zero tools silently.
+- Daemons keep the UNION — there is no human to intersect with, so plan-time and call-time agree.
+- Bundle refresh lag means the bind-time and call-time answers can disagree across a refresh; the
+  call-time check must remain authoritative when they do.
+
+**Test that would prove it:** two users on different teams run the SAME agent; assert the tool
+schemas offered to the model differ, and that the previously-denied tool is absent from the plan
+rather than denied during it.
+
+## Known gaps — the two test layers share personas and can invalidate each other — 2026-08-07
+
+**not-yet-wired (debt).** `e2e_ensure_persona` (bash) calls `POST /admin/users/{id}/reset-password`
+on `e2e-consumer` / `e2e-contributor` every run — it has to, because `create_user` sets
+`requiredActions=["UPDATE_PASSWORD"]` and Keycloak then refuses a password grant. But Keycloak
+**invalidates that user's sessions on a password reset**, and Playwright's `global-setup` saves a
+`storageState` per role at the start of its run.
+
+So: run a bash sweep containing `suite-98`, then run the browser layer against a `storageState`
+minted earlier, and the non-admin specs fail with what looks exactly like a product regression.
+Observed today — `T-RJ-004` and `T-RJ-007` failed immediately after a bash sweep and passed
+**11/11** on a re-run with no code change.
+
+Mitigations, none applied yet:
+- run `scripts/studio-e2e.sh` *before* the bash layer, or re-run global-setup after it, or
+- give the browser layer its own personas (`pw-consumer` / `pw-contributor`) so the two layers stop
+  sharing identities, or
+- have `e2e_ensure_persona` skip the reset when the persona already has no `requiredActions`.
+
+The third is the smallest and removes the cause rather than sequencing around it. Recorded because a
+red browser layer that is really an expired session is indistinguishable from a real break, and the
+instinct will be to go looking in the product.
+
+## G-100 — suite-45's `hitl-agent` fixture does not exist — 2026-08-08
+
+**not-yet-wired (debt), NOT in the Decision 45 blast radius.** `suite-45-hitl-e2e` is
+3 passed / 5 failed / 5 skipped, and every failure traces to one missing row:
+
+```
+T-S45-001  OPA bundle has hitl-agent with web_search risk=high  -> NOT_IN_BUNDLE
+T-S45-003  sandbox approve journey                               -> CREATE_FAIL:404 "Agent 'hitl-agent' not found."
+```
+
+`select ... from agents where name like 'hitl-agent%'` returns **NONE**. The suite's own
+setup is not producing it, so every case downstream skips or fails on a 404.
+
+Attributed away from today's work deliberately: the failures are **404s, not 401/403**, and
+nothing in the Decision 45 change deletes agents or gates agent lookup. Recording it rather
+than fixing it because it is a fixture bug in a suite I did not touch, and folding it into
+an authorization commit would make the commit's blast radius unreadable.
+
+Worth noting the shape though: like `suite-78` before it, this suite reports a summary line
+and a non-zero exit while most of its cases never ran. A suite whose fixture vanishes should
+say "I proved nothing", not "3 passed".
+
+## G-45 — ✅ IMPLEMENTED 2026-08-08 (registry-api 0.2.272 / runner 0.1.70 / sdk 0.2.11).
+Proven on the cluster by `suite-100` 6/0 and 29/29 rego unit tests.
+
+The P1-ships-alone hazard this entry warned about never materialised because P1 and
+2a/2c/2d shipped as ONE slice — which is what the hazard implied they had to be.
+
+REMAINING — ✅ HALF CLOSED 2026-08-08 (registry-api 0.2.277).
+This entry said "the reactive `/chat/stream` path and the production `internal.py` path
+still reach the pod without a minted context ... threading those two is the rest of P1",
+and it was right — that was P1's own undone scope, not a later phase's.
+
+  * **`internal.py` — CLOSED.** Both branches now carry identity: the durable dispatch
+    (`rct` through `_dispatch_and_complete`) and the reactive `/chat` POST. The context is
+    built from the already-resolved `Principal`, so a daemon keeps `user_id=""` and its
+    service subject stays in `service_name` instead of being laundered into `user_sub`.
+  * **`/chat/stream` — STILL OPEN.** The consumer-facing streaming chat entry point does
+    not mint. Tracked here; it is the last unminted producer besides eval-runner (P3).
+
+Postmortem for why this was ledgered as future work while being P1's own scope:
+`docs/bugs/identity-p1-wired-one-caller-of-three.md`.
+
+Original analysis follows.
+
+### (implemented) 
+
+**not-yet-wired (debt). This is the headline authorization requirement, not a footnote.**
+Filed under the capability, not under a phase, because burying it as two sub-bullets of
+identity P2 is how it ended up behind six items of tool-lifecycle work.
+
+### The requirement, in Kalyan's words (Decision 45)
+
+> "Having grant to agent does not get users in a team grants to all the tools the agents can
+> use. If the user is performing on behalf of the user, user grants should be enforced but if
+> the agent is deamon and is not acting on behalf of the user, agent delegate its
+> capabilities."
+
+Canonical scenario: **Alice queries agent X. X is bound to `tool-1` and `tool-2`. Alice's
+team has a grant to `tool-1` only.** Expected: `tool-1` runs, `tool-2` is denied *naming the
+grant*, and the agent answers Alice using `tool-1`.
+
+### Three states — measured against `opa_policy/agentshield.rego`
+
+| When | Result | Why |
+|---|---|---|
+| **today** | **every** tool denied, `missing_user_identity` — including `tool-1` | `input.user_id` is always `""` (P1 unbuilt), and `user_identity_ok` is AND-ed into `allow` at `:111-117` |
+| **after P1 alone** | **`tool-2` ALLOWED** | Gate 6 now passes. Gate 3 (`:63-76`) matches `some t in agent.tools` — `tool-2` is bound to the agent, so it is in the effective set. Gate 3 never looks at the caller. |
+| **after P1 + 2a + 2c + 2d** | `tool-1` allowed, `tool-2` denied on the grant | the intersection exists |
+
+**The middle row is the hazard.** Today's blanket denial is *accidentally* protective.
+Threading `user_id` removes the accident and puts nothing in its place. **Identity P1 must
+not ship on its own.** Nothing in the roadmap said so before this entry.
+
+### Why the policy cannot do better yet — structural, not tuning
+
+1. **The OPA input carries no user authority.** It has `agent_class`, `sa_subject`,
+   `tool_name`, `user_id`. `user_id` is a bare string — there is no caller team and no
+   caller grants, so the policy has nothing to intersect *with*.
+2. **`data.grants` is only ever read on the agent's team** — `data.grants[agent.team]`
+   (`:72`). No lookup on the caller's team exists anywhere in the bundle.
+3. **`agent_class` is self-reported.** It reaches OPA from `input`, which the pod composes
+   (`AGENTSHIELD_AGENT_CLASS`). A compromised pod claims `daemon` and skips the identity
+   floor entirely — and the daemon branch is the one that requires no human at all. That is
+   D-1. Fixable in the bundle: OPA already has `agents[sa_subject]`, so `agent_class` can be
+   keyed off the verified SA subject instead of the input.
+
+### What the target rule is
+
+| `agent_class` | Effective tool set |
+|---|---|
+| `daemon` | `agent.tools ∪ data.grants[agent.team]` — unchanged. No human is involved; the agent delegates its own capability. |
+| `user_delegated` | `agent.tools` **∩** tools the **caller's** team may use |
+
+Caller side resolves through `asset_grants` for their team plus `tool_access.team_may_use_tool`.
+Note `team_may_use_tool` returns True when `owner_team IS NULL` — which is why Decision 46
+step A (derive `owner_team` on create, shipped `0.2.267`) is a **real prerequisite**: without
+it the intersection is vacuous for every null-owner row.
+
+Also note `user_team_assignments.user_sub` is the PRIMARY KEY, so a user has exactly one
+team today and "the caller's grants" is unambiguous. That stops being true the moment
+multi-team lands — which is why P2 2c specifies `user_teams` as a **list**.
+
+### Minimum slice to satisfy Alice
+
+`P1` (thread RunContext to the pod) **+** `2a` (agent_class from the verified SA subject)
+**+** `2c` (caller team into the OPA input) **+** `2d` (intersect for `user_delegated`).
+
+**It does not depend on tool-lifecycle B, C, D, E or F.** Only on A, already shipped.
+
+### Test that proves it
+
+None exists. `suite-18` T-S18-015 pins the *floor* (empty `user_id` → deny) and T-S18-012
+pins the daemon exemption, but nothing asserts the intersection, because there is nothing to
+assert yet. The case must be: same agent, same tool set, two callers in different teams with
+different grants — one gets `tool-1` only, the other gets both. A single-caller test cannot
+distinguish the intersection from today's "everything bound is allowed".
+
+## G-R3-12 — the Playwright tree authenticated by HEADER only, and the hygiene gate did not look at it — 2026-08-07
+
+**✅ CLOSED same day**, recorded because the *shape* recurs and the gate change is the part
+worth keeping.
+
+`studio/e2e/lib/api.ts` and 14 specs built API contexts with
+`extraHTTPHeaders: { "X-User-Sub": "<hardcoded uuid>" }` and no token. That was identity
+until R1 put `require_user` on ten routers; after R1/R2/R3 + G-R3-6 those calls 401, and
+the failure surfaced as whatever UI step depended on the fixture — `lifecycle-journey`
+died at "leg 1 — create agent with tool (UI)", which names neither auth nor the seed.
+
+Worse, **both hardcoded subs have no `user_team_assignments` row on the current cluster.**
+A realm recreation mints new subs and nothing updated the literals. Under header-only
+identity that was invisible; the moment a real credential arrived, header and signature
+would have named two different people.
+
+Fixed by one producer: `ctx()` mints a token by direct access grant and derives
+`X-User-Sub` **from the token**, so they cannot disagree; `adminAuthHeaders()` is exported
+for the specs that build their own context. Two specs (`conversations-sidebar`,
+`deployment-conversations`) already resolved their sub live via `resolveSessionSub` — right
+instinct, missing only the credential — so they merge the Bearer and keep their resolved
+sub.
+
+**The gate change is the durable part.** `scripts/check-e2e-auth-hygiene.sh` scanned
+`scripts/e2e` only. It now scans `studio/e2e` too, accepts exactly four named credential
+paths (`Authorization`, `captureAuthHeaders`, `adminAuthHeaders`, `adminApi`/`userApi`),
+and covers `/api/v1/mcp-servers`. Extending it immediately found the 14 specs, and later
+`suite-87` — which had **zero** `E2E_TOKEN` references and registered MCP servers with a
+bare header.
+
+Full Playwright: **92 passed / 18 failed** (Aug-5 baseline) → **117 passed / 10 failed**.
+Nine of the ten remaining failures are in that baseline; the tenth was G-R3-13.
+
+## G-R3-13 — MCP-discovered tools were invisible after the private default — 2026-08-07
+
+**✅ CLOSED same day** in registry-api `0.2.270`. Postmortem:
+`docs/bugs/mcp-discovered-tools-invisible-after-private-default.md`.
+
+A regression introduced by step B itself. The Register Server modal sends no team,
+`create_mcp_server` took `owner_team` from the body, and `mcp_discovery.py:154` copies the
+server's team onto every discovered tool — so registering through Studio produced tools
+that were `private` **and** owned by `NULL`, matching neither arm of
+`published OR owner_team = <caller's team>`. Invisible to everyone, permanently.
+
+**Why the step-B verification missed it, worth keeping:** the sweep was grep-derived from
+the e2e tree for `/tools`, `/skills` and `publish_status`, and `mcp_discovery.py` writes
+`Tool` rows without naming any of them. The post-deploy check ("192 tools, all still
+published, zero rows touched") was true and irrelevant — the defect lives in rows created
+*after* the migration, of which there were none yet.
+
+**The rule this yields:** changing a column default is a change to every WRITER of that
+column, not to the existing rows. The audit is `grep -rn "Tool(" services/`, and it names
+the second writer immediately.
+
+## G-R3-10 — no test proves the admin governance record names the CALLER — 2026-08-07
+
+**not-yet-wired (debt).** `0.2.269` removed the forgeable `X-User-Sub` header from five
+`admin.py` handlers, so `reviewed_by` / `granted_by` / `admin_id` / `promoted_by` now come
+from the verified token
+(`docs/bugs/admin-governance-records-signed-from-a-header.md`).
+
+Nothing asserts it. Proving it needs **two distinct platform-admin identities** — admin A
+approves, and the record must name A rather than a header value or `"system"`. `suite-98`
+provisions three personas but only one is platform-admin; `e2e_ensure_persona` pins the
+other two to `contributor` and `consumer`.
+
+What exists today is a negative result only: the eight-suite sweep over every suite touching
+`/admin/grants`, `/admin/publish-requests` and `/admin/approval-authority` (5, 14, 15, 18,
+42, 89, 93, 98) stayed green, which proves the switch broke no caller. **Green there does
+not prove the attribution is correct** — it proves nothing regressed, and the whole defect
+was invisible to a green suite for three phases.
+
+Deferred to **R5**, which already has to stand up a second admin identity for the
+approval-authority rework. Doing it earlier means building that fixture twice.
+
+## G-R3-11 — ✅ CLOSED 2026-08-08. The publish reviewer no longer approves blind.
+
+**Shipped: registry-api `0.2.274` / studio `0.1.187`.** `GET /api/v1/admin/publish-requests/
+{id}/review` + `PublishReviewDrawer.tsx`. Design (now IMPLEMENTED, with all five open
+questions resolved and their reasoning recorded): `docs/design/publish-review-surface.md`.
+Decision 47 step D in `docs/decisions.md`.
+
+**What closed it, against the "measured, not inferred" table further down:** every row of
+that table is now populated — tools (name, risk, owner, `http_method`+`http_url`,
+`python_code` in full, the credential NAME, `side_effecting`, `pii_deanonymize_allowed`,
+MCP server), agent config (`agent_class`, instructions, execution shape, memory), the
+version (`image_tag`, `git_sha`, both eval gate flags), and the **publish cascade** —
+which tools become org-wide on approve, which are already public, and which are blocked
+because they belong to another team.
+
+**The gate, not just the display.** The requirement said *"before he can approve"*, so
+Approve moved OFF the queue row and INTO the drawer (option B): a reviewer cannot authorize
+publication without the screen having rendered. When the cascade is non-empty an extra
+acknowledgement names the tools going org-wide (option C) — reserved for the case that
+escalates scope, so it does not decay into a click-through.
+
+**Proven by** `suite-6` T-S6-017..022 (**33/0** on EKS) and
+`studio/e2e/publish-review-drawer.spec.ts` — the bash layer proves the payload, the
+Playwright spec proves the journey and the approve→reload round-trip, because a bash suite
+`kubectl exec`s into a pod and cannot see a screen (DoD rule 1). `T-S6-019` is the one worth
+naming: it binds a cross-team tool AFTER submit and asserts the payload shows it as
+`blocked` — which a submit-time snapshot could not do, and is why Decision 47 refused a
+`cascade_publish` column.
+
+**One deliberate gap remains — see G-D3 below.**
+
+### (superseded — kept because it is the measurement that justified the work)
+
+### The requirement, in Kalyan's words
+
+> "the admin while approving the publish should have access all the aspects of the tools and
+> in the agent along with everything in the agent before he can approve. Some small
+> improvement, the admin should be able to see the evaluation run on the agent"
+
+### What this entry used to say, and why that was wrong
+
+It read *"cascade-publish has no reviewer-facing surface"* — scoping the gap to the tool
+cascade step C introduced. That is a **subset**, and framing it that way made a pre-existing
+hole look like a side effect of a new feature. Someone could have closed a narrow
+cascade-visibility fix and believed the requirement was met.
+
+The reviewer approved blind **before** step C too. The cascade widened the blast radius of a
+blind approval; it did not create it.
+
+### What the reviewer actually sees today — measured, not inferred
+
+`AdminPublishRequestsPage.tsx` renders one flat row: Asset Type · Asset · Submitted By ·
+Submitted At · Last Eval · Status · Risk · Actions. Then an approve button that publishes the
+artifact org-wide.
+
+| | State |
+|---|---|
+| **Eval run** | **BUILT, and better than Decision 47 claims. Do not rebuild.** `last_eval_score` / `last_eval_run_id` / `last_eval_pass_threshold` **plus `eval_source`** (`version` \| `agent_latest` \| `none`), so a reviewer can tell "this version's eval" from "some other version's". Decision 47 lists that provenance as "one thing to verify" — already resolved by Decision 32. The chip links to the full run. |
+| **Tools** | **nothing.** `grep -c "tool" AdminPublishRequestsPage.tsx` → **0**. One aggregate `highest_risk_level` chip is the entire tool story. |
+| **Agent config** | nothing — no instructions, no `agent_class`, no version, no image tag |
+| `GET /admin/publish-requests/{id}/review` | does not exist |
+| The drawer | does not exist |
+
+### Why the missing fields are not cosmetic
+
+Every one of these exists on the row and is invisible to the person authorizing publication:
+
+- `Tool.http_url` — **where the data goes.** A reviewer approving an agent cannot see that one
+  of its tools POSTs to an external host.
+- `Tool.python_code` — arbitrary code the platform will execute.
+- `Tool.auth_config_id` — **which platform credential the tool will use.** Publishing widens
+  who can invoke a tool that carries a real secret.
+- `Tool.pii_deanonymize_allowed` — whether the tool sees raw PII (Decision 27).
+- `Tool.side_effecting` — whether a call mutates the world.
+- `Agent.agent_class` — `daemon` is **exempt from OPA's identity floor** (`user_identity_ok`).
+  Approving a daemon is a materially different decision from approving a `user_delegated`
+  agent, and the queue does not say which one it is.
+- `Agent.metadata_.instructions` — the prompt. What the agent will actually do.
+- Which tools **cascade to published** on approve (step C), and which are already public.
+
+### Why it is worse than "a missing screen"
+
+The approve button is the platform's only human gate between a team's draft and the
+marketplace. Everything else in the authorization stack — OPA, HITL, the eval gate, the
+cross-team 422 — is machine-enforced and testable. This one control is a person, and the
+platform currently gives that person a name, a timestamp, a percentage and a colour.
+
+### Not sufficient, though it helps
+
+The **submitter** gets the full picture at submit time: a cross-team private tool blocks with
+422 `tool_not_publishable_cross_team` naming every blocking tool and its owner, rendered by
+`AgentDetailPage` (studio `0.1.186`). That informs the person who already knows what they
+built. It tells the reviewer nothing.
+
+## G-D3 — workflow publish requests are NOT reviewable — 2026-08-08
+
+**deferred (intentional).** Decision 47 step D, sub-decision D-3.
+
+The same admin queue serves `asset_type: workflow`. A workflow's tools arrive through its
+member agents, so the review payload's shape genuinely differs — building it was scoped out
+to keep step D a vertical slice (DoD rule 4) rather than a half-finished horizontal one.
+
+**It is not silent.** `GET /admin/publish-requests/{id}/review` answers **200** with
+`review_supported: false` and a reason naming exactly what is not being shown, and the
+drawer renders that as a banner. Deliberately not a 404 (the request is real) and
+deliberately not an agent-shaped payload with an empty `tools` list — that would read as
+"this workflow has no tools", which is the silently-unreviewed outcome the whole requirement
+rules out. Regression: `T-S6-021` asserts `review_supported=false`, a non-empty reason, and
+that the payload carries **no** `tools` key at all.
+
+**What closing it needs:** resolve a workflow's members → each member's bound tools →
+a cascade plan across the union. `plan_tool_cascade` is per-agent today.
+
+## G-P1-PROD — ✅ MOSTLY CLOSED 2026-08-09. Correcting my own over-pessimistic entry.
+
+**Original claim (wrong):** "the production anchor is proven structurally but NOT end to
+end, because the cluster has no running production agent deployment."
+
+**Measured instead of assumed:** `suite-64` deploys REAL `-production` pods and runs a
+production workflow to completion with live LLM output; `suite-28` and `suite-94` produce
+production runs that reach a pod. Querying `agent_runs` afterwards found **6 real object
+anchors on `context='production'`** — including `evt-test-*` carrying a real human
+`user_sub`, and `s94-prodok-*` carrying `user_sub: ""` with a service name, which is the
+DAEMON case behaving exactly as designed (no human, service subject kept out of `user_sub`).
+
+So the production **agent** path IS proven end to end. The earlier entry generalized from
+`suite-37`, whose agent happens to be sandbox-only, to the whole platform.
+
+**The same query found two real defects, which is why this entry is worth keeping:**
+
+1. The production **workflow** parent was never anchored — only the agent path was wired.
+   Because `workflow_orchestrator` derives each member child's anchor from the parent's,
+   an unanchored parent left every member unanchored, so a member parking at HITL
+   re-hydrated nothing. Fixed in `0.2.278`.
+2. `JSONB` defaults to `none_as_null=False`, so Python `None` was stored as JSON `null` —
+   a value for which `run_context IS NOT NULL` is **TRUE while there is no identity**. 52
+   such rows existed. Behaviour was always correct (`rehydrate` treats it as absent), but
+   the data lied to every audit query. Model now declares `JSONB(none_as_null=True)`;
+   migration `0083` normalizes the existing rows; `T-S101-001b` is the standing invariant.
+
+**Still open (small):** no suite ASSERTS on a production anchor — the evidence above is a
+manual query. Closing it needs a case in a suite that already deploys production pods
+(`suite-64` is the natural home).
+
+**Lesson worth more than the fix:** both defects were invisible in the diff and obvious in
+the data. "Read the running product, not the design doc" applies to your own change, one
+hour old, as much as to a stale doc.
+
+## G-E1 — re-publishing an unpublished tool costs a trip through the AGENT's review — 2026-08-08
+
+**deferred (intentional).** Decision 47 step E, and a direct consequence of option C.
+
+There is no `POST /tools/{id}/publish` — by design (`T-S6-029` pins its absence). A tool
+re-enters the org-wide catalog only by riding along with an agent a reviewer approves. That
+path works and is idempotent, but `publish_agent` sets `agent.publish_status` back to
+`pending_review`, so **putting one tool back takes the agent out of the catalog until a
+reviewer approves again**.
+
+**Not a bug and not being "fixed".** A tool-level publish endpoint would be a second door to
+org-wide visibility with no reviewer behind it, which is exactly what options A and B were
+rejected for. Recorded so the friction is a known cost rather than a surprise, and so nobody
+resolves it by opening that door. If it becomes painful, the honest fix is a re-approval
+flow that does not un-publish the agent while it is pending — a change to the AGENT
+lifecycle, not a new tool endpoint.
+
+## G-E2 — skills are private by default with NO way to publish one — 2026-08-08
+
+**not-yet-wired (debt).** Postmortem: `docs/bugs/skills-are-private-with-no-publish-path.md`.
+
+Step B gave `Skill.publish_status` the same private default as `Tool` (`models.py:1371`) and
+`catalog_visibility.py` filters both from one producer. The forward path did **not**
+transfer: tools ride along with an agent via `plan_tool_cascade`, and skills are in no such
+join. `admin.approve_publish_request` has a `skill` branch (`admin.py:377`) with **no
+producer anywhere** — grep finds the reader, the CHECK constraints and a `team_assets` join,
+and no writer of a `PublishRequest` with `asset_type='skill'`.
+
+So every skill created after migration `0080` is visible only to its creator, permanently.
+
+**Why step E did not absorb it.** Step E builds the REVERSE. An unpublish for skills could
+only ever return 409, because nothing reaches `published` — orphan code by construction. The
+missing piece is the forward path, and choosing its shape (skills have no agent binding to
+ride along with) is Decision-47-sized work, not a side effect of an unrelated step.
+
+**Blast radius, measured not assumed:** pre-`0080` skills kept `published` (no backfill, per
+Decision 47), so the existing library is intact; only post-`0080` skills are affected, and
+only their discoverability. `create_skill` sets `created_by` as of `0.2.271`, so the author
+still sees their own.
+
+## G-R3-8 — ✅ CLOSED 2026-08-08. The tokenless catalog branch is DELETED, not narrowed.
+
+Closed sooner than the "identity Phase 3" this entry originally deferred it to, because the
+premise it rested on turned out to be false. The branch existed to keep agent pods alive;
+Kalyan pointed out the platform is in active development, most agents are test litter, and
+regressions are not a constraint — so "breaking pods" stopped being a cost worth trading a
+security property for.
+
+It also turned out the pods were asking the wrong question. `GET /agents/{name}/tools`
+already existed (`agent_tools.py:141`), already returned full `ToolResponse` rows joined on
+`agent_tools`, and already carried no publish filter — because a pod's authority over a tool
+has always been its BINDING, never the catalog flag. The resolver now calls that,
+authenticated with the pod's projected ServiceAccount token (`agent_identity.py`, TokenReview,
+audience `agentshield-registry-api`), and registry-api refuses any request naming a different
+agent than the verified token does.
+
+Original entry follows for the reasoning.
+
+### (superseded) 
+
+**not-yet-wired (debt), with a stated expiry.** `catalog_visibility.py`'s
+`IN_CLUSTER_MACHINE` kind applies no `publish_status` filter. That is a deliberate widening
+shipped with migration `0080`: agent pods hold no token until identity Phase 3, the SDK
+`tool_resolver` calls `GET /api/v1/tools/?name=X` at startup, and the previous
+published-only branch would have returned zero items for any tool created after the default
+flip — killing every SDK agent with `RuntimeError: Tool 'X' not found in the platform
+registry`.
+
+**What it costs:** a tokenless in-cluster caller can enumerate every tool and skill,
+including other teams' private drafts, instead of only published ones. registry-api's
+Service is not exposed outside the cluster and agent pods are its only tokenless callers, so
+the exposure is in-cluster. It is still strictly wider than before.
+
+**What closes it:** identity Phase 3 gives these callers a verifiable service identity, at
+which point the predicate becomes "the tools this agent is BOUND to" (`agent_tools`, the
+same set OPA Gate 3 authorizes) and the branch disappears rather than being narrowed.
+`T-S98-026` and `T-S98-027` will have to be rewritten then — they currently assert the
+tokenless read SUCCEEDS, which is the behaviour being retired. That is deliberate: the cases
+are load-bearing until Phase 3 and it should be impossible to remove the branch without
+touching them.
+
+## G-R3-9 — ✅ DISSOLVED 2026-08-08. Tools and skills went back to CREATOR-scoped, so all
+four artifact types agree again.
+
+This entry existed because I had changed tools/skills to team-scoped and left agents and
+workflows creator-scoped. Kalyan asked why tools should differ from agents when Decision 47
+is named for the agent pattern — and the answer was that they should not. Reverting removed
+the inconsistency rather than documenting it.
+
+Original entry follows.
+
+### (superseded) 
+
+**deferred (intentional).** `catalog_visibility.py` unified the predicate for tools and
+skills. Two more copies of the same `or_(publish_status == "published", created_by == caller)`
+remain:
+
+```
+services/registry-api/routers/agents.py:248
+services/registry-api/routers/composite_workflows.py:205
+```
+
+Both are creator-scoped, which is the thing Decision 46 rejects for tools: the creating TEAM
+owns the artifact, so a teammate should see a colleague's private draft. Left alone
+deliberately — retargeting them changes what every user sees on the Agents and Workflows
+screens, and that is a product decision nobody has made, not a mechanical follow-through
+from a tool change.
+
+**Why it is recorded rather than forgotten:** four copies of one predicate is the shape this
+repo has three postmortems for (`start_chat`/`start_deployment_chat`,
+`webhook_clients.py`/`agent_endpoints.py`, `approvals._ADMIN_ROLES`). Two of the four are now
+behind one producer. If the answer for agents turns out to be the same as for tools, the
+producer already takes the parameter and the change is two call sites.
+
+## G-R3-6 — `tools.py` and `skills.py` are ENTIRELY unauthenticated — 2026-08-07
+
+Found while starting Decision 46's step A. Measured against the deployed `0.2.266` with
+T-S97-011's own algorithm:
+
+```
+tools:  protected=0  exempt=7     skills: protected=0  exempt=5
+   POST   /api/v1/tools/            POST   /api/v1/skills/
+   GET    /api/v1/tools/            GET    /api/v1/skills/
+   GET    /api/v1/tools/{id}        GET    /api/v1/skills/{id}
+   PUT    /api/v1/tools/{id}        PUT    /api/v1/skills/{id}
+   DELETE /api/v1/tools/{id}        DELETE /api/v1/skills/{id}
+   GET    /api/v1/tools/{id}/agents
+   POST   /api/v1/tools/{id}/test
+```
+
+`APIRouter(prefix="/api/v1/tools", tags=["tools"])` — no `dependencies=`, and neither module
+was among R1's ten routers, so the T-S97-011 canary never covered them either.
+
+**Why this is worse than what R3 closed.** A tool's `risk_level` is the input to every
+downstream control: it drives the HITL gate (`high` → park, `critical` → not deployable) and
+OPA's risk→action rule. An anonymous caller can `PUT` an existing tool and lower its
+`risk_level`, and every gate that depends on it silently relaxes — for every agent already
+bound to it. `POST /tools/{id}/test` executes the tool.
+
+**Blocks Decision 46 step A.** "Derive `owner_team` from the caller's team" is not
+implementable while the caller is optional. Auth has to land first, in the same change.
+
+**Scope note — this is R3's pattern, not a new phase.** R3 gated `agents.py` mutations with
+`_require_manage` (platform-admin OR `agent-admin` on the artifact). Tools have no artifact
+role, so the equivalent is `require_user` + own-team-or-platform-admin, using `owner_team`
+once Decision 46 sets it. Chicken-and-egg is resolved by ordering: `require_user` first (so a
+caller exists), then `owner_team` on create, then the ownership check on mutate.
+
+**Blast radius to expect:** the e2e suites create tools. `check-e2e-auth-hygiene.sh` currently
+only knows about `/api/v1/agents` — it must be extended to `/tools` and `/skills` in the same
+change, or the sweep list is hand-written again and misses suites, which is precisely the R2
+mistake that script exists to prevent.
+
+## Known gaps — authorization review, 2026-08-07 (design session, no code change yet)
+
+A walkthrough of MCP and tool authorization surfaced eleven findings. **Decisions 45 and 46** were
+taken in response. This section is the routing table — where each finding lands — so the sequencing
+does not have to be reconstructed later.
+
+| # | Finding | Type | Lands in |
+|---|---|---|---|
+| 1 | `start_deployment_chat` (`chat.py:801`) has **no access check** — its sibling `start_chat` enforces team + `AssetGrant`, this enforces nothing, and Studio routes to it (`App.tsx:84`) | **live bug** | **now** — standalone fix |
+| 2 | OPA resolves the tool set on `agent.team`, never the caller's → wrap a tool in an agent, share the agent, bypass tool grants | gap | P2 (2d), Decision 45 |
+| 3 | MCP proxy Gate 2 has the **identical** defect — team from the pod SA, and `AuthorizeToolCallRequest` has no user field | gap | P2 (2d), Decision 45 |
+| 4 | `agent_class` is self-reported and now gates tool scope **and** credential choice, not just the identity floor | **blocker** | P2 (2a) — first |
+| 5 | 65 tools are `owner_team = NULL`; the resolver says "anyone", the OPA bundle lists them for nobody | contradiction | **Decision 46** — ship before P1 |
+| 6 | `x-user-sub` at the MCP proxy is self-asserted; the whole per-user OAuth chain rests on it | gap | P2 (2e) |
+| 7 | daemon + external OAuth must be a **permanent** deny, not a stub awaiting work | undocumented invariant | ✅ done — §4.8.6 inv. 7 |
+| 8 | `asset_grants` is "visibility, not authority" (§2) but `chat.py:585` uses it as the authority for cross-team invoke | doc ⇄ code conflict | R5 |
+| 9 | **Zero** admin-created tool grants — 120 `auto:deploy`, 27 `system`; the Deploy modal never mentions granting | measurement | Decision 46 |
+| 10 | OQ-4 was being treated as the route to per-tool authorization; the proxy can do it without touching credentials | de-scope | ✅ done — §4.8.7 |
+| 11 | The agent's tool list is fetched **once at pod startup**, so per-user schema *filtering* is impossible without request-scoped resolution | gap | post-P2 |
+
+**THE ROADMAP AFTER R3.** Kept here because it is the canonical gap ledger and because three
+separate design sessions have now added to it. Decisions 46/47 move ahead of identity P1 — they are
+not blocked on identity, and they remove a P2 blocker (finding 5) rather than forcing a rego special
+case.
+
+```
+SHIPPED   R0 · R1 · R2 · R3 · G-R3-2 fix · identity P0
+────────────────────────────────────────────────────────────────────────
+RE-ORDERED 2026-08-08, BY CAPABILITY RATHER THAN BY INFRASTRUCTURE PHASE.
+==========================================================================
+The previous ordering was: tool lifecycle A-F -> identity P0 -> P1 -> P1.5 ->
+P2(2a..2e) -> R4 -> R5 -> OPA. It sequenced by MECHANISM. The consequence was
+that Decision 45 -- the requirement Kalyan named "the missing piece" -- appeared
+as two sub-bullets (2c, 2d) inside phase P2, roughly item twelve. Read cold they
+look like plumbing; nothing said "these two ARE the requirement, the rest is
+scaffolding."
+
+Meanwhile the work actually in flight (tool lifecycle B and C) does not block it.
+Alice's scenario needs P1 + 2a + 2c + 2d. Of the tool lifecycle only A is a real
+prerequisite -- because team_may_use_tool treats owner_team IS NULL as usable by
+every team, so without A the intersection is vacuous for 65 rows. B, C, D, E, F
+are the VISIBILITY axis and block nothing.
+
+Rule going forward: order by the capability being delivered, and say plainly
+which phases are scaffolding for it.
+
+  [x] 1. REVERT + CLOSE THE POD READ PATH   SHIPPED 0.2.271 / runner 0.1.69 /
+      deploy-controller 0.1.43 / sdk 0.2.10 / migration 0081. suite-98 30/0.
+      Small, and it is shipped code we have agreed is wrong. Building the
+      step-D reviewer surface on a filter we are about to change is waste.
+        a. catalog visibility back to CREATOR-scoped for tools and skills,
+           matching agents (agents.py:248) and workflows
+           (composite_workflows.py:205). Decision 47 is named for the agent
+           pattern -- "drafts are yours until you share" -- and team-scoping
+           broke it. Dissolves G-R3-9.
+        b. SDK tool_resolver stops querying the global catalog by name and
+           reads GET /agents/{name}/tools -- which ALREADY EXISTS
+           (agent_tools.py:141), returns full ToolResponse rows joined on
+           agent_tools, and is the binding question rather than a catalog
+           question.
+        c. third projected SA token (audience=agentshield-registry-api)
+           alongside the two already mounted; registry-api validates via
+           TokenReview -- copy mcp-proxy's existing validator. Pod identity
+           must match the {name} in the path.
+        d. delete CallerKind.IN_CLUSTER_MACHINE. Retires G-R3-8.
+        e. invert T-S98-024 / T-RJ-013 (they assert a teammate SEES a private
+           tool); rewrite T-S98-026 / T-S98-027 (they assert the tokenless read
+           SUCCEEDS, which becomes the wrong assertion).
+      NOTE the 8 running SDK agents need a rebuild either way; the 61
+           declarative ones update with one image bump.
+
+  [2] DECISION 45 -- THE ASK                      <- the requirement
+      "Alice queries agent X. X is bound to tool-1 and tool-2. Alice's team has
+      a grant to tool-1 only." Expected: tool-1 runs, tool-2 is denied NAMING
+      THE GRANT, and the agent answers using tool-1.  Full analysis: G-45.
+        P1  thread RunContext to the pod. Mint at create_playground_run; add an
+            rct kwarg to durable_dispatch.dispatch_durable_run -- ONE edit
+            covers all three durable callers. Migration 0081.
+        2a  agent_class from the VERIFIED SA subject, not from input. OPA
+            already has agents[sa_subject] in the bundle. Without this a
+            compromised pod claims "daemon" and skips the identity floor -- the
+            branch that requires no human at all.
+        2c  the caller's team into the OPA input (user_teams as a LIST).
+        2d  Gate 3 intersects for user_delegated:
+              daemon          -> agent.tools U data.grants[agent.team]  (as now)
+              user_delegated  -> agent.tools INTERSECT caller-team-usable
+            data.grants is ALREADY keyed by team in the bundle, so this is
+            mostly rego.
+      *** P1 MUST NOT SHIP ALONE. *** Today's blanket missing_user_identity
+      denial is ACCIDENTALLY protective. P1 removes the accident and puts
+      nothing in its place: tool-2 becomes ALLOWED because it is in
+      agent.tools and Gate 3 never looks at the caller. P1+2a+2c+2d is one
+      slice, not four.
+      TEST: two callers, different teams, different grants, same agent, same
+      tools. One gets tool-1 only, the other gets both. A single-caller test
+      cannot distinguish the intersection from "everything bound is allowed".
+
+  [3] Tool lifecycle D -- the reviewer surface
+      Scope draft: docs/design/publish-review-surface.md. G-R3-11.
+      After [2] because a blind reviewer over-publishes VISIBILITY, while a
+      missing intersection over-grants EXECUTION.
+        [x] A. create_tool derives owner_team          SHIPPED 0.2.267
+        [x] B. migration 0080, private by default      SHIPPED 0.2.268 / 0.1.185
+        [x] C. cascade + cross-team 422                SHIPPED 0.2.269 / 0.1.186
+        [x] D. GET /admin/publish-requests/{id}/review + reviewer drawer
+                                                       SHIPPED 0.2.274 / 0.1.187.
+               Approve moved INTO the drawer (option B) + a cascade acknowledgement
+               (option C) so "the reviewer was shown it" is structural, not hoped-for.
+               D-1..D-5 resolved in docs/decisions.md; D-3 (workflows) deferred and
+               ledgered as G-D3 -- review_supported=false WITH a reason, never an
+               empty tool list. suite-6 33/0.
+        [x] E. owner-initiated unpublish (Decision 47 #4 = option B)
+                                                       SHIPPED 0.2.275 / 0.1.188.
+               POST /tools/{id}/unpublish. E-1..E-5 in docs/decisions.md: the
+               platform-admin arm added on purpose (the approver must be able to
+               reverse), 409 not a silent 200, AUTHORITY BEFORE STATE so 403 never
+               leaks the publish state, bound published agents WARN and never block,
+               and it does NOT cascade. Skills excluded on purpose -- nothing
+               publishes them, so an unpublish would be orphan by construction (G-E2).
+               Two defects found on the way: the Tools page never rendered
+               publish_status at all (bug doc, fixed here), and the skills forward
+               path was never built (G-E2). suite-6 T-S6-023..029.
+        [x] F. tests: suite-6 extension + Playwright drawer case
+               Closed by D and E together. D shipped T-S6-017..022 +
+               e2e/publish-review-drawer.spec.ts; E shipped T-S6-023..029 +
+               e2e/tool-unpublish.spec.ts + 7 Vitest cases on ToolsPage. Both
+               registered in scripts/test-manifest.txt (--audit clean).
+      NOTE G-R3-6 (tools/skills fully unauthenticated) was a PREREQUISITE of A
+           -- owner_team cannot be derived from an optional caller. Shipped with
+           A; postmortem in tools-and-skills-routers-had-no-authentication.md.
+
+  [4] identity P1 + P1.5  [x] SHIPPED 0.2.277. Migration 0082 (NOT 0081 -- tool
+                      lifecycle took 0080 and mcp took 0081). run_context JSONB on
+                      playground_runs AND agent_runs; run_context_anchor.py is one
+                      producer for the row + the token, built from the SAME object so
+                      a run cannot start as one user and resume as another.
+                      P1 WAS ONLY HALF-WIRED: "one kwarg covers all three durable
+                      callers" was true of the dispatcher and false of the callers --
+                      only playground passed it, so every production/scheduled durable
+                      run reached the pod with user_id="" and the identity floor denied
+                      it. internal.py (durable + reactive) and workflow members are
+                      wired now; postmortem in
+                      docs/bugs/identity-p1-wired-one-caller-of-three.md.
+                      P1.5: all FIVE resume doors re-mint from the anchor. The fifth
+                      (approval_timeout_worker) was NOT on the hand list -- T-S101-009
+                      derives the set from the tree and found it. declarative-runner
+                      needed NO change (_bind_user_context is app-wide), verified by
+                      checking no route overrides it rather than assuming.
+                      suite-101 9 cases; T-S101-004 is the point (token expires, anchor
+                      still resolves the same human).
+  [5] identity P3     verifiable SERVICE identity. Currently listed as
+                      eval-runner + scheduler + event-gateway; DEPLOY-CONTROLLER
+                      IS MISSING FROM THAT LIST and is tokenless today,
+                      including a MUTATION (POST /agents/{n}/identities).
+                      eval-runner authenticates with X-User-Sub: eval-runner,
+                      a header it asserts about itself.
+  [6] post-P2         per-user tool SCHEMA filtering -- the LLM only ever sees
+                      the caller's allowed subset, so no turn is burned on a
+                      tool that will be denied. Needs request-scoped tool
+                      resolution.
+  [7] R4              trigger management (ENFORCE_TRIGGER_MGMT)
+  [8] R5              one role vocabulary; asset_grants visibility-vs-authority
+                      (G-R3-3); split role from membership; G-R3-10's second
+                      platform-admin identity lands here.
+  [9] OPA stage 6     the one net-new gate (who authorized an autonomous run)
+
+  MIGRATION NUMBERS: tool lifecycle took 0080, not the 0083 originally
+  reserved; identity moves to 0081-0083. Alembic is a linear down_revision
+  chain, so writing 0083 while 0080-0082 stayed unwritten would have chained
+  0079 -> 0083 and forced the identity migrations to insert AFTER it, making the
+  file numbers read backwards against the real order.
+```
+
+**Migration numbers:** `0079` is the last on disk. `0080–0082` stay reserved for identity across
+three docs. Tool lifecycle takes **`0083`**.
+
+**Ship `user_teams` as a LIST from day one (2c).** Multi-team membership is currently impossible —
+`user_sub` is the PRIMARY KEY of `user_team_assignments` — so it is a deliberate migration, not
+drift. But the OPA input field is being added in 2c anyway, and a one-element list costs nothing now
+where scalar→list later means touching the rego, the bundle, the input builder and every test.
+Resolution rule, written now even though unimplemented: **union for authorization, explicit for
+ownership.** Splitting `role` from membership belongs in R5, which is already opening that table.
+
+**finding 1 — PROVEN then FIXED, 2026-08-07 (`0.2.266`).** The cross-team reproduction was
+run: a `consumer` in team `operations`, agent `trigger-demo-b` owned by team `platform` —
+`/agents/{n}/chat` → **403**, `/agents/{n}/deployments/{id}/chat` → **200**, same caller and
+moment. Both entry points now call one shared `_require_agent_access`; extraction rather than
+a second copy, because two doors to one capability is the class this repo has three
+postmortems for. RED-first was honoured properly: `suite-98` ran 18/1 against the unfixed
+`0.2.265` with T-S98-017 failing at 200 and the over-reach guard T-S98-018 already passing.
+Postmortem: `docs/bugs/deployment-pinned-chat-had-no-access-check.md`.
+
+The first probe was inconclusive and the lesson is worth keeping: it used a same-team
+persona, so the own-team fast path would have allowed it regardless. **A 200 is only evidence
+when the control under test is the one that would have said no.**
+
+## Identity propagation P0 — 2026-08-07 (registry-api 0.2.265 / deploy-controller 0.1.42 / declarative-runner 0.1.68)
+
+The `RunContext` primitive and its signing key. Design:
+`docs/design/identity-propagation-architecture.md` §4.1/§4.3. `suite-99` **8/0**.
+
+- **the blocker this phase carried was based on a component that does not exist.** Both
+  the design doc and the plan recorded "resolve the Deployment backing the shared
+  `declarative-runner` Service (not found under any chart template)". Checking the running
+  cluster instead of the chart: there is no such Service and no such Deployment. The runner
+  runs as **per-agent pods** created by the deploy-controller. Nothing was missing — the
+  premise was wrong, and §4.3 had already named the right target. Reason from the running
+  product, not the design doc (DoD rule 6), applied to a doc I had been treating as ground
+  truth all week.
+- **deliberately no runtime change.** P0 threads nothing through a live run; that is P1. So
+  `suite-99` asserts the primitive and the wiring and never that a run carries identity — a
+  P0 suite claiming otherwise would be green for the wrong reason.
+- **the security properties are the cases that matter.** A tampered token, a token signed
+  with the wrong key, an expired token, and a missing key are all rejected — the last by
+  raising rather than degrading to unsigned. An unsigned run context is worse than none:
+  every downstream hop would treat forged identity as verified and OPA would authorize it.
+- **three vendored copies, checked mechanically.** No shared package spans `services/*` and
+  `sdk/`. T-S99-004 hashes the shared core of all three so drift fails a test — a token
+  minted by one and rejected by another surfaces as an OPA denial naming a TOOL, three
+  layers from the cause.
+- **not-yet-wired (debt) — OPA Gate 6 still denies.** P0 changes nothing for a running
+  agent: `user_id` is still `""` at the OPA call, so `user_delegated` tool calls are still
+  denied. That is the live production denial this whole workstream exists to close, and it
+  closes in **P1**, not here. Stated so "P0 shipped" is not read as "identity works".
+- **the escaping bug that bit suite-42 bit suite-99 too.** `\"PASS\" if ok else \"FAIL\"`
+  inside an f-string inside a single-quoted bash string is a SyntaxError. Second occurrence;
+  the fix both times is to precompute rather than nest quotes. Worth a lint if it recurs.
+
+## Known gaps — RBAC R3 (artifact-scoped enforcement) — 2026-08-07 (registry-api 0.2.264)
+
+R3 closed what R2 left: `PATCH`/`PUT`, `DELETE` and `POST /publish` on
+`/api/v1/agents/{name}` were **fully unauthenticated** — anyone reaching the API could
+rename, soft-delete (which also terminates deployments and disarms triggers) or push any
+agent into the review queue. R2 had closed a read disclosure on `/admin/*` while these
+destructive writes stayed open, which made them the biggest remaining hole. Design:
+`docs/design/rbac-and-artifact-authorization.md` §5 R3.
+
+- **closed — G-R2-4.** `agents.py` was 1 protected / 11 exempt after R2. The mutations
+  now require platform-admin or `agent-admin` on the artifact; quarantine is
+  platform-admin **only** (it is applied *to* an owner, so an owner able to lift it makes
+  it advisory). `publish.submitted_by` now comes from the verified token instead of an
+  `X-User-Sub` header defaulting to `"system"` — that name is what a reviewer sees when
+  deciding, so the header was a forged signature on a governance record.
+- **closed — §1.3's orphan list.** `can_deploy_to_production`, `can_use_playground` and
+  `can_manage_artifact` all have live callers. Only `can_approve_hitl` remains (R5).
+- **R2's blast-radius sweep was incomplete, and R3's found it.** R2 required auth on
+  `POST /agents/` and I verified a **hand-picked list of 17 suites**. A grep-derived audit
+  during R3 found **41 anonymous create sites across ~28 suites** — so several had been
+  red since `0.2.263` and nobody knew. Worse, some *passed* anyway: their create sits in a
+  `try/except` that swallows the 401 and the fixture silently reuses a stale agent from an
+  earlier run, which is the suite-78 "green while testing nothing" defect wearing a
+  different hat. **Lesson: derive the sweep list from a grep of the changed surface, never
+  from a list you wrote by hand.** All 41 now carry a Bearer; the audit is repeatable and
+  is what should gate the next router change.
+- **closed structurally — `scripts/check-e2e-auth-hygiene.sh`.** Cluster-free, ~1s, run
+  it beside `check-tag-content-coupling.sh` before deploying a router change. It fails on
+  a duplicate `headers=` kwarg, TWO `Authorization` keys in one dict (not a syntax error —
+  the last value silently wins, so a persona's call goes out as someone else), an agent
+  mutation with no credential, and `${E2E_TOKEN}` referenced without sourcing
+  `lib/e2e-auth.sh`. It found a site my hand audit had just missed
+  (`suite-17-eval-gate.sh:473`) on its first run. This is the answer to three phases of
+  hand sweeps: derive the list from the tree, not from memory.
+- **four scripted-edit bugs of my own, all the same shape.** Bulk regex edits across the
+  suites produced: a duplicate `headers=` kwarg (`SyntaxError: keyword argument repeated`,
+  14 sites, caught by the sweep); TWO `Authorization` keys in one dict, which is NOT an
+  error — the last wins, so suite-15's publish went out as platform-admin instead of as
+  alice and the case proved nothing; an anonymous probe rewritten into an authenticated
+  one (suite-15 T-S15-002); and a `/me` case that lost the unauthenticated half it existed
+  to assert (suite-42 T-S42-004). Every one was caught by *running* the thing, never by
+  reading the diff. The replacement pass is now add-**or**-merge, and the first two
+  variants are permanently gated by `check-e2e-auth-hygiene.sh`.
+- **closed — 35 suites mutated agents with no credential.** A router change without the
+  suite fixes turns ~31 suites red; that is the R1/HC-3 lesson and it is why they are in
+  this commit. 61 call sites across two shapes, all verified to interpolate.
+- **RED baseline captured 2026-08-07 against the deployed `0.2.263`** (R2 shipped, R3
+  not) — `docs/testing/evidence-suite98-r3-red-baseline-0.2.263.txt`. T-S98-011 returned
+  **204**: an unauthenticated caller actually deleted the agent. 012/013/014 likewise red;
+  T-S98-015 green as the over-reach guard requires.
+- **the baseline caught a false pass of my own.** T-S98-016 asserted only `403` on the
+  playground, and it was GREEN against an image with no role gate — because the
+  pre-existing owner check already answers 403, and R2 stops a consumer ever OWNING an
+  agent, so a consumer is refused every agent on ownership grounds. Rewritten to assert
+  the refusal REASON. Stated plainly rather than overselling R3: for a consumer,
+  `can_use_playground` is defence in depth and a clearer error, **not a new denial**. It
+  becomes load-bearing when non-owners may run shared or published agents.
+- **not-yet-wired (debt) — G-R3-1, the playground gate is bypassable by header.**
+  `can_use_playground` is applied only to a VERIFIED user, because `eval-runner` POSTs
+  `/playground/runs` with `X-User-Sub: eval-runner` and no Bearer; gating the route would
+  break batch eval. So a caller who sends that header with no token still lands in the
+  `_SERVICE_IDENTITIES` branch and skips the check. What IS closed is every authenticated
+  path, including all of Studio. Closing the rest needs eval-runner to hold a real
+  verifiable identity — identity-propagation Phase 3 / migration `0081`.
+- **not-yet-wired (debt) — the 404-before-403 ordering on agent mutations.** The agent
+  must be fetched before it can be authorized, so an unauthorized caller can still tell
+  "exists" from "does not". Not a new leak: `GET /agents/{name}` is deliberately open for
+  the in-cluster machine callers, so names are already enumerable. Same Phase 3 owner.
+- **still open — workflow mutations.** R3 covered `agents.py`. The parallel surface in
+  `composite_workflows.py` has not been audited to the same standard; `ENFORCE_TRIGGER_MGMT`
+  is still `False` (R4).
+
+## Known gaps — RBAC R2 (global-role enforcement) — 2026-08-06 (registry-api 0.2.263 / studio 0.1.184)
+
+R2 is the first phase that returns a 403 to a real user: `/api/v1/admin/*` and
+`/api/v1/admin/users*` now require the `platform-admin` global role, and `POST /agents/`
+requires contributor+. Design: `docs/design/rbac-and-artifact-authorization.md` §5 R2 ·
+Decisions 43–44.
+
+- **RED-first satisfied for real this time.** `suite-98` was written before R2 and was
+  run against the deployed `0.2.262` minutes before R2's image rolled: 001/002/004/006/
+  007/008 red, 003/005 (the over-reach guards) green. Captured run:
+  `docs/testing/evidence-suite98-red-baseline-0.2.262.txt`. The previous change had to substitute captured
+  evidence for a red run because showing red meant redeploying a broken image; here the
+  cluster was still on the pre-fix image, so the real run was free. The baseline also
+  found two defects in the suite itself — a fixed probe name that made T-S98-004 fail
+  for the wrong reason, and a T-S98-009 probe that aborted the harness under
+  `set -e`, hiding T-S98-010 entirely. Both fixed.
+- **closed — the browser layer could not fail a role gate.** All 61 bash suites and, until
+  `0.1.184`, all 47 Playwright specs authenticated as `platform-admin`, so R2 could have
+  been inverted or 403'd everybody and the whole suite would have stayed green.
+  `e2e/global-setup.ts` is now multi-role: it provisions `e2e-contributor` /
+  `e2e-consumer` through the real `POST /api/v1/admin/users` and saves a session per role
+  (fail-loud — `assertRoleSession` turns a missing session into a named failure, not a
+  silent skip). `e2e/rbac-role-journeys.spec.ts` drives the deployed app as each.
+- **closed — `/admin/teams-summary` was an admin endpoint with non-admin readers.** The
+  sidebar's "Shared With Me" and My Agents read it for *every* role. Gating it as R2's plan
+  said would have emptied both platform-wide with no error; leaving it open would have kept
+  a `consumer` reading the whole org's membership map. Split per Decision 43 — census stays
+  admin-only, `GET /api/v1/me/team` is self-scoped. `suite-98` asserts **both** sides
+  (T-S98-006 403 *and* T-S98-007 200); only the 403 half would have passed a broken build.
+- **closed — `app-shell-resilience.spec.ts` had gone vacuous, and the sweep is what
+  caught it.** Its three cases stub `/admin/teams-summary`; R2 moved the sidebar to
+  `/me/team`, so the stub matched nothing the shell requests and all three passed while
+  asserting nothing. They were **green** in the R2 regression run — a passing spec was
+  the symptom. Retargeted at `/me/team`, and each case now asserts its stub actually
+  FIRED (`expectStubWasUsed`), so the next time the producer moves they fail instead of
+  going quietly green. Generalizes: **a route stub is only a guard while the app still
+  requests the route it names.** Any spec built on `page.route` should assert the hit.
+- **closed — the artifact grant picker.** `ArtifactGrantsList` (agent Settings tab, workflow
+  triggers panel — both contributor-reachable) read `/admin/users`. Now reads the new
+  `GET /api/v1/users/directory`. `T-RJ-007` asserts the picker actually populates for a
+  contributor; asserting only that the panel renders would have missed an empty list.
+- **deferred (intentional) — G-R2-1, `/users/directory` lets any authenticated user
+  enumerate usernames.** Inherent to a name picker; carries no email / role / team /
+  `enabled`, so it is strictly less than every role could read before R2. `T-S98-009` pins
+  the absent fields so it cannot grow back into `/admin/users`.
+- **not-yet-wired (debt) — G-R2-4, eleven `agents.py` routes are still unauthenticated,
+  including MUTATIONS.** Measured on the deployed `0.2.263` via the T-S97-011 canary:
+  `agents` is 1 protected / 11 exempt. The exempt set includes `PATCH /agents/{name}`,
+  `DELETE /agents/{name}` and `POST /agents/{name}/quarantine` — anyone who can reach
+  the API can rename, soft-delete or quarantine any agent. R2 closed only `POST
+  /agents/`. This is R3's scope; it is pinned in the canary (`"agents": (1, 11)`) so the
+  number is visible rather than implied, and so guarding them moves a test.
+- **not-yet-wired (debt) — suite-97 was NOT run end-to-end for R2.** Its destructive leg
+  deletes the Keycloak `platform-admin` and relies on the bootstrap re-pinning; if that
+  failed the platform would be left without an admin, and recovering could require
+  entering a password, which I cannot do. The part R2 affects — the T-S97-011 route
+  partition — was verified **statically against the deployed app** by running the
+  canary's own algorithm in the pod (that is where the `(1, 11)` / `(5, 0)` / `(1, 0)` /
+  `(8, 0)` numbers above come from), but the suite itself has not been executed. Run it
+  deliberately:
+  `KUBECONFIG=~/.kube/test-cluster-kube-config.yaml bash scripts/e2e/suite-97-rbac-bootstrap-and-router-auth.sh`
+- **not-yet-wired (debt) — G-R2-2, a `/me` failure silently demotes an admin's UI.**
+  `main.tsx` catches a failed `getMe()` with `console.warn` and renders with `role = null`,
+  which `isAtLeast` treats as `consumer`: Admin nav gone, `/admin/*` deep links redirected,
+  no message. Denying is the safe direction; doing it silently is not. Not fixed in R2.
+- **closed — six e2e suites created agents with no credential.** `POST /agents/` took
+  `get_optional_user` and fell back to an `X-User-Sub` header, so suites 6, 14, 15, 42,
+  78 (and the LG block inside 6) created fixtures anonymously. All now carry a real
+  Bearer. Two went further, because the migration exposed that they were asserting the
+  wrong thing:
+  - **suite-15** drove isolation with `X-User-Sub: user-alice`, an identity that never
+    existed in Keycloak. It proved the visibility filter matches a string the caller
+    typed — which it would do whether or not the identity meant anything. Migrated to
+    two real personas (`s15-alice` / `s15-bob`) with subs read out of their tokens, and
+    T-S15-002 flipped from asserting anonymous creation SUCCEEDS to asserting it is
+    refused. The suite had the hole encoded as its expectation.
+  - **suite-42** T-S42-004 is named "returns role and artifact_roles" and checked
+    neither — it could only assert 401, and said so in a comment. With a real persona it
+    now asserts both halves, including that the creator auto-grants appear in `/me`.
+- **closed — suite-78 reported "all green" while testing nothing.** Its fixture create
+  started 401ing; every case took the `skip_all` path and the suite printed
+  `0 passed, 0 failed, 6 skipped` then `OK: suite-78 all green` and exited **0**. A
+  broken fixture is now `fail_all`. `skip_all` is reserved for a genuinely absent
+  precondition — a fixture that errored is indistinguishable from the product being
+  broken, and must not be reported as success.
+- **not-yet-wired (debt) — G-R2-3, the Build nav is not role-gated.** `POST /agents/` now
+  requires contributor+, but the sidebar shows "Build" to every role, so a **consumer**
+  can still open the create wizard, fill it in, and only discover at Save that they are
+  refused. The API is correct and the app does not break — it is a wasted journey and a
+  late error, not a hole. The nav-level counterpart to R3's `can_use_playground`; fix
+  both together rather than bolting one `isAtLeast` onto one nav group.
+- **not-yet-wired (debt) — R3's orphans remain orphans.** `can_deploy_to_production` and
+  `can_use_playground` still have zero callers, so production deploy and playground access
+  are still ungated. R2 wired `can_create_agent` only. Stated so "R2 shipped" is not read as
+  "RBAC is on".
+
+## Known gaps — R1 router auth broke Studio — 2026-08-06 (studio 0.1.182 / 0.1.183)
+
+Closing the anonymous `/api/v1/admin/*` hole (registry-api `0.2.262`) broke three Studio
+call sites that had been reaching those routers with a **raw `fetch`** and no
+`Authorization` header. Full postmortem:
+`docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md`.
+
+- **fixed in 0.1.182 — blank page on every route.** `Sidebar.tsx` parsed the 401 envelope
+  into React Query as *success* data; `(sidebarTeams ?? []).find(...)` threw inside a
+  `useMemo` and unmounted the whole app. Guarded by
+  `studio/e2e/app-shell-resilience.spec.ts` (3 cases; the `pageerror` listener is the
+  assertion, and it is mutation-verified).
+- **fixed in 0.1.183 — the entire Access Control users tab was dead.** Six more raw
+  fetches inline in `AdminAccessPage.tsx` (list/create/edit/delete/reset-password +
+  teams-summary). Caught by `e2e/admin-access-roles.spec.ts` going 3-red in the blast
+  radius sweep. All six moved behind the authed `http` client in `api/registryApi.ts`.
+- **closed structurally — `studio/src/api/transport-boundary.test.ts`.** Fails if any file
+  outside `api/registryApi.ts` calls `fetch()`, with a reasoned allowlist for the two SSE
+  streams (which must use `fetch` and do send a Bearer — asserted) and `/config.json`. It
+  runs inside `npm run test`, so it cannot be skipped.
+
+- **deferred (intentional) — the RED-first gate was satisfied by evidence, not by
+  redeploying the broken image.** The browser layer runs against the *deployed* artifact,
+  so demonstrating `app-shell-resilience.spec.ts` red would have meant putting studio
+  `0.1.181` back on the cluster. Used instead: the console `TypeError` captured live from
+  the failing tab, plus a mutation check proving the `pageerror` guard fires on that exact
+  error. Noted because it is a real weakening of rule 7, not a clean pass.
+
+## Known gaps — RBAC R0 (bootstrap + refusal) — 2026-08-04 (registry-api 0.2.259)
+
+R0 shipped: the platform creates and re-pins its own `platform-admin` from `lifespan`
+(`services/registry-api/bootstrap_admin.py`), the realm-init Job creates no users at all
+(Decision 40), `POST /api/v1/admin/users` is atomic, migration `0079` drops the `role`
+column default, and a subject with no assignment row is refused with **403
+`no_platform_role`** instead of being handed an invented one.
+Postmortem: `docs/bugs/platform-admin-role-stranded-on-realm-recreation.md` ·
+`scripts/e2e/suite-97-rbac-bootstrap-and-router-auth.sh` (T-S97-001..010, 012) ·
+`studio/e2e/admin-access-roles.spec.ts`.
+
+**R1 (FR-11 — `require_user` on the ten routers) is NOT in this commit.** It ships as its
+own change together with the ~28-suite Bearer sweep, because a router change deployed
+without the suite token fixes reproduces commit `76b3570`'s fifteen-dark-suites failure at
+scale. Until it lands, **all ten routers still answer unauthenticated requests** — not
+only the five named exemptions below. `T-S97-011` (the 401 matrix + exemption canary) is
+deliberately absent from suite-97's completeness gate until it does.
+
+**deferred (intentional)**
+
+- **G-R0-1 — `user_team_assignments.role` is a union of two vocabularies.** It holds a
+  global role (`platform-admin`/`contributor`/`consumer`) *and* a reviewer **scope**
+  (`agent:reviewer`, `approvals.py:48 _DEFAULT_REVIEWER_SCOPE`, matched by `_caller_roles`
+  at `:266`). `rbac._normalize_role` returns an unrecognized value **verbatim** and
+  `ROLE_HIERARCHY.get(role, 0) == 0` is what stops a reviewer scope being read as a
+  contributor — load-bearing, not an oversight. Splitting the column is **R5's** job;
+  doing it here would have moved HITL authority in the same change that moves admin
+  bootstrap. Pinned by `T-S97-010(c)`.
+- **G-R0-2 — `approval_authority` remains the live HITL mechanism.** R0 changed nothing
+  about who may approve. Deliberate: the global role and the approval authority are
+  different questions and R5 owns merging them.
+- **G-R0-4 — no Keycloak realm-role OBJECTS exist for the three global roles.**
+  `set_user_realm_role` (`keycloak_client.py:203`) silently skips a name absent from
+  `role_map`, so today the DB row is the only carrier of the global role. Not a hole (the
+  backend never reads the realm role for authorization), but it means the Keycloak console
+  shows nothing about a user's platform role. `T-S97-007` asserts the mapping only where
+  the object exists, and says so in its evidence line rather than pretending.
+- **G-R0-5 — `scripts/seed-platform-admin-role.sh` is retained** as a **manual repair
+  tool**, retitled as one. Deploy no longer calls it. It exists for the operator who must
+  re-pin the row *without* restarting registry-api (a hand-edited row, or
+  `GET /api/v1/admin/identity-audit` reporting a stale one when waiting for the next
+  rollout is not acceptable).
+- **G-R0-6 — `UserCreate.role` still defaults to the legacy `"operator"`**
+  (`routers/admin_users.py:53`). Every in-repo caller now states a role explicitly, so the
+  default is unreachable from our own code, but an external `POST /api/v1/admin/users`
+  that omits `role` still creates a `contributor` by another name. Changing the API
+  default is a contract change and belongs with the R5 vocabulary work.
+- **G-R0-7 — the six checkpoint scripts CP1a–c / CP2a–c were never written**
+  (`docs/plan/rbac-r0-r1/tasks.md`, Checkpoints 1 and 2). Decided 2026-08-04: `suite-97` is
+  the gate instead. It carries every assertion those scripts would have made — T-S97-001/002/003
+  (bootstrap, restart idempotence, advisory-lock single-flight), T-S97-005/006 (Keycloak-outage
+  non-fatal path, `/ready` 503 body), T-S97-007/008 (atomic create + compensating delete),
+  T-S97-009 (`NOT NULL` proving the `server_default` is gone), T-S97-010 (403 `no_platform_role`
+  + the `agent:reviewer` rank-0 carve-out) and T-S97-012 (audit invariants) — driven through the
+  real handlers rather than restated in shell. CP1a/CP2a would have wrapped
+  `scripts/deploy-cpe2e.sh`, which CLAUDE.md already names as the only deploy mechanism. The
+  boxes stay unticked in tasks.md on purpose so this reads as a choice, not an omission.
+- **G-R0-8 — ✅ CLOSED 2026-08-04.** The R0 Playwright journey
+  (`studio/e2e/admin-access-roles.spec.ts` "bootstrap gives platform-admin a role row, so the Admin
+  menu renders") **passes against `0.2.260` on `test-cluster-964-10086`** — 2 passed of 3 in that
+  file, the third failure being G-R0-9 below and unrelated. R0 is now backend- **and**
+  UI-verified. The diagnosis below is kept because the root cause was never R0 and the fix is
+  reusable.
+
+  **Root cause, and a wrong turn worth recording.** `deploy-eks.sh` sets `global.publicUrl` to the
+  ELB address, so on EKS the `HTTPRoute` is bound to the **NLB's own DNS name**, not
+  `agentshield.127.0.0.1.nip.io`. Envoy therefore answers **404** to the default URL — a route
+  miss, not a connection failure. `scripts/studio-e2e.sh` then fell through to a plain-http
+  port-forward that cannot reach the API on `:8443`, so **every** spec died at its fixture with
+  `ECONNREFUSED` while `global-setup` reported a *successful* login. That shape reads as an
+  app-wide outage and is why it was misdiagnosed twice: first as an R0 regression, then as
+  requiring an `/etc/hosts` entry. **Neither was true.** The NLB name resolves to a private VPC
+  address (`10.80.118.27`), but anyone who can reach the cluster API — also private — can reach
+  the gateway too: `curl https://<nlb>/config.json` → 200 with **no tunnel at all**. The first fix
+  attempt hard-exited demanding an `/etc/hosts` line and would have *blocked* the working path;
+  it was replaced.
+
+  `studio-e2e.sh` now asks the cluster which hostname its Gateway serves and tries it directly, so
+  the browser layer runs on EKS with **zero configuration**. It still refuses to fall through to
+  the broken http mode, and prints the port-forward + `/etc/hosts` recipe for the genuinely
+  off-VPN case.
+
+- **G-R0-9 — root-caused 2026-08-04: the test could NEVER have passed, and the guard it represents
+  has never run.** `admin-access-roles.spec.ts` "assigning consumer persists across a reload"
+  looked for `getByRole('button', {name: /^save$/i})`. `EditUserModal`'s button reads **"Save
+  Changes"** (`AdminAccessPage.tsx:452`), so the anchored regex could not match and the click timed
+  out. Not R0: the R0 commits changed **zero** files under `studio/src`, and Studio still runs the
+  untouched `0.1.180` image.
+
+  **The serious part is the timeline.** "Save Changes" shipped in `3192ebe`; this test was written
+  **later**, in `8baba26` — an *RBAC* commit. So it was **red from the day it was authored and has
+  never once passed**. Nothing surfaced it because the browser layer could not run against EKS at
+  all (G-R0-8), so two failures covered for each other: a test that could not pass, in a layer that
+  could not run. The consequence is that **CLAUDE.md DoD rule 2's mandatory save→reload→assert
+  guard on the RBAC admin write path has never actually executed** — on the very surface R2 is
+  about to start enforcing against.
+
+  Locator corrected to `/^save changes$/i` (fix the test, not the user-facing copy — the same
+  principle applied to the `EmailStr` finding).
+
+  **✅ CLOSED — verified 2026-08-04: `3 passed`, exit 0** against `0.2.260` on
+  `test-cluster-964-10086`. **The persistence round-trip itself was never broken** — the PATCH
+  lands, survives a full reload, and reads back correctly from the backend. Only the guard was
+  dead. That is the better outcome, but it does not soften the finding: for the whole life of this
+  test the RBAC admin write surface was reported as covered while nothing was checking it, and the
+  bug it would have caught could have been anything.
+
+- **G-R0-10 — ✅ CLOSED 2026-08-04.** `studio/src/pages/AdminAccessPage.test.tsx` added — 5 tests,
+  **180ms, no cluster** (the browser layer needs a reachable cluster and ~20s per spec). It pins the
+  accessible names the e2e spec drives, so a label/locator drift now fails locally in the same
+  commit that causes it instead of rotting invisibly. **Mutation-verified**: renaming the button
+  back to `"Save"` fails 2 of the 5 in ~1s. Also covers the canonical-role list, that a role change
+  actually PATCHes, and that a legacy `operator` row still renders. Full suite green: 71 files,
+  618 tests. Original text:
+
+- **~~G-R0-10~~ — `studio/src/pages/AdminAccessPage.tsx` has NO Vitest component test.** The page
+  creates, edits and deletes users and assigns global roles — the entire RBAC admin write surface —
+  and its only automated guard was the Playwright spec above, which was dead. A component test
+  would have caught the "Save Changes"/`/^save$/` mismatch offline in milliseconds and needs no
+  cluster. CLAUDE.md's Post-Implementation Checklist item 4 requires component tests for changed
+  components; this page predates that discipline and was never backfilled.
+
+- **~~G-R0-8 (original text)~~ — the R0 Playwright journey (T038) has NEVER been executed.** It is the **only** artifact
+  that proves DoD rule 1 for R0 — that the sidebar Admin section actually renders, which is the
+  literal 2026-07-20 symptom. It typechecks and is registered, but has not run:
+  `scripts/studio-e2e.sh` targets `https://agentshield.127.0.0.1.nip.io:8443` (the local
+  kind/docker-desktop Envoy Gateway), and on the EKS test cluster the gateway is an **internal NLB**
+  with no such local address. Attempting it produced `ECONNREFUSED ::ffff:127.0.0.1:8443` in the
+  file's first test, which aborted the other two before they ran — so "2 did not run", **not** "2
+  passed". R0's backend is proven by `suite-97` (11/11 against `0.2.260`, with `T-S97-004`
+  demonstrated RED against `0.2.258` first); the UI journey is not proven at all. R0 is
+  **backend-verified and UI-unverified** and must not be described otherwise.
+
+  **Diagnosed and half-closed 2026-08-04.** The root cause was not R0: the Gateway `HTTPRoute`
+  (`agentshield-routes`) is bound to the **internal NLB's own DNS name**, so nothing answers on
+  `127.0.0.1:8443` and no `Host` header matches. `scripts/studio-e2e.sh` then fell through to a
+  plain-http port-forward that cannot reach the API on `:8443`, so **every** spec died at its
+  fixture with `ECONNREFUSED` — the whole browser layer has been silently unrunnable against EKS,
+  not just this one test. The script now discovers the route hostname, port-forwards the Gateway
+  Service to 8443, and runs gateway mode against it; verified reachable
+  (`/config.json` → 200, `/realms/agentshield/.well-known/openid-configuration` → 200 via
+  `curl --resolve`).
+
+  **ONE MANUAL STEP REMAINS**, because Playwright drives a real browser and cannot override DNS the
+  way `curl --resolve` can:
+
+      sudo sh -c 'echo "127.0.0.1  <nlb-dns-name>" >> /etc/hosts'
+
+  The script prints the exact line and refuses to run rather than degrading silently. After that
+  entry exists, `bash scripts/studio-e2e.sh` runs the browser layer on EKS and this gap closes.
+
+- **G-R0-11 — FIRST browser-layer baseline against EKS, 2026-08-04: 69 passed / 24 failed / 2
+  skipped / 23 did not run (17.9m).** Until the gateway-discovery fix (G-R0-8) this layer could not
+  run against this cluster at all, so this is the first time its real state has been observed.
+  **Zero connection/infrastructure errors** — every failure is a genuine assertion or locator
+  failure, spread 1-2 across 20 different spec files, which argues against a single systemic cause.
+  Error classes: ~12 plain assertion failures, 2 `strict mode violation` (a locator that stopped
+  being unique), 1 `locator.click` timeout (the G-R0-9 class), 1 60s test timeout.
+  **These are NOT triaged yet.** Each belongs in one of three buckets and the count means nothing
+  until they are split: (a) dead tests guarding a surface that intentionally changed, (b) real
+  product bugs that were invisible while the layer was dark, (c) fixture/timing. One clear
+  candidate for (a): `agent-graphs.spec.ts` asserts a "New Agent Graph" button is visible, but
+  **Decision 24 deliberately hid Agent Graphs from the nav** in favour of the unified Workflow
+  builder. Triage should precede R1 — R1 changes authentication on 10 routers, and starting it on
+  top of 24 unexplained browser failures makes any new breakage unattributable.
+  Log: `pw-full.log` (session scratchpad); re-run with `bash scripts/studio-e2e.sh`.
+
+- **G-R0-12 — a corrupted account is indistinguishable from a low-privilege one in the UI.**
+  R0's FR-5 makes a subject with no `user_team_assignments` row answer **403
+  `no_platform_role`** — deliberately loud on the server, and proven by `suite-97` T-S97-010.
+  Studio does not surface it: `/me` is fetched once in `main.tsx` and a 403 is swallowed into
+  `role = null` (`main.tsx:37-39`), so the only visible effect is that the Admin section does not
+  render — exactly what a legitimate `consumer` sees. The 2026-07-20 incident was *precisely* this
+  symptom ("a menu just disappeared"), so the platform now detects the corruption and then hides
+  the detection.
+  **Deliberately NOT covered by a browser journey.** Staging it needs a Keycloak user with no row,
+  which R0's own atomicity makes unreachable through the API — a spec would have to drive
+  Keycloak's admin API *and* delete the DB row, neither of which Playwright can reach — and the
+  resulting assertion ("no Admin menu") could not distinguish the bug from correct `consumer`
+  behaviour. The test would be expensive and weak. The real fix is product-side: surface
+  `error_code === "no_platform_role"` as a distinct state instead of a null role. Then it becomes
+  cheaply testable.
+
+- **G-R1-7 — ✅ CLOSED 2026-08-07. `suite-18` T-S18-005/006/011 died at the OPA IDENTITY FLOOR,
+  not on fixtures. The root cause recorded here was WRONG and is corrected below.**
+  Suite now **14 passed / 0 failed / 1 skipped** (was 10/3/1), no registry-api change involved.
+
+  **What was recorded (2026-08-06), and why it was wrong.** The entry said the three cases assert
+  on scavenged shared tools that "zero of the 47 agents grant". That diagnosis never fit its own
+  evidence: `T-S18-006` reported `allow=False, req_appr=True`, and `require_approval` can only be
+  true if the tool WAS resolved and its risk read. An ungranted tool cannot produce it. The
+  inference was made from a bundle query instead of from the decision the sidecar actually
+  returned — the same shape as the Decision-46 correction (reasoning about a handler without
+  reading its body).
+
+  **Actual root cause, measured.** Every case sent `user_id: ''`. Gate 6 (`user_identity_ok`,
+  `agentshield.rego:22,101-108`) is AND-ed into `allow`, so a `user_delegated` input with no
+  `user_id` is denied `missing_user_identity` regardless of risk or grant. Same tool, same pod,
+  only `user_id` changed:
+
+  | tool | `user_id=''` | `user_id='alice'` |
+  |---|---|---|
+  | `email_notifier` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=allow_medium_risk` |
+  | `cic-echo-tool` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=require_approval_high_risk` |
+  | `get_weather` | `allow=false deny_reason=missing_user_identity` | `allow=true reason=allow_low_risk` |
+
+  All three tools are granted and resolve correctly. The cases were not merely red — they were
+  **asserting nothing about the risk→action mapping they exist to prove**, because the request
+  never reached that rule.
+
+  **Fix — the suite was the defect, in three ways.** (1) Allow-path and deny-path cases now send a
+  synthetic `S18_UID`, i.e. the input a real run sends once identity P1 threads the RunContext.
+  (2) New **`T-S18-015`** asserts the floor's DENY half — the only case that deliberately sends an
+  empty `user_id`, so switching Gate 6 off turns exactly one test red instead of zero.
+  (3) **`T-S18-012` was a tautology** — `if allow == "True" || allow == "False"`, satisfied by
+  every possible boolean. It stayed green through the whole period the floor was denying, which is
+  the gate it is nominally about. It now asserts the EXEMPT half: daemon + empty `user_id` → allow.
+
+  This does **not** weaken a control. The floor is asserted from both sides for the first time, and
+  the live-denial entry above (a real `user_delegated` run still reaches OPA with `user_id=""` until
+  identity P1) is unchanged and still open — `T-S18-015` is now its regression guard, and must keep
+  passing after P1, because P1 changes what the pod SENDS, not what the policy DECIDES.
+
+  **Process gaps this exposed, both worth keeping.** (a) R1 shipped without a pre-change baseline of
+  the BASH layer (only the browser layer was baselined), so attribution had to be reconstructed
+  after the fact instead of read off a diff. (b) **A wrong root cause in this ledger is worse than
+  an open one** — it survived a day and would have sent the next person to rebuild fixtures that
+  were never broken. One `kubectl exec` against the sidecar settled it. Query the component that
+  made the decision, not a table upstream of it.
+
+- **G-R1-8 — `knowledge.spec.ts` "attach agent" picker option never renders; cause NOT established.**
+  `expect(picker.locator("option", {hasText: AGENT_NAME})).toHaveCount(1)` gets 0 (`:283`).
+  **Ruled out by inspection, so the obvious answers are not it:** the options render `a.name`
+  (`KnowledgeBaseDetailPage.tsx:449`), matching the locator; `list_agents` orders
+  `created_at.desc()` (`agents.py:207`) so a fixture created in `beforeAll` sits at position 1, well
+  inside the picker's `listAgents(200, 0)` cap — the cap is real (722 agents on this cluster, 136
+  active) but cannot be what hides a brand-new one; `available` filters only already-bound agents
+  and this one is not yet bound; and step 3 does a full `page.goto`, so the React Query cache is
+  cold. The failure artifact carries no page snapshot, so the rendered option list was never
+  observed. Needs a debug run that dumps `picker.locator("option").allTextContents()` — I stopped
+  rather than keep guessing at it. Everything else in Group B is fixed.
+
+- **G-R1-9 — R1 CHANGED AUDIT ATTRIBUTION, and it is the first real behavioural consequence found.**
+  `routers/triggers.py:73` reads `armed_by = (user or {}).get("sub") or x_user_sub` — the JWT
+  subject takes precedence over the self-asserted `X-User-Sub` header. Before R1 the e2e suites sent
+  no Bearer, so `user` was `None` and `armed_by` fell back to the header literal; Phase 7 attached a
+  real token, so `armed_by` is now the **authenticated** caller. `suite-71` T-S71-001c encodes the
+  old behaviour and fails: `armed_by=5cf374d6-… expected=75c7c8b3-…`.
+  **The new behaviour is the correct one** — an authenticated identity outranking a header a caller
+  can type is precisely what R1 is for — but the change was silent, and anything that reads
+  `armed_by` for *audit* now attributes differently than before. That deserves to be a stated
+  consequence of R1, not an absorbed surprise.
+  **Wider exposure:** `grep -rn 75c7c8b3 scripts/` finds **33 occurrences across 30+ files**. Most
+  are harmless — `X-User-Sub` as an audit stamp works with any string. The dangerous ones are those
+  asserting that a **persisted** value equals the literal, which silently couple a test to a real
+  Keycloak identity that the IdP is free to reissue (and which `suite-97` T-S97-004 reissues on
+  purpose). Those need auditing individually; a blanket replace would be wrong, since most sites are
+  legitimately arbitrary.
+  Fix for T-S71-001c: assert `armed_by` equals the sub of the token that actually armed it, not a
+  literal.
+
+**not-yet-wired (debt)**
+
+- **G-R0-3 — a stale row survives a realm recreation or a hand-deleted admin.**
+  `GET /api/v1/admin/identity-audit` **reports** orphan users and stale rows in both
+  directions; it never deletes (spec OQ-2 → option (a): deciding which side of a
+  divergence is wrong is an operator's judgement). A stale row is litter, not a security
+  hole — nobody can authenticate as a dead `sub` — but it does mean "row count" stops
+  equalling "user count". There is no reaper and no alert. `T-S97-012` asserts the audit's
+  two arithmetic invariants **and** that both lists are empty, so litter fails the suite
+  by name rather than accumulating quietly.
+- **G-R1-1 — `services/registry-api/routers/agent_runs.py` is entirely unauthenticated**
+  (all 7 routes). Callers are in-cluster machines with no user identity to present:
+  `declarative-runner/main.py:410,437,148`, `checkpoint.py:27`, `orchestrator.py:35`,
+  `eval-runner/main.py:1254`. Closing it needs the service identity that
+  `docs/design/identity-propagation-architecture.md` owns (migrations 0080–0082), not a
+  `require_user` that would break every run recording.
+- **G-R1-2 — `GET /api/v1/deployments/` and `PATCH /api/v1/deployments/{id}`** stay
+  exempt for `deploy-controller/main.py:54,70,122,176`.
+- **G-R1-3 — `GET /api/v1/versions/{id}`** stays exempt for
+  `deploy-controller/main.py:33`.
+- **G-R1-4 — `GET /api/v1/auth-configs/{id}/secret-ref`** stays exempt for
+  `deploy-controller/tool_secrets.py:45`. **Credential-adjacent** — it returns a secret
+  *reference*, not a secret, but it is the most sensitive of the five.
+- **G-R1-5 — `GET /api/v1/agents/{name}/tools`** stays exempt for
+  `deploy-controller/tool_secrets.py:36` and
+  `declarative-runner/workflow_executor.py:171`.
+  *(G-R1-2..5 are the four route-level exemptions R1 will name in code with the caller's
+  `file:line` in the comment; all four are owned by identity propagation and will be
+  pinned by `T-S97-011` so a NEW unauthenticated route on those routers fails a test
+  rather than passing review.)*
+- **G-R1-6 — `agentshield deploy` from the SDK sends no token.**
+  `sdk/agentshield_sdk/cli.py:193-196` (create version) and `:205-209` (trigger deploy)
+  call `httpx.post` with no `Authorization` header. Harmless today; **the moment R1 puts
+  `require_user` on `deployments.py` and `versions.py` the CLI's deploy path 401s.** It
+  must gain a token before or with that change — it is the one caller of those routers
+  that is neither a browser nor an in-cluster service.
+
 ## Known gaps — intermittent agent-identity denial — 2026-08-03
 
 - **debt (intermittent, seen once in three consecutive runs) — a legitimate tool call

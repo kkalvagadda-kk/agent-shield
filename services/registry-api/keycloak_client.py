@@ -49,12 +49,27 @@ def _admin_url(path: str) -> str:
     return f"{_KEYCLOAK_URL}/admin/realms/{_REALM}/{path.lstrip('/')}"
 
 
-async def list_users(max: int = 500) -> list[dict]:
+async def list_users(
+    max: int = 500,
+    username: str | None = None,
+    exact: bool = True,
+) -> list[dict]:
+    """List realm users, optionally narrowed to a single exact username.
+
+    `username=None` (the default) is the pre-existing behaviour — the whole realm,
+    capped at `max`. Passing `username` adds Keycloak's `username`/`exact` query
+    params so a caller that knows WHO it wants does not have to page the realm and
+    filter client-side.
+    """
     token = await _admin_token()
+    params: dict[str, Any] = {"max": max, "briefRepresentation": "false"}
+    if username is not None:
+        params["username"] = username
+        params["exact"] = "true" if exact else "false"
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(
             _admin_url("users"),
-            params={"max": max, "briefRepresentation": "false"},
+            params=params,
             headers={"Authorization": f"Bearer {token}"},
         )
         r.raise_for_status()
@@ -88,6 +103,11 @@ async def create_user(
         "firstName": first_name,
         "lastName": last_name,
         "enabled": enabled,
+        # emailVerified is REQUIRED for a direct-grant login. Keycloak's declarative user profile
+        # (VERIFY_PROFILE) refuses "Account is not fully set up" without it — the same reason
+        # charts/agentshield/templates/realm-init-job.yaml sets it via kcadm. This platform has no
+        # email-verification flow, so a created user could never clear it.
+        "emailVerified": True,
         "credentials": [
             {"type": "password", "value": temp_password, "temporary": True}
         ],

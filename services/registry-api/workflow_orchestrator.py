@@ -37,6 +37,8 @@ from sqlalchemy import func, select
 from db import AsyncSessionLocal
 from filter_engine import evaluate_filters
 from models import AgentRun, Approval, RunStep
+from run_context import RCT_HEADER
+from run_context_anchor import inherit_anchor, rehydrate
 from pod_stream import stream_pod_chat_frames
 
 logger = logging.getLogger(__name__)
@@ -183,6 +185,7 @@ async def _dispatch_durable_member(
     agent_name: str, team: str, message: str, child_id: str,
     conversation_id: str | None = None, scope: str = "agent",
     workflow_run_id: str | None = None,
+    rct: str | None = None,
 ) -> tuple[str, str | None, str | None]:
     """Dispatch a DURABLE member via the pod's `/run` (D4 "+ Visibility"), then poll the
     child AgentRun to a terminal state.
@@ -228,6 +231,10 @@ async def _dispatch_durable_member(
         callback_url=callback_url,
         runner_url=base,
         timeout_s=15.0,
+        # Identity P1 — the member's inherited context, minted from the CHILD's anchor by
+        # the caller. Rides the same `rct` kwarg as every other durable dispatch; this was
+        # the third of the "all three durable callers" the kwarg was built for.
+        rct=rct,
     )
     if not ok:
         # dispatch_durable_run returns a generic reason (bad status OR a network error);
@@ -275,9 +282,20 @@ async def resume_durable_member(
         "decision": decision, "reviewer_id": reviewer_id, "reason": reason,
         "run_id": str(child_id), "callback_url": callback_url,
     }
+    # Identity P1.5 — same re-hydration as the single-agent resume in approvals.py, and it
+    # has to be here too rather than only there: a workflow MEMBER parks and resumes on
+    # this path exclusively (approvals.py returns early for it at the `_is_member` branch).
+    # Anchoring one and re-hydrating the other is how the sandbox/production split has
+    # bitten this codebase before.
+    #
+    # `extend_with` appends this member to the actor chain, so the resumed hop carries the
+    # same lineage the forward dispatch built rather than looking like a fresh root run.
+    async with AsyncSessionLocal() as s:
+        member_rct = await rehydrate(s, str(child_id), extend_with=agent_name)
+    headers = {RCT_HEADER: member_rct} if member_rct else {}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(f"{base}/resume/{child_id}", json=body)
+            resp = await client.post(f"{base}/resume/{child_id}", json=body, headers=headers)
         if resp.status_code not in (200, 201, 202):
             return "failed", None, f"member /resume returned {resp.status_code}: {resp.text[:300]}"
     except httpx.ConnectError:
@@ -513,7 +531,8 @@ async def _run_step_stream(
     thread_id = uuid.uuid4().hex
     async with AsyncSessionLocal() as s:
         parent = (await s.execute(
-            select(AgentRun.run_by, AgentRun.context, AgentRun.user_id).where(AgentRun.id == parent_run_id)
+            select(AgentRun.run_by, AgentRun.context, AgentRun.user_id, AgentRun.run_context)
+            .where(AgentRun.id == parent_run_id)
         )).first()
         # D1 actor_chain (WS-2 T016): the child member run acts under the WORKFLOW's
         # authority, not the member's own. That authority is carried by inheriting the
@@ -528,6 +547,7 @@ async def _run_step_stream(
         # class. T016 threads the authority through run_by (provable); the signed
         # actor_chain token + pod OPA-input propagation are the separate initiative.
         parent_run_by = parent[0] if parent else None
+        parent_run_context = (parent[3] if parent else None) or None
         # Inherit the parent workflow run's context so a playground/test run yields
         # playground children (→ self-service inline approval), while a production
         # (triggered) run yields production children (→ reviewer console). Do NOT
@@ -551,6 +571,18 @@ async def _run_step_stream(
             team=team,
             thread_id=thread_id,
             run_by=parent_run_by,
+            # ── Identity P1: INHERIT the parent's anchor, extended with this member ──
+            # The NOTE above says propagating the workflow's identity onto the member pod
+            # is "the separate initiative". Half of it is this initiative: the child needs
+            # its OWN anchor row, because a member that parks at HITL resumes through
+            # `resume_durable_member`, which re-hydrates by CHILD id. Without this the
+            # member's resume finds no anchor and reaches OPA with user_id="".
+            #
+            # Inherited, never re-derived: the member acts under the WORKFLOW's authority,
+            # which is the same rule `run_by` above already encodes. `extend_with` appends
+            # the member to the actor chain so the lineage reads root -> member instead of
+            # looking like a fresh root run.
+            run_context=inherit_anchor(parent_run_context, agent_name),
         )
         s.add(child)
         await s.commit()
@@ -590,10 +622,16 @@ async def _run_step_stream(
                 # trace stays a thin envelope — the detail lives on the members.
                 child.langfuse_trace_id = uuid.UUID(child_id).hex
                 await s.commit()
+        # Mint from the CHILD's own anchor (written at creation above, inherited from the
+        # parent). Re-using `rehydrate` rather than minting inline is deliberate: the
+        # forward dispatch and the post-approval resume then read identity through exactly
+        # one function, so a member cannot start as one principal and resume as another.
+        async with AsyncSessionLocal() as s:
+            member_rct = await rehydrate(s, child_id)
         status_val, output, err = await _dispatch_durable_member(
             agent_name, team, current_input, child_id,
             conversation_id=conversation_id, scope=conversation_scope,
-            workflow_run_id=workflow_run_id,
+            workflow_run_id=workflow_run_id, rct=member_rct,
         )
     else:
         # Reactive member: stream /chat/stream through the shared reader, re-yielding the

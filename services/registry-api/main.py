@@ -87,6 +87,7 @@ from routers.admin_users import router as admin_users_router, teams_router as ad
 from routers.catalog import router as catalog_router
 from routers.chat import router as chat_router, deployment_chat_router
 from routers.me import router as me_router
+from routers.users import router as users_router
 from routers.memory import router as memory_router
 from routers.internal import router as internal_router
 from routers.internal_mcp import router as internal_mcp_router
@@ -139,6 +140,15 @@ async def lifespan(app: FastAPI):
         from mcp_health import mcp_health_loop
         mcp_health_task = _asyncio.create_task(mcp_health_loop())
 
+    # platform-admin bootstrap (Decision 40, phase R0). Runs in the BACKGROUND and is
+    # NON-FATAL: Keycloak is routinely not ready when registry-api starts, and
+    # crash-looping a fresh install is worse than degrading. /ready stays red until it
+    # succeeds. Single-flighted across replicas by a Postgres advisory lock.
+    from bootstrap_admin import bootstrap_admin_loop
+    bootstrap_task = _asyncio.create_task(
+        bootstrap_admin_loop(settings.platform_admin_bootstrap_retry_seconds)
+    )
+
     yield  # application runs here
 
     # --- shutdown ---
@@ -154,6 +164,11 @@ async def lifespan(app: FastAPI):
             await mcp_health_task
         except (_asyncio.CancelledError, Exception):
             pass
+    bootstrap_task.cancel()
+    try:
+        await bootstrap_task
+    except (_asyncio.CancelledError, Exception):
+        pass
     await engine.dispose()
     logger.info("registry-api: shutdown complete")
 
@@ -181,6 +196,26 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # A subject with no user_team_assignments row is refused, loudly, in ONE place
+    # (Decision 40/41). Stable machine-readable code so Studio and the suites can
+    # assert on it without string-matching a sentence.
+    from rbac import NoPlatformRole
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(NoPlatformRole)
+    async def _no_platform_role_handler(request: Request, exc: NoPlatformRole):
+        logger.error("403 %s: sub=%s path=%s", NoPlatformRole.ERROR_CODE,
+                     exc.user_sub, request.url.path)
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content={
+                "detail": f"No platform role assigned to '{exc.user_sub}'. "
+                          "Users are created by a platform administrator.",
+                "error_code": NoPlatformRole.ERROR_CODE,
+                "sub": exc.user_sub,
+            },
+        )
 
     # --- Trace ID propagation middleware ---
     # Reads X-AgentShield-Trace-ID from request; generates one if absent.
@@ -286,6 +321,10 @@ def create_app() -> FastAPI:
     # --- Current user router ---
     app.include_router(me_router)
 
+    # --- User directory (grant pickers). Authenticated, any role — see routers/users.py
+    #     for why this is separate from the platform-admin-only /admin/users. ---
+    app.include_router(users_router)
+
     # --- System endpoints ---
     @app.get(
         "/health",
@@ -335,14 +374,41 @@ def create_app() -> FastAPI:
         response_model=dict[str, str],
         responses={
             200: {"description": "Service is ready"},
-            503: {"description": "Database unreachable"},
+            503: {
+                "description": (
+                    "Database unreachable, or the platform-admin bootstrap has "
+                    "not yet completed"
+                )
+            },
         },
     )
     async def ready(response: Response) -> dict[str, Any]:
-        """Checks DB connectivity.  Returns 503 when the DB is unreachable."""
+        """Checks DB connectivity, then the platform-admin bootstrap.
+
+        Returns 503 when the DB is unreachable, and 503 `bootstrapping` while the
+        R0 bootstrap has not yet pinned the admin.
+        """
         try:
             async with AsyncSessionLocal() as session:
                 await session.execute(text("SELECT 1"))
+
+            from bootstrap_admin import bootstrap_state
+            if not bootstrap_state.ok:
+                # RED UNTIL SUCCESS (spec OQ-1, resolved 2026-08-04). The platform is
+                # not live; a loud stall beats a quiet half-working state, and a pod
+                # whose admin does not exist should not take traffic. There is
+                # deliberately no "ready after N attempts" escape — that trades a
+                # visible failure for an invisible one. /health stays 200 throughout,
+                # so this degrades readiness without restarting the pod.
+                response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+                return {
+                    "status": "bootstrapping",
+                    "detail": (
+                        bootstrap_state.last_error
+                        or "platform-admin bootstrap has not completed"
+                    ),
+                    "attempts": str(bootstrap_state.attempts),
+                }
             return {"status": "ready"}
         except Exception as exc:
             logger.error("ready: DB check failed: %s", exc)

@@ -131,7 +131,7 @@ scheduler:
     # 0.1.5: reads the trigger_liveness view (migration 0077) instead of restating
     #   the artifact-liveness predicate — one definition shared with the
     #   event-gateway and registry-api.
-    tag: "0.1.5"
+    tag: "0.1.6"
 
 # embedding-sidecar: POC-4 Knowledge Base / RAG embedding service. A small FastAPI
 # app that turns text into 384-dim vectors (bge-small-en-v1.5, ONNX via fastembed).
@@ -177,7 +177,7 @@ event-gateway:
     #   webhook_clients for client_signed verification.
     # 0.1.5: read-side status filter in _TRIGGER_SQL — a deleted agent's webhook must
     #   not stay live (defence in depth behind registry-api's write-side disarm).
-    tag: "0.1.8"
+    tag: "0.1.9"
 
 # Envoy Gateway ingress — path-based routing to all services via Gateway API.
 # Requires Envoy Gateway controller pre-installed: bash scripts/setup-envoy-gateway.sh
@@ -741,10 +741,38 @@ registry-api:
     #          browser decide 403 fix + console scoping (suite-93 T-S93-004).
     # 0.2.242: resolve caller from the JWT Bearer (get_optional_user) — no Envoy SecurityPolicy
     #          injects claim headers, so the browser decide fell back to "studio-user" -> 403.
-    tag: "0.2.258"
+    # 0.2.259: RBAC R0 — the platform creates its own admin from lifespan (bootstrap_admin,
+    #          username lookup so a realm recreation self-heals, advisory-lock single-flight);
+    #          /ready is 503 {"status":"bootstrapping"} until it succeeds. realm-init creates no
+    #          users (Decision 40). POST /admin/users is atomic + GET /admin/identity-audit.
+    #          Migration 0079 drops the role default; a row-less caller is 403 no_platform_role.
+    # 0.2.263: RBAC R2 — require_global_role ENFORCES and is wired onto admin.py +
+    #          admin_users.py; can_create_agent gates POST /agents/. /admin/teams-summary
+    #          split: census stays admin-only, new self-scoped GET /api/v1/me/team backs
+    #          the sidebar for every role; new GET /api/v1/users/directory backs the
+    #          grant picker. MUST match scripts/deploy-cpe2e.sh REGISTRY_API_TAG.
+    # 0.2.264: RBAC R3 — agent PATCH/DELETE/publish require platform-admin or
+    #          agent-admin on the artifact (all three were unauthenticated);
+    #          quarantine is platform-admin only; can_deploy_to_production gates
+    #          the production deploy branch; can_use_playground gates the playground.
+    # 0.2.265: identity P0 — vendored run_context.py; mints the root run context.
+    # 0.2.266: G-R3-2 — the deployment-pinned chat endpoint had no access check.
+    # 0.2.268: Decision 47 step B — tools/skills private by default (migration 0080),
+    # team-scoped catalog visibility, and NO publish filter for tokenless in-cluster
+    # agent pods (or the SDK tool_resolver returns zero items and the pod dies).
+    # 0.2.269: Decision 47 step C — tool publish cascade + cross-team 422;
+    # five admin handlers stop taking reviewer identity from a header.
+    # 0.2.270: regression fix — MCP server registration derives owner_team, or its
+    # discovered tools are private with no owning team and nobody can see them.
+    # 0.2.271: creator-scoped catalog; tokenless pod read path closed (SA token).
+    # 0.2.272: Decision 45 — user grants enforced for user_delegated (OPA Gate 3
+    # intersects the agent reach with the caller's teams); agent_class from the bundle.
+    # 0.2.273: deny_reason precedence — the identity floor outranks the Decision 45
+    # intersection, and two rules it made unreachable are guarded on agent reach.
+    tag: "0.2.280"
     pullPolicy: IfNotPresent
 
-  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.14"
+  evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.15"
   langfuseProjectId: "00000000-0000-0000-0001-agentshield01"
 
   # Credential provider (Decision 31 — pluggable credential store). Default
@@ -780,7 +808,7 @@ registry-api:
     REDIS_URL: "redis://:$(REDIS_PASSWORD)@agentshield-redis-master:6379/0"
     LANGFUSE_HOST: "http://agentshield-langfuse-web:3000"
     # LANGFUSE_PUBLIC_URL is now wired via registry-api.langfusePublicUrl (see above)
-    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.14"
+    EVAL_RUNNER_IMAGE: "registry.internal/agentshield/eval-runner:0.1.15"
     KEYCLOAK_URL: "http://agentshield-keycloak/realms/agentshield"
 
   # OOMKilled under the full 101-suite sweep on 2026-08-02, twice. It idles at
@@ -832,7 +860,9 @@ deploy-controller:
     #   production-context HITL approvals → OPA parked low-risk tools + the inline sandbox
     #   approve/resume never worked (chat hung after approval). Now derived from the
     #   deployment's `environment`. See docs/bugs/sandbox-hitl-playground-context.md.
-    tag: "0.1.41"
+    # 0.1.42: identity P0 — copies agentshield-run-context into each agent namespace
+    #         and injects AGENTSHIELD_INTERNAL_SIGNING_KEY into every agent pod.
+    tag: "0.1.43"
     pullPolicy: IfNotPresent
 
   # NOTE: bump this when the declarative-runner image (or the SDK it bakes in)
@@ -847,7 +877,8 @@ deploy-controller:
   # 0.1.61: P2 WS-C — McpToolNodeExecutor emits x-user-sub (non-empty only); rebuilds sdk 0.2.4.
   # 0.1.66: rebuilds sdk 0.2.9 — F-E (Issue 2) message_start + reasoning SSE events.
   # 0.1.67: memory decouple — _load_memory_context sends for_agent_context (scope=agent).
-  declarativeRunnerTag: "0.1.67"
+  # 0.1.68: identity P0 — vendored run_context.py (verify/extend only).
+  declarativeRunnerTag: "0.1.70"
 
   env:
     REGISTRY_API_URL: "http://agentshield-registry-api:8000"
@@ -1165,7 +1196,12 @@ studio:
     # 0.1.169: F-E (Issue 2) — ChatPane bubble-per-turn (message_start) + reasoning block.
     # 0.1.170: F-E (Issue 2) — attachRationale accumulates; all chatStream chat surfaces split per-turn.
     # 0.1.171: Agent-list Delete uses an in-app confirm modal (no native confirm; leg 22).
-    tag: "0.1.180"
+    # 0.1.184: R2 UI — sidebar/My Agents read /api/v1/me/team, grant picker reads
+    #          /api/v1/users/directory; multi-role Playwright global-setup.
+    # 0.1.185: Decision 46 UI — tool Team field is admin-only; non-admins see their
+    # own team read-only and the payload omits owner_team (the server derives it).
+    # 0.1.186: Decision 47 step C UI — the cross-team publish block names the tools.
+    tag: "0.1.188"
     pullPolicy: IfNotPresent
 
   service:

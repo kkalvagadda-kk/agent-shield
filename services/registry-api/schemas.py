@@ -714,7 +714,12 @@ class ToolResponse(BaseModel):
     mcp_server_scan_results: bool | None = None
     python_code: str | None
     created_by: str | None = None
-    publish_status: str = "published"
+    # No default. Agent and CompositeWorkflow declare this required; Tool and Skill
+    # defaulted it to 'published', which is a permission-bearing field inventing the
+    # most permissive value when it is absent — the same shape as _normalize_role(None)
+    # returning 'contributor'. The column is NOT NULL, so from_attributes always has a
+    # real value; a missing one is corruption and should surface, not be papered over.
+    publish_status: str
     created_at: datetime
     updated_at: datetime
 
@@ -1048,7 +1053,12 @@ class SkillResponse(BaseModel):
     description: str | None
     tool_ids: list[str]
     status: str
-    publish_status: str = "published"
+    # No default. Agent and CompositeWorkflow declare this required; Tool and Skill
+    # defaulted it to 'published', which is a permission-bearing field inventing the
+    # most permissive value when it is absent — the same shape as _normalize_role(None)
+    # returning 'contributor'. The column is NOT NULL, so from_attributes always has a
+    # real value; a missing one is corruption and should surface, not be papered over.
+    publish_status: str
     created_at: datetime
     created_by: str | None
     model_config = ConfigDict(from_attributes=True)

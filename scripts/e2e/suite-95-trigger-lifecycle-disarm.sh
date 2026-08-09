@@ -134,6 +134,12 @@ else
   echo "FAIL  T-S95-000 read-side liveness parity  |  PROBLEMS:$_missing"
   FAIL=$((FAIL+1))
 fi
+
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 echo ""
 
 RUN_TAG="$(date +%s)$$"
@@ -151,7 +157,7 @@ from sqlalchemy import text
 from db import AsyncSessionLocal
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 OUT = os.environ["S95_OUT"]
 SFX = uuid.uuid4().hex[:6]
@@ -393,7 +399,7 @@ PY
 
 echo "Running driver detached in-pod…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S95_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S95_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 60); do
   sleep 5

@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, request as pwRequest, type Page } from "@playwright/test";
 
 /**
  * Capture the app's own Bearer token so a spec can call `require_user` routes.
@@ -46,4 +46,45 @@ export async function captureAuthHeaders(
       `run unauthenticated and its 401s would read as product failures`,
   ).toBeTruthy();
   return { Authorization: authHeader! };
+}
+
+/**
+ * The Keycloak `sub` of the user the browser session runs as. THE one definition.
+ *
+ * Several specs seed fixtures (conversations, memory) that the UI then lists, and those
+ * lists are OWNERSHIP-SCOPED to `claims["sub"]`. The seed must therefore carry the same
+ * subject the browser uses, or the list correctly returns nothing and the failure
+ * surfaces far away as "the seeded thread is not in the list".
+ *
+ * Four specs hardcoded a literal sub ("75c7c8b3-…"). That broke the moment the Keycloak
+ * platform-admin was recreated and reissued under a NEW subject — which suite-97
+ * T-S97-004 does deliberately (delete the admin, restart, require the platform to
+ * re-pin). Coupling a fixture to an identifier the IdP is free to reissue is the SAME
+ * design flaw RBAC R0 removed from the platform itself: bootstrap_admin.py looks the
+ * admin up by USERNAME, never a stored sub, so a realm recreation self-heals.
+ *
+ * Read from the token's own claim rather than GET /me: specs that authenticate with
+ * X-User-Sub audit headers (not a Bearer) get a 401 from /me.
+ */
+export async function resolveSessionSub(baseURL: string): Promise<string> {
+  const ctx = await pwRequest.newContext({ baseURL, ignoreHTTPSErrors: true });
+  try {
+    const r = await ctx.post("/realms/agentshield/protocol/openid-connect/token", {
+      form: {
+        grant_type: "password",
+        client_id: "agentshield-studio",
+        username: process.env.STUDIO_E2E_USER || "platform-admin",
+        password: process.env.STUDIO_E2E_PASSWORD || "PlatformAdmin2024",
+      },
+    });
+    expect(r.ok(), `resolveSessionSub token: ${r.status()} ${await r.text()}`).toBeTruthy();
+    const jwt = (await r.json()).access_token as string;
+    const claims = JSON.parse(
+      Buffer.from(jwt.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(),
+    );
+    expect(claims.sub, "token carried no sub — fixtures would be owned by nobody").toBeTruthy();
+    return claims.sub as string;
+  } finally {
+    await ctx.dispose();
+  }
 }

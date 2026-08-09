@@ -155,6 +155,11 @@ async def list_schedules(
     all_teams = (await get_user_global_role(db, caller)) == "platform-admin"
     team = await get_user_team(db, caller)
 
+    # NOTE (R0/FR-5): this branch is now UNREACHABLE. get_user_global_role above raises
+    # NoPlatformRole -> 403 for a sub with no row, and team_name is NOT NULL, so
+    # "no team" and "no row" are the same condition. Kept as defence in depth: if FR-5
+    # is ever reverted, this is still the Decision-33 `else` that stops an unfiltered
+    # read. suite-96 T-S96-002 asserts the NEW contract (refusal), not the old empty list.
     if not all_teams and not team:
         # Deny by default. An authenticated caller with no team assignment sees
         # NOTHING — never the unfiltered table. This is the `else` branch Decision 33

@@ -41,6 +41,15 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
 
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver is DETACHED (nohup) and outlives the 300s token lifespan, so a
+# statically-interpolated Bearer would expire mid-run and 401 on whichever case
+# happened to be last. Install lib/e2e_auth.py and let BearerAuth re-mint per
+# request (lib/e2e-auth.sh:88-96).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 64: PRODUCTION durable-workflow golden path (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -54,12 +63,28 @@ OUTFILE="/tmp/s64_out_${RUN_TAG}.txt"
 # 1) write the driver into the pod (one short exec)
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun
 from tracing import get_langfuse, _lf_trace_id
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+# AUTH IS ON THE CLIENT (auth=BearerAuth()), NOT IN THIS FILE.
+# The R3/E2E_SUB scripted passes spliced BASH lines into this Python heredoc
+# (`source .../lib/e2e-auth.sh`, `e2e_set_token ...`). Python received shell text
+# and died with SyntaxError, so the driver produced no result and the suite
+# reported a driver error instead of a test failure. Removed 2026-08-09; the
+# suite already sourced the lib, called e2e_require_token and e2e_install_pyauth
+# ABOVE the heredoc, which is where they belong.
+
+# X-User-Sub removed 2026-08-09: this heredoc is QUOTED, so "${E2E_SUB}" was never
+# interpolated and the header carried that literal 12-character string. It is a
+# fallback the handlers only consult when there is no token (armed_by =
+# (user or {}).get("sub") or x_user_sub), and BearerAuth() below always supplies
+# one — so the value was both wrong and unused. Sending a real sub would need it
+# threaded via env, which nothing here asserts on.
+H={"X-User-Team":"platform"}
 SFX=uuid.uuid4().hex[:6]
 NAMES=[f"s64-a-{SFX}", f"s64-b-{SFX}"]
 INSTR="You answer factual questions. Reply with ONLY the answer — no preamble."
@@ -87,7 +112,8 @@ async def wait_running(name, env, tries=60):
     return None
 async def main():
     out={}; wid=None
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid=await prov(c)
     try:
         for n in NAMES:
@@ -231,6 +257,8 @@ else
   echo "PASS  T-S64-COMPLETE every gate assertion ran (001-005, none skipped)"
   PASS=$((PASS+1))
 fi
+
+
 
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   rm -f "$DRIVER" "$OUTFILE" 2>/dev/null || true

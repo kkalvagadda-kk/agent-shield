@@ -30,7 +30,12 @@ import { useEffect, useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "../contexts/AuthContext";
-import { listAgents, listPendingApprovals, listSchedules } from "../api/registryApi";
+import {
+  getMyTeam,
+  listAgents,
+  listPendingApprovals,
+  listSchedules,
+} from "../api/registryApi";
 import { needsAttention } from "../lib/triggerArm";
 import { DEMO } from "../demo/demo";
 import { STUDIO_BUILD } from "../lib/build";
@@ -229,9 +234,23 @@ export default function Sidebar() {
   const { pathname } = useLocation();
   const { user, logout, isAtLeast } = useAuth();
 
-  const { data: sidebarTeams } = useQuery({
-    queryKey: ["sidebar-teams"],
-    queryFn: () => fetch("/api/v1/admin/teams-summary").then((r) => r.json()),
+  const { data: myTeam } = useQuery({
+    queryKey: ["sidebar-my-team"],
+    // SELF-SCOPED (/api/v1/me/team), not the admin census. This query used to read
+    // /admin/teams-summary with a bare fetch(): that endpoint needed no auth until
+    // 0.2.262 closed the hole, after which it returned 401 {"detail":...} and
+    // `r.json()` handed that OBJECT to React Query as SUCCESS data. The `.find(...)`
+    // below then threw "find is not a function" inside a useMemo — uncaught, so the
+    // whole app unmounted to a blank page. `?? []` covers null/undefined only and gave
+    // false confidence; a 500 would have done the same.
+    //
+    // R2 (0.2.263) makes the census platform-admin only, which would have emptied this
+    // section for every non-admin. The self-scoped endpoint is the right reader anyway:
+    // the sidebar never wanted every team, and because the server knows who is asking,
+    // the client no longer searches an array to find itself — the crash SITE is gone,
+    // not just the crash. Guarded by e2e/app-shell-resilience.spec.ts and
+    // e2e/rbac-role-journeys.spec.ts.
+    queryFn: getMyTeam,
     staleTime: 60_000,
   });
 
@@ -269,18 +288,15 @@ export default function Sidebar() {
   };
 
   const myTeamGrants = useMemo(() => {
-    const myTeam = (sidebarTeams ?? []).find((t: any) =>
-      t.members?.some((m: any) => m.user_sub === user?.sub)
-    );
     const grantedNames = new Set(
       (myTeam?.grants ?? [])
-        .filter((g: any) => g.asset_type === "agent")
-        .map((g: any) => g.asset_name as string)
+        .filter((g) => g.asset_type === "agent")
+        .map((g) => g.asset_name)
     );
     return (sidebarAgents?.items ?? [])
       .filter((a) => grantedNames.has(a.name))
       .slice(0, 5);
-  }, [sidebarTeams, sidebarAgents, user?.sub]);
+  }, [myTeam, sidebarAgents]);
 
   const [adminOpen, setAdminOpen] = useState(() => detectSections(pathname).includes("admin"));
 

@@ -4,6 +4,32 @@ Agent Runs router — POST/GET /api/v1/agent-runs
 Central invocation primitive. Every agent invocation (production or playground)
 creates one row. Enables cost tracking, latency instrumentation, and Langfuse
 trace linkage across the platform.
+
+UNAUTHENTICATED BY NECESSITY — THE WHOLE ROUTER (R1, G-R1-1)
+------------------------------------------------------------
+R1 (FR-11) added `require_user` to the other nine anonymous routers. This one is
+exempt in its entirety — all 7 routes — and deliberately carries NO
+`Depends(require_user)` anywhere. Every writer here is an in-cluster machine
+caller that sends no user JWT:
+
+  * services/declarative-runner/main.py:410   POST /api/v1/agent-runs        (run start)
+  * services/declarative-runner/main.py:437   PATCH /api/v1/agent-runs/{id}  (run finish)
+  * services/declarative-runner/main.py:148   PATCH /api/v1/agent-runs/{id}  (run failure)
+  * services/declarative-runner/checkpoint.py:27   POST /api/v1/agent-runs
+  * services/declarative-runner/orchestrator.py:35 PATCH /api/v1/agent-runs/{parent_id}
+  * services/eval-runner/main.py:1254         POST /api/v1/agent-runs/{id}/steps
+
+`eval-runner`'s `_EVAL_HEADERS` is `{"X-User-Sub": "eval-runner"}` — an audit
+stamp, never an authentication (scripts/e2e/lib/e2e-auth.sh:36-38), and this
+router must never start treating it as one. Protecting these routes would break
+run recording for every declarative execution and every eval step write.
+
+Closing this needs a service identity that
+docs/design/identity-propagation-architecture.md owns (migrations 0080-0082) —
+it is out of R0/R1 scope. Same posture as routers/internal.py: cluster-internal,
+NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set, so adding an
+authenticated route here (or leaving a new one unlisted) fails that suite rather
+than a review.
 """
 from __future__ import annotations
 

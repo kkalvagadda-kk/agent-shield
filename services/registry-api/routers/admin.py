@@ -5,6 +5,7 @@ Endpoints
 ---------
   POST /api/v1/admin/bundle/regenerate              — regenerate OPA bundle data.json from DB
   GET  /api/v1/admin/publish-requests               — list publish requests (?status=pending_review)
+  GET  /api/v1/admin/publish-requests/{id}/review    — full reviewer payload (Decision 47 step D)
   POST /api/v1/admin/publish-requests/{id}/approve  — approve a publish request
   POST /api/v1/admin/publish-requests/{id}/reject   — reject a publish request
   POST /api/v1/admin/grants                         — create an asset grant directly
@@ -26,13 +27,17 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from bundle_generator import generate_bundle_data
 from db import get_db
-# THE threshold resolution — imported, never re-implemented. It already handles the
-# pre-E-6 NULL rows, and its docstring is the postmortem for what happens when this
-# rule gets copied: "the threshold used to exist four times across three services...
-# they agreed, so nothing ever errored." A fifth copy here would be the same bug.
-from routers.eval_runner import effective_pass_threshold
+from publish_cascade import plan_tool_cascade
+from publish_review import build_review_payload, resolve_request_evals
+from rbac import require_global_role
+# NOTE `effective_pass_threshold` used to be imported here. It moved with the eval
+# resolution into `publish_review`, which is now its only caller in this path — the
+# threshold rule has ONE importer per consumer, which is the whole point of its own
+# docstring ("it used to exist four times across three services... they agreed, so nothing
+# ever errored"). Leaving a dead import here would invite the fifth copy.
 from models import (
     Agent, AgentVersion, ApprovalAuthority, AssetGrant, CompositeWorkflow,
     EvalRun, GrantAudit, PublishRequest, PublishedArtifact, PublishedVersion,
@@ -52,7 +57,27 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+# AUTHORIZED (R2, 2026-08-06). R1 made these 11 routes require a valid JWT; that
+# proved somebody was calling, never WHICH somebody. They now require the
+# platform-admin global role: asset-grant create/revoke, the publish-request
+# approve/reject queue, per-tool approval authority and OPA bundle regeneration are
+# all platform-operator actions.
+#
+# Blast radius checked in the BROWSER, not just under services/ — that omission is
+# what shipped the blank page (docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md
+# lesson 1). Every Studio caller of these routes lives on a page already gated by
+# `<RequireRole minRole="platform-admin">` in App.tsx: listPublishRequests /
+# approve / reject -> AdminPublishRequestsPage; listGrants / createGrant / revokeGrant
+# -> AdminGrantsPage + AdminAccessPage; the approval-authority trio ->
+# AdminApprovalAuthorityPage. No non-admin surface reads any of them, so no legitimate
+# UI call starts failing. (`GET /admin/users` was the exception — it is read by the
+# artifact grant picker on the agent Settings tab — and that is why R2 adds the
+# self-serve `GET /api/v1/users/directory` rather than leaving the picker broken.)
+router = APIRouter(
+    prefix="/api/v1/admin",
+    tags=["admin"],
+    dependencies=[require_global_role("platform-admin")],
+)
 
 
 # ---------------------------------------------------------------------------
@@ -166,84 +191,23 @@ async def list_publish_requests(
             asset_name_map[row.id] = (row.name, row.team)
 
     # ------------------------------------------------------------------
-    # Resolve each request's eval PER REQUEST, against the version it pins.
+    # Each request's eval, resolved AGAINST THE VERSION IT PINS.
     #
-    # This map used to be keyed by ASSET_ID and resolved by `agent_name` alone
-    # (`.order_by(agent_name, completed_at.desc()).distinct(agent_name)`), so
-    # `PublishRequest.source_version_id` was never read and EVERY pending request
-    # for one agent received the SAME latest eval. A reviewer approves a release on
-    # that number, which made it a correctness bug rather than a missing feature.
-    # Keying by request id is what makes per-request resolution expressible at all.
+    # This block used to live inline here. It moved to `publish_review.resolve_request_evals`
+    # when the reviewer drawer (step D) needed the identical triple for ONE request: a
+    # single-request copy would have been the fourth implementation of a rule that already
+    # has a postmortem (Decision 32 — the map was keyed by ASSET id, so every pending
+    # request for one agent got the same latest eval and a reviewer approved a release on a
+    # number that did not describe it). Same producer, two callers.
     #
-    # Two batched queries, never per-request: this is an admin list view whose whole
-    # job is showing many rows, so an N+1 here is a page-load regression.
-    #
-    # Decision 32. Regression: suite-89 T-S89-001..004.
+    # Still batched: two queries regardless of row count. Regression: suite-89 T-S89-001..004.
     # ------------------------------------------------------------------
-    eval_map: dict[
-        uuid.UUID, tuple[float | None, uuid.UUID | None, float | None, str]
-    ] = {}
-    agent_ids = set(ids_by_type.get("agent") or [])
-    agent_requests = [r for r in rows if r.asset_id in agent_ids]
-
-    pinned = {r.id: r.source_version_id for r in agent_requests if r.source_version_id}
-    unpinned = [r for r in agent_requests if not r.source_version_id]
-
-    # (1) Version-pinned requests — the common case, and the one that was wrong.
-    if pinned:
-        version_rows = (await db.execute(
-            select(EvalRun)
-            .where(
-                EvalRun.agent_version_id.in_(set(pinned.values())),
-                EvalRun.status == "completed",
-            )
-            .order_by(EvalRun.agent_version_id, EvalRun.completed_at.desc())
-            .distinct(EvalRun.agent_version_id)
-        )).scalars().all()
-        by_version = {run.agent_version_id: run for run in version_rows}
-        for req_id, version_id in pinned.items():
-            run = by_version.get(version_id)
-            if run is not None:
-                eval_map[req_id] = (
-                    run.overall_score,
-                    run.id,
-                    effective_pass_threshold(run),
-                    "version",
-                )
-            # else: left out of the map entirely -> eval_source stays "none".
-            # A pinned version with no eval must NEVER borrow another version's
-            # score. That silent borrow IS the bug.
-
-    # (2) Legacy requests that pin no version. `POST /agents/{name}/publish` always
-    #     pins one, so this covers rows written before that landed. The fallback is
-    #     LABELLED `agent_latest` rather than silent, so the reviewer can see that
-    #     the number is not evidence about the thing being published.
-    if unpinned:
-        names = [
-            asset_name_map.get(r.asset_id, (None, None))[0] for r in unpinned
-        ]
-        names = [n for n in names if n]
-        if names:
-            latest_rows = (await db.execute(
-                select(EvalRun)
-                .where(
-                    EvalRun.agent_name.in_(names),
-                    EvalRun.status == "completed",
-                )
-                .order_by(EvalRun.agent_name, EvalRun.completed_at.desc())
-                .distinct(EvalRun.agent_name)
-            )).scalars().all()
-            by_name = {run.agent_name: run for run in latest_rows}
-            for r in unpinned:
-                aname = asset_name_map.get(r.asset_id, (None, None))[0]
-                run = by_name.get(aname) if aname else None
-                if run is not None:
-                    eval_map[r.id] = (
-                        run.overall_score,
-                        run.id,
-                        effective_pass_threshold(run),
-                        "agent_latest",
-                    )
+    agent_names = {
+        aid: asset_name_map[aid][0]
+        for aid in (ids_by_type.get("agent") or [])
+        if aid in asset_name_map
+    }
+    eval_map = await resolve_request_evals(db, list(rows), agent_names)
 
     items: list[PublishRequestResponse] = []
     for r in rows:
@@ -253,17 +217,59 @@ async def list_publish_requests(
             resp.asset_team = asset_name_map[r.asset_id][1]
         # Keyed by REQUEST id, not asset id — see the resolution block above.
         if r.id in eval_map:
-            score, run_id, threshold, source = eval_map[r.id]
-            resp.last_eval_score = score
-            resp.last_eval_run_id = run_id
-            resp.last_eval_pass_threshold = threshold
-            resp.eval_source = source
+            facts = eval_map[r.id]
+            resp.last_eval_score = facts.score
+            resp.last_eval_run_id = facts.run_id
+            resp.last_eval_pass_threshold = facts.threshold
+            resp.eval_source = facts.source
         items.append(resp)
 
     return PaginatedResponse[PublishRequestResponse](
         items=items,
         total=total,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /publish-requests/{id}/review
+# ---------------------------------------------------------------------------
+@router.get(
+    "/publish-requests/{request_id}/review",
+    summary="Everything a reviewer must see before approving a publish request",
+)
+async def review_publish_request(
+    request_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """The read surface behind the reviewer drawer. Decision 47 step D, gap G-R3-11.
+
+    Read-only by construction. Approve and reject stay where they are — this endpoint
+    exists so the human at the only non-machine gate in the authorization stack is shown
+    what they are authorizing: the prompt, which container, which tools, where those tools
+    send data, which credential each carries, and WHICH TOOLS BECOME ORG-WIDE ON APPROVE.
+
+    Authorization is the router's: R2 put `require_global_role("platform-admin")` on every
+    route here, so no per-route check is added — a second, weaker copy of the guard is how
+    `production-hitl-decide-403-authority.md` happened.
+
+    ONE request, one payload. A drawer that fanned out to six endpoints would render
+    half-populated and the reviewer could not tell which half was missing — a partially
+    rendered review screen is worse than none, because it looks like it worked.
+
+    The cascade is derived HERE, at request time, by `plan_tool_cascade` — the same
+    producer the submit guard and the approve action use, never a snapshot. Decision 47
+    rejected a `cascade_publish` column precisely so the reviewer sees current truth: a
+    tool can be unbound, rebound, or published by another agent's cascade between submit
+    and approve.
+    """
+    pr = (await db.execute(
+        select(PublishRequest).where(PublishRequest.id == request_id)
+    )).scalar_one_or_none()
+    if pr is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Publish request not found."
+        )
+    return await build_review_payload(db, pr)
 
 
 # ---------------------------------------------------------------------------
@@ -276,15 +282,27 @@ async def list_publish_requests(
 async def approve_publish_request(
     request_id: uuid.UUID,
     body: PublishRequestApprove,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Approve a publish request.
 
     - Sets publish_request.status = 'approved'
-    - Sets the asset's publish_status = 'published' (only agents supported for now)
+    - Sets the asset's publish_status = 'published'
+    - CASCADES: publishes the agent's own-team unpublished tools (Decision 47 option C)
     - Creates AssetGrant + GrantAudit records for each grantee_team in the body
+
+    `reviewed_by` / `granted_by` / the audit `admin_id` used to come from an
+    `X-User-Sub` header defaulting to the literal `"system"`. R2 gates this router to
+    platform-admin, so the CALLER is verified — but the header meant a verified admin
+    could still attribute their approval, every grant it creates, and the audit row to
+    anyone at all, including `"system"`. That is a forged signature on a governance
+    record, the same defect R3 deleted from `publish_agent`, and the cascade below makes
+    it worse: approving now publishes tools too, so the record has to name who actually
+    decided that. Header deleted rather than demoted, for the same reason as there —
+    a secondary identity source that any client can set is not a fallback, it is the bug.
     """
+    x_user_sub = claims["sub"]
     result = await db.execute(
         select(PublishRequest).where(PublishRequest.id == request_id)
     )
@@ -303,6 +321,8 @@ async def approve_publish_request(
     source_tool = None
     source_skill = None
 
+    cascaded_tools: list[str] = []
+
     if pr.asset_type == "agent":
         source_agent = (await db.execute(
             select(Agent).where(Agent.id == pr.asset_id)
@@ -310,6 +330,37 @@ async def approve_publish_request(
         if source_agent is not None:
             source_agent.publish_status = "published"
             source_agent.updated_at = now
+
+            # Decision 47 option C — the agent's own-team tools ride along. Derived from
+            # LIVE rows by the same producer `publish_agent` used to gate the submission,
+            # not from a snapshot taken then: a tool can be unbound, rebound, or published
+            # by another agent's cascade in between, and the audit should record what
+            # actually happened rather than what was intended.
+            #
+            # `blocked` is not re-raised here. The submit-time guard is where a blocked
+            # cascade gets a usable error, and 422-ing an APPROVAL would leave the request
+            # stuck with no path forward — there is no withdraw endpoint. If a tool became
+            # cross-team between submit and approve, the agent publishes and that tool
+            # simply does not cascade; it stays private and its owning team decides. That
+            # is the fail-safe direction: never publish another team's draft as a side
+            # effect of approving something else.
+            cascade = await plan_tool_cascade(db, source_agent.id, source_agent.team)
+            for tool in cascade.will_publish:
+                tool.publish_status = "published"
+                cascaded_tools.append(tool.name)
+            if cascade.blocked:
+                logger.warning(
+                    "approve_publish_request: agent=%s published, but %d bound tool(s) did "
+                    "NOT cascade (not owned by team %r): %s. They stay private; their "
+                    "owning team decides.",
+                    source_agent.name, len(cascade.blocked), source_agent.team,
+                    [t.name for t in cascade.blocked],
+                )
+            if cascaded_tools:
+                logger.info(
+                    "approve_publish_request: agent=%s cascade published %d tool(s): %s",
+                    source_agent.name, len(cascaded_tools), cascaded_tools,
+                )
     elif pr.asset_type == "workflow":
         source_wf = (await db.execute(
             select(CompositeWorkflow).where(CompositeWorkflow.id == pr.asset_id)
@@ -517,7 +568,17 @@ async def approve_publish_request(
         version_label,
         pr.source_version_id,
     )
-    return {"approved": True, "grants_created": grants_created, "artifact_id": str(artifact.id), "version_label": version_label}
+    # `cascaded_tools` is in the response because approving an agent now publishes tools
+    # too. A reviewer who clicks approve and gets back only {"approved": true} has no
+    # way to see that three tools just became org-wide discoverable — a silent side
+    # effect inside an existing approval is the escalation Decision 47 flags.
+    return {
+        "approved": True,
+        "grants_created": grants_created,
+        "artifact_id": str(artifact.id),
+        "version_label": version_label,
+        "cascaded_tools": cascaded_tools,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -530,10 +591,16 @@ async def approve_publish_request(
 async def reject_publish_request(
     request_id: uuid.UUID,
     body: PublishRequestReject,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Reject a publish request and revert the agent back to 'private'."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     result = await db.execute(
         select(PublishRequest).where(PublishRequest.id == request_id)
     )
@@ -584,10 +651,16 @@ async def reject_publish_request(
 )
 async def create_grant(
     body: AssetGrantCreate,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> AssetGrantResponse:
     """Directly create an asset grant for a team (bypasses publish workflow)."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     grant = AssetGrant(
         asset_id=body.asset_id,
         asset_type=body.asset_type,
@@ -711,10 +784,16 @@ async def list_grant_audit(
 )
 async def revoke_grant(
     grant_id: uuid.UUID,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     """Soft-revoke an asset grant by setting revoked_at = now()."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     result = await db.execute(select(AssetGrant).where(AssetGrant.id == grant_id))
     grant = result.scalar_one_or_none()
     if grant is None:
@@ -791,10 +870,16 @@ async def list_approval_authority(
 )
 async def create_approval_authority(
     body: ApprovalAuthorityCreate,
-    x_user_sub: str = Header(default="system", alias="X-User-Sub"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalAuthorityResponse:
     """Register an approver (user or role) for a specific resource."""
+    # Identity from the verified token, never a header. R2 gates this router to
+    # platform-admin so the CALLER is known, but `X-User-Sub` (default "system") meant a
+    # verified admin could still sign this governance record as anyone. Four handlers
+    # carried the identical parameter; fixing only the one being edited would have left
+    # the same defect in its siblings — the shape this repo has three postmortems for.
+    x_user_sub = claims["sub"]
     if not body.approver_user_id and not body.approver_role:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

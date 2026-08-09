@@ -167,6 +167,17 @@ export interface RegistryTool {
   mcp_server_scan_results?: boolean | null;
   // Decision 27 / FR-MCP-51 — per-tool de-anonymize permission (every tool type).
   pii_deanonymize_allowed?: boolean;
+  // Catalog VISIBILITY — 'private' | 'published'. Distinct from `status`
+  // (active/deprecated/inactive), which is operational. `ToolResponse` has carried
+  // both since Decision 47 step B flipped the default to private; this interface
+  // omitted `publish_status`, so the screen could not show which of its rows were
+  // org-wide and which were the caller's own drafts. Required, not optional: the
+  // server declares it with no default for exactly this reason.
+  publish_status: string;
+  // The `created_by == caller` arm of both the visibility filter and the unpublish
+  // authority check. Needed here so the page can decide whether to offer Unpublish
+  // without a second round trip.
+  created_by: string | null;
 }
 
 /**
@@ -1062,6 +1073,29 @@ export const deleteTool = async (id: string): Promise<void> => {
   await http.delete(`/tools/${id}`);
 };
 
+/** Agents bound to this tool. Used by the unpublish confirmation to name the
+ *  published agents that keep working afterwards — see `unpublishTool`. Returns
+ *  every binding regardless of publish status; the caller filters, because the
+ *  same endpoint serves "what would this change affect" and "what uses this". */
+export const listAgentsForTool = async (id: string): Promise<Paginated<Agent>> => {
+  const { data } = await http.get<Paginated<Agent>>(`/tools/${id}/agents`);
+  return data;
+};
+
+/** Take a tool back out of the org-wide catalog (Decision 47 #4).
+ *
+ *  There is intentionally no `publishTool` counterpart. Tools go org-wide only by
+ *  riding along with an agent a reviewer approved (Decision 47 option C); a direct
+ *  publish would be a second door to the same capability with no review behind it.
+ *  To put an unpublished tool back, re-publish an agent that binds it.
+ *
+ *  Throws 403 unless the caller is the tool's creator, in its owning team, or a
+ *  platform-admin; 409 if the tool is already private. */
+export const unpublishTool = async (id: string): Promise<RegistryTool> => {
+  const { data } = await http.post<RegistryTool>(`/tools/${id}/unpublish`);
+  return data;
+};
+
 // ---------------------------------------------------------------------------
 // Skills
 // ---------------------------------------------------------------------------
@@ -1151,6 +1185,98 @@ export const listPublishRequests = async (params?: {
   const { data } = await http.get<Paginated<PublishRequest>>(
     "/admin/publish-requests",
     { params }
+  );
+  return data;
+};
+
+// ---------------------------------------------------------------------------
+// The reviewer surface (Decision 47 step D, gap G-R3-11)
+//
+// The approve button is the only place in the authorization stack where a HUMAN
+// decides, and until this payload existed the human was shown a name, a submitter,
+// a timestamp, a percentage and a colour. Not the prompt, not the tools, not where
+// those tools send data, and not which of them become org-wide on approve.
+// ---------------------------------------------------------------------------
+export interface PublishReviewTool {
+  id: string;
+  name: string;
+  description: string | null;
+  type: string;
+  risk_level: string | null;
+  owner_team: string | null;
+  publish_status: string | null;
+  /** The CASCADE verdict from the server's `plan_tool_cascade` — the same producer the
+   *  submit guard and the approve action use. Never re-derived in the client: a UI that
+   *  computed "will this publish?" itself would eventually disagree with what approve
+   *  actually does, and the reviewer would be the last to know. */
+  disposition: "will_publish" | "blocked" | "already_published";
+  side_effecting: boolean | null;
+  pii_deanonymize_allowed: boolean | null;
+  /** Where the data goes — the single highest-signal field on this screen. */
+  http_method: string | null;
+  http_url: string | null;
+  /** D-1: in full. It is what is being approved. */
+  python_code: string | null;
+  /** D-2: the credential's NAME, never its value. */
+  auth_config_name: string | null;
+  mcp_server_name: string | null;
+  mcp_tool_name: string | null;
+}
+
+export interface PublishReview {
+  request_id: string;
+  asset_type: string;
+  /** D-3. `false` for workflows — their tools arrive through member agents, so the
+   *  payload shape genuinely differs. The drawer must say so rather than render an
+   *  empty tool list, which would read as "this workflow has no tools". */
+  review_supported: boolean;
+  unsupported_reason?: string;
+  submitted_by?: string;
+  submitted_at?: string | null;
+  status?: string;
+  agent?: {
+    id: string;
+    name: string;
+    team: string | null;
+    created_by: string | null;
+    description: string | null;
+    /** `daemon` is exempt from OPA's identity floor — a materially different risk
+     *  decision, and the queue row has never said which kind it is. */
+    agent_class: string | null;
+    agent_type: string | null;
+    execution_shape: string | null;
+    memory_enabled: boolean | null;
+    publish_status: string | null;
+    instructions: string | null;
+  };
+  version?: {
+    id: string;
+    version_number: number | null;
+    image_tag: string | null;
+    git_sha: string | null;
+    git_branch: string | null;
+    eval_passed: boolean | null;
+    adversarial_eval_passed: boolean | null;
+    notes: string | null;
+  } | null;
+  eval?: {
+    score: number | null;
+    run_id: string | null;
+    pass_threshold: number | null;
+    source: "version" | "agent_latest" | "none";
+  };
+  tools?: PublishReviewTool[];
+  cascade?: {
+    will_publish: string[];
+    blocked: { name: string; owner_team: string | null }[];
+    already_published: string[];
+  };
+  knowledge_bases?: { id: string; name: string; team: string | null }[];
+}
+
+export const getPublishReview = async (id: string): Promise<PublishReview> => {
+  const { data } = await http.get<PublishReview>(
+    `/admin/publish-requests/${id}/review`
   );
   return data;
 };
@@ -1596,9 +1722,14 @@ export const revokeArtifactGrant = async (
   await http.delete(`/artifacts/${artifactType}/${artifactId}/grants/${grantId}`);
 };
 
-// Directory user (Keycloak-backed) — the picker source for human-grantee grants.
-// `kc_id` is the Keycloak sub, i.e. the value artifact_role_grants stores as
-// grantee_id for a `user` grantee. Backend: routers/admin_users.py GET /admin/users.
+// Directory user (Keycloak-backed) — the picker source for human-grantee grants AND
+// the row model for the Access Control users tab. `kc_id` is the Keycloak sub, i.e.
+// the value artifact_role_grants stores as grantee_id for a `user` grantee.
+// Backend: routers/admin_users.py GET /admin/users.
+//
+// `enabled` / `created_at` were only ever consumed by AdminAccessPage, which declared
+// its own copy of this interface next to its own raw-fetch client. They are the same
+// row from the same endpoint, so there is one type and one producer.
 export interface AdminUser {
   kc_id: string;
   username: string;
@@ -1607,11 +1738,13 @@ export interface AdminUser {
   last_name: string;
   team?: string | null;
   role?: string | null;
+  enabled?: boolean;
+  created_at?: number | null;
 }
 
 export const listUsers = async (): Promise<AdminUser[]> => {
   const { data } = await http.get<AdminUser[]>("/admin/users");
-  return data;
+  return Array.isArray(data) ? data : [];
 };
 
 // ---------------------------------------------------------------------------
@@ -2052,4 +2185,138 @@ export const updateMyPreferences = async (
 ): Promise<UserPreferences> => {
   const { data } = await http.put<UserPreferences>("/me/preferences", prefs);
   return data;
+};
+
+// ---------------------------------------------------------------------------
+// Platform admin surface — /api/v1/admin/*
+//
+// These live HERE, not inline in AdminAccessPage/Sidebar/MyAgentsPage, because
+// every one of those had rolled its own `fetch("/api/v1/admin/...")` with no
+// Authorization header. That worked only while the routers were unauthenticated;
+// registry-api 0.2.262 added `require_user` and all of it broke at once — the
+// Sidebar copy took the entire app down to a blank page (see
+// docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md).
+//
+// The class fix is not "add a token to those fetches" — it is that page
+// components do not do transport. `http` owns the Bearer + refresh interceptor,
+// so anything routed through here is authenticated by construction and cannot
+// drift back.
+// ---------------------------------------------------------------------------
+
+export interface TeamAssetGrant {
+  id: string;
+  asset_type: string;
+  asset_name: string;
+  granted_at: string | null;
+  expires_at?: string | null;
+}
+
+export interface TeamSummary {
+  id: string;
+  name: string;
+  namespace: string;
+  members: { user_sub: string; role: string }[];
+  grants: TeamAssetGrant[];
+}
+
+// Reading the user list is `listUsers` above — it already existed on the authed client
+// and is used by the grant pickers. A second `listAdminUsers` here would be two paths to
+// one fact, which is how the raw-fetch copy in AdminAccessPage survived unnoticed.
+
+export const createAdminUser = async (body: {
+  username: string;
+  email: string;
+  first_name: string;
+  last_name: string;
+  temp_password: string;
+  team: string;
+  role: string;
+}): Promise<AdminUser> => {
+  const { data } = await http.post<AdminUser>("/admin/users", body);
+  return data;
+};
+
+export const patchAdminUser = async (
+  kcId: string,
+  body: Partial<{
+    team: string;
+    role: string;
+    enabled: boolean;
+    first_name: string;
+    last_name: string;
+  }>
+): Promise<AdminUser> => {
+  const { data } = await http.patch<AdminUser>(`/admin/users/${kcId}`, body);
+  return data;
+};
+
+export const deleteAdminUser = async (kcId: string): Promise<void> => {
+  // A 404 means the user is already gone — the caller's intent is satisfied, so
+  // swallow only that. Every other status still throws.
+  try {
+    await http.delete(`/admin/users/${kcId}`);
+  } catch (e) {
+    if (axios.isAxiosError(e) && e.response?.status === 404) return;
+    throw e;
+  }
+};
+
+export const resetAdminUserPassword = async (
+  kcId: string,
+  newPassword: string
+): Promise<void> => {
+  await http.post(`/admin/users/${kcId}/reset-password`, {
+    new_password: newPassword,
+    temporary: true,
+  });
+};
+
+// FULL-ORG CENSUS. platform-admin only since registry-api 0.2.263 (RBAC R2) — a
+// non-admin caller gets 403. Only Admin > Access Control may read this; the sidebar
+// and My Agents use `getMyTeam` below. Still array-coerced: the Sidebar consumer's
+// `.find(...)` over a non-array error envelope is what blanked the app, and a
+// producer that can only return an array is the property, not the discipline.
+export const getTeamsSummary = async (): Promise<TeamSummary[]> => {
+  const { data } = await http.get<TeamSummary[]>("/admin/teams-summary");
+  return Array.isArray(data) ? data : [];
+};
+
+export interface MyTeam {
+  team: string | null;
+  namespace: string | null;
+  grants: TeamAssetGrant[];
+}
+
+// SELF-SCOPED — any authenticated role. The sidebar's "Shared With Me" and the My
+// Agents page ask "what is shared with ME", which is not an admin question; they were
+// reading the whole-org census only because that was the endpoint that existed. R2
+// gating the census would have emptied both for every contributor and consumer.
+//
+// Note what is NOT here: a member list. The old client had to `.find()` its own team
+// inside an array of every team by matching `members[].user_sub` — the exact call that
+// threw and unmounted the app. The server knows who is asking, so that lookup is gone
+// from the client entirely. `grants` is still coerced because a producer that cannot
+// return a non-array is worth more than a consumer that remembers to check.
+export const getMyTeam = async (): Promise<MyTeam> => {
+  const { data } = await http.get<MyTeam>("/me/team");
+  return {
+    team: data?.team ?? null,
+    namespace: data?.namespace ?? null,
+    grants: Array.isArray(data?.grants) ? data.grants : [],
+  };
+};
+
+export interface DirectoryUser {
+  sub: string;
+  username: string;
+  display_name: string;
+}
+
+// Name + id only, for grant pickers. Any authenticated role — a contributor holding
+// `agent-admin` on their own agent is entitled to delegate on it, so the picker cannot
+// depend on `/admin/users` (platform-admin only since R2). See routers/users.py for
+// the disclosure tradeoff.
+export const listUserDirectory = async (): Promise<DirectoryUser[]> => {
+  const { data } = await http.get<DirectoryUser[]>("/users/directory");
+  return Array.isArray(data) ? data : [];
 };

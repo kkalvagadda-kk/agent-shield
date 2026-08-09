@@ -10,6 +10,21 @@ RUN_TAG="$(date +%s)"
 POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
+# R2 (registry-api 0.2.263): POST /agents/ requires a real JWT and contributor+, and the
+# creator auto-grant is now keyed on the token's `sub`. This suite used to pass
+# `X-User-Sub: test-rbac-user` with no credential and assert the grant landed on that
+# literal — which proved the grant matches a string the CALLER TYPED, not that it
+# matches the creator. A real persona makes the assertion mean what its name says.
+# See docs/bugs/anonymous-agent-creation-with-forged-attribution.md.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+S42_TOK="$(e2e_ensure_persona "$NAMESPACE" "$POD" "s42-creator" "contributor")"
+[ -n "$S42_TOK" ] || { echo "ERROR: could not provision the s42-creator persona"; exit 1; }
+S42_SUB="$(printf '%s' "$S42_TOK" | cut -d. -f2 | python3 -c "
+import base64, json, sys
+raw = sys.stdin.read().strip()
+print(json.loads(base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)))['sub'])
+")"
+
 run() {
   kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "$1"
 }
@@ -49,7 +64,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 import os
 
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"Authorization": "Bearer '"${S42_TOK}"'"})
 # Create agent
 r = c.post("/agents", json={"name":"s42-rbac-agent-'"${RUN_TAG}"'","team":"default","agent_type":"declarative"})
 assert r.status_code in (200, 201), f"create agent -> {r.status_code} {r.text[:200]}"
@@ -68,7 +83,7 @@ async def check():
         assert len(rows) >= 1, f"Expected at least 1 grant, got {len(rows)}"
         grant = rows[0]
         assert grant[0] == "agent-admin", f"Expected agent-admin, got {grant[0]}"
-        assert grant[1] == "test-rbac-user", f"Expected test-rbac-user, got {grant[1]}"
+        assert grant[1] == "'"${S42_SUB}"'", f"Expected the creator real sub, got {grant[1]}"
         assert grant[2] == "system:auto-grant"
     await eng.dispose()
 asyncio.run(check())
@@ -85,7 +100,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 import os
 
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"Authorization": "Bearer '"${S42_TOK}"'"})
 rw = c.post("/workflows", json={"name":"s42-rbac-wf-'"${RUN_TAG}"'","team":"default","orchestration":"sequential"})
 assert rw.status_code in (200, 201), f"create workflow -> {rw.status_code} {rw.text[:200]}"
 wf = rw.json()
@@ -102,7 +117,7 @@ async def check():
         rows = r.fetchall()
         assert len(rows) >= 1, f"Expected at least 1 grant, got {len(rows)}"
         assert rows[0][0] == "agent-admin"
-        assert rows[0][1] == "test-rbac-user"
+        assert rows[0][1] == "'"${S42_SUB}"'"
     await eng.dispose()
 asyncio.run(check())
 print("PASS: T-S42-003")
@@ -114,12 +129,32 @@ print("PASS: T-S42-003")
 echo "T-S42-004 — /me endpoint returns role and artifact_roles"
 run '
 import httpx
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers={"X-User-Sub": "test-rbac-user"})
-# We need a JWT for /me (it uses require_user), so we test the structure exists
-# by calling without auth — should get 401 (proves endpoint is guarded)
-r = c.get("/me")
+base = "http://localhost:8000/api/v1"
+
+# Half 1 — the endpoint is guarded. NO Authorization header on purpose.
+anon = httpx.Client(follow_redirects=True, base_url=base)
+r = anon.get("/me")
 assert r.status_code == 401, f"Expected 401 without token, got {r.status_code}"
-print("PASS: T-S42-004 (endpoint requires auth, structure verified)")
+
+# Half 2 — and it actually answers for a real caller. The old version could only do
+# the 401 half and said so in a comment ("We need a JWT for /me"), so the case named
+# "returns role and artifact_roles" never once checked either field. A real persona
+# is now available, so it does.
+authed = httpx.Client(follow_redirects=True, base_url=base,
+                      headers={"Authorization": "Bearer '"${S42_TOK}"'"})
+me = authed.get("/me")
+assert me.status_code == 200, f"Expected 200 with a token, got {me.status_code} {me.text[:200]}"
+body = me.json()
+got_sub = body.get("sub")
+assert got_sub == "'"${S42_SUB}"'", f"/me sub mismatch: {got_sub}"
+got_role = body.get("role")
+assert got_role == "contributor", f"expected contributor, got {got_role}"
+ar = body.get("artifact_roles")
+assert isinstance(ar, list), "artifact_roles must be a list"
+# The persona created an agent and a workflow above, so its auto-grants must show here.
+roles = {g["role"] for g in ar}
+assert "agent-admin" in roles, f"creator auto-grants missing from /me: {ar}"
+print("PASS: T-S42-004 (401 unauthenticated; role + artifact_roles correct when authenticated)")
 '
 
 # --------------------------------------------------------------------------
@@ -136,7 +171,15 @@ assert _normalize_role("viewer") == "consumer"
 assert _normalize_role("platform-admin") == "platform-admin"
 assert _normalize_role("contributor") == "contributor"
 assert _normalize_role("consumer") == "consumer"
-assert _normalize_role(None) == "contributor"
+
+# CONTRACT CHANGE (R0 / FR-5, FR-6). `_normalize_role(None) == "contributor"` used to
+# be asserted here — that was the invention Decision 41 named. A missing row now raises
+# NoPlatformRole in get_user_global_role and never reaches this function, so `raw` is
+# non-Optional. What replaces it: an UNRECOGNIZED value is returned VERBATIM and keeps
+# rank 0. That is load-bearing, not a gap — `agent:reviewer` is a reviewer SCOPE read
+# out of the same column by approvals.py:266 _caller_roles (Decision 42 / V-5).
+assert _normalize_role("agent:reviewer") == "agent:reviewer"
+assert ROLE_HIERARCHY.get(_normalize_role("agent:reviewer"), 0) == 0
 
 # consumer is the floor of the hierarchy; viewer is no longer a canonical key
 assert ROLE_HIERARCHY["consumer"] == 0, ROLE_HIERARCHY

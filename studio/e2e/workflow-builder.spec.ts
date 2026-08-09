@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // workflow-builder.spec.ts
@@ -15,7 +16,11 @@ import { test, expect, type APIRequestContext } from "@playwright/test";
 
 // Seed helper: create agents + a workflow with one conditional edge via the
 // proxied API. Returns the workflow id + created agent ids for cleanup.
-const SYS = { "X-User-Sub": "system" };
+// Was `{ "X-User-Sub": "system" }` — a header, on routes that now require a real JWT
+// (R1/R2/R3 + G-R3-6). Every seed call 401'd, and the failure showed up as "persisted
+// edges survive a builder reload" rather than as an auth problem. Populated in
+// beforeAll because minting a token is async.
+let SYS: Record<string, string> = {};
 async function seedWorkflowWithEdge(request: APIRequestContext, suffix: string) {
   const team = "platform";
   const names = [`wfb-a-${suffix}`, `wfb-b-${suffix}`];
@@ -74,6 +79,11 @@ async function seedForkWorkflow(request: APIRequestContext, suffix: string) {
 }
 
 test.describe("workflow builder", () => {
+  // One mint for the file. Async, so it cannot be a module-level const.
+  test.beforeAll(async () => {
+    SYS = await adminAuthHeaders();
+  });
+
   test("new-workflow canvas renders with toolbar actions", async ({ page }) => {
     await page.goto("/workflows/new");
     await page.waitForLoadState("networkidle");
@@ -165,6 +175,13 @@ test.describe("workflow builder", () => {
     // Add one member via inline create (self-contained; also sets the workflow team).
     await page.getByRole("button", { name: /Add Agent/i }).click();
     await page.getByRole("button", { name: /Create New Agent/i }).click();
+    // NO pickModel here. This creates a member through AddAgentModal's "Create New Agent"
+    // TAB, which has only name / description / system prompt (AddAgentModal.tsx:258-282) —
+    // there is no Model select to pick. pickModel belongs to the full CreateAgentPage
+    // wizard at /agents/new, where llm_provider_id is required. I inserted it here by a
+    // blanket regex on getByPlaceholder("my-agent") in the first triage batch without
+    // checking which FORM that placeholder belonged to, and it hung for 15s waiting on a
+    // field that does not exist.
     await page.getByPlaceholder("my-agent").fill(memberName);
     const memberCreated = page.waitForResponse(
       (r) => r.request().method() === "POST" && new URL(r.url()).pathname.endsWith("/agents/"),

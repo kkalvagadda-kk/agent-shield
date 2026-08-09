@@ -1083,6 +1083,10 @@ class MCPServer(Base):
     # credentials {client_id, client_secret?}, per server. Null until the first authorize
     # registers a client (RFC 7591 Dynamic Client Registration).
     oauth_client_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # WHO registered this server. Its discovered tools inherit it as their
+    # `created_by`, or a private mcp_tool would have no creator and catalog
+    # visibility (published OR created_by == caller) would hide it from everyone.
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
     )
@@ -1255,8 +1259,10 @@ class Tool(Base):
     )
     mcp_tool_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Private by default, like Agent and CompositeWorkflow (Decision 47, migration 0080).
+    # Existing rows were NOT backfilled — see the migration for why.
     publish_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default=text("'published'")
+        String(32), nullable=False, server_default=text("'private'")
     )
     created_at: Mapped[datetime] = mapped_column(
         _TSTZ, nullable=False, server_default=_NOW
@@ -1361,8 +1367,9 @@ class Skill(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     tool_ids: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=text("'[]'"))
     status: Mapped[str] = mapped_column(String(32), nullable=False, server_default=text("'active'"))
+    # Private by default (Decision 47, migration 0080). See Tool.publish_status.
     publish_status: Mapped[str] = mapped_column(
-        String(32), nullable=False, server_default=text("'published'")
+        String(32), nullable=False, server_default=text("'private'")
     )
     created_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
     updated_at: Mapped[datetime] = mapped_column(_TSTZ, nullable=False, server_default=_NOW)
@@ -1543,6 +1550,22 @@ class PlaygroundRun(Base):
     # HITL console (username instead of raw sub; the requester's own team).
     requested_by_username: Mapped[str | None] = mapped_column(String(256), nullable=True)
     requested_by_team: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # ── Identity P1 durable anchor (migration 0082) ──────────────────────────
+    # The serialized RunContext this run acts under. NOT derivable from `user_id`
+    # above: that column carries no team, no origin and no actor_chain, and for a
+    # service-driven run it holds a service subject rather than a human. See
+    # run_context_anchor.py for why re-deriving it at resume is wrong three ways.
+    # The in-flight RCT token expires in 900s; a HITL pause can last hours, so THIS
+    # row — not the token — is the system of record for who a paused run acts for.
+    #
+    # none_as_null=True is LOAD-BEARING, not style. SQLAlchemy's JSONB defaults to
+    # none_as_null=False, so assigning Python None writes JSON `null` — a value for which
+    # `run_context IS NOT NULL` is TRUE. A row with no identity would then answer "yes, I
+    # have one" to every audit query. Measured on the cluster before this fix: 52 such
+    # rows in agent_runs. Behaviour was already correct (rehydrate treats JSON null as
+    # absent), but the DATA lied, and an identity column that lies about its own presence
+    # is exactly the kind of thing a future query builds a wrong conclusion on.
+    run_context: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     context: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'playground'")
     )
@@ -1771,6 +1794,17 @@ class AgentRun(Base):
     run_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     team: Mapped[str | None] = mapped_column(String(100), nullable=True)
     thread_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # ── Identity P1 durable anchor (migration 0082) ──────────────────────────
+    # Mirrors PlaygroundRun.run_context — see that column and run_context_anchor.py.
+    # Note this row's `run_by` is a SERVICE subject for a daemon run, which is exactly
+    # why the anchor cannot be re-derived from it: minting user_sub=run_by would hand a
+    # daemon a fabricated human identity and walk it through the user_delegated arm of
+    # OPA's identity floor.
+    #
+    # none_as_null=True — see PlaygroundRun.run_context. This is the table where it bit:
+    # workflow member children inherit their parent's anchor, and `inherit_anchor` returns
+    # None when the parent has none, which was landing as JSON `null`.
+    run_context: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     parent_run_id: Mapped[uuid.UUID | None] = mapped_column(
         _UUID, ForeignKey("agent_runs.id"), nullable=True
     )

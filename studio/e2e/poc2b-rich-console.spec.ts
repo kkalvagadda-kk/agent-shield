@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // poc2b-rich-console.spec.ts  (context-storage POC-2b — rich workflow console)
@@ -45,10 +46,11 @@ import {
 // ---------------------------------------------------------------------------
 
 const TS = Date.now();
-const ADMIN = {
-  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. Those literals have no user_team_assignments row on
+// the current cluster (a realm recreation mints new subs), and header identity stopped
+// being identity when R1/R2/R3 + G-R3-6 gated these routes. adminAuthHeaders() mints a
+// real token and derives the sub FROM it, so the two cannot disagree.
+let ADMIN: Record<string, string> = {};
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 const RESEARCHER = `e2e-rc-researcher-${TS}`;
@@ -76,6 +78,7 @@ test.describe("POC-2b rich workflow console", () => {
     // Provisioning does two production deploys + publish/approve + up to a 90s
     // readiness poll — well past the 60s default hook timeout. Extend it.
     test.setTimeout(240_000);
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

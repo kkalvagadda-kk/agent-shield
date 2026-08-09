@@ -54,6 +54,11 @@ class UserContext:
     """User identity propagated through Class B (user_delegated) agent calls."""
     user_id: str
     user_team: str
+    # PLURAL, and a list even though `user_team_assignments.user_sub` is a primary key
+    # today (one team per user). Decision 45's intersection is written against
+    # `input.user_teams`, and a policy written against a scalar would have to be rewritten
+    # rather than re-fed the day multi-team membership lands.
+    user_teams: list = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +146,11 @@ async def check_tool(
         # Class B: include user identity; Class A: empty strings
         "user_id": user_context.user_id if user_context else "",
         "user_team": user_context.user_team if user_context else "",
+        # Decision 45: the caller's authority. Gate 3 intersects the agent's reach with
+        # the tools these teams may use, so an EMPTY list denies every tool for a
+        # user_delegated agent — fail-closed, and the correct answer when we do not
+        # know who is asking.
+        "user_teams": (user_context.user_teams if user_context else []) or [],
     }
 
     url = f"{config.AGENTSHIELD_OPA_URL}{_OPA_POLICY_PATH}"

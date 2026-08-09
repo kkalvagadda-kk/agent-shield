@@ -284,6 +284,7 @@ def _wrap_tool_with_governance(fn: Any, agent_name: str) -> Any:
         user_ctx = opa_client.UserContext(
             user_id=uc.get("user_id", ""),
             user_team=uc.get("user_team", ""),
+            user_teams=uc.get("user_teams") or ([uc["user_team"]] if uc.get("user_team") else []),
         ) if uc else None
         decision = await opa_client.check_tool(agent_name, fn.tool_name, kwargs, user_context=user_ctx)
 

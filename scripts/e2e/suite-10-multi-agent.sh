@@ -27,6 +27,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agents..."
@@ -34,7 +41,7 @@ cleanup() {
 import urllib.request
 for name in ['${AGENT_INITIATOR}', '${AGENT_TARGET}']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
 }
@@ -96,7 +103,7 @@ except urllib.error.HTTPError as e:
         'description': 'Suite 10 initiator agent — hands off to agent-target',
         'metadata': {'tools': ['handoff_to_agent_target']}
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -122,7 +129,7 @@ except urllib.error.HTTPError as e:
         'description': 'Suite 10 target agent — receives handoff from agent-initiator',
         'metadata': {'tools': ['lookup_order', 'issue_refund']}
       }).encode(),
-      headers={'Content-Type': 'application/json'},
+      headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
       method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -256,7 +263,7 @@ for AGENT_NAME in "$AGENT_INITIATOR" "$AGENT_TARGET"; do
 import urllib.request, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/agents/$AGENT_NAME',
-  method='DELETE'
+  method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 try:
   urllib.request.urlopen(req)

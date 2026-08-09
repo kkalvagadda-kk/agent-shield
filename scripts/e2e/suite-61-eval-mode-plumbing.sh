@@ -59,19 +59,35 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver waits up to 180s for the deploy and another 300s for the eval run, so a
+# statically-interpolated token would EXPIRE mid-run (Keycloak issues expires_in=300).
+# Install lib/e2e_auth.py into the pod and let BearerAuth re-mint per request instead.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 61: Eval v2 E-0 REAL reactive-parity gate (no fakes) ==="
 echo "  Pod: $API_POD"
 echo ""
 
-RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY' 2>/dev/null
-import asyncio, uuid
+RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null
+import asyncio, os, uuid
 import httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult, PlaygroundDataset
 
 BASE = "http://localhost:8000/api/v1"
-SUB = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+SUB = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": SUB, "X-User-Team": "platform"}
 SUFFIX = uuid.uuid4().hex[:8]
 AGENT = f"s61-eval-agent-{SUFFIX}"
@@ -154,7 +170,10 @@ async def wait_eval_terminal(run_id, timeout=300):
 async def main():
     out = {}
     skip = None
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=60)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication. auth=
+    # BearerAuth() is what satisfies R1, and httpx re-evaluates it per request so the
+    # token stays fresh across this driver's multi-minute waits.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60)
     pid = await provider_id(c)
     ds_id = None
     run_id = None

@@ -43,6 +43,13 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): agent mutations (PUT/PATCH/DELETE/quarantine/publish)
+# require platform-admin or `agent-admin` on the artifact. This suite mutated agents
+# anonymously, which worked only because those routes took no credential at all.
+# Call e2e_set_token BARE — a command substitution swallows its abort.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # Cleanup on exit: deprecate test agent
 cleanup() {
   echo ""
@@ -53,7 +60,8 @@ try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${HITL_AGENT}',
         data=json.dumps({'status': 'deprecated'}).encode(),
-        headers={'Content-Type': 'application/json'}, method='PUT'
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PUT'
     )
     urllib.request.urlopen(req, timeout=5)
     print('  deprecated: ${HITL_AGENT}')
@@ -81,7 +89,7 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:

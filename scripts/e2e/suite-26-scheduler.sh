@@ -36,7 +36,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
 }
@@ -81,7 +81,7 @@ import httpx, sys
 r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT_NAME}', 'team': 'platform', 'agent_type': 'declarative',
     'execution_shape': 'reactive',
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create agent {r.status_code}: {r.text}'); sys.exit(1)
 r2 = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/triggers', headers={'X-User-Sub':'system','Authorization':'Bearer ${E2E_TOKEN}'}, json={

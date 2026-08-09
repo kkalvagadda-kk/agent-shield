@@ -92,6 +92,17 @@ spec:
                 secretKeyRef:
                   name: agentshield-encryption
                   key: key
+            # Identity propagation P0 (design §4.3). registry-api is the ONLY process that
+            # mints a root run context — it is the only one that can authenticate a human.
+            # `optional: true` so an existing install that predates the Secret still starts:
+            # run_context raises a NAMED error at first use, which is far easier to diagnose
+            # than a CrashLoop with no message. It does NOT mean identity is optional.
+            - name: AGENTSHIELD_INTERNAL_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-run-context
+                  key: AGENTSHIELD_INTERNAL_SIGNING_KEY
+                  optional: true
             - name: REDIS_URL
               value: {{ .Values.redisUrl | default (printf "redis://%s-redis-master:6379/0" .Release.Name) | quote }}
       containers:
@@ -137,6 +148,16 @@ spec:
                 secretKeyRef:
                   name: keycloak-admin-password
                   key: admin-password
+            # platform-admin bootstrap (Decision 40). The Secret moved here from the
+            # realm-init Job, which no longer creates users. Missing/empty -> the
+            # bootstrap fails loudly and /ready stays red.
+            # MAIN CONTAINER ONLY — the alembic-migrate init container runs schema
+            # migrations and must not carry a user credential it never reads.
+            - name: PLATFORM_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-user-passwords
+                  key: platform-admin
             - name: LOG_LEVEL
               value: {{ .Values.logLevel | default "INFO" | quote }}
             - name: EVAL_RUNNER_IMAGE
@@ -146,6 +167,17 @@ spec:
                 secretKeyRef:
                   name: agentshield-encryption
                   key: key
+            # Identity propagation P0 (design §4.3). registry-api is the ONLY process that
+            # mints a root run context — it is the only one that can authenticate a human.
+            # `optional: true` so an existing install that predates the Secret still starts:
+            # run_context raises a NAMED error at first use, which is far easier to diagnose
+            # than a CrashLoop with no message. It does NOT mean identity is optional.
+            - name: AGENTSHIELD_INTERNAL_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-run-context
+                  key: AGENTSHIELD_INTERNAL_SIGNING_KEY
+                  optional: true
             - name: REDIS_URL
               value: {{ .Values.redisUrl | default (printf "redis://%s-redis-master:6379/0" .Release.Name) | quote }}
             - name: LANGFUSE_PUBLIC_URL

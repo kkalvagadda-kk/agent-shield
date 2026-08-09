@@ -60,21 +60,97 @@ _risk_of(entry) := "critical" if {
 
 _risk_of(entry) := "critical" if is_string(entry)
 
+# ─── agent_class: from the BUNDLE, never from input (D-1) ────────────────────
+# `input.agent_class` is composed by the SDK inside the agent pod, so a compromised pod
+# could claim "daemon" and skip the identity floor below — the branch that requires no
+# human at all. The bundle keys `agent_class` off `sa_subject`, which Gates 1 and 2 have
+# already verified against the pod's ServiceAccount, so it is not the pod's to assert.
+#
+# Undefined when the agent is unknown, which fails every gate that reads it. That is the
+# correct answer for a pod we cannot identify.
+agent_class := agent.agent_class
+
+# ─── Decision 45: whose authority is this call made under? ────────────────────
+# The caller's teams, as a LIST. Plural because `user_team_assignments.user_sub` is a
+# primary key TODAY — one team per user — and that will stop being true; a rule written
+# against a scalar would have to be rewritten rather than re-fed.
+caller_teams := input.user_teams
+
+# Tools the CALLER's teams may use: granted to them, or owned by them.
+# `tool_access.team_may_use_tool` is `owner_team is None or owner_team == team`, so the
+# own-team half is usable WITHOUT a grant — intersecting on `grants` alone would deny a
+# user their own team's tools.
+_caller_usable contains name if {
+	some ct in caller_teams
+	some t in data.grants[ct]
+	name := _name_of(t)
+}
+
+_caller_usable contains name if {
+	some ct in caller_teams
+	some t in data.team_tools[ct]
+	name := _name_of(t)
+}
+
 # ─── Gate 3: tool membership over the effective tool set ──────────────────────
-# effective set = agent's own tools ∪ grants for the agent's own team.
-# We collect the risk *rank* of every effective entry whose name matches the
-# requested tool; a non-empty set means the tool is in scope.
+# Decision 45 — the effective set depends on WHO the run is acting for:
+#
+#   daemon          agent.tools ∪ grants[agent.team]
+#                   No human is involved; the agent delegates its OWN capability. This is
+#                   the long-standing rule and is unchanged.
+#
+#   user_delegated  agent.tools ∩ tools the CALLER's teams may use
+#                   "Having grant to agent does not get users in a team grants to all the
+#                   tools the agents can use." A tool bound to the agent is NOT enough —
+#                   the human's own authority has to reach it too.
+#
+# Note the asymmetry is deliberate: the daemon branch UNIONs (the agent's authority is the
+# ceiling) and the delegated branch INTERSECTS (the narrower of agent and human wins).
 _matching_ranks contains risk_rank[_risk_of(t)] if {
+	agent_class == "daemon"
 	some t in agent.tools
 	_name_of(t) == input.tool_name
 }
 
 _matching_ranks contains risk_rank[_risk_of(t)] if {
+	agent_class == "daemon"
 	some t in data.grants[agent.team]
 	_name_of(t) == input.tool_name
 }
 
+_matching_ranks contains risk_rank[_risk_of(t)] if {
+	agent_class == "user_delegated"
+	some t in agent.tools
+	_name_of(t) == input.tool_name
+	_caller_usable[input.tool_name]
+}
+
+_matching_ranks contains risk_rank[_risk_of(t)] if {
+	agent_class == "user_delegated"
+	some t in data.grants[agent.team]
+	_name_of(t) == input.tool_name
+	_caller_usable[input.tool_name]
+}
+
 tool_in_set if count(_matching_ranks) > 0
+
+# In the AGENT's reach — its own bound tools plus what its team is granted. This is the
+# agent-side capability, and it is exactly the old (pre-Decision-45) effective set.
+#
+# The intersection applies to THIS, not to `agent.tools` alone. A first cut used only the
+# bound tools and broke `test_tool_via_team_grant_allows`: a tool granted to the agent's
+# team but not individually bound was denied even to a caller who could reach it. The
+# agent's capability has always included its team's grants; Decision 45 narrows by the
+# HUMAN's authority, it does not also silently narrow the agent's.
+_in_agent_reach if {
+	some t in agent.tools
+	_name_of(t) == input.tool_name
+}
+
+_in_agent_reach if {
+	some t in data.grants[agent.team]
+	_name_of(t) == input.tool_name
+}
 
 # ─── Gate 4: risk → action ───────────────────────────────────────────────────
 # Resolve the matched tool's risk as the MOST SEVERE among matching entries
@@ -99,11 +175,11 @@ risk_allows if resolved_risk == "high"
 #                 never a silent downgrade to the service identity (fail-closed).
 # Orthogonal to the risk-based require_approval gate below.
 user_identity_ok if {
-	input.agent_class == "daemon"
+	agent_class == "daemon"
 }
 
 user_identity_ok if {
-	input.agent_class == "user_delegated"
+	agent_class == "user_delegated"
 	input.user_id != ""
 }
 
@@ -163,6 +239,26 @@ deny_reason := "tool_not_granted" if {
 	identity_present
 	identity_matches
 	not tool_in_set
+	not _in_agent_reach
+}
+
+# Decision 45: the tool IS bound to the agent, but this human's own authority does not
+# reach it. Distinct from `tool_not_granted` on purpose — that one means "the agent cannot
+# do this", which is fixed by binding the tool; this one means "you cannot ask it to",
+# which is fixed by granting the caller's team. Same 403 with two different remedies is
+# how an operator ends up applying the wrong one.
+deny_reason := "tool_not_granted_to_user" if {
+	identity_present
+	identity_matches
+	not tool_in_set
+	_in_agent_reach
+	# The identity floor OUTRANKS this. With no user at all, the intersection is empty for
+	# the trivial reason that there is nobody to intersect with — and answering
+	# "tool_not_granted_to_user" then sends the operator to grant a team, when the actual
+	# problem is that the run carries no principal. Two wrongs, and this reason names the
+	# consequence rather than the cause. Caught by suite-70 T-S70-002b against a REAL
+	# deployed agent, which is the only place the two can be told apart.
+	user_identity_ok
 }
 
 deny_reason := "tool_risk_denied" if {
@@ -182,9 +278,18 @@ deny_reason := "tool_risk_denied" if {
 deny_reason := "missing_user_identity" if {
 	identity_present
 	identity_matches
-	tool_in_set
-	risk_allows
-	input.agent_class == "user_delegated"
+	# `_in_agent_reach`, NOT `tool_in_set`. Decision 45 made `tool_in_set` depend on the
+	# caller's grants, so with no principal it is ALWAYS false — which silently made this
+	# rule unreachable and let `tool_not_granted_to_user` answer instead. The question here
+	# is "could the AGENT do this", asked so the reason names the missing principal rather
+	# than a grant nobody could have held.
+	_in_agent_reach
+	# `risk_allows` is NOT a precondition here, and cannot be: it derives from
+	# max(_matching_ranks), which the Decision 45 intersection empties whenever there is no
+	# caller — so requiring it made this rule unreachable for a second reason. Risk is a
+	# different axis from identity, and `tool_risk_denied` stays mutually exclusive with
+	# this because it requires `tool_in_set`, which is false in exactly this case.
+	agent_class == "user_delegated"
 	input.user_id == ""
 }
 

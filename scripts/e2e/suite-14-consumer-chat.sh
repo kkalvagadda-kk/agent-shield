@@ -30,13 +30,21 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/versions and POST /admin/publish-requests/{id}/approve
+# now require a real JWT. T-S14-002's GET /api/v1/deployments/?status=running is the
+# global deployments LIST, which stays EXEMPT for deploy-controller (G-R1-2), so it is
+# deliberately left anonymous — adding a token there would hide a regression in the
+# exemption. Call e2e_set_token BARE (lib/e2e-auth.sh explains the subshell trap).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/s14-promote-test', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
 
@@ -120,8 +128,11 @@ RESULT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
 
 # Create test agent
+# R2 (0.2.263): POST /agents/ requires a real JWT + contributor+; it used to accept an
+# anonymous caller. The very next call in this fixture already carried E2E_TOKEN.
 r = httpx.post('http://localhost:8000/api/v1/agents/',
     json={'name': 's14-promote-test', 'team': 'platform', 'agent_type': 'declarative'},
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     timeout=5)
 if r.status_code not in (200, 201, 409):
     print(f'agent create: {r.status_code} {r.text[:80]}')
@@ -129,10 +140,12 @@ if r.status_code not in (200, 201, 409):
 
 # Create an eval-passed version so the publish gate (Decision 20) is satisfied
 httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/versions',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)
 
 # Submit for publish
 pub = httpx.post('http://localhost:8000/api/v1/agents/s14-promote-test/publish',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={'dependency_declaration': {}}, timeout=5)
 if pub.status_code not in (200, 201, 202):
     print(f'publish: {pub.status_code} {pub.text[:80]}')
@@ -142,6 +155,7 @@ pr_id = pub.json().get('publish_request_id', '')
 # Approve with empty body (no grantee_teams)
 apr = httpx.post(
     f'http://localhost:8000/api/v1/admin/publish-requests/{pr_id}/approve',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     json={}, timeout=5)
 if apr.status_code != 200:
     print(f'approve: {apr.status_code} {apr.text[:80]}')
@@ -252,7 +266,7 @@ esac
 echo "[T-S14-007] Cleanup: delete s14-promote-test agent"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
-httpx.delete('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5)
+httpx.delete('http://localhost:8000/api/v1/agents/s14-promote-test', timeout=5, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 " 2>/dev/null || true
 pass "T-S14-007: cleanup complete"
 

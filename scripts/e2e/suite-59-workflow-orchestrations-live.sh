@@ -28,19 +28,37 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# ${E2E_SUB} is the sub DECODED FROM the minted token (lib/e2e-auth.sh). Sourcing alone
+# does not mint — the CALL does, and without it E2E_SUB expands to empty and every
+# identity assertion silently compares against "".
 [ -z "$API_POD" ] && { echo "ERROR: no registry-api pod"; exit 1; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 
 echo "=== Suite 59: all 4 orchestrations + HITL (real pods, no fakes) ==="
 echo "  Pod: $API_POD"
 
-RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY' 2>/dev/null
+# stderr KEPT and the substitution failure HANDLED — see suite-60 for the full note.
+# `2>/dev/null` with no `|| :` under `set -e` made a dead driver abort the suite
+# silently, printing no reason at all.
+set +e
+RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  env S59_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>&1
 import asyncio, os, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, text
 from db import AsyncSessionLocal
 from models import AgentRun, Deployment, Agent
 
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+# From the ENVIRONMENT: this heredoc is QUOTED, so the "${E2E_SUB}" that used to sit
+# here was never expanded — the header carried that literal string and, with no Bearer,
+# every call was anonymous.
+ADMIN = os.environ["S59_ADMIN_SUB"]
+H={"X-User-Sub":ADMIN,"X-User-Team":"platform"}
 S=uuid.uuid4().hex[:6]
 ROUTER,WORKER,PLAIN,SUP = "wf-router","wf-payout","wf-confirm","wf-supervisor"
 REQUIRED=[ROUTER,WORKER,PLAIN,SUP]
@@ -102,7 +120,7 @@ async def mk_wf(c, name, orch, members, edges):
 
 async def main():
     out={}; wids=[]
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60, follow_redirects=True)
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60, follow_redirects=True)
     up=await running(REQUIRED)
     out["001_agents_running"]= all(n in up for n in REQUIRED)
     if not out["001_agents_running"]:
@@ -133,7 +151,13 @@ async def main():
 asyncio.run(main())
 PY
 )
+DRIVER_RC=$?
+set -e
 echo "$RESULT"
 echo ""
+if [ "$DRIVER_RC" -ne 0 ] || ! echo "$RESULT" | grep -qE "^(PASS|FAIL) "; then
+  echo "❌ Suite 59 DRIVER ERROR (rc=$DRIVER_RC) — no PASS/FAIL verdict was produced."
+  exit 1
+fi
 if echo "$RESULT" | grep -q "FAIL"; then echo "❌ Suite 59 FAILED"; exit 1; fi
 echo "✅ Suite 59 PASSED"

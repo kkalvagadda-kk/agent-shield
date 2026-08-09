@@ -33,22 +33,35 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: every /api/v1/admin/* route (routers/admin.py) now requires a real JWT —
+# here that is the approval-authority create / list / delete. /api/v1/approvals/* and
+# /api/v1/agents/* are NOT among R1's ten routers and stay as they are. Call
+# e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 AUTHORITY_ID=""
 cleanup() {
+  # Re-mint first: Keycloak tokens live 300s and this suite runs longer, so the token
+  # from setup is expired by the time cleanup needs it. Cleanup only began needing a
+  # credential when R3 gated agent DELETE — see e2e_refresh_token in lib/e2e-auth.sh.
+  e2e_refresh_token "$NAMESPACE" "$API_POD" || true
+
   echo ""
   echo "==> Cleanup..."
   if [ -n "$AUTHORITY_ID" ]; then
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, method='DELETE'), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/hitl-s5-agent', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/hitl-s5-agent', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
 }
@@ -104,7 +117,7 @@ except urllib.error.HTTPError:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/',
         data=json.dumps({'name': name, 'team': 'platform', 'description': 'Suite 5 HITL test'}).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
         method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -134,7 +147,8 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -154,9 +168,10 @@ fi
 
 run_test "T-S5-001 GET /admin/approval-authority?resource_id=issue_refund → reviewer-1 record present" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/approval-authority?resource_type=tool&resource_id=issue_refund'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/approval-authority?resource_type=tool&resource_id=issue_refund',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 assert len(items) > 0, 'no records returned'
@@ -212,6 +227,7 @@ if [ -z "$APPROVAL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 try: urllib.request.urlopen(req)
@@ -344,6 +360,7 @@ if [ -n "$AUTHORITY_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/approval-authority/${AUTHORITY_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)
@@ -355,8 +372,7 @@ run_test "Cleanup: DELETE /agents/hitl-s5-agent → 204 (soft-delete)" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/hitl-s5-agent',
-    method='DELETE'
-)
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
 "

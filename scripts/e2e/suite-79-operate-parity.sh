@@ -86,10 +86,20 @@ echo "    edge under test: ${GATEWAY}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+
 # The real interactive platform-admin Keycloak sub. Deny-by-default hides resources whose
 # created_by != the caller's sub, so a wrong sub yields an empty list that reads as "no
 # pending approvals" rather than as an auth failure — a false PASS.
-ADMIN_SUB="${ADMIN_SUB:-75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6}"
+API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
+  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+# ${E2E_SUB} is the sub DECODED FROM the minted token (lib/e2e-auth.sh). Sourcing alone
+# does not mint — the CALL does, and without it E2E_SUB expands to empty and every
+# identity assertion silently compares against "".
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
+ADMIN_SUB="${ADMIN_SUB:-${E2E_SUB}}"
 
 # Per-invocation paths (the suite-74 lesson): a fixed /tmp path lets two overlapping
 # invocations (a retry, a second operator, a CI re-run) read each OTHER's results.
@@ -288,8 +298,8 @@ echo ""
 # ---------------------------------------------------------------------------
 echo "--- T-S79-003  badge producer live (real GET /approvals/) ---"
 
-API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
-  --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+
 
 if [ -z "$API_POD" ]; then
   rec FAIL "T-S79-003 badge count producer is live" \
@@ -410,6 +420,7 @@ ${line}";;
     rm -f "$DRIVER" "$OUTFILE" "$RUNLOG" 2>/dev/null || true
   rm -f "$DRIVER" 2>/dev/null || true
 fi
+
 echo ""
 
 # ---------------------------------------------------------------------------

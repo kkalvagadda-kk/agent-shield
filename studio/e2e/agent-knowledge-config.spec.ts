@@ -5,6 +5,7 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 /**
  * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
@@ -52,10 +53,11 @@ const TS = Date.now();
 // match the browser JWT's sub so REST-created fixtures land in the same identity
 // the browser session sees. (The realm was re-seeded; the old 75c7c8b3… sub now
 // 401s — see the stale-fixture-sub gap in the manual test plan.)
-const ADMIN = {
-  "X-User-Sub": "047fad5f-f38c-430a-bfba-6e4d9009314b",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. That literal has no user_team_assignments row on the
+// current cluster (a realm recreation mints new subs), and header identity stopped being
+// identity when R1/R2/R3 + G-R3-6 gated these routes. adminAuthHeaders() mints a real
+// token and derives the sub FROM it, so header and signature cannot disagree.
+let ADMIN: Record<string, string> = {};
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 const KB_NAME = `e2e-akc-kb-${TS}`;
@@ -142,6 +144,7 @@ test.describe("agent-side Knowledge Base config (special config, not a tool)", (
   let kbReady = false;
 
   test.beforeAll(async () => {
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

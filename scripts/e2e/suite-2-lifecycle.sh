@@ -48,6 +48,13 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /{name}/versions, POST /{name}/tools and POST /{name}/deploy now
+# require a real JWT. /api/v1/tools/*, /api/v1/agents/ and /api/v1/bundle/* are NOT
+# on the ten protected routers, so their calls are left as-is. Call e2e_set_token
+# BARE — in a command substitution its `exit 1` kills only the subshell.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 # Soft-delete test agents and tools on exit
 cleanup() {
   echo ""
@@ -58,7 +65,7 @@ import urllib.request, json
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${agent_name}',
-        method='DELETE'
+        method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req, timeout=5)
     print('  deleted: ${agent_name}')
@@ -70,13 +77,16 @@ except Exception as e:
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 try:
-    r = urllib.request.urlopen('http://localhost:8000/api/v1/tools/?limit=200', timeout=5)
+    # GET /api/v1/tools/ now requires a user token (Decision 47 revert, 0.2.271): the
+    # anonymous arm existed only for agent pods, which now ask
+    # GET /agents/{name}/tools with a ServiceAccount token instead.
+    r = urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/?limit=200', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     tools = json.loads(r.read()).get('items', [])
     for t in tools:
         if t.get('name','').startswith('restricted-tool-'):
             req = urllib.request.Request(
                 'http://localhost:8000/api/v1/tools/' + str(t['id']),
-                method='DELETE')
+                method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
             urllib.request.urlopen(req, timeout=5)
             print('  deleted tool: ' + t['name'])
 except Exception:
@@ -105,7 +115,7 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -155,7 +165,8 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${SMOKE_AGENT}/versions',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -201,7 +212,7 @@ try:
             'name': '${GRANT_GATE_AGENT}', 'team': 'platform',
             'description': 'Grant gate pre-flight test', 'agent_type': 'sdk'
         }).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
     gg_agent_id = json.loads(r.read()).get('id', '')
 except urllib.error.HTTPError as e:
@@ -227,7 +238,7 @@ try:
             'name': tool_name, 'type': 'native',
             'risk_level': 'high', 'owner_team': 'other-team-${TS}'
         }).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
     tool_id = json.loads(r.read()).get('id', '')
 except urllib.error.HTTPError as e:
@@ -238,7 +249,8 @@ try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/${GRANT_GATE_AGENT}/tools',
         data=json.dumps({'tool_id': tool_id}).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
 except urllib.error.HTTPError as e:
     print('bind_err:' + str(e.code)); sys.exit(0)
@@ -251,7 +263,8 @@ try:
             'image_tag': '${ECHO_AGENT_IMAGE}',
             'tools': [], 'eval_passed': True
         }).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST'
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
     ), timeout=10)
     ver_id = json.loads(r.read()).get('id', '')
 except urllib.error.HTTPError as e:
@@ -272,7 +285,8 @@ try:
             'version_id': '${GG_VERSION_ID}',
             'replicas': 1, 'environment': 'production'
         }).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'},
         method='POST'
     ), timeout=10)
     print(r.getcode())
@@ -316,7 +330,11 @@ try:
         }).encode(),
         headers={
             'Content-Type': 'application/json',
-            'X-User-Team': 'other-team'
+            # X-User-Team stays an AUDIT STAMP and is what deploy_agent's team gate
+            # reads; the Bearer only satisfies R1 authentication. Both are needed for
+            # this case to keep asserting 403 (wrong team) rather than 401 (no token).
+            'X-User-Team': 'other-team',
+            'Authorization': 'Bearer ${E2E_TOKEN}'
         },
         method='POST'
     )
@@ -358,7 +376,8 @@ req = urllib.request.Request(
         'version_id': '${VERSION_ID}',
         'replicas': 1, 'environment': 'production'
     }).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -380,7 +399,8 @@ req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${SMOKE_AGENT}/deploy',
     data=json.dumps({'version_id': '${VERSION_ID}', 'replicas': 1,
                       'environment': 'production'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-AgentShield-Trace-ID': 'g5-s2-deploy-${TS}'},
+    headers={'Content-Type': 'application/json', 'X-AgentShield-Trace-ID': 'g5-s2-deploy-${TS}',
+             'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -474,7 +494,7 @@ if [ -n "${API_POD:-}" ]; then
 import urllib.request, json
 body = json.dumps({'name': '${BUNDLE_AGENT}', 'team': 'platform', 'description': 'bundle test'}).encode()
 req = urllib.request.Request('http://localhost:8000/api/v1/agents',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     r = urllib.request.urlopen(req, timeout=5)
     print('registered:' + str(r.getcode()))

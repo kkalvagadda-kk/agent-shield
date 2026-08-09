@@ -13,9 +13,20 @@ export async function sendChatTurn(
   const posted = page
     .waitForResponse((r) => r.request().method() === "POST" && chatUrlRe.test(r.url()), { timeout: timeoutMs })
     .catch(() => null);
+  // RETURN null, DO NOT THROW, when the composer is not there. Every caller already
+  // treats null as "could not send" — assertRecall maps it to "skipped"/"asked" and
+  // records an annotation rather than failing. But the fill itself threw, so a cold or
+  // absent agent pod took down the whole test the caller had explicitly labelled
+  // "best-effort … cold-pod tolerant" (lifecycle-journey leg 5). The composer is absent
+  // exactly when there is no live deployment to chat with, which is the tolerated case.
   const input = page.getByRole("textbox").first();
-  await input.fill(message);
-  await input.press("Enter");
+  try {
+    await input.waitFor({ state: "visible", timeout: 10_000 });
+    await input.fill(message);
+    await input.press("Enter");
+  } catch {
+    return null;   // no composer -> nothing was sent; the caller decides what that means
+  }
   const resp = await posted;
   return resp ? (resp.request().postDataJSON() as Record<string, unknown>) : null;
 }

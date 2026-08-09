@@ -23,6 +23,8 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
+from rbac import can_deploy_to_production, get_user_global_role
 from crypto import decrypt_json
 from agent_config import build_config_snapshot
 from db import get_db
@@ -192,10 +194,24 @@ async def _auto_grant_tool_access(
     return created
 
 
-router = APIRouter(prefix="/api/v1/agents", tags=["deployments"])
+# AUTHENTICATED (R1, FR-11). Router-level: /{name}/deploy, /{name}/rollback,
+# GET /{name}/deployments and PATCH /{name}/deployments/{id} — production deploy
+# and rollback, the highest-blast-radius writes on this service. Authentication
+# only — no role logic, no team scoping, no new 403; an authenticated response is
+# byte-identical to pre-R1. suite-97 T-S97-011 pins the partition.
+router = APIRouter(
+    prefix="/api/v1/agents",
+    tags=["deployments"],
+    dependencies=[Depends(require_user)],
+)
 
 # ---------------------------------------------------------------------------
 # Global deployments router (separate prefix — used by deploy-controller)
+#
+# MIXED (R1, FR-11): protection is per-endpoint here, NOT router-level, because
+# deploy-controller polls and callbacks land on two of these routes with no JWT.
+# Protected: GET /workflows, GET /{id}/stats, GET /{id}/runs.
+# Exempt: GET /  and  PATCH /{deployment_id}  (see G-R1-2 comments below).
 # ---------------------------------------------------------------------------
 global_deployments_router = APIRouter(prefix="/api/v1/deployments", tags=["deployments"])
 
@@ -206,6 +222,12 @@ class DeploymentStatusUpdate(BaseModel):
     error_message: Optional[str] = None
 
 
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-2). In-cluster machine caller with no user
+# JWT: services/deploy-controller/main.py:70,122,176 — the reconcile loop lists
+# deployments on every pass. Closing this needs a service identity that
+# docs/design/identity-propagation-architecture.md owns (migrations 0080-0082); doing
+# it here would break control-plane reconciliation. Same posture as routers/internal.py:
+# cluster-internal, NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set.
 @global_deployments_router.get(
     "/",
     response_model=PaginatedResponse[DeploymentResponse],
@@ -238,6 +260,12 @@ async def list_all_deployments(
     return PaginatedResponse(items=items, total=total)
 
 
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-2). In-cluster machine caller with no user
+# JWT: services/deploy-controller/main.py:54 — the status callback that moves a
+# deployment to running/failed. Closing this needs a service identity that
+# docs/design/identity-propagation-architecture.md owns (migrations 0080-0082); doing
+# it here would break control-plane reconciliation. Same posture as routers/internal.py:
+# cluster-internal, NetworkPolicy-trusted. suite-97 T-S97-011 pins this exemption set.
 @global_deployments_router.patch(
     "/{deployment_id}",
     response_model=DeploymentResponse,
@@ -268,6 +296,7 @@ async def update_deployment_status(
     "/workflows",
     response_model=list[WorkflowDeploymentResponse],
     summary="List workflow deployments (filterable by status/environment)",
+    dependencies=[Depends(require_user)],
 )
 async def list_all_workflow_deployments(
     status_filter: Optional[str] = Query(None, alias="status"),
@@ -328,6 +357,7 @@ def _run_scope(deployment_id: uuid.UUID, context: str):
     "/{deployment_id}/stats",
     response_model=AgentStatsResponse,
     summary="Get run statistics for a single deployment (last 24h)",
+    dependencies=[Depends(require_user)],
 )
 async def get_deployment_stats(
     deployment_id: uuid.UUID,
@@ -378,6 +408,7 @@ async def get_deployment_stats(
     "/{deployment_id}/runs",
     response_model=list[AgentRunResponse],
     summary="List runs for a single deployment",
+    dependencies=[Depends(require_user)],
 )
 async def list_deployment_runs(
     deployment_id: uuid.UUID,
@@ -446,6 +477,7 @@ async def deploy_agent(
     name: str,
     body: DeploymentCreate,
     x_user_team: Optional[str] = Header(default=None, alias="X-User-Team"),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> DeploymentResponse:
     """Create a new Deployment for a specific agent version.
@@ -619,6 +651,36 @@ async def deploy_agent(
     # evaluated in the playground before it earns eval_passed. The eval gate now
     # lives on PUBLISH (see routers/agents.py publish_agent).
     if body.environment == "production":
+        # ── Gate 0: AUTHORIZATION — production deploy (R3, 2026-08-07) ────────────
+        # `can_deploy_to_production` has existed and been correct in rbac.py since
+        # R-phase 1 with ZERO callers (§1.3), on what the design doc calls "the single
+        # highest-consequence action on the platform". R1 made this route require a
+        # token; until now ANY authenticated user — including a `consumer` — could put
+        # any agent into production. platform-admin, or `agent-admin` on this artifact.
+        #
+        # Deliberately INSIDE the production branch, not on the route: sandbox stays
+        # contributor+ so an agent can be deployed and evaluated before it has earned
+        # anything. Guarding the whole route would have made the playground loop
+        # admin-only, which is a different product.
+        #
+        # Ordered BEFORE the eval gates on purpose. A 422 telling an unauthorized caller
+        # which versions have passed evaluation answers a question they were not
+        # entitled to ask.
+        if not await can_deploy_to_production(db, claims["sub"], agent.id):
+            role = await get_user_global_role(db, claims["sub"])
+            logger.warning(
+                "deploy_agent: DENY production sub=%s role=%s agent=%s",
+                claims["sub"], role, agent.name,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Deploying '{agent.name}' to production requires the 'agent-admin' "
+                    f"role on it, or platform-admin; you have '{role}' and no grant on "
+                    "this agent. Sandbox deploys are unaffected."
+                ),
+            )
+
         # Gate 3: eval gate — only passed versions may reach production
         if not version.eval_passed:
             raise HTTPException(

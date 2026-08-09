@@ -16,6 +16,16 @@
 #   T-S6-009 (plan T-S6-008) — AssetGrant row visible via GET /admin/grants
 #   T-S6-010 (plan T-S6-009) — DELETE grant → 204; audit row check → MANUAL (no audit API)
 #   T-S6-011 (plan T-S6-010) — Deploy blocked after grant revocation → MANUAL
+#   T-S6-013 — a CROSS-TEAM private tool blocks publish (422 tool_not_publishable_cross_team)
+#   T-S6-014 — an OWN-TEAM private tool does NOT block (the over-reach guard for 013)
+#   T-S6-015 — approve CASCADES: the own-team tool flips to published and the response says so
+#   T-S6-016 — an ALREADY-PUBLISHED cross-team tool does not block either
+#   T-S6-017 — the /review payload names EVERY bound tool, not just the cascade
+#   T-S6-018 — it flags EXACTLY the cascade set (asserted both ways)
+#   T-S6-019 — the payload is derived at REQUEST time: a tool bound after submit shows up
+#   T-S6-020 — the credential NAME is shown; the credential VALUE never appears
+#   T-S6-021 — a workflow request says review_supported=false WITH a reason, not a 404
+#   T-S6-022 — agent_class + image_tag + instructions are present
 #
 # API notes vs. test plan:
 #   - DELETE /admin/grants/{id} returns 204 (no body), not 200
@@ -39,6 +49,17 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: this suite drives four of the ten protected routers —
+#   • routers/admin.py       : /admin/publish-requests*, /admin/grants*
+#   • routers/agent_tools.py : POST /{name}/tools, DELETE /{name}/tools/{id}
+#   • routers/versions.py    : POST/GET/PATCH /{name}/versions*
+#   • routers/deployments.py : POST /{name}/deploy
+# all of which now require a real JWT. /api/v1/agents/*, /api/v1/tools/* and
+# /agents/{name}/publish are NOT among the ten and stay as they are.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 CRITICAL_TOOL_ID=""
 cleanup() {
   echo ""
@@ -46,14 +67,14 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   if [ -n "$CRITICAL_TOOL_ID" ]; then
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
@@ -65,7 +86,7 @@ try:
     for a in agents:
         if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
             try:
-                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE'), timeout=5)
+                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + a['name'], method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
             except Exception: pass
 except Exception: pass
 " 2>/dev/null || true
@@ -124,7 +145,7 @@ import urllib.request, urllib.error
 try:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
-        method='DELETE'
+        method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
     )
     urllib.request.urlopen(req)
 except: pass
@@ -139,7 +160,10 @@ req = urllib.request.Request(
         'team': 'platform',
         'description': 'Suite 6 publish lifecycle test'
     }).encode(),
-    headers={'Content-Type': 'application/json'},
+    # R2 (0.2.263): POST /agents/ requires a real JWT and contributor+. It used to take
+    # get_optional_user and fall back to an X-User-Sub header, so this call worked with
+    # no identity at all — see docs/bugs/anonymous-agent-creation-with-forged-attribution.md.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -185,7 +209,7 @@ req = urllib.request.Request(
         'risk_level': 'critical',
         'description': 'Suite 6 critical risk test tool'
     }).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -207,7 +231,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools',
     data=json.dumps({'tool_id': '${CRITICAL_TOOL_ID}'}).encode(),
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -221,8 +245,8 @@ import urllib.request, urllib.error, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 try:
     r = urllib.request.urlopen(req)
@@ -246,6 +270,7 @@ if [ -n "$CRITICAL_TOOL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools/${CRITICAL_TOOL_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)
@@ -259,7 +284,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/versions',
     data=json.dumps({'image_tag': 'registry.internal/s6-publish:v1', 'eval_passed': True, 'adversarial_eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except Exception as e:
@@ -271,8 +296,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'
@@ -304,9 +329,10 @@ echo ""
 echo "--- T-S6-004: Publish request appears in admin queue ---"
 run_test "T-S6-004 GET /admin/publish-requests?status=pending_review → ${AGENT_NAME} present" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/publish-requests?status=pending_review'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/publish-requests?status=pending_review',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 asset_ids = [str(i.get('asset_id', '')) for i in items]
@@ -326,7 +352,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/publish-requests/${PUBLISH_REQUEST_ID_1}/reject',
     data=json.dumps({'notes': 'Suite 6 test rejection'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -355,8 +381,8 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}/publish',
     data=json.dumps({}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user'},
-    method='POST'
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'dev-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
+    method='POST' 
 )
 r = urllib.request.urlopen(req)
 assert r.status == 202, f'expected 202 got {r.status}'
@@ -392,7 +418,7 @@ import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/publish-requests/${PUBLISH_REQUEST_ID_2}/approve',
     data=json.dumps({'grantee_teams': ['platform']}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-admin', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -429,9 +455,10 @@ echo "--- T-S6-009 (plan T-S6-008): AssetGrant row visible in admin grants ---"
 
 GRANT_ID=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 assert len(items) > 0, f'no grants found for asset_id=${AGENT_ID:0:8}'
@@ -462,6 +489,7 @@ if [ -n "$GRANT_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/admin/grants/${GRANT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='DELETE'
 )
 r = urllib.request.urlopen(req)
@@ -471,9 +499,10 @@ assert r.status == 204, f'expected 204 got {r.status}'
   # Verify grant is gone from the active list
   run_test "T-S6-010 GET /admin/grants?asset_id=${AGENT_ID:0:8}... → no active grants remain" "
 import urllib.request, json
-r = urllib.request.urlopen(
-    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}'
-)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/admin/grants?asset_id=${AGENT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
+))
 data = json.loads(r.read())
 items = data.get('items', [])
 active = [i for i in items if i.get('revoked_at') is None]
@@ -504,7 +533,7 @@ run_test "Cleanup: DELETE /agents/${AGENT_NAME} → 204 (soft-delete)" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/${AGENT_NAME}',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
@@ -515,8 +544,7 @@ if [ -n "$CRITICAL_TOOL_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/tools/${CRITICAL_TOOL_ID}',
-    method='DELETE'
-)
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 r = urllib.request.urlopen(req)
 assert r.status == 204, f'expected 204 got {r.status}'
 "
@@ -543,7 +571,7 @@ ag = json.dumps({'name': 'high-risk-gate-' + ts, 'team': 'platform',
                   'description': 'gate test', 'risk_level': 'high'}).encode()
 try:
     r = urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     agent = json.loads(r.read())
     agent_name = agent.get('name')
 except urllib.error.HTTPError as e:
@@ -560,7 +588,7 @@ v = json.dumps({'agent_name': agent_name, 'description': 'v1',
                  'adversarial_eval_passed': False}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
-    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    data=v, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 version = json.loads(r.read())
 version_id = str(version.get('id'))
 
@@ -570,7 +598,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -589,8 +617,9 @@ ts = '${TS6LG}'
 agent_name = 'high-risk-gate-' + ts
 
 # Get latest version id
-r = urllib.request.urlopen(
-    base + '/api/v1/agents/' + agent_name + '/versions', timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(
+    base + '/api/v1/agents/' + agent_name + '/versions',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 versions = json.loads(r.read())
 # versions may be a list or paginated — handle both
 items = versions if isinstance(versions, list) else versions.get('items', versions.get('data', []))
@@ -601,7 +630,7 @@ version_id = str(items[-1].get('id'))
 patch = json.dumps({'adversarial_eval_passed': True}).encode()
 req = urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions/' + version_id,
-    data=patch, headers={'Content-Type': 'application/json'}, method='PATCH')
+    data=patch, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 r = urllib.request.urlopen(req, timeout=5)
 assert r.getcode() in (200, 204), f'patch failed: {r.getcode()}'
 
@@ -611,7 +640,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     r2 = urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     print('DEPLOY_OK status=' + str(r2.getcode()))
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -634,7 +663,7 @@ agent_name = 'crit-tool-gate-' + ts
 ag = json.dumps({'name': agent_name, 'team': 'platform', 'description': 'gate test'}).encode()
 try:
     urllib.request.urlopen(urllib.request.Request(base + '/api/v1/agents/',
-        data=ag, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=ag, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 
@@ -644,7 +673,7 @@ v = json.dumps({'agent_name': agent_name, 'description': 'v1',
                  'adversarial_eval_passed': True}).encode()
 r = urllib.request.urlopen(urllib.request.Request(
     base + '/api/v1/agents/' + agent_name + '/versions',
-    data=v, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+    data=v, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
 version_id = str(json.loads(r.read()).get('id'))
 
 d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
@@ -652,7 +681,7 @@ d = json.dumps({'agent_name': agent_name, 'version_id': version_id,
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/' + agent_name + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 422 but deploy succeeded')
 except urllib.error.HTTPError as e:
     body = json.loads(e.read())
@@ -675,7 +704,7 @@ d = json.dumps({'agent_name': 'nonexistent-agent-' + ts, 'version_id': '00000000
 try:
     urllib.request.urlopen(urllib.request.Request(
         base + '/api/v1/agents/nonexistent-agent-' + ts + '/deploy',
-        data=d, headers={'Content-Type': 'application/json'}, method='POST'), timeout=5)
+        data=d, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'), timeout=5)
     raise AssertionError('Expected 4xx but got 200')
 except urllib.error.HTTPError as e:
     assert e.code in (404, 422), f'expected 404 or 422 got {e.code}'
@@ -697,7 +726,7 @@ try:
         if 'high-risk-gate-' in a.get('name','') or 'crit-tool-gate-' in a.get('name',''):
             req = urllib.request.Request(
                 'http://localhost:8000/api/v1/agents/' + a['name'],
-                method='DELETE')
+                method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
             try:
                 urllib.request.urlopen(req, timeout=5)
                 print('  deleted: ' + a['name'])
@@ -706,6 +735,567 @@ try:
 except Exception:
     pass
 " 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# T-S6-013..016 — Decision 47 option C: the tool publish CASCADE
+#
+# Publishing an agent publishes the agent's own-team unpublished tools along with it.
+# Tools have no publish endpoint of their own, by design — one review covers both.
+#
+# The four cases are the four ways this goes wrong:
+#   013  a cross-team private tool must BLOCK the request at submit time. Otherwise
+#        approving an agent becomes a way to publish another team's private draft, and
+#        the deciding reviewer never sees whose work they just exposed.
+#   014  an own-team private tool must NOT block. 013 alone is satisfied by refusing
+#        every publish that binds an unpublished tool, which would make the cascade
+#        unreachable and the feature pointless.
+#   015  approve actually flips it, and SAYS SO. A silent side effect inside an existing
+#        approval is the escalation Decision 47 exists to prevent, so the response has to
+#        name what cascaded.
+#   016  an already-published cross-team tool must NOT block. The guard is about
+#        publishing someone else's PRIVATE work; a tool that is already org-wide costs
+#        nothing to keep using, and blocking on it would make most real agents
+#        unpublishable.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-013..016: Decision 47 tool publish cascade ---"
+
+CASCADE_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + TOK}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    # Verdict precomputed — an escaped quote inside an f-string inside a single-quoted
+    # bash string is a SyntaxError, and this repo has paid for it twice (suite-42, suite-99).
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+AGENT = "s6c-cascade-" + TS
+OWN   = "s6c_own_" + TS          # platform, private  -> cascades
+FOREIGN = "s6c_foreign_" + TS    # operations, private -> BLOCKS
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+_, own = call("POST", "/tools/", {"name": OWN, "type": "http", "description": "cascade own",
+                                  "risk_level": "low", "http_method": "GET",
+                                  "http_url": "https://example.invalid/own"})
+# owner_team is honoured for a platform-admin only (Decision 46) — that is what this token is.
+_, foreign = call("POST", "/tools/", {"name": FOREIGN, "type": "http", "description": "cascade foreign",
+                                      "risk_level": "low", "http_method": "GET",
+                                      "http_url": "https://example.invalid/foreign",
+                                      "owner_team": "operations"})
+own_id, foreign_id = own.get("id"), foreign.get("id")
+
+# An ALREADY-published tool this team does not own. Taken from the live catalog rather
+# than minted: tools have no publish endpoint, and the ~192 pre-0080 rows are exactly the
+# shared-library population this case is about.
+pub_id = pub_name = None
+_, listing = call("GET", "/tools/?limit=200")
+for row in listing.get("items", []):
+    if row.get("publish_status") == "published" and row.get("owner_team") != "platform" \
+       and row.get("risk_level") in ("low", "medium") and row.get("status") == "active":
+        pub_id, pub_name = row.get("id"), row.get("name"); break
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "description": "suite 6 cascade probe"})
+call("POST", "/agents/" + AGENT + "/versions",
+     {"image_tag": "registry.internal/s6c:v1", "eval_passed": True, "adversarial_eval_passed": True})
+
+if sc != 201 or not own_id or not foreign_id:
+    for tid in ("T-S6-013", "T-S6-014", "T-S6-015", "T-S6-016"):
+        check(tid, False, "fixture failed: agent=%s own=%s foreign=%s" % (sc, own_id, foreign_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 013: a cross-team PRIVATE tool blocks the submission -----------------
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": foreign_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+detail = body.get("detail") or {}
+err = detail.get("error") if isinstance(detail, dict) else str(detail)
+named = FOREIGN in json.dumps(detail)
+check("T-S6-013", code == 422 and err == "tool_not_publishable_cross_team" and named,
+      "code=%s error=%s names_the_tool=%s" % (code, err, named))
+
+# --- 014: own-team private + already-published foreign do NOT block -------
+call("DELETE", "/agents/" + AGENT + "/tools/" + str(foreign_id))
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": own_id})
+if pub_id:
+    call("POST", "/agents/" + AGENT + "/tools", {"tool_id": pub_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = body.get("publish_request_id")
+check("T-S6-014", code == 202 and bool(pr_id),
+      "code=%s request=%s (own-team private tool must not block)" % (code, str(pr_id)[:8]))
+check("T-S6-016", code == 202 and bool(pub_id),
+      "an already-published cross-team tool (%s) did not block: code=%s" % (pub_name, code))
+
+# --- 015: approve cascades, and the response says what it published -------
+if pr_id:
+    code, body = call("POST", "/admin/publish-requests/" + pr_id + "/approve", {"grantee_teams": ["platform"]})
+    cascaded = body.get("cascaded_tools") or []
+    _, reread = call("GET", "/tools/?name=" + OWN + "&limit=1")
+    items = reread.get("items", [])
+    now_pub = items[0].get("publish_status") if items else "NOT_VISIBLE"
+    # The foreign one must be untouched — it was unbound before this publish, and nothing
+    # about approving this agent confers authority over a tool another team owns.
+    # (No apostrophe on purpose: this whole driver is inside a single-quoted bash string.)
+    _, fre = call("GET", "/tools/?name=" + FOREIGN + "&limit=1")
+    fitems = fre.get("items", [])
+    foreign_ps = fitems[0].get("publish_status") if fitems else "NOT_VISIBLE"
+    # The foreign tool must NOT be published. Asserted as "not published" rather than
+    # "== private" because this reader is a platform-admin in team `platform`, and
+    # catalog visibility is team-scoped with NO admin exemption by design
+    # (catalog_visibility.py) — so another team private tool reads as NOT_VISIBLE here.
+    # That is conclusive, not a weaker check: published implies visible to everyone, so
+    # NOT_VISIBLE proves it did not cascade. Pinning "private" instead would make this
+    # case fail the day the admin exemption question is settled either way.
+    check("T-S6-015",
+          code == 200 and OWN in cascaded and now_pub == "published"
+          and foreign_ps != "published",
+          "approve=%s cascaded=%s own_now=%s foreign_still=%s" % (code, cascaded, now_pub, foreign_ps))
+else:
+    check("T-S6-015", False, "no publish_request_id from 014 — nothing to approve")
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+for tid in (own_id, foreign_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-013 T-S6-014 T-S6-015 T-S6-016; do
+  line="$(echo "$CASCADE_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$CASCADE_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T-S6-017..022 — Decision 47 step D: the REVIEWER payload
+#
+# The approve button is the only place in the authorization stack where a HUMAN decides,
+# and until GET /admin/publish-requests/{id}/review existed that human was shown a name,
+# a submitter, a timestamp, a percentage and a colour. G-R3-11.
+#
+# The six cases are the six ways this goes wrong:
+#   017  the payload must name EVERY bound tool, not only the ones that cascade. "2 tools
+#        become org-wide" reads very differently from "this agent uses 4 tools, 2 of which
+#        become org-wide", and the second is the decision being made.
+#   018  it must flag EXACTLY the set the cascade would publish. Asserted BOTH WAYS on
+#        purpose: a payload that marked everything will_publish passes a naive "is the
+#        cascade listed" check, so the already-published tool must come back as
+#        already_published in the same assertion.
+#   019  the payload is derived AT REQUEST TIME from live rows, never snapshotted at
+#        submit. Proven by binding a cross-team private tool AFTER the request was
+#        submitted clean: a snapshot cannot see it, and the reviewer would approve
+#        blind to the one tool the cascade will refuse.
+#   020  the credential NAME is shown and the credential VALUE never appears anywhere in
+#        the payload (D-2). The name is the signal; the value is the leak.
+#   021  a workflow request answers review_supported=false WITH A REASON — not a 404 and
+#        not an agent-shaped payload with an empty tool list, which would read as "this
+#        workflow has no tools" (D-3).
+#   022  agent_class and image_tag are present. `daemon` is exempt from OPA identity
+#        floor and an sdk image is user-built; neither has ever been on the queue row.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-017..022: Decision 47 step D reviewer payload ---"
+
+REVIEW_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + TOK}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+IDS = ("T-S6-017", "T-S6-018", "T-S6-019", "T-S6-020", "T-S6-021", "T-S6-022")
+AGENT   = "s6d-review-" + TS
+OWN     = "s6d_own_" + TS        # platform, private  -> will_publish
+FOREIGN = "s6d_foreign_" + TS    # operations, private -> blocked, bound AFTER submit
+CRED    = "s6d-cred-" + TS
+SECRET_VALUE = "sk-do-not-leak-" + TS
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+_, cred = call("POST", "/auth-configs/", {"name": CRED, "type": "api_key",
+                                          "credentials": {"apikey": SECRET_VALUE},
+                                          "owner_team": "platform"})
+cred_id = cred.get("id")
+_, own = call("POST", "/tools/", {"name": OWN, "type": "http", "description": "review own",
+                                  "risk_level": "high", "http_method": "POST",
+                                  "http_url": "https://payments.example.invalid/refund",
+                                  "side_effecting": True,
+                                  "auth_config_id": cred_id})
+_, foreign = call("POST", "/tools/", {"name": FOREIGN, "type": "http", "description": "review foreign",
+                                      "risk_level": "low", "http_method": "GET",
+                                      "http_url": "https://example.invalid/foreign",
+                                      "owner_team": "operations"})
+own_id, foreign_id = own.get("id"), foreign.get("id")
+
+pub_id = pub_name = None
+_, listing = call("GET", "/tools/?limit=200")
+for row in listing.get("items", []):
+    if row.get("publish_status") == "published" and row.get("owner_team") != "platform" \
+       and row.get("risk_level") in ("low", "medium") and row.get("status") == "active":
+        pub_id, pub_name = row.get("id"), row.get("name"); break
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "agent_class": "daemon",
+                                  "description": "suite 6 reviewer probe",
+                                  "metadata": {"instructions": "REVIEW-PROBE-INSTRUCTIONS"}})
+_, ver = call("POST", "/agents/" + AGENT + "/versions",
+              {"image_tag": "registry.internal/s6d:v7", "eval_passed": True,
+               "adversarial_eval_passed": True})
+
+if sc != 201 or not own_id or not foreign_id or not cred_id:
+    for tid in IDS:
+        check(tid, False, "fixture failed: agent=%s own=%s foreign=%s cred=%s"
+              % (sc, own_id, foreign_id, cred_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+# Submit CLEAN: own-team private + an already-published foreign. Both are publishable, so
+# the submit guard lets it through and we get a pending request to review.
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": own_id})
+if pub_id:
+    call("POST", "/agents/" + AGENT + "/tools", {"tool_id": pub_id})
+code, body = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = body.get("publish_request_id")
+
+if not pr_id:
+    for tid in IDS:
+        check(tid, False, "no publish_request_id (publish -> %s %s)" % (code, str(body)[:120]))
+    call("DELETE", "/agents/" + AGENT)
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 017 / 018 / 020 / 022 on the clean payload ---------------------------
+rc, rev = call("GET", "/admin/publish-requests/" + pr_id + "/review")
+tools = rev.get("tools") or []
+by_name = {t.get("name"): t for t in tools}
+expected = {OWN} | ({pub_name} if pub_name else set())
+check("T-S6-017", rc == 200 and expected.issubset(set(by_name)),
+      "code=%s payload_tools=%s expected=%s" % (rc, sorted(by_name), sorted(expected)))
+
+own_disp = (by_name.get(OWN) or {}).get("disposition")
+pub_disp = (by_name.get(pub_name) or {}).get("disposition") if pub_name else "already_published"
+cascade = set((rev.get("cascade") or {}).get("will_publish") or [])
+# BOTH WAYS: the own tool cascades AND the published one does not. Either half alone is
+# satisfied by a payload that flags everything.
+check("T-S6-018",
+      own_disp == "will_publish" and pub_disp == "already_published" and cascade == {OWN},
+      "own=%s published(%s)=%s cascade=%s" % (own_disp, pub_name, pub_disp, sorted(cascade)))
+
+blob = json.dumps(rev)
+check("T-S6-020",
+      (by_name.get(OWN) or {}).get("auth_config_name") == CRED and SECRET_VALUE not in blob,
+      "cred_name=%s value_leaked=%s"
+      % ((by_name.get(OWN) or {}).get("auth_config_name"), SECRET_VALUE in blob))
+
+agent_blk = rev.get("agent") or {}
+ver_blk = rev.get("version") or {}
+check("T-S6-022",
+      agent_blk.get("agent_class") == "daemon"
+      and ver_blk.get("image_tag") == "registry.internal/s6d:v7"
+      and agent_blk.get("instructions") == "REVIEW-PROBE-INSTRUCTIONS",
+      "class=%s image=%s instructions=%s"
+      % (agent_blk.get("agent_class"), ver_blk.get("image_tag"),
+         (agent_blk.get("instructions") or "")[:32]))
+
+# --- 019: bind a cross-team private tool AFTER submit ---------------------
+# A payload snapshotted at submit CANNOT see this. The reviewer would then approve
+# blind to the one tool the cascade is about to refuse.
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": foreign_id})
+rc2, rev2 = call("GET", "/admin/publish-requests/" + pr_id + "/review")
+by2 = {t.get("name"): t for t in (rev2.get("tools") or [])}
+blocked = {b.get("name"): b.get("owner_team") for b in ((rev2.get("cascade") or {}).get("blocked") or [])}
+check("T-S6-019",
+      rc2 == 200 and (by2.get(FOREIGN) or {}).get("disposition") == "blocked"
+      and blocked.get(FOREIGN) == "operations",
+      "code=%s disposition=%s blocked=%s" % (rc2, (by2.get(FOREIGN) or {}).get("disposition"), blocked))
+
+# --- 021: a WORKFLOW request is explicitly unreviewable, not silently empty
+# NOTE the router prefix is /api/v1/workflows (not /composite-workflows) and both the
+# publish and delete routes key on the workflow UUID, not its name. Checked in
+# routers/composite_workflows.py rather than assumed.
+WF = "s6d-wf-" + TS
+wsc, wf = call("POST", "/workflows", {"name": WF, "team": "platform",
+                                      "description": "suite 6 reviewer probe wf"})
+wf_id = wf.get("id") if wsc in (200, 201) else None
+wf_pr = None
+wsc2 = None
+if wf_id:
+    # publish_workflow 409s with "No version exists" unless a version is present, and
+    # 403s unless that version passed eval. Measured, not assumed: the first cut of this
+    # case created only the workflow and reported "proved nothing" — correctly, which is
+    # the point of that branch existing.
+    wsc2, _ = call("POST", "/workflows/" + str(wf_id) + "/versions", {"eval_passed": True})
+    _, wb = call("POST", "/workflows/" + str(wf_id) + "/publish", {})
+    wf_pr = wb.get("publish_request_id")
+if wf_pr:
+    rc3, rev3 = call("GET", "/admin/publish-requests/" + wf_pr + "/review")
+    check("T-S6-021",
+          rc3 == 200 and rev3.get("review_supported") is False
+          and bool(rev3.get("unsupported_reason")) and "tools" not in rev3,
+          "code=%s supported=%s reason=%s has_tools_key=%s"
+          % (rc3, rev3.get("review_supported"), (rev3.get("unsupported_reason") or "")[:60],
+             "tools" in rev3))
+else:
+    check("T-S6-021", False,
+          "could not create a workflow publish request (wf=%s id=%s version=%s) — case proved nothing"
+          % (wsc, wf_id, wsc2))
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+if wf_id: call("DELETE", "/workflows/" + str(wf_id))
+for tid in (own_id, foreign_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+if cred_id: call("DELETE", "/auth-configs/" + str(cred_id))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-017 T-S6-018 T-S6-019 T-S6-020 T-S6-021 T-S6-022; do
+  line="$(echo "$REVIEW_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$REVIEW_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# T-S6-023..029 — Decision 47 #4: owner-initiated UNPUBLISH (the reverse)
+#
+# The forward direction (013..016) is a cascade a reviewer approves. The reverse is one
+# owner acting on one row, and the two are deliberately NOT symmetric. These seven cases
+# are the ways that asymmetry gets broken:
+#
+#   023  it works, and it SURVIVES A RELOAD. The optimistic response is not the assertion;
+#        the round trip is.
+#   024  a second unpublish is 409, not a silent 200. A UI offering the control on a
+#        private row is a bug, and a quiet success hides it.
+#   025  authority is checked BEFORE state: an unauthorized caller gets 403 on a PRIVATE
+#        tool, not the 409 that would tell them what state it is in.
+#   026  the OWNING-TEAM arm, exercised by someone who did not create the tool. Without
+#        it a tool becomes unmaintainable the day its creator leaves.
+#   027  it does NOT cascade. The agent stays published and the binding survives —
+#        unpublish removes discoverability, never capability.
+#   028  the courtesy list has a real source. The UI names the published agents still
+#        bound; if GET /tools/{id}/agents could not answer that, the dialog would be
+#        showing a number it invented.
+#   029  there is still no way to publish a tool directly. If one appeared, every guard
+#        013..016 proves would have a second door with no reviewer behind it.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-023..029: Decision 47 owner-initiated unpublish ---"
+
+# Late in a long suite: the 300s token may already be dead (lib/e2e-auth.sh).
+e2e_refresh_token "$NAMESPACE" "$API_POD"
+
+# A CONTRIBUTOR in team `platform` — not a platform-admin, so the admin arm cannot mask a
+# broken owning-team arm in 026, and not the creator of anything here.
+UNPUB_PERSONA_TOK="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "e2e-unpub-member" "contributor")" || UNPUB_PERSONA_TOK=""
+
+UNPUB_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" PTOK="${UNPUB_PERSONA_TOK}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+PTOK = os.environ.get("PTOK") or ""
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None, tok=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + (tok or TOK)}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+AGENT = "s6u-unpub-" + TS
+TOOL_A = "s6u_a_" + TS      # platform-owned, cascades, unpublished by its CREATOR
+TOOL_B = "s6u_b_" + TS      # platform-owned, cascades, unpublished by a TEAMMATE
+TOOL_C = "s6u_c_" + TS      # operations-owned, stays private, used for the 403
+
+IDS = ["T-S6-023", "T-S6-024", "T-S6-025", "T-S6-026", "T-S6-027", "T-S6-028", "T-S6-029"]
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+def mk(name, team=None):
+    body = {"name": name, "type": "http", "description": "unpublish probe",
+            "risk_level": "low", "http_method": "GET",
+            "http_url": "https://example.invalid/" + name}
+    if team: body["owner_team"] = team
+    _, r = call("POST", "/tools/", body)
+    return r.get("id")
+
+a_id, b_id, c_id = mk(TOOL_A), mk(TOOL_B), mk(TOOL_C, "operations")
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "description": "suite 6 unpublish probe"})
+if sc != 201 or not (a_id and b_id and c_id):
+    for tid in IDS:
+        check(tid, False, "fixture failed: agent=%s a=%s b=%s c=%s" % (sc, a_id, b_id, c_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": a_id})
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": b_id})
+call("POST", "/agents/" + AGENT + "/versions",
+     {"image_tag": "registry.internal/s6u:v1", "eval_passed": True, "adversarial_eval_passed": True})
+_, pub = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = pub.get("publish_request_id")
+apr = 0
+if pr_id:
+    apr, _ = call("POST", "/admin/publish-requests/" + pr_id + "/approve", {"grantee_teams": ["platform"]})
+
+# The whole block is about taking something OUT of the catalog. If the cascade never put
+# it in, every case below would pass vacuously — so gate on it.
+_, a_now = call("GET", "/tools/" + str(a_id))
+_, b_now = call("GET", "/tools/" + str(b_id))
+if a_now.get("publish_status") != "published" or b_now.get("publish_status") != "published":
+    for tid in IDS:
+        check(tid, False, "cascade did not publish the fixtures (approve=%s a=%s b=%s) "
+                          "— cases proved nothing"
+              % (apr, a_now.get("publish_status"), b_now.get("publish_status")))
+    call("DELETE", "/agents/" + AGENT)
+    for tid in (a_id, b_id, c_id): call("DELETE", "/tools/" + str(tid))
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 028: the courtesy list has a real source, BEFORE anything changes ----
+# Ordered first because this is what the dialog reads at the moment the user opens it.
+_, bound = call("GET", "/tools/" + str(a_id) + "/agents")
+names = [i.get("name") for i in bound.get("items", [])]
+pubd = [i.get("name") for i in bound.get("items", []) if i.get("publish_status") == "published"]
+check("T-S6-028", AGENT in names and AGENT in pubd,
+      "bound=%s published_bound=%s (the dialog names these; a count with no source is invented)"
+      % (names, pubd))
+
+# --- 023: unpublish, then RELOAD FROM THE BACKEND -------------------------
+code, body = call("POST", "/tools/" + str(a_id) + "/unpublish")
+_, reread = call("GET", "/tools/" + str(a_id))
+check("T-S6-023", code == 200 and body.get("publish_status") == "private"
+      and reread.get("publish_status") == "private",
+      "code=%s response=%s reread=%s" % (code, body.get("publish_status"), reread.get("publish_status")))
+
+# --- 024: a second unpublish is a CONFLICT, not a quiet success -----------
+code, body = call("POST", "/tools/" + str(a_id) + "/unpublish")
+det = body.get("detail") or {}
+err = det.get("error") if isinstance(det, dict) else str(det)
+check("T-S6-024", code == 409 and err == "tool_not_published",
+      "code=%s error=%s" % (code, err))
+
+# --- 027: NO cascade — the agent and the binding are untouched ------------
+_, ag = call("GET", "/agents/" + AGENT)
+_, ag_tools = call("GET", "/agents/" + AGENT + "/tools")
+still_bound = any(t.get("id") == a_id or t.get("name") == TOOL_A
+                  for t in (ag_tools.get("items", []) if isinstance(ag_tools, dict) else ag_tools))
+check("T-S6-027", ag.get("publish_status") == "published" and still_bound,
+      "agent_publish_status=%s tool_still_bound=%s (unpublish removes discoverability, "
+      "never capability)" % (ag.get("publish_status"), still_bound))
+
+# --- 025 / 026: the two persona arms --------------------------------------
+if not PTOK:
+    check("T-S6-025", False, "no persona token — case proved nothing")
+    check("T-S6-026", False, "no persona token — case proved nothing")
+else:
+    # 025 — TOOL_C is PRIVATE and owned by another team. A caller with no authority must
+    # get 403, not the 409 that would disclose its state.
+    code, body = call("POST", "/tools/" + str(c_id) + "/unpublish", tok=PTOK)
+    check("T-S6-025", code == 403,
+          "code=%s (403 must win over 409: authority before state) detail=%s"
+          % (code, str(body.get("detail"))[:120]))
+
+    # 026 — same caller, a tool their TEAM owns but they did not create.
+    code, body = call("POST", "/tools/" + str(b_id) + "/unpublish", tok=PTOK)
+    _, b_re = call("GET", "/tools/" + str(b_id))
+    check("T-S6-026", code == 200 and b_re.get("publish_status") == "private",
+          "code=%s reread=%s (owning-team arm, caller is NOT the creator)"
+          % (code, b_re.get("publish_status")))
+
+# --- 029: still no direct publish path for a tool -------------------------
+code, _ = call("POST", "/tools/" + str(a_id) + "/publish", {})
+check("T-S6-029", code in (404, 405),
+      "code=%s (Decision 47 option C: a tool re-enters the catalog only by riding along "
+      "with an agent a reviewer approved)" % code)
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+for tid in (a_id, b_id, c_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-023 T-S6-024 T-S6-025 T-S6-026 T-S6-027 T-S6-028 T-S6-029; do
+  line="$(echo "$UNPUB_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$UNPUB_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Summary

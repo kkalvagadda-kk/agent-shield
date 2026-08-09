@@ -44,6 +44,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# Gated routes (agents/tools/skills) need a real JWT since R1/R2/R3 + G-R3-6, and the
+# catalog READS since 0.2.271. This suite authenticated with X-User-Sub headers alone and
+# has been silently 401ing; scripts/check-e2e-auth-hygiene.sh now catches that shape.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 80: Multi-KB agent bindings + derived knowledge_search ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
@@ -69,7 +76,7 @@ tally() {
 }
 
 BLOCK=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
 import os, time, httpx
 
 SUFFIX = os.environ["SUFFIX"]
@@ -77,7 +84,8 @@ BASE = "http://localhost:8000/api/v1"
 
 TEAM = "platform"
 USER = f"s80-user-{SUFFIX}"
-HDR = {"X-User-Sub": USER, "X-User-Team": TEAM}
+HDR = {"X-User-Sub": USER, "X-User-Team": TEAM,
+       "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 
 FACT1 = "The Vantexa satellite reached orbit on 2033-08-19."
 FACT2 = "The Brellium reactor achieved ignition on 2035-02-27."

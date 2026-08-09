@@ -31,6 +31,13 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agents..."
@@ -38,7 +45,7 @@ cleanup() {
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${a}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${a}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -59,11 +66,11 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT_NAME}', 'team': 'platform',
     'description': 'Memory test agent', 'agent_type': 'declarative',
     'memory_enabled': True,
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'setup mem agent failed: {r.status_code} {r.text}'
 r2 = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${NOMEM_AGENT}', 'team': 'platform', 'agent_type': 'declarative',
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r2.status_code == 201, f'setup nomem agent failed: {r2.status_code} {r2.text}'
 print('OK')
 " || { echo "FATAL: setup failed"; exit 1; }
@@ -155,7 +162,7 @@ print('OK')
 echo "--- T-S25-005: Delete thread ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.delete('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory/${THREAD_ID}')
+r = httpx.delete('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory/${THREAD_ID}', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 204:
     print(f'FAIL: expected 204, got {r.status_code}: {r.text}'); sys.exit(1)
 r2 = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory', params={'thread_id': '${THREAD_ID}'})
@@ -175,7 +182,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory', json=
 })
 if r.status_code != 201:
     print(f'FAIL: seed for clear failed: {r.status_code} {r.text}'); sys.exit(1)
-r2 = httpx.delete('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory/clear')
+r2 = httpx.delete('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory/clear', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r2.status_code != 204:
     print(f'FAIL: expected 204, got {r2.status_code}: {r2.text}'); sys.exit(1)
 r3 = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/memory')

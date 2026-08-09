@@ -30,6 +30,16 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST/PATCH /agents/{name}/versions* and POST /agents/{name}/deploy now
+# require a real JWT. Deliberately NOT touched here:
+#   • GET /api/v1/versions/{id}  — versions_global_router, EXEMPT (G-R1-3)
+#   • /agents/{name}/publish, /agents/, /playground/datasets, /playground/eval-runs
+#     — none of those routers are in R1's ten.
+# Call e2e_set_token BARE — a command substitution swallows its abort and every
+# later call 401s with nothing naming the cause (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
@@ -37,7 +47,7 @@ cleanup() {
 import urllib.request
 for name in ['eval-gate-s17-agent', 'eval-gate-s17-noversion', 'eval-gate-s17-risky', 'eval-gate-s17-auto', 'eval-gate-s17-fail']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
@@ -85,7 +95,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-agent', 'team': 'platform', 'description': 's17 eval gate'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -93,7 +103,7 @@ except urllib.error.HTTPError as e:
 # create a version WITHOUT eval_passed (defaults false)
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/versions',
     data=json.dumps({'image_tag': 'registry.internal/s17:v1'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 r = urllib.request.urlopen(req)
 d = json.loads(r.read())
 assert d.get('eval_passed') in (False, None), f'version should default eval_passed false: {d.get(\"eval_passed\")}'
@@ -111,7 +121,7 @@ if [ -n "$VERSION_ID" ]; then
 import urllib.request, json
 body = json.dumps({'version_id': '${VERSION_ID}', 'environment': 'sandbox'}).encode()
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/eval-gate-s17-agent/deploy',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 r = urllib.request.urlopen(req, timeout=10)
 assert r.status == 201, f'expected 201 got {r.status}'
 d = json.loads(r.read())
@@ -133,7 +143,7 @@ if [ -n "$VERSION_ID" ]; then
 import urllib.request, json, urllib.error
 body = json.dumps({'version_id': '${VERSION_ID}', 'environment': 'production'}).encode()
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/eval-gate-s17-agent/deploy',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST')
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req, timeout=10)
     raise AssertionError('expected 422, got 2xx')
@@ -153,7 +163,7 @@ echo "--- T-S17-003: publish blocked (eval not passed) ---"
 run_test "T-S17-003 POST /agents/eval-gate-s17-agent/publish → 422 eval_not_passed" "
 import urllib.request, json, urllib.error
 req = urllib.request.Request('http://localhost:8000/api/v1/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -176,12 +186,12 @@ base = 'http://localhost:8000/api/v1'
 # PATCH the version to eval_passed=true
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/versions/${VERSION_ID}',
     data=json.dumps({'eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json'}, method='PATCH')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'patch expected 200 got {r.status}'
 # now publish
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'publish expected 202 got {r.status}'
 d = json.loads(r.read())
@@ -208,13 +218,13 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-noversion', 'team': 'platform', 'description': 'no versions'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/eval-gate-s17-noversion/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -239,7 +249,7 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-risky', 'team': 'platform', 'description': 'risky'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
@@ -249,11 +259,11 @@ vbody = {'image_tag': 'registry.internal/s17risky:v1',
          'eval_passed': True, 'adversarial_eval_passed': False,
          'tools': [{'name': 'issue_refund', 'risk': 'high'}]}
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions',
-    data=json.dumps(vbody).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps(vbody).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 vid = json.loads(urllib.request.urlopen(req).read())['id']
 # publish blocked on adversarial
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 try:
     urllib.request.urlopen(req, timeout=5)
     raise AssertionError('expected 422, got 2xx')
@@ -264,10 +274,10 @@ except urllib.error.HTTPError as e:
 # now pass adversarial and re-publish
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/versions/' + vid,
     data=json.dumps({'adversarial_eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json'}, method='PATCH')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 urllib.request.urlopen(req, timeout=5)
 req = urllib.request.Request(base + '/agents/eval-gate-s17-risky/publish',
-    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json'}, method='POST')
+    data=json.dumps({}).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 202, f'expected 202 after adversarial passed got {r.status}'
 print('adversarial gate: 422 then 202 after passing')
@@ -283,13 +293,13 @@ import urllib.request, json
 base = 'http://localhost:8000/api/v1'
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/versions',
     data=json.dumps({'image_tag': 'registry.internal/s17:v9'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 d = json.loads(urllib.request.urlopen(req).read())
 assert d.get('eval_passed') in (False, None), f'new version should not force eval_passed: {d.get(\"eval_passed\")}'
 vid = d['id']
 req = urllib.request.Request(base + '/agents/eval-gate-s17-agent/deploy',
     data=json.dumps({'version_id': vid, 'environment': 'sandbox'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 r = urllib.request.urlopen(req, timeout=10)
 assert r.status == 201, f'sandbox deploy expected 201 got {r.status}'
 print('Studio flow: version created without eval, sandbox-deployed (201)')
@@ -310,14 +320,14 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-auto', 'team': 'platform', 'description': 'auto eval_passed test'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/eval-gate-s17-auto/versions',
     data=json.dumps({'image_tag': 'registry.internal/s17auto:v1'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 ver = json.loads(urllib.request.urlopen(req).read())
 ver_id = ver['id']
 assert ver.get('eval_passed') in (False, None), f'version should start with eval_passed=false: {ver.get(\"eval_passed\")}'
@@ -366,14 +376,14 @@ except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': 'eval-gate-s17-fail', 'team': 'platform', 'description': 'failing score test'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/eval-gate-s17-fail/versions',
     data=json.dumps({'image_tag': 'registry.internal/s17fail:v1'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 ver = json.loads(urllib.request.urlopen(req).read())
 ver_id = ver['id']
 # Create a dataset
@@ -413,7 +423,7 @@ for ag in eval-gate-s17-agent eval-gate-s17-noversion eval-gate-s17-risky eval-g
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, urllib.error
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/$ag', method='DELETE'))
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/$ag', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
     print('deleted $ag')
 except Exception:
     pass
@@ -460,30 +470,30 @@ import urllib.request, json, urllib.error
 base = 'http://localhost:8000/api/v1'
 name = 's17-dup-publish'
 try:
-    urllib.request.urlopen(urllib.request.Request(base + '/agents/' + name, method='DELETE'))
+    urllib.request.urlopen(urllib.request.Request(base + '/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
 except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
     data=json.dumps({'name': name, 'team': 'platform', 'description': 'double publish'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     urllib.request.urlopen(req)
 except urllib.error.HTTPError as e:
     if e.code != 409: raise
 req = urllib.request.Request(base + '/agents/' + name + '/versions',
     data=json.dumps({'image_tag': 'registry.internal/s17dup:v1'}).encode(),
-    headers={'Content-Type': 'application/json'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 ver = json.loads(urllib.request.urlopen(req).read())
 # Clear the eval gate so publish is admissible at all.
 req = urllib.request.Request(base + '/agents/' + name + '/versions/' + ver['id'],
     data=json.dumps({'eval_passed': True}).encode(),
-    headers={'Content-Type': 'application/json'}, method='PATCH')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='PATCH')
 urllib.request.urlopen(req)
 
 def publish():
     r = urllib.request.Request(base + '/agents/' + name + '/publish',
         data=json.dumps({}).encode(),
-        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+        headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST' )
     return json.loads(urllib.request.urlopen(r).read())
 
 first = publish()

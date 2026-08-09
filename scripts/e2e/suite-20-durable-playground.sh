@@ -29,13 +29,20 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agents..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${DURABLE_AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -61,7 +68,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'agent_type': 'declarative',
     'execution_shape': 'durable',
     'metadata': {'instructions': 'durable playground test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create returned {r.status_code}: {r.text}')
     sys.exit(1)

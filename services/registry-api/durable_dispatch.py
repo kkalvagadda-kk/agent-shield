@@ -15,6 +15,8 @@ import os
 
 import httpx
 
+from run_context import RCT_HEADER
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,6 +49,7 @@ async def dispatch_durable_run(
     runner_url: str | None = None,
     timeout_s: float = 10.0,
     eval_mode: str = "live",
+    rct: str | None = None,
 ) -> tuple[bool, str | None]:
     """POST a durable run to the declarative-runner /run. Returns (accepted, error).
 
@@ -62,6 +65,17 @@ async def dispatch_durable_run(
     is a body-shaped POST; `auto_approve`, which threads the same shape through the
     /chat/stream path, rides a header there for the same reason. Defaulting to 'live'
     here means a caller that does not ask for record mode never gets it.
+
+    ``rct`` (identity P1) — the signed RunContext naming the human this run acts for. ONE
+    kwarg here covers all three durable callers (`playground.py` sandbox,
+    `workflow_orchestrator.py` workflow member, `internal.py` production), which is why
+    threading identity through this function is the whole of the durable slice.
+
+    It rides a HEADER, not the body: every hop downstream of the runner forwards it the
+    same way, and a body field would have to be re-marshalled at each one. Absent is
+    survivable and stays that way — the runner sets no user context, OPA sees no user, and
+    a `user_delegated` agent is denied `missing_user_identity`. Fail-closed, and the same
+    outcome as before P1, so a caller that has not been taught to mint one is no worse off.
     """
     url = f"{(runner_url or default_runner_url()).rstrip('/')}/run"
     body = {
@@ -71,9 +85,12 @@ async def dispatch_durable_run(
         "callback_url": callback_url,
         "eval_mode": eval_mode,
     }
+    headers: dict[str, str] = {}
+    if rct:
+        headers[RCT_HEADER] = rct
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            resp = await client.post(url, json=body)
+            resp = await client.post(url, json=body, headers=headers)
         if resp.status_code in (200, 201, 202):
             logger.info(
                 "dispatch_durable_run: accepted run=%s agent=%s -> %s", run_id, agent_name, url

@@ -36,13 +36,20 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/versions now requires a real JWT. The seed block below
+# swallows its own errors (`2>/dev/null || true`), so an unauthenticated 401 there would
+# surface much later as "no version row" — exactly the misdirected failure lib/e2e-auth.sh
+# was written about. Call e2e_set_token BARE, never in a command substitution.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
 for n in ('s46-pin-a', 's46-pin-b'):
-    try: httpx.delete(f'http://localhost:8000/api/v1/agents/{n}', timeout=5)
+    try: httpx.delete(f'http://localhost:8000/api/v1/agents/{n}', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, timeout=5)
     except Exception: pass
 " 2>/dev/null || true
 }
@@ -66,8 +73,9 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx
 for n in ('s46-pin-a', 's46-pin-b'):
     httpx.post('http://localhost:8000/api/v1/agents/',
-        json={'name': n, 'team': 'platform', 'agent_type': 'declarative'}, timeout=5)
+        json={'name': n, 'team': 'platform', 'agent_type': 'declarative'}, timeout=5, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     httpx.post(f'http://localhost:8000/api/v1/agents/{n}/versions',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
         json={'eval_passed': True, 'adversarial_eval_passed': True}, timeout=5)
 " 2>/dev/null || true
 

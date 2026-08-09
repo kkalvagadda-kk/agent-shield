@@ -44,10 +44,50 @@ from everything above and is **not** owned here. Current platform-wide truth:
 | Tool kind | Credential the tool receives | Who validates | Status |
 |---|---|---|---|
 | External MCP server, `external_auth_mode="oauth"` | the end user's **own upstream OAuth access token**, resolved per-request from `user_sub` | the external server (e.g. GitHub), against that user's scopes | **BUILT** — `mcp_oauth_grants` (`0074`), `routers/internal_mcp.py`, `suite-87`; per-request-user fix in SDK `0.2.7` |
-| Internal MCP server, `identity_mode="service_identity"` | a **Keycloak client-credentials token, audienced to that server** — asserts *the platform*, not any human | the internal server (a real, validatable JWT) | **BUILT** — `mcp-proxy/keycloak_client.py:80` |
+| Internal MCP server, `identity_mode="service_identity"` | ⚠️ **NOT audienced — see the correction below.** A Keycloak client-credentials token asserting *the platform*, but the `audience` parameter is silently ignored, so every server receives the SAME unscoped token | the internal server — which cannot tell WHICH server the token was minted for | **CODE PATH BUILT, PROPERTY NOT DELIVERED** — `mcp-proxy/keycloak_client.py:80` |
 | Internal MCP server, `identity_mode="on_behalf_of"` | a token minted **for** `user_sub`, audienced to that server (impersonation exchange) | the internal server — **assumed, not contracted** | **STUB THAT FAILS CLOSED**, blocked on this doc's Phase 0–2 — Decision 29 |
 | Internal MCP server, `identity_mode="none"` | static per-server credentials | the server, if it bothers | **BUILT** (Phase 1) |
 | HTTP / Python platform tools | none | n/a — governance is OPA-side only | by design |
+
+> ### ⚠️ CORRECTION 2026-08-04 — `service_identity` does NOT produce a scoped token
+>
+> The row above previously read "**BUILT**". That was **wrong, and it was my error** — asserted
+> from reading `mint_service_account_token(audience)` and seeing an `audience` argument, without
+> testing what Keycloak does with it.
+>
+> `mcp-proxy/keycloak_client.py:80` sends `audience` on a **`grant_type=client_credentials`**
+> request. `audience` is RFC 8693's parameter; Keycloak honours it on
+> `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, **not** on client-credentials.
+> It is silently ignored. Verified against the live realm on `test-cluster-964-10086`:
+>
+> | request | HTTP | `aud` in the issued token |
+> |---|---|---|
+> | no `audience` param | 200 | `account` |
+> | `audience=totally-nonexistent-tool-xyz` | 200 | `account` |
+> | `audience=langfuse` (a **real** client) | 200 | `account` |
+>
+> Identical every time. **This is not token exchange — it is a plain service-account grant with an
+> ignored hint**, and `_token_cache` keyed by audience is caching one token under many keys.
+>
+> **Consequence if it were used:** every upstream MCP server receives the *same* unscoped platform
+> token. A server can tell "this is the platform" but not which server it was minted for, and the
+> token replays against any other server. The three-gate model in §4.8.1 assumes a scoped token at
+> gate 3; that assumption does not hold.
+>
+> **Masked today:** all 13 registered `mcp_servers` rows are `identity_mode="none"` /
+> `identity_audience=NULL`, and `MCP_PROXY_KEYCLOAK_CLIENT_ID` has no matching client on the realm
+> — so a mint would fail before it could mislead anyone. Nothing is exploitable right now; the
+> design claim was simply false.
+>
+> **What it takes:** (1) MCP-server registration must create or verify a Keycloak client for the
+> target and an audience-mapped scope on the proxy's client — that step does not exist at all
+> (`registry-api/keycloak_client.py` has only `/users` operations, and `identity_audience` is
+> unvalidated operator free text, `mcp_secrets.py:118`); (2) switch the grant to
+> `urn:ietf:params:oauth:grant-type:token-exchange`; (3) fail closed on an unregistered audience —
+> today the code cannot even detect one.
+>
+> Sharpens **OQ-5**: a server validating this token sees `aud: account` and has no basis to accept
+> or reject it. Postmortem: `docs/bugs/mcp-service-identity-token-is-not-audienced.md`.
 
 This doc supplies the `user_sub` those flows consume; it does not mint, scope, or validate
 tool-facing credentials. **Full treatment — the implemented matrix, the three-gate model, the
@@ -79,7 +119,7 @@ so the table stands unchanged in substance; the deltas are locations, not status
 **Two corrections to this document's own numbers:** latest Alembic migration is **`0078`** (not
 `0050`) and the latest e2e suite is **`suite-96`** (not `suite-44`). §5 and §6 are renumbered
 accordingly; the allocation across the three authorization docs is RBAC `0079`/`suite-97-98`,
-this doc `0080-0082`/`suite-99+`, OPA none.
+this doc `0081-0083`/`suite-99+`, OPA none. (Re-allocated 2026-08-07: the tool lifecycle took `0080` because alembic is a linear `down_revision` chain — reserving a number you have not written yet makes the file order read backwards against the real order.)
 
 **One material plan improvement,** found by reading the running code rather than the original
 survey: all three durable dispatch paths — sandbox playground (`playground.py:356`), workflow
@@ -415,6 +455,20 @@ These are the properties that make the stub safe. Any change to `identity.py` mu
    token: listing a server's tools is the platform acting as itself, not as any user.
 6. An unrecognized `identity_mode` falls back to static credentials — never mints a platform
    identity for a mode it does not understand.
+7. **A daemon can NEVER call an external OAuth server. This is permanent, not a stub.** The
+   credential for an OAuth server *is* a specific human's grant; the platform has no GitHub
+   identity of its own, so there is nothing to fall back to. `OAuthUserRequired` is the correct
+   final answer for an autonomous run. Written down because Decision 45 says autonomous runs
+   delegate the agent's capabilities — someone will read that, see a daemon failing on GitHub,
+   and "fix" it by substituting a service token. That would hand the platform's own credentials
+   to an unattended job, and it is what invariant 1 forbids.
+8. **The user/service branch is decided by VERIFIED `agent_class`, never by "is `user_sub`
+   empty".** Under Decision 45 a daemon legitimately has no user and correctly resolves to
+   `service_identity`; a user-delegated run that has *lost* its identity must still fail closed.
+   Those two states look identical if the test is a missing `user_sub`, and conflating them is
+   how a user-delegated run silently acquires a platform token. This reframes invariant 4: never
+   resolve to a service token when the run **is user-delegated** — not merely when `user_sub` is
+   absent.
 
 #### 4.8.7 What this does NOT give you
 
@@ -424,6 +478,26 @@ Two properties are absent by design. Both are decisions, not oversights, and bot
   narrows it to the single tool being invoked. A token minted to call `search_repositories` is
   equally usable for `delete_repo` if the upstream authorizes it. Per-tool scope-down is where
   classic delegation earns its complexity — **OQ-4**.
+
+  > **OQ-4 DE-SCOPED 2026-08-07 by Decision 45.** OQ-4 was being treated as the route to per-tool
+  > *authorization*, and it is expensive: it needs classic delegation, which needs a live
+  > re-presentable token internally, which §4.3 rules out for reasons that survive full
+  > implementation. But authorization and credential scope are different problems. The proxy can
+  > enforce "may this user's team use this tool" at **Gate 2** without narrowing the credential's
+  > audience at all. OQ-4 therefore remains open only as *defence in depth* — bounding blast radius
+  > if an upstream server is compromised — and is no longer on the critical path for anything.
+  > Do not build classic delegation to get per-tool authorization.
+
+- **Gate 2 judges the AGENT's team, not the caller's — same defect as OPA Gate 1.** Found
+  2026-08-07. `authz.team_from_sa_subject` parses `system:serviceaccount:agents-{team}:{sa}`, so
+  the "caller team" is the **pod's** team; `AuthorizeToolCallRequest` carries `caller_sa_subject`
+  and **no user field at all**, so the acting user never reaches `internal_mcp.authorize_tool_call`.
+  §4.8.1's Gate 2 row ("may this agent's *team* reach this server/tool") is accurate about what the
+  code does and wrong about what it should do. Under **Decision 45** a user-delegated run must
+  intersect with the *acting user's* team; an autonomous run keeps today's behaviour.
+  The identity is already at the proxy — `tool_executor.py:409-416` sends per-request `x-user-sub`
+  — it is simply not used for the decision, and it is a self-asserted header until Phase 2 verifies
+  the RCT. So this is one change applied twice: once in the rego, once at Gate 2.
 - **No contract obliges the server to validate what it is handed.** For external servers this is
   moot (GitHub validates because it is GitHub). For an **internal** MCP server the platform mints
   an audienced token and trusts the receiver to check audience, expiry, and subject — with no
@@ -435,11 +509,17 @@ Two properties are absent by design. Both are decisions, not oversights, and bot
 Renumbered 2026-08-02 — the head on disk is `0078`, and `0079` is reserved for RBAC phase R5
 (`rbac-and-artifact-authorization.md` §5).
 
-| Migration | Table | Change |
-|---|---|---|
-| `0080_run_context_column.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor |
-| `0081_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner |
-| `0082_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index |
+> **Renumbered again 2026-08-08 — these numbers moved twice and the doc was stale both times.**
+> `0079` went to RBAC R0, `0080` to the tool-lifecycle private-by-default change, `0081` to
+> `mcp_servers.created_by`. Alembic is a linear `down_revision` chain, so the identity
+> migrations take the next FREE numbers rather than the reserved ones. Do not re-reserve a
+> number without checking `ls services/registry-api/alembic/versions | tail -1`.
+
+| Migration | Table | Change | Status |
+|---|---|---|---|
+| `0082_run_context_anchor.py` | `playground_runs`, `agent_runs` | `run_context JSONB` — durable identity anchor | ✅ **SHIPPED** `0.2.277` |
+| `0083_agent_trigger_created_by.py` | `agent_triggers` | `created_by TEXT` — schedule/trigger human owner | P3 |
+| `0084_approval_requesting_user.py` | `approvals` | `requested_by_user_id`, `requested_by_team`, `is_service_triggered BOOL`, `triggering_service_name` + index | P5 |
 
 All idempotent (`IF NOT EXISTS`), data-preserving.
 
@@ -451,15 +531,113 @@ Each phase is a real vertical slice with its own bash e2e suite (**`suite-99` on
 its own; verify with `bash scripts/run-tests.sh --audit`), and bumps the touched image tags in
 **both** `scripts/deploy-cpe2e.sh` and `charts/agentshield/values.yaml`.
 
-**Phase 0 — Shared token infra.** `run_context.py` ×3; `AGENTSHIELD_INTERNAL_SIGNING_KEY` secret + chart wiring; resolve the Deployment backing the shared `declarative-runner` Service (not found under any current chart template — must be located for the secret mount). *e2e:* `suite-99` mint/verify/expiry/tamper/cap. *Tags:* registry-api, declarative-runner, SDK version.
+**Phase 0 — ✅ SHIPPED 2026-08-07 (deploy-controller `0.1.42` / declarative-runner `0.1.68`).**
+Shared token infra: `run_context.py` ×3, `AGENTSHIELD_INTERNAL_SIGNING_KEY` Secret + chart wiring.
+*e2e:* `suite-99` — 8 cases, the primitive exercised **inside the pod** (tamper, wrong key, expiry
+and a missing key all rejected) plus a mechanical check that the three vendored copies agree.
+*Tags:* deploy-controller, declarative-runner.
 
-**Phase 1 — Durable `/run` slice** (highest value, lowest risk; copies the working reactive path). Mint at `create_playground_run`; **add an `rct` keyword to the shared `durable_dispatch.dispatch_durable_run` (`durable_dispatch.py:41`) and send the header there** — one edit covers all three durable callers (`playground.py:356` sandbox, `workflow_orchestrator.py:224` workflow member, `internal.py:198` production), which is why part of the original Phase 4 collapses into this phase; runner verifies and sets the ContextVar before `workflow_executor.run`; migration `0080` + write the anchor at insert. *e2e:* `suite-100` real user → real `user_id` reaches OPA. *Docs:* spec.md Identity Propagation subsection.
+> **The blocker this phase carried was based on a component that does not exist.** Both this
+> section and the gap ledger recorded "resolve the Deployment backing the shared
+> `declarative-runner` Service (not found under any current chart template)". Checking the running
+> cluster rather than the chart: there is **no** `declarative-runner` Service and **no** Deployment
+> of that name. The runner image runs as **per-agent pods** in `agents-platform`, created by the
+> deploy-controller, each with its own OPA sidecar. Nothing was missing from the chart — the
+> premise was wrong. §4.3 already named the correct target (`manifest_builder.py`'s env list,
+> beside `AGENTSHIELD_SA_TOKEN_PATH`), so the design was right and only the blocker note was stale.
+> The Secret is copied into each agent namespace by `identity_secret.ensure_run_context_secret`,
+> called from **both** reconcilers — sandbox and production — because the file's own comment
+> already warns that those two paths drift.
 
-**Phase 1.5 — Resume re-hydration** (mandatory; without it every post-approval OPA re-check sees `user_id=""`). Resume paths load `RunContext` from the anchor by `thread_id`, re-set the ContextVar, re-mint the RCT; `ResumeRequest` gains an optional `run_context`. *e2e:* `suite-101` approve after the token would have expired, assert identity still present.
+*Deliberately NOT in P0:* nothing is threaded through a live run. `suite-99` therefore asserts the
+primitive and the wiring, never that a run carries identity — that is P1, and a P0 suite claiming
+otherwise would be green for the wrong reason.
 
-**Phase 2 — SDK pod runtime + Gate 5 hardening.** `server.py` reads/verifies the RCT header (today it reads only `x-agentshield-trace-id`); `start_chat` mints on the production path; transition window accepts legacy `x-user-sub` (RCT wins). **Gate 5 already exists** — this phase does not add it; it closes the three deltas in §4.6 (D-1 registry-side `agent_class`, D-2 decide the playground/sandbox question, D-3 `require_approval` gating), and D-1 is the only one that changes a security property. *Sequencing note:* the original "add Gate 5 only after identity arrives" is moot — the gate has been live and denying since WS-2, so Phase 1's real acceptance test is that the *existing* floor stops denying legitimate `user_delegated` traffic. *e2e:* `suite-102` user_delegated denied without identity; **daemons explicitly asserted unaffected**; self-reported-`daemon` relabel attempt denied (D-1's regression guard).
+**Phase 1 — ✅ SHIPPED 2026-08-08 (registry-api `0.2.277`), completing a partial 2026-08-07 landing.**
+Mint at `create_playground_run`; `rct` keyword on `durable_dispatch.dispatch_durable_run`; runner
+verifies and sets the ContextVar before `workflow_executor.run`; **migration `0082`** (not `0081`)
+writes the durable anchor at insert. *e2e:* `suite-101`.
 
-**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0081` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
+> **CORRECTION — the sentence below was true about the dispatcher and false about the callers,
+> and that gap shipped.** This phase originally read: *"add an `rct` keyword to the shared
+> `dispatch_durable_run` and send the header there — **one edit covers all three durable
+> callers** (`playground.py` sandbox, `workflow_orchestrator.py` workflow member,
+> `internal.py` production)."*
+>
+> One edit is indeed all the DISPATCHER needs. But `rct: str | None = None` changes nothing
+> for a caller that does not pass it, and only `playground.py` did. `grep -n "rct"
+> routers/internal.py workflow_orchestrator.py` returned nothing while the phase was marked
+> complete — so **every production and scheduled durable run reached the pod with
+> `user_id=""`** and was denied by the identity floor this phase exists to satisfy. Postmortem:
+> `docs/bugs/identity-p1-wired-one-caller-of-three.md`.
+>
+> Now wired: `internal.py` builds the context from the already-resolved `Principal` (never
+> re-derived — `run_by` holds a SERVICE subject for a daemon, and minting `user_sub=run_by`
+> would hand it a fabricated human) and passes it to BOTH the durable dispatch and the reactive
+> `/chat` POST; `workflow_orchestrator` inherits the parent's anchor onto each member child and
+> mints from that. The reactive half also closes the `internal.py` side of ledgered gap **G-45**.
+>
+> *Docs:* spec.md Identity Propagation subsection.
+
+**Phase 1.5 — ✅ SHIPPED 2026-08-08 (registry-api `0.2.277`).** Resume re-hydration. All FIVE
+registry-side resume doors load the anchor by run id (or, for the chat resume, straight off the
+already-loaded row — its LangGraph thread key is a `session_id`, not a run id) and re-mint a
+fresh RCT immediately before the pod re-enters the governed tool.
+
+**The runner needed no change**: `_bind_user_context` is an **app-wide** FastAPI dependency
+(`main.py:257`), so it already ran on `/resume` and only ever lacked a header to read. Verified
+by checking that no route declares its own `dependencies=` override, rather than assumed — which
+is why this phase bumps no declarative-runner tag. `ResumeRequest` therefore did **not** gain a
+`run_context` body field as originally designed: one carrier (the header) for every hop beats a
+second shape of the same thing on one door.
+
+**The fifth door was not on the list.** The hand-written set was
+`approvals` · `workflow_orchestrator` · `playground` · `chat`. `T-S101-009` derives the set from
+the tree and found `approval_timeout_worker.py` — a timed-out approval still resumes the pod,
+re-enters the graph, and can make further governed tool calls. It would have shipped
+unidentified in the very change that exists to end unidentified resumes.
+
+*e2e:* `suite-101` — 9 cases; `T-S101-004` is the one that matters: mint with a 1-second TTL,
+wait for it to genuinely die, then prove re-hydration still yields the same human.
+
+
+
+**Phase 2 — SDK pod runtime + Gate 5/6 hardening. SCOPE GREW 2026-08-07 (Decisions 45/46).**
+Phase 2 now carries the tool-scope work, in this order — the order is forced, not stylistic:
+
+  **2a. D-1 FIRST — `agent_class` from the registry record, not the pod.** Previously "the only
+  delta that changes a security property". Under Decision 45 it also selects the tool set AND
+  (for MCP) the credential, so a pod that self-reports `daemon` would get a wider tool set and a
+  platform-scoped upstream token. Every other item below is weaker than today's behaviour without
+  it. *Regression guard:* a self-reported-`daemon` relabel attempt is denied.
+
+  **2b. Decision 46 must have landed** (`owner_team` set at creation, `NULL` illegal). The OPA
+  bundle lists only explicitly-granted tools, so intersecting against a caller's grants would deny
+  every unowned tool. Decision 46 removes that state rather than special-casing it in the rego.
+  It is not blocked on identity and should ship ahead of Phase 1.
+
+  **2c. `user_team` into the OPA input, from the verified `RunContext`** — never a header, or the
+  caller picks their own ceiling. `caller_team == ""` fails closed on the user-delegated branch.
+
+  **2d. The intersection, applied TWICE** — once in `agentshield.rego` Gate 3, once at the MCP
+  proxy's Gate 2 (which needs the acting user added to `AuthorizeToolCallRequest`). Same rule,
+  two enforcement points. Behind a flag: this breaks anyone relying on cross-team agent sharing
+  today, and R2 already demonstrated what a hand-rolled rollout costs.
+
+  **2e. `x-user-sub` stops being load-bearing** once the SDK verifies the RCT. This also closes
+  G-R3-1 (the playground role gate bypassable by forging that header).
+
+Original Phase 2 scope, unchanged: `server.py` reads/verifies the RCT header (today it reads only
+`x-agentshield-trace-id`); `start_chat` mints on the production path; transition window accepts
+legacy `x-user-sub` (RCT wins). **Gate 5 already exists** — this phase does not add it; it closes
+the §4.6 deltas, of which D-1 is now 2a. *Sequencing note:* the original "add Gate 5 only after
+identity arrives" is moot — the gate has been live and denying since WS-2, so Phase 1's real
+acceptance test is that the *existing* floor stops denying legitimate `user_delegated` traffic.
+*e2e:* `suite-102` user_delegated denied without identity; **daemons explicitly asserted
+unaffected**; self-reported-`daemon` relabel attempt denied (2a's regression guard); cross-team
+caller denied a tool their team lacks while the owning team still gets it (2d's over-reach guard).
+
+**Phase 3 — Verifiable service identity** (eval-runner + scheduler + event-gateway). Keycloak service clients; `is_trusted_service`; callers switch to Bearer; `create_playground_run` and `internal.py::start_internal_run` verify and stop trusting body/header; `0082` + wire schedule owner as `user_sub`. *e2e:* `suite-103` positive (run `user_id` = human) **+ non-negotiable negative**: forged `X-User-Sub: eval-runner` and forged body `run_by` both now 403.
 
 > **Blast radius, measured (2026-08-02):** ~15 e2e suites POST to `/internal/runs/start`
 > without any token, and neither `services/scheduler/main.py` nor
@@ -478,7 +656,7 @@ its own; verify with `bash scripts/run-tests.sh --audit`), and bumps the touched
 
 **Phase 4 — Handoff / supervisor lineage.** Reduced by Phase 1: the durable dispatch seam is already threaded, so what remains is the *streaming* and in-pod hops — `_dispatch_stream` (`workflow_orchestrator.py:107`), `dispatch_to_orchestrator_pod`/`_run_step`/`orchestrate_*` gain `rct` and **extend** the chain per hop; SDK `handoff.py` sends the RCT + docstring fix; close the unauthenticated `composite_workflows` edge. *e2e:* `suite-104` 3-hop A→B→C, assert C carries the original human + `actor_chain==["A","B"]`.
 
-**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0082`; writer + reader wiring — note `opa_decisions` is a fully-built table + router with **zero writers** today, so this phase is the one that makes `Approval.opa_decision_id` non-null for the first time; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-105` approval requester + non-null `opa_decision_id`.
+**Phase 5 — HITL/Approval identity + `opa_decisions` + Studio.** `0083`; writer + reader wiring — note `opa_decisions` is a fully-built table + router with **zero writers** today, so this phase is the one that makes `Approval.opa_decision_id` non-null for the first time; Studio surfacing. *UX-facing:* Playwright spec driving an approval → dashboard shows "Requested by" → survives reload; Vitest for render states. *e2e:* `suite-105` approval requester + non-null `opa_decision_id`.
 
 **Phase 6 — Cleanup.** Remove the legacy header shim; fix `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` (a separate approver-identity bug); revisit packaging the three `run_context.py` copies only if a 4th consumer appears.
 
@@ -499,7 +677,7 @@ Definition-of-Done per phase: (a) real journey proven — bash suite for backend
 - **deferred (intentional):** legacy `x-user-sub` header shim kept through Phase 5, removed in Phase 6.
 - **deferred (intentional):** pre-existing `agent_triggers` get `created_by=NULL`; no backfill.
 - **not-yet-wired (debt):** `HITLDashboardPage.tsx:48` hardcoded `reviewer_id:"studio-user"` — separate approver-identity bug, fixed in Phase 6.
-- **infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service — needed for the secret mount.
+- ~~**infra unknown (resolve before Phase 1):** the Deployment backing the shared `declarative-runner` Service.~~ **RESOLVED 2026-08-07 — the premise was false.** No such Service or Deployment exists; the runner runs as per-agent pods created by the deploy-controller. The secret mount goes in `manifest_builder.py` (which §4.3 already said) plus a per-namespace copy from both reconcilers. Verified against the running cluster, not the chart.
 - **not-yet-wired (debt), blocked on Phase 0–2 (§4.8.4):** internal MCP `on_behalf_of` — the
   `mint_on_behalf_of_token` stub (`mcp-proxy/identity.py:77`) raises on every data-plane call.
   Fails closed and loud, so it is an unavailable feature rather than a security hole. Unblocked by

@@ -43,6 +43,14 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: GET /api/v1/playground/approvals is the ONE call this suite makes into R1's
+# ten routers — routers/playground_approvals.py is router-level protected. The rest of
+# /api/v1/playground/* (runs, datasets, eval-runs, approvals/{id}/decide) lives in
+# routers/playground.py, which R1 does NOT touch, so those calls are left alone.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 DATASET_ID=""
 cleanup() {
   echo ""
@@ -51,7 +59,7 @@ cleanup() {
 import urllib.request
 for name in ['pg-s8-run-agent', 'pg-s8-hitl-agent']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
   if [ -n "$DATASET_ID" ]; then
@@ -113,7 +121,7 @@ name = 'pg-s8-run-agent'
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/',
     data=json.dumps({'name': name, 'team': 'platform', 'description': 'suite-8 run tests'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 try:
@@ -138,7 +146,7 @@ except urllib.error.HTTPError:
     req = urllib.request.Request(
         'http://localhost:8000/api/v1/agents/',
         data=json.dumps({'name': name, 'team': 'platform', 'description': 's8 hitl test'}).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
         method='POST'
     )
     r = urllib.request.urlopen(req)
@@ -604,7 +612,9 @@ fi
 # ---------------------------------------------------------------------------
 run_test "T-S8-019 GET /playground/approvals → all items context=playground" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/playground/approvals', timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/playground/approvals',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 data = json.loads(r.read())
 assert isinstance(data, list), f'expected list got {type(data)}'
 for item in data:
@@ -733,7 +743,7 @@ run_test "Cleanup: DELETE pg-s8-hitl-agent → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/pg-s8-hitl-agent',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 204, f'expected 204 got {r.status}'
@@ -743,7 +753,7 @@ run_test "Cleanup: DELETE pg-s8-run-agent → 204" "
 import urllib.request
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/agents/pg-s8-run-agent',
-    method='DELETE'
+    method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 204, f'expected 204 got {r.status}'

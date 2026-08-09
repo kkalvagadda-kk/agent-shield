@@ -23,13 +23,19 @@ if [ -z "${API_POD:-}" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /{name}/versions, POST /{name}/deploy, GET /{name}/deployments and
+# GET /deployments/{id}/{stats,runs} now require a real JWT. Call e2e_set_token BARE —
+# inside a command substitution its `exit 1` kills only the subshell (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -45,21 +51,23 @@ echo "--- T-S38-001: sandbox deployment has an auto-generated name ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
 
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+
 r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'name': '${AGENT}', 'team': 'default', 'agent_type': 'declarative',
     'metadata': {'instructions': 'dep overview test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create agent {r.status_code}: {r.text}'); sys.exit(1)
 
-v = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', json={
+v = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/versions', headers=AUTH, json={
     'image_tag': 'registry.internal/agentshield/noop:latest', 'eval_passed': True,
 })
 if v.status_code != 201:
     print(f'FAIL: create version {v.status_code}: {v.text}'); sys.exit(1)
 version_id = v.json()['id']
 
-d = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/deploy', json={
+d = httpx.post('http://localhost:8000/api/v1/agents/${AGENT}/deploy', headers=AUTH, json={
     'version_id': version_id, 'environment': 'sandbox',
 })
 if d.status_code != 201:
@@ -70,7 +78,7 @@ if not name or not name.startswith('${AGENT}-'):
     print(f'FAIL: deployment name not auto-generated: {name}'); sys.exit(1)
 
 # Save → reload → assert: name survives a fresh read from the backend.
-lst = httpx.get('http://localhost:8000/api/v1/agents/${AGENT}/deployments')
+lst = httpx.get('http://localhost:8000/api/v1/agents/${AGENT}/deployments', headers=AUTH)
 match = [x for x in lst.json() if x['id'] == dep['id']]
 if not match or match[0].get('name') != name:
     print(f'FAIL: deployment name did not persist on reload'); sys.exit(1)
@@ -98,7 +106,8 @@ if ar.json().get('sandbox_deployment_id') != dep_id:
     print(f'FAIL: run not scoped: {ar.json().get(\"sandbox_deployment_id\")}'); sys.exit(1)
 
 # Reload from the deployment-scoped endpoint.
-r = httpx.get(f'http://localhost:8000/api/v1/deployments/{dep_id}/runs', params={'context': 'playground'})
+r = httpx.get(f'http://localhost:8000/api/v1/deployments/{dep_id}/runs',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, params={'context': 'playground'})
 if r.status_code != 200:
     print(f'FAIL: runs endpoint {r.status_code}: {r.text}'); sys.exit(1)
 runs = r.json()
@@ -111,7 +120,8 @@ print('OK')
 echo "--- T-S38-003: deployment stats run_count >= 1 ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/stats', params={'context': 'playground'})
+r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/stats',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, params={'context': 'playground'})
 if r.status_code != 200:
     print(f'FAIL: stats {r.status_code}: {r.text}'); sys.exit(1)
 data = r.json()
@@ -126,7 +136,8 @@ print('OK')
 echo "--- T-S38-004: production context does not resolve a sandbox id (404) ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/runs', params={'context': 'production'})
+r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/runs',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, params={'context': 'production'})
 if r.status_code != 404:
     print(f'FAIL: expected 404 for cross-context, got {r.status_code}'); sys.exit(1)
 print('OK')
@@ -136,7 +147,8 @@ print('OK')
 echo "--- T-S38-005: invalid context -> 422 ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/stats', params={'context': 'bogus'})
+r = httpx.get('http://localhost:8000/api/v1/deployments/${DEP_ID}/stats',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, params={'context': 'bogus'})
 if r.status_code != 422:
     print(f'FAIL: expected 422, got {r.status_code}'); sys.exit(1)
 print('OK')
@@ -146,7 +158,8 @@ print('OK')
 echo "--- T-S38-006: unknown deployment id -> 404 ---"
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys
-r = httpx.get('http://localhost:8000/api/v1/deployments/00000000-0000-0000-0000-000000000000/stats', params={'context': 'playground'})
+r = httpx.get('http://localhost:8000/api/v1/deployments/00000000-0000-0000-0000-000000000000/stats',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, params={'context': 'playground'})
 if r.status_code != 404:
     print(f'FAIL: expected 404, got {r.status_code}'); sys.exit(1)
 print('OK')

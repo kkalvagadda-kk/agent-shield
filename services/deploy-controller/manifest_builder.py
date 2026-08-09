@@ -177,6 +177,25 @@ def build_deployment(
             name="AGENTSHIELD_SA_TOKEN_PATH",
             value="/var/run/secrets/sa-token/token",
         ),
+        # Identity propagation P0 (design §4.3). The shared HMAC secret this pod uses to
+        # VERIFY the run-context token registry-api minted, and to EXTEND it with its own
+        # hop. Copied into this namespace by identity_secret.ensure_run_context_secret —
+        # a pod cannot mount a Secret from another namespace.
+        #
+        # optional=True so a pod whose namespace predates the Secret still SCHEDULES:
+        # run_context then raises a named error at first use, which is diagnosable, where
+        # a missing-secret CrashLoop reports only "CreateContainerConfigError". It does
+        # NOT make identity optional — without the key OPA Gate 6 denies every tool call.
+        k8s_client.V1EnvVar(
+            name="AGENTSHIELD_INTERNAL_SIGNING_KEY",
+            value_from=k8s_client.V1EnvVarSource(
+                secret_key_ref=k8s_client.V1SecretKeySelector(
+                    name="agentshield-run-context",
+                    key="AGENTSHIELD_INTERNAL_SIGNING_KEY",
+                    optional=True,
+                )
+            ),
+        ),
         # MCP tool source (T012): second projected SA token path, audience
         # agentshield-mcp-proxy. The SDK/runner MCP tool executors read it and send
         # it as a Bearer token to the MCP proxy (separate audience from OPA's).
@@ -334,6 +353,15 @@ def build_deployment(
                 mount_path="/var/run/secrets/mcp-proxy-token",
                 read_only=True,
             ),
+            k8s_client.V1VolumeMount(
+                name="registry-token",
+                # Path is a CONTRACT with sdk/agentshield_sdk/tool_resolver.py and
+                # services/declarative-runner/workflow_executor.py, both of which read
+                # /var/run/secrets/agentshield/registry-token/token. Changing it here
+                # without changing them makes every pod start unauthenticated.
+                mount_path="/var/run/secrets/agentshield/registry-token",
+                read_only=True,
+            ),
         ],
         resources=k8s_client.V1ResourceRequirements(
             requests={"cpu": "100m", "memory": "256Mi"},
@@ -419,6 +447,31 @@ def build_deployment(
                     k8s_client.V1VolumeProjection(
                         service_account_token=k8s_client.V1ServiceAccountTokenProjection(
                             audience="agentshield-mcp-proxy",
+                            expiration_seconds=3600,
+                            path="token",
+                        )
+                    )
+                ]
+            ),
+        ),
+        # THIRD projected bound SA token (audience=agentshield-registry-api, TTL=1h).
+        #
+        # The pod resolves its bound tools from the registry at startup. That call used to
+        # be ANONYMOUS, which forced the registry to answer a catalog question with a
+        # visibility filter and left every team's private tools readable by any workload in
+        # the cluster. The pod has had a verifiable identity all along — OPA Gate 2 already
+        # trusts this same ServiceAccount — it simply never presented it to the registry.
+        #
+        # Audience-scoped like the other two: a token minted for OPA or the MCP proxy must
+        # not be replayable against the registry, and registry-api verifies the audience the
+        # API server echoes back rather than trusting the request.
+        k8s_client.V1Volume(
+            name="registry-token",
+            projected=k8s_client.V1ProjectedVolumeSource(
+                sources=[
+                    k8s_client.V1VolumeProjection(
+                        service_account_token=k8s_client.V1ServiceAccountTokenProjection(
+                            audience="agentshield-registry-api",
                             expiration_seconds=3600,
                             path="token",
                         )

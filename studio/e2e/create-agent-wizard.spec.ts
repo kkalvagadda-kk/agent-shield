@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 /**
  * Model is REQUIRED (an agent with no LLM provider can never complete a run), so
@@ -104,7 +105,11 @@ test.describe("route to production", () => {
     // The wizard's own notice must name the FULL path, not just "Publish".
     // docs/bugs/publish-does-not-create-a-production-deployment.md
     const notice = page.getByTestId("schedule-not-in-production-notice");
-    await expect(notice).toContainText(/Publish Queue/i);
+    // NBSP, not a space. The notice renders "Admin&nbsp;▸&nbsp;Publish&nbsp;Queue"
+    // (CreateAgentPage.tsx:146) so the DOM text carries U+00A0 between the words and a
+    // regular-space regex can never match. Match either kind of whitespace rather than
+    // pasting a literal NBSP into the source, which is invisible in review.
+    await expect(notice).toContainText(/Publish[\s\u00a0]+Queue/i);
     await expect(notice).toContainText(/Deploy Latest/i);
     await expect(notice).toContainText(/only creates the catalog listing/i);
 
@@ -135,6 +140,12 @@ test.describe("route to production", () => {
       timeout: 20_000,
     });
 
-    await page.request.delete(`/api/v1/agents/${name}`).catch(() => undefined);
+    // `page.request` carries Keycloak's SESSION COOKIE, not the access token —
+    // keycloak-js holds that in JS memory (see e2e/lib/apiAuth.ts). So this cleanup has
+    // been a silent no-op since R3 gated DELETE /agents/{name}: the 401 went straight
+    // into .catch(). Agents accumulated on the cluster with nothing reporting it.
+    await page.request
+      .delete(`/api/v1/agents/${name}`, { headers: await adminAuthHeaders() })
+      .catch(() => undefined);
   });
 });

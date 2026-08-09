@@ -106,7 +106,13 @@ test("assigning consumer persists across a reload (save -> reload -> assert)", a
     (r) => /\/api\/v1\/admin\/users\//.test(r.url()) && r.request().method() === "PATCH" && r.ok(),
     { timeout: 20_000 },
   );
-  await page.getByRole("button", { name: /^save$/i }).click();
+  // EditUserModal's button reads "Save Changes" (AdminAccessPage.tsx:452), and has since
+  // 3192ebe — BEFORE this test was written in 8baba26. The original locator here was
+  // /^save$/i, anchored, so it could never match: this test has been RED since the day it
+  // was authored and had never once passed. Nothing surfaced it because the browser layer
+  // could not run against EKS at all (gap G-R0-8), so the mandatory save->reload->assert
+  // guard on the RBAC admin write path was silently absent. Match the real button.
+  await page.getByRole("button", { name: /^save changes$/i }).click();
   const patch = await saved;
   expect((await patch.json()).role).toBe("consumer");
 
@@ -121,4 +127,112 @@ test("assigning consumer persists across a reload (save -> reload -> assert)", a
   const api_r = await api.get(`/api/v1/admin/users`);
   const users = (await api_r.json()) as { username: string; role: string | null }[];
   expect(users.find((u) => u.username === USERNAME)?.role).toBe("consumer");
+});
+
+test("bootstrap gives platform-admin a role row, so the Admin menu renders (R0 / Decision 40)", async ({
+  page,
+}) => {
+  // The 2026-07-20 symptom was structural, not visual: the assignment row was pinned to
+  // a `sub` captured at seed time, the realm was later recreated, Keycloak reissued the
+  // admin under a NEW sub, /me answered role=null, `isAtLeast("platform-admin")` was
+  // false (Sidebar.tsx:392) and the Admin section silently vanished. Nothing errored —
+  // a menu just disappeared, which is why no suite caught it. Nothing in the install
+  // wrote that row at all; scripts/seed-platform-admin-role.sh patched it after the
+  // fact. It is now written by registry-api's lifespan bootstrap
+  // (services/registry-api/bootstrap_admin.py), which looks the admin up by USERNAME on
+  // every start so re-pinning falls out of the design.
+  //
+  // This asserts the WHOLE chain from the browser — real Keycloak login (global-setup)
+  // -> GET /me -> the sidebar — because that is the only layer where the symptom was
+  // visible. suite-97 T-S97-004 proves the same property from the other end (delete the
+  // Keycloak admin, restart, require a re-pin); neither replaces the other.
+  //
+  // /me is fetched exactly once, in main.tsx, BEFORE the first render — so the waiter
+  // must be armed before goto(). A 403 there is swallowed into `role = null`
+  // (main.tsx:37-39), i.e. the failure is silent by design and only the sidebar shows it.
+  const me = page.waitForResponse(
+    (r) => r.url().includes("/api/v1/me") && r.request().method() === "GET",
+    { timeout: 30_000 },
+  );
+  await page.goto(BASE_URL);
+  const meResponse = await me;
+  const body = await meResponse.json();
+  expect(meResponse.status(), `/me: ${meResponse.status()} ${JSON.stringify(body)}`).toBe(200);
+  expect(body.role, `/me role: ${JSON.stringify(body)}`).toBe("platform-admin");
+  expect(body.team).toBe("platform");
+
+  // `CollapsibleSection` (Sidebar.tsx:201-224) renders its label as a real <button>, so
+  // the role selector is correct. The name regex is case-INSENSITIVE on purpose: the
+  // label is uppercased by CSS (`uppercase` at Sidebar.tsx:216), and whether an
+  // accessible name reflects `text-transform` is a browser/engine detail this assertion
+  // must not depend on. The DOM text is "Admin"; the rendered text is "ADMIN"; both pass.
+  await expect(page.getByRole("button", { name: /^admin$/i })).toBeVisible({ timeout: 20_000 });
+});
+
+test("create a user THROUGH THE UI → it persists across a reload (R0 / FR-8)", async ({
+  page,
+}) => {
+  // R0 made POST /api/v1/admin/users ATOMIC: the Keycloak user, its realm role and the
+  // user_team_assignments row now land together or not at all, with a compensating
+  // kc_delete and a 502 on failure. suite-97 T-S97-007/008 prove that at the API. NOTHING
+  // proved it through the screen — the other tests in this file seed their fixture with
+  // api.post(), so the Create User modal itself had no journey at all, and CLAUDE.md DoD
+  // rule 2's save→reload→assert existed for the EDIT surface but not the CREATE one.
+  //
+  // Emails use @example.com deliberately: UserCreate.email is EmailStr and email-validator
+  // rejects .local as an RFC 6762 special-use TLD, so @agentshield.local answers 422. The
+  // bootstrap can pin platform-admin@agentshield.local only because it calls
+  // keycloak_client.create_user directly and never sees the model.
+  const NAME = `uicreate-${Date.now()}`;
+  let createdKcId = "";
+
+  try {
+    await page.goto(`${BASE_URL}/admin/access`);
+    await page.getByRole("button", { name: /^Create User$/i }).click();
+
+    // getByPlaceholder matches by SUBSTRING unless exact — "Smith" otherwise resolves to
+    // three fields (jsmith / j.smith@company.com / Smith) and fails strict mode. Same
+    // ambiguity class this triage has been clearing all day; it caught me too.
+    await page.getByPlaceholder("jsmith", { exact: true }).fill(NAME);
+    await page.getByPlaceholder("j.smith@company.com", { exact: true }).fill(`${NAME}@example.com`);
+    await page.getByPlaceholder("Jane", { exact: true }).fill("UI");
+    await page.getByPlaceholder("Smith", { exact: true }).fill("Created");
+    await page.getByPlaceholder("••••••••", { exact: true }).fill("UiCreate2024!");
+
+    // Team is required and its options come from the live cluster — pick a real one
+    // rather than hardcoding, so this does not track one cluster's seed data.
+    const teamSelect = page.locator("select").filter({ has: page.locator('option[value=""]') }).first();
+    const teamValue = await teamSelect.locator("option").nth(1).getAttribute("value");
+    expect(teamValue, "no team exists in this cluster to assign").toBeTruthy();
+    await teamSelect.selectOption(teamValue!);
+
+    const roleSelect = page.locator("select").filter({ has: page.locator('option[value="consumer"]') }).first();
+    await roleSelect.selectOption("consumer");
+
+    // Assert the write left the browser AND that the server answered 201 — not a toast,
+    // not a closed modal. A 502 here is R0's compensating-rollback path surfacing.
+    const created = page.waitForResponse(
+      (r) =>
+        /\/api\/v1\/admin\/users\/?$/.test(r.url()) && r.request().method() === "POST",
+      { timeout: 20_000 },
+    );
+    await page.getByRole("button", { name: /^Create User$/i }).last().click();
+    const resp = await created;
+    expect(resp.status(), `create failed: ${await resp.text()}`).toBe(201);
+    createdKcId = (await resp.json()).kc_id;
+
+    // FULL RELOAD — the row must be rehydrated from the backend, not from the mutation
+    // cache. This is the round-trip R0's atomicity claim actually rests on: if the
+    // Keycloak user existed but the assignment row did not, the role cell would be empty.
+    await page.reload();
+    const row = page.getByRole("row", { name: new RegExp(NAME) });
+    await row.waitFor({ timeout: 20_000 });
+    await expect(row).toContainText("consumer");
+  } finally {
+    if (createdKcId) {
+      await page.request
+        .delete(`${BASE_URL}/api/v1/admin/users/${createdKcId}`)
+        .catch(() => {});
+    }
+  }
 });

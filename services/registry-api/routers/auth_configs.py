@@ -25,6 +25,7 @@ from credential_provider import (
     auth_config_credential_ref,
     get_provider,
 )
+from auth_middleware import require_user
 from crypto import decrypt_json, encrypt_json
 from db import get_db
 from k8s import delete_secret, secret_exists, upsert_secret
@@ -33,6 +34,10 @@ from schemas import AuthConfigCreate, AuthConfigResponse, AuthConfigUpdate, Pagi
 
 logger = logging.getLogger(__name__)
 
+# MIXED (R1, FR-11): protection is per-endpoint here, NOT router-level, because
+# deploy-controller resolves secret refs on this prefix with no JWT.
+# Protected (credential-bearing): POST /, GET /, GET /{id}, PUT /{id}, DELETE /{id}.
+# Exempt: GET /{config_id}/secret-ref (see the G-R1-4 comment below).
 router = APIRouter(prefix="/api/v1/auth-configs", tags=["auth-configs"])
 
 _PLATFORM_NAMESPACE = "agentshield-platform"
@@ -57,6 +62,7 @@ async def _get_auth_config(config_id: uuid.UUID, db: AsyncSession) -> AuthConfig
     status_code=status.HTTP_201_CREATED,
     response_model=AuthConfigResponse,
     summary="Create auth config",
+    dependencies=[Depends(require_user)],
 )
 async def create_auth_config(
     body: AuthConfigCreate,
@@ -97,6 +103,7 @@ async def create_auth_config(
     "/",
     response_model=PaginatedResponse[AuthConfigResponse],
     summary="List auth configs",
+    dependencies=[Depends(require_user)],
 )
 async def list_auth_configs(
     type: str | None = Query(None),
@@ -126,6 +133,7 @@ async def list_auth_configs(
     "/{config_id}",
     response_model=AuthConfigResponse,
     summary="Get auth config by ID",
+    dependencies=[Depends(require_user)],
 )
 async def get_auth_config(
     config_id: uuid.UUID,
@@ -137,6 +145,14 @@ async def get_auth_config(
 # ---------------------------------------------------------------------------
 # GET /api/v1/auth-configs/{id}/secret-ref  (internal — deploy-controller)
 # ---------------------------------------------------------------------------
+# UNAUTHENTICATED BY NECESSITY (R1, G-R1-4). In-cluster machine caller with no user
+# JWT: services/deploy-controller/tool_secrets.py:45 — resolves (and re-materializes)
+# the K8s Secret an agent Pod must mount before it can start. Closing this needs a
+# service identity that docs/design/identity-propagation-architecture.md owns
+# (migrations 0080-0082); doing it here would break control-plane reconciliation. Same
+# posture as routers/internal.py: cluster-internal, NetworkPolicy-trusted. suite-97
+# T-S97-011 pins this exemption set. Note: this returns a secret NAME, never a
+# credential value — the five credential-bearing routes on this router are protected.
 @router.get(
     "/{config_id}/secret-ref",
     summary="Get k8s_secret_ref for deploy-controller",
@@ -223,6 +239,7 @@ async def get_auth_config_secret_ref(
     "/{config_id}",
     response_model=AuthConfigResponse,
     summary="Update auth config",
+    dependencies=[Depends(require_user)],
 )
 async def update_auth_config(
     config_id: uuid.UUID,
@@ -259,6 +276,7 @@ async def update_auth_config(
     "/{config_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete auth config",
+    dependencies=[Depends(require_user)],
 )
 async def delete_auth_config(
     config_id: uuid.UUID,

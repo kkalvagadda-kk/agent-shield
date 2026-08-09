@@ -1,4 +1,6 @@
 import { test, expect, type Browser } from "@playwright/test";
+import { pickModel } from "./lib/agents";
+import { deployToSandbox } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // deployment-overview.spec.ts
@@ -23,6 +25,7 @@ async function createAgentViaUI(browser: Browser, agentName: string) {
     await page.getByRole("button", { name: /No-code/i }).click();
     await page.waitForLoadState("domcontentloaded");
     await page.getByPlaceholder("my-agent").fill(agentName);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
     const createDone = page.waitForResponse(
       (r) =>
         r.url().includes("/api/v1/agents") &&
@@ -32,7 +35,12 @@ async function createAgentViaUI(browser: Browser, agentName: string) {
     );
     await page.getByRole("button", { name: /Create Agent/i }).click();
     await createDone;
-    await page.waitForURL(`**/agents/${agentName}`, { timeout: 15_000 });
+    // The 201 above IS the proof of creation. The wizard navigates to the agent LIST
+    // (/agents, CreateAgentPage.tsx:785), NOT /agents/{name}, so waiting for the detail
+    // URL here hung for 15s and failed a beforeAll — taking every test in the file with
+    // it. catalog-overview-parity.spec.ts already documented this exact drift and named
+    // these specs as still carrying it: "a navigation is a side effect of creation, not
+    // proof of it; the 201 is the proof."
   } finally {
     await ctx.close();
   }
@@ -65,20 +73,22 @@ test.afterAll(async ({ browser }) => {
 });
 
 test("deploy → open deployment overview → reload survives", async ({ page }) => {
-  // 1. Deploy a sandbox deployment via the deploy page.
-  await page.goto(`/agents/${AGENT}/deploy`);
-  await page.waitForLoadState("networkidle");
+  // 1. Deploy a sandbox deployment through the DeployModal on the detail page.
+  //
+  // This used to goto(`/agents/${AGENT}/deploy`). That ROUTE WAS DELETED — App.tsx:83 says
+  // so in a comment: "/agents/:name/deploy removed — deploy is now a modal on
+  // AgentDetailPage". The spec kept navigating to it, landed on a page with no Deploy
+  // button, and timed out clicking one. e2e/lib/agents.ts already exports the correct
+  // modal-driven helper ("Deploy an agent to sandbox through the DeployModal on the detail
+  // page"); this spec hand-rolled the stale version instead of importing it — the same
+  // duplication that hid the required-model change from six specs.
+  const depId = await deployToSandbox(page, AGENT);
 
-  const deployDone = page.waitForResponse(
-    (r) =>
-      r.url().includes(`/api/v1/agents/${AGENT}/deploy`) &&
-      r.request().method() === "POST",
-    { timeout: 30_000 }
-  );
-  await page.getByRole("button", { name: /^Deploy$/ }).click();
-  const deployResp = await deployDone;
-  expect(deployResp.status()).toBe(201);
-  const depName: string = (await deployResp.json()).name;
+  // The overview link is keyed by deployment NAME, which the helper does not return.
+  const listResp = await page.request.get(`/api/v1/agents/${AGENT}/deployments`);
+  expect(listResp.ok(), `list deployments: ${listResp.status()}`).toBeTruthy();
+  const deployments = (await listResp.json()) as { id: string; name: string }[];
+  const depName = (deployments.find((d) => d.id === depId) ?? deployments[0]).name;
   expect(depName).toContain(`${AGENT}-`);
 
   // 2. Artifact page → Deployments tab (default) lists the deployment by name.

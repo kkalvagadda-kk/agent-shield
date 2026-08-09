@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Code, ExternalLink, Loader2, Pencil, Plus, Server, Trash2, Wrench, X } from 'lucide-react';
+import { Code, ExternalLink, EyeOff, Loader2, Pencil, Plus, Server, Trash2, Wrench, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
@@ -12,9 +12,13 @@ import {
   listAuthConfigs,
   listAllTools,
   updateTool,
+  getMyTeam,
   type CreateToolPayload,
   type RegistryTool,
 } from '../api/registryApi';
+import UnpublishToolDialog from '../components/tools/UnpublishToolDialog';
+import { useAuth } from '../contexts/AuthContext';
+import { canUnpublishTool } from '../lib/toolAuthority';
 import { cn } from '../lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +84,11 @@ export default function ToolsPage() {
   const qc = useQueryClient();
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [editingTool, setEditingTool] = useState<RegistryTool | null>(null);
+  const [unpublishing, setUnpublishing] = useState<RegistryTool | null>(null);
+  // The three arms of the unpublish rule need the caller's sub, team and role. All
+  // three are already on the auth context; see lib/toolAuthority.ts for why this is an
+  // affordance and the server is the authority.
+  const { user, team: myTeam, role } = useAuth();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['registry-tools'],
@@ -180,7 +189,12 @@ export default function ToolsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {['Name', 'Type', 'Source', 'Risk', 'Team', 'Status', ''].map((h) => (
+                  {/* 'Visibility' is publish_status (private/published — who can SEE
+                      it); 'Status' is the operational lifecycle (active/deprecated).
+                      Two different questions that both used to be answered by one
+                      column, so the screen could not show which rows were org-wide
+                      after migration 0080 made private the default. */}
+                  {['Name', 'Type', 'Source', 'Risk', 'Team', 'Visibility', 'Status', ''].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -250,10 +264,42 @@ export default function ToolsPage() {
                       <td className="px-4 py-3 text-slate-600">
                         {tool.owner_team ?? '—'}
                       </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={cn(
+                            'badge',
+                            tool.publish_status === 'published'
+                              ? 'bg-blue-100 text-blue-700'
+                              : 'bg-slate-100 text-slate-600',
+                          )}
+                          data-testid={`tool-visibility-${tool.name}`}
+                        >
+                          {tool.publish_status === 'published' ? 'Published' : 'Private'}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 text-slate-600">
                         {tool.status ?? '—'}
                       </td>
                       <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-3">
+                        {/* Unpublish sits OUTSIDE the mcp/non-mcp branch on purpose.
+                            Delete refuses mcp_tool rows because the row's EXISTENCE is
+                            owned upstream by the MCP server that discovered it. Its
+                            catalog visibility is not an upstream property — it is this
+                            platform's decision about its own catalog. Copying the
+                            refusal would have put a one-way ratchet inside the fix for
+                            a one-way ratchet: a discovered tool that cascade-published
+                            with an agent could never leave the catalog again. */}
+                        {canUnpublishTool(tool, { sub: user?.sub ?? null, team: myTeam, role }) && (
+                          <button
+                            onClick={() => setUnpublishing(tool)}
+                            className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 transition-colors"
+                            data-testid={`tool-unpublish-${tool.name}`}
+                          >
+                            <EyeOff size={12} />
+                            Unpublish
+                          </button>
+                        )}
                         {/* MCP tools are server-owned: their lifecycle lives on the
                             MCP Servers screen, so no Edit/Delete here — only a link
                             back to the source server. */}
@@ -296,6 +342,7 @@ export default function ToolsPage() {
                             </button>
                           </div>
                         )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -304,6 +351,13 @@ export default function ToolsPage() {
             </table>
           </div>
         )
+      )}
+
+      {unpublishing && (
+        <UnpublishToolDialog
+          tool={unpublishing}
+          onClose={() => setUnpublishing(null)}
+        />
       )}
     </div>
   );
@@ -323,6 +377,23 @@ function ToolForm({
 }) {
   const isEdit = tool !== null;
   const [authConfigId, setAuthConfigId] = useState<string>(tool?.auth_config_id ?? '');
+
+  // Decision 46: the creating team OWNS the tool, and `owner_team` is DERIVED by the
+  // backend from the caller's team assignment. Only a platform-admin may assign it
+  // elsewhere; for anyone else the backend answers 403.
+  //
+  // This field used to be a free-text input for everybody, which after 0.2.267 meant a
+  // contributor who typed any team but their own got a 403 they could do nothing about —
+  // the form was still offering a choice the server had stopped honouring. An admin keeps
+  // the input, because seeding and admin-side creation legitimately assign ownership.
+  const { isAtLeast } = useAuth();
+  const canAssignTeam = isAtLeast('platform-admin');
+  const { data: myTeam } = useQuery({
+    queryKey: ['my-team'],
+    queryFn: getMyTeam,
+    staleTime: 60_000,
+    enabled: !canAssignTeam,
+  });
 
   const { data: authConfigsData } = useQuery({
     queryKey: ['auth-configs'],
@@ -368,7 +439,10 @@ function ToolForm({
           display_name: values.display_name,
           description: values.description,
           risk_level: values.risk_level,
-          owner_team: values.owner_team,
+          // Only an admin sends owner_team. For everyone else the field is read-only and
+          // the server derives ownership, so sending it back would be the client asserting
+          // a value it does not get to choose.
+          ...(canAssignTeam ? { owner_team: values.owner_team } : {}),
           auth_config_id: authConfigId || null,
           pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
           ...(values.tool_type === 'http'
@@ -385,7 +459,7 @@ function ToolForm({
         pii_deanonymize_allowed: values.pii_deanonymize_allowed ?? false,
         ...(values.display_name ? { display_name: values.display_name } : {}),
         ...(values.description ? { description: values.description } : {}),
-        ...(values.owner_team ? { owner_team: values.owner_team } : {}),
+        ...(canAssignTeam && values.owner_team ? { owner_team: values.owner_team } : {}),
         ...(values.tool_type === 'http'
           ? { http_method: values.http_method ?? 'GET', http_url: values.http_url }
           : { python_code: values.python_code }),
@@ -506,11 +580,27 @@ function ToolForm({
             </select>
           </Field>
           <Field label="Team" error={errors.owner_team?.message}>
-            <input
-              {...register('owner_team')}
-              className="input"
-              placeholder="platform-team"
-            />
+            {canAssignTeam ? (
+              <input
+                {...register('owner_team')}
+                className="input"
+                placeholder="platform-team"
+              />
+            ) : (
+              // Read-only, and the submit handler omits owner_team entirely for this
+              // caller — the value shown is what the server will derive, not an input the
+              // server then has to re-check. Rendering the field at all (rather than
+              // hiding it) is deliberate: the owning team decides who can see and use the
+              // tool, so it should not be invisible just because it is not editable.
+              <input
+                value={myTeam?.team ?? ''}
+                readOnly
+                disabled
+                data-testid="tool-owner-team-readonly"
+                className="input bg-slate-50 text-slate-500 cursor-not-allowed"
+                title="Your team owns the tools you create. Only a platform-admin can assign ownership to another team."
+              />
+            )}
           </Field>
         </div>
 

@@ -65,6 +65,29 @@ export default function AgentDetailPage() {
           toast.error("Cannot publish: agent has a critical-risk tool assigned.");
           return;
         }
+        // Decision 47 option C. Publishing an agent cascades its own-team tools to
+        // published; a bound tool that is still private and owned by ANOTHER team blocks
+        // the request, because approving this agent must never be a way to publish
+        // somebody else's draft.
+        //
+        // The tool names matter more here than in any other publish error: the fix is
+        // "ask that team to publish it, or unbind it", and neither is actionable without
+        // knowing WHICH tool and WHOSE. The generic fallback below would have said only
+        // "Failed to submit publish request" — the detail is an object, not a string.
+        if (errCode === "tool_not_publishable_cross_team") {
+          const blocked = (detail as { tools?: { name: string; owner_team: string | null }[] })
+            .tools ?? [];
+          const listed = blocked
+            .map((t) => `${t.name} (${t.owner_team ?? "no owner team"})`)
+            .join(", ");
+          toast.error(
+            blocked.length
+              ? `Cannot publish: these tools are private and owned by another team — ${listed}. ` +
+                `Ask the owning team to publish them, or unbind them from this agent.`
+              : "Cannot publish: a bound tool is private and owned by another team.",
+          );
+          return;
+        }
       }
       toast.error(typeof detail === "string" ? detail : "Failed to submit publish request.");
     },

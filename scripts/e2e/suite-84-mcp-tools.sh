@@ -30,17 +30,29 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 [ -z "$API_POD" ] && API_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep registry-api | grep Running | awk '{print $1}' | head -1)
 [ -z "$API_POD" ] && { echo "FATAL: no running registry-api pod"; exit 1; }
 
+# R1/FR-11: POST /api/v1/admin/bundle/regenerate (routers/admin.py) is the ONE call this
+# suite makes into R1's ten routers. /api/v1/tools/*, /api/v1/mcp-servers/*,
+# /api/v1/internal/* and /api/v1/bundle/* are outside them and stay anonymous.
+# The driver is a QUOTED heredoc, so the token travels as an env var beside SUFFIX.
+# Call e2e_set_token BARE (lib/e2e-auth.sh explains the subshell trap).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 84: MCP as a Tool Source (registry-api surface) ==="
 echo "  Pod:    $API_POD"
 echo "  Suffix: $SUFFIX"
 
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env SUFFIX="$SUFFIX" python3 - <<'PY'
+  env SUFFIX="$SUFFIX" E2E_TOKEN="$E2E_TOKEN" python3 - <<'PY'
 import os, asyncio, httpx, uuid
 SUFFIX = os.environ["SUFFIX"]
 BASE = "http://localhost:8000/api/v1"
 TEAM = "platform"
-ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM}
+# X-User-* stay AUDIT STAMPS; the Bearer is the R1 authentication. Only the
+# /admin/bundle/regenerate call actually needs it, but ADMIN is one dict shared by
+# every call in this driver and carrying a valid token on the others is inert.
+ADMIN = {"X-User-Sub": "platform-admin", "X-User-Team": TEAM,
+         "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
 fails = []
 
 def check(cond, tid, msg):
@@ -190,9 +202,15 @@ async def main():
         # deprecated fixture rather than a live MCP row so the suite does not depend
         # on an upstream server having dropped something.
         async with AsyncSessionLocal() as s:
+            # publish_status is EXPLICIT because this row is inserted straight into the DB,
+            # bypassing create_tool. Migration 0080 defaults it to 'private', and catalog
+            # visibility is `published OR created_by == caller` — a direct insert has no
+            # created_by, so the row would match neither arm and the fetch below would
+            # return zero items. This case is about the STATUS filter, not visibility;
+            # saying so explicitly keeps the two independent.
             retired = Tool(name=f"s84-retired-{SUFFIX}", type="http", risk_level="low",
                            owner_team=TEAM, http_url="https://example.com", http_method="GET",
-                           status="deprecated")
+                           status="deprecated", publish_status="published")
             s.add(retired); await s.commit()
         act = await c.get(f"{BASE}/tools/", params={"status": "active", "limit": 200}, headers=ADMIN)
         act_names = [t["name"] for t in act.json().get("items", [])]

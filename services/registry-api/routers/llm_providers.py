@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from crypto import encrypt_json, decrypt_json
 from db import get_db
 from models import Agent, LLMProvider
@@ -36,7 +37,16 @@ from schemas import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/llm-providers", tags=["llm-providers"])
+# AUTHENTICATED (R1, FR-11). Router-level: all 5 routes require a valid JWT.
+# Credential-bearing — these rows carry encrypted provider API keys, so an
+# anonymous read was the sharpest of the ten gaps. Authentication only — no role
+# logic, no team scoping, no new 403; an authenticated response is byte-identical
+# to pre-R1. suite-97 T-S97-011 pins the protected/exempt partition.
+router = APIRouter(
+    prefix="/api/v1/llm-providers",
+    tags=["llm-providers"],
+    dependencies=[Depends(require_user)],
+)
 
 
 async def _get_or_404(provider_id: uuid.UUID, db: AsyncSession) -> LLMProvider:

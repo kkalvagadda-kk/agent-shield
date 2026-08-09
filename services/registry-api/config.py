@@ -99,6 +99,20 @@ class Settings(BaseSettings):
     mcp_health_max_backoff_cycles: int = 10
 
     # ------------------------------------------------------------------ #
+    # platform-admin bootstrap (Decision 40, phase R0)                     #
+    # ------------------------------------------------------------------ #
+    # registry-api code — not the Helm chart — creates the sole auto-created
+    # user. Disable ONLY for a deploy that provisions the admin some other way;
+    # with it off, a fresh install has no admin and no Admin menu.
+    platform_admin_bootstrap_enabled: bool = True
+    # From the pre-existing keycloak-user-passwords Secret, key `platform-admin`.
+    # Empty -> bootstrap fails loudly (/ready red) rather than minting an
+    # unknown-password admin.
+    platform_admin_password: str = ""
+    # Retry cadence while Keycloak is not yet up. /ready stays red until success.
+    platform_admin_bootstrap_retry_seconds: int = 30
+
+    # ------------------------------------------------------------------ #
     # MCP list_changed re-sync (Phase 2, WS-B / FR-MCP-07)                 #
     # ------------------------------------------------------------------ #
     # When an upstream server announces notifications/tools/list_changed, the

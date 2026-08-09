@@ -27,6 +27,13 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup..."
@@ -34,7 +41,7 @@ cleanup() {
 import urllib.request
 for name in ['${AGENT_NAME}', '${AGENT_DECL}']:
     try:
-        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE'), timeout=5)
+        urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/' + name, method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     except Exception: pass
 " 2>/dev/null || true
 }
@@ -183,7 +190,7 @@ tool_body = {
     'risk_level': 'low',
     'description': 'Look up an order by ID',
 }
-r = httpx.post('http://localhost:8000/api/v1/tools/', json=tool_body)
+r = httpx.post('http://localhost:8000/api/v1/tools/', json=tool_body, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code in (201, 409), f'Tool create failed: {r.status_code} {r.text}'
 
 # Create agent with tools
@@ -195,7 +202,7 @@ agent_body = {
     'tools': ['${TEST_TOOL}'],
 }
 r = httpx.post('http://localhost:8000/api/v1/agents/', json=agent_body,
-               headers={'X-User-Sub': 'test-user-s16'})
+               headers={'X-User-Sub': 'test-user-s16', 'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'Agent create failed: {r.status_code} {r.text}'
 data = r.json()
 assert data['name'] == '${AGENT_NAME}'
@@ -209,7 +216,10 @@ echo ""
 echo "--- T-S16-004: Verify tools are bound to agent ---"
 run_test "T-S16-004 — GET /agents/{name}/tools returns bound tools" "
 import httpx
-r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools')
+# The binding endpoint takes a user token OR an agent SA token since 0.2.271 —
+# it is what every agent pod resolves its tools through, so it cannot stay open.
+r = httpx.get('http://localhost:8000/api/v1/agents/${AGENT_NAME}/tools',
+              headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 200, f'Expected 200, got {r.status_code}'
 data = r.json()
 items = data.get('items', data) if isinstance(data, dict) else data
@@ -232,7 +242,7 @@ agent_body = {
     'tools': ['nonexistent_tool_xyz'],
 }
 r = httpx.post('http://localhost:8000/api/v1/agents/', json=agent_body,
-               headers={'X-User-Sub': 'test-user-s16'})
+               headers={'X-User-Sub': 'test-user-s16', 'Authorization': 'Bearer ${E2E_TOKEN}'})
 assert r.status_code == 201, f'Expected 201, got {r.status_code} {r.text}'
 "
 

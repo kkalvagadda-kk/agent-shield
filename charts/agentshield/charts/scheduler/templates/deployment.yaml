@@ -57,6 +57,20 @@ spec:
                 secretKeyRef:
                   name: agentshield-secrets
                   key: database-url
+            # Identity P3 (§4.5) — this pod's own Keycloak credential. Without it
+            # service_token.token() raises and every fire is SKIPPED rather than
+            # dispatched unauthenticated, so a missing env here fails closed and loud.
+            - name: SERVICE_CLIENT_ID
+              value: "scheduler"
+            - name: SERVICE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-service-clients
+                  key: scheduler
+            - name: KEYCLOAK_URL
+              value: "http://{{ .Release.Name }}-keycloak"
+            - name: KEYCLOAK_REALM
+              value: "agentshield"
             - name: RELOAD_INTERVAL_SECONDS
               value: {{ .Values.reloadIntervalSeconds | default "60" | quote }}
             - name: LOG_LEVEL

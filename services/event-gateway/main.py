@@ -37,6 +37,7 @@ import uvicorn
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
+import service_token
 from filter_engine import evaluate_filters
 from rate_limiter import RateLimiter
 from webhook_auth import verify_webhook_auth
@@ -221,6 +222,8 @@ async def receive_workflow_hook(
     # 6 + 7. Matched ⇒ dispatch to the cluster-internal run-start endpoint
     run_id = None
     try:
+        # Prove which service is dispatching (identity P3, §4.5). `run_by` below is now a
+        # transport label; the SERVICE is read from this token's verified `azp`.
         resp = httpx.post(
             f"{REGISTRY_API_URL}/api/v1/internal/runs/start",
             json={
@@ -230,6 +233,7 @@ async def receive_workflow_hook(
                 "trigger_payload": payload,
                 "run_by": "serviceaccount:event-gateway",
             },
+            headers=service_token.auth_header(),
             timeout=15.0,
         )
         if resp.status_code in (200, 201):
@@ -318,6 +322,8 @@ async def receive_hook(
     # 6 + 7. Matched ⇒ dispatch to the cluster-internal run-start endpoint
     run_id = None
     try:
+        # Prove which service is dispatching (identity P3, §4.5). `run_by` below is now a
+        # transport label; the SERVICE is read from this token's verified `azp`.
         resp = httpx.post(
             f"{REGISTRY_API_URL}/api/v1/internal/runs/start",
             json={
@@ -327,6 +333,7 @@ async def receive_hook(
                 "trigger_payload": payload,
                 "run_by": "serviceaccount:event-gateway",
             },
+            headers=service_token.auth_header(),
             timeout=15.0,
         )
         if resp.status_code in (200, 201):

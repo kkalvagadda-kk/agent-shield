@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
-# seed-platform-admin-role.sh — pin the `platform-admin` global role to the CURRENT
-# Keycloak platform-admin user, every deploy. Idempotent + self-healing.
+# seed-platform-admin-role.sh — MANUAL REPAIR TOOL — not part of the install.
 #
-# WHY THIS EXISTS
-# --------------
+# THE MECHANISM IS NOW `bootstrap_admin.ensure_platform_admin` (Decision 40, R0)
+# ----------------------------------------------------------------------------
+# services/registry-api/bootstrap_admin.py, run from registry-api's lifespan, creates
+# the Keycloak `platform-admin` user AND pins its `user_team_assignments` row on every
+# start. It looks the user up by USERNAME, so a recreated realm re-pins onto the new
+# `sub` by itself, and `/ready` stays RED (503 "bootstrapping") until it succeeds — a
+# green rollout is therefore already proof that the row is correct. `deploy-cpe2e.sh`
+# no longer calls this script.
+#
+# THIS SCRIPT IS RETAINED FOR ONE CASE (G-R0-5)
+# ---------------------------------------------
+# An operator needs to re-pin the row WITHOUT restarting registry-api — e.g. the row
+# was hand-edited, or `GET /api/v1/admin/identity-audit` reports a stale row and
+# waiting for the next rollout is not acceptable. Run it by hand; it is idempotent.
+#
+# THE ORIGINAL FAILURE IT WAS WRITTEN FOR (kept — it is why the bootstrap exists)
+# ------------------------------------------------------------------------------
 # The Studio Admin menu (and every platform-admin-gated feature) is gated by
 # `GET /api/v1/me` returning role == "platform-admin". `/me` resolves the role from
 # `user_team_assignments` keyed on the caller's Keycloak `sub` (routers/me.py).
 #
-# Nothing else in the install seeds that row — realm-init-job.yaml only creates the
+# Nothing in the install used to seed that row — realm-init-job.yaml only created the
 # Keycloak *user*, never a DB assignment. So the mapping was hand-created once against
 # whatever `sub` the platform-admin had then. When the Keycloak realm is later
 # recreated (fresh cluster, realm re-import, etc.) the platform-admin gets a NEW `sub`,
@@ -16,10 +30,11 @@
 # `contributor` row — the Admin menu silently vanishes. (Observed 2026-07-20:
 # assignment pinned to old sub 643b0e62…, live admin 75c7c8b3… stuck as contributor.)
 #
-# This script closes that gap: it logs in AS the platform-admin (so it reads the sub
-# the running Keycloak actually issues today) and UPSERTs role=platform-admin onto
-# THAT sub. Re-running is a no-op once correct. `user_team_assignments` PK is
-# `user_sub`, so ON CONFLICT (user_sub) DO UPDATE is the right upsert.
+# This script closes that gap the manual way: it logs in AS the platform-admin (so it
+# reads the sub the running Keycloak actually issues today) and UPSERTs
+# role=platform-admin onto THAT sub. Re-running is a no-op once correct.
+# `user_team_assignments` PK is `user_sub`, so ON CONFLICT (user_sub) DO UPDATE is the
+# right upsert.
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"

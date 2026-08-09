@@ -79,6 +79,21 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
+# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
+# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver is DETACHED (nohup) and runs far past the 300s token lifespan, so a
+# statically-interpolated Bearer would expire mid-run and 401 on whichever case
+# happened to be last. Install lib/e2e_auth.py in the pod and let BearerAuth re-mint
+# per request (lib/e2e-auth.sh:88-96).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 72: Eval v2 E-1 NO-FAKES durable trajectory + tool-call gate ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -94,12 +109,14 @@ kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   bash -c "rm -f $OUTFILE $RUNLOG; cat > $DRIVER" <<'PY'
 import asyncio, json, os, uuid
 import httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, desc, text
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, EvalRun, EvalRunResult
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 H = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
 SFX = uuid.uuid4().hex[:8]
 AGENT = f"s72-durable-{SFX}"
@@ -265,7 +282,10 @@ async def read_rows(run_id):
 async def main():
     ds_id = None
     run_id = None
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=90)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    # auth=BearerAuth() is the R1 authentication and httpx re-evaluates it per
+    # request, so the token survives this driver outliving its 300s lifespan.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=90)
     try:
         pid = await provider_id(c)
         if not pid:
@@ -501,7 +521,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+4 durable runs+park/approve can take ~10-20 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S72_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S72_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 360); do   # up to ~30 min

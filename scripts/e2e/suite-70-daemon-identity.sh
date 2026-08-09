@@ -45,7 +45,6 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OPA_IMAGE="openpolicyagent/opa:0.69.0-static"
-ADMIN_SUB="75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
 
 PASS=0; FAIL=0
 ok()  { echo "PASS  $1  |  $2"; PASS=$((PASS+1)); }
@@ -89,18 +88,29 @@ else
   # data.json with one registered user_delegated agent so the full allow-chain is
   # satisfiable — which is what makes deny_reason == missing_user_identity the LIVE reason.
   cat > "$WORK/data.json" <<'JSON'
-{"agents":{"system:serviceaccount:agents-platform:agent-refunds-sa":{"tools":[{"name":"lookup_order","risk":"low"}],"team":"platform","agent_class":"user_delegated","expected_sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","sa_namespace":"agents-platform"}},"grants":{"platform":[]}}
+{"agents":{"system:serviceaccount:agents-platform:agent-refunds-sa":{"tools":[{"name":"lookup_order","risk":"low"}],"team":"platform","agent_class":"user_delegated","expected_sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","sa_namespace":"agents-platform"}},"grants":{"platform":[]},"team_tools":{"platform":[{"name":"lookup_order","risk":"low"}]}}
+JSON
+  # D-1 (registry-api 0.2.272): agent_class comes from the BUNDLE keyed on the verified
+  # sa_subject, NOT from input — the SDK composes input inside the pod, so a compromised pod
+  # could otherwise claim "daemon" and skip the identity floor, which is the branch that
+  # needs no human at all. A test meaning "this is a daemon" must say so in the DATA.
+  # The input still claims daemon; that claim is now correctly ignored.
+  cat > "$WORK/data_daemon.json" <<'JSON'
+{"agents":{"system:serviceaccount:agents-platform:agent-refunds-sa":{"tools":[{"name":"lookup_order","risk":"low"}],"team":"platform","agent_class":"daemon","expected_sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","sa_namespace":"agents-platform"}},"grants":{"platform":[]},"team_tools":{"platform":[{"name":"lookup_order","risk":"low"}]}}
 JSON
   cat > "$WORK/in_daemon.json" <<'JSON'
-{"sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","tool_name":"lookup_order","agent_class":"daemon","user_id":"","user_team":"","trigger_type":"schedule"}
+{"sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","tool_name":"lookup_order","agent_class":"daemon","user_id":"","user_team":"","user_teams":[],"trigger_type":"schedule"}
 JSON
   cat > "$WORK/in_ud_empty.json" <<'JSON'
-{"sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","tool_name":"lookup_order","agent_class":"user_delegated","user_id":"","user_team":"","trigger_type":"schedule"}
+{"sa_subject":"system:serviceaccount:agents-platform:agent-refunds-sa","tool_name":"lookup_order","agent_class":"user_delegated","user_id":"","user_team":"","user_teams":[],"trigger_type":"schedule"}
 JSON
-  opa_eval() {  # <input-file> <query>
+  opa_eval() {  # <input-file> <query> [data-file]
+    # The DATA file is a parameter now. D-1 moved agent_class out of input and into the
+    # bundle, so "is this a daemon" is a property of the data, and a fixture that means
+    # daemon must supply a daemon bundle rather than assert one in the input.
     docker run --rm \
       -v "$WORK:/work:ro" "$OPA_IMAGE" \
-      eval -d /work/agentshield.rego -d /work/data.json -i "/work/$1" "$2" -f raw 2>/dev/null | tr -d '[:space:]'
+      eval -d /work/agentshield.rego -d "/work/${3:-data.json}" -i "/work/$1" "$2" -f raw 2>/dev/null | tr -d '[:space:]'
   }
   B1=$(opa_eval in_ud_empty.json 'data.agentshield.user_identity_ok')
   [ "$B1" = "false" ] && ok "T-S70-002a user_delegated+empty-user user_identity_ok(DEPLOYED)" "=$B1" \
@@ -108,13 +118,27 @@ JSON
   B2=$(opa_eval in_ud_empty.json 'data.agentshield.deny_reason')
   [ "$B2" = "missing_user_identity" ] && ok "T-S70-002b user_delegated+empty-user deny_reason(DEPLOYED)" "=$B2" \
                       || bad "T-S70-002b user_delegated+empty-user deny_reason(DEPLOYED)" "=$B2 expected missing_user_identity"
-  B3=$(opa_eval in_daemon.json 'data.agentshield.user_identity_ok')
+  B3=$(opa_eval in_daemon.json 'data.agentshield.user_identity_ok' data_daemon.json)
   [ "$B3" = "true" ] && ok "T-S70-002c daemon+empty-user user_identity_ok(DEPLOYED)" "=$B3" \
                       || bad "T-S70-002c daemon+empty-user user_identity_ok(DEPLOYED)" "=$B3 expected true"
   echo "  NOTE: agent_class reaches the pod OPA input via the deploy env; propagating"
   echo "        principal.user_id/trigger_type onto the pod OPA input for a trigger"
   echo "        dispatch is the DEFERRED identity-propagation initiative (WS-2 gap ledger)."
 fi
+
+# RESOLVED LIVE, not hardcoded. This literal has no user_team_assignments row on the current
+# cluster — a realm recreation mints new subs and nothing updated it, so the assertion
+# compared the run's real principal against a sub that no longer exists. Same staleness that
+# was in studio/e2e/lib/api.ts.
+ADMIN_SUB="$(kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
+import asyncio, os
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy import text
+async def m():
+    e = create_async_engine(os.environ['DATABASE_URL'])
+    async with e.connect() as c:
+        print((await c.execute(text(\"select user_sub from user_team_assignments where role='platform-admin' order by user_sub limit 1\"))).scalar() or '')
+asyncio.run(m())" 2>/dev/null | tr -d '[:space:]')"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,7 +163,10 @@ from models import Agent, AgentVersion, Deployment, AgentIdentity, AgentTrigger,
 from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+# Same stale literal as the one above — a realm recreation mints new subs and nothing
+# updated either copy, so this compared the run's REAL principal against a sub with no
+# user_team_assignments row. Fed from the shell, which resolves it live.
+ADMIN = os.environ["ADMIN_SUB"]
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
@@ -435,7 +462,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume can take a few min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE ADMIN_SUB=$ADMIN_SUB nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 150); do   # up to ~12.5 min (production deploy + park + resume)
   sleep 5

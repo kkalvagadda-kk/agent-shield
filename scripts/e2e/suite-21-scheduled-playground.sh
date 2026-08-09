@@ -31,7 +31,7 @@ cleanup() {
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${SCHED_AGENT}', method='DELETE')
+    req = urllib.request.Request('http://localhost:8000/api/v1/agents/${SCHED_AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
     urllib.request.urlopen(req, timeout=5)
 except Exception:
     pass
@@ -52,7 +52,7 @@ r = httpx.post('http://localhost:8000/api/v1/agents/', json={
     'team': 'default',
     'agent_type': 'declarative',
     'metadata': {'instructions': 'scheduled test'},
-})
+}, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 if r.status_code != 201:
     print(f'FAIL: create returned {r.status_code}: {r.text}')
     sys.exit(1)

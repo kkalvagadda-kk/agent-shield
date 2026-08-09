@@ -1,4 +1,5 @@
 import { test, expect, request as pwRequest, type APIRequestContext } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // durable-stream.spec.ts
@@ -17,10 +18,11 @@ import { test, expect, request as pwRequest, type APIRequestContext } from "@pla
 
 // Interactive platform-admin sub (the identity global-setup logs in as) so the
 // self-provisioned agent is visible in the browser's deployment dropdown.
-const ADMIN = {
-  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. That literal has no user_team_assignments row on the
+// current cluster (a realm recreation mints new subs), and header identity stopped being
+// identity when R1/R2/R3 + G-R3-6 gated these routes. adminAuthHeaders() mints a real
+// token and derives the sub FROM it, so header and signature cannot disagree.
+let ADMIN: Record<string, string> = {};
 const BASE_URL =
   process.env.PLAYWRIGHT_BASE_URL || "https://agentshield.127.0.0.1.nip.io:8443";
 const AGENT = `dstream-${Date.now().toString().slice(-7)}`;
@@ -31,6 +33,7 @@ test.describe("durable playground step-stream (real SSE)", () => {
 
   test.beforeAll(async () => {
     test.setTimeout(180_000); // deploying a real pod takes a bit
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: BASE_URL,
       ignoreHTTPSErrors: true,

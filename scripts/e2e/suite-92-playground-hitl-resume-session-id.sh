@@ -23,8 +23,14 @@ POD="$(kubectl -n "$NS" get pod -l app.kubernetes.io/name=registry-api -o jsonpa
 [ -z "$POD" ] && { echo "no running registry-api pod found in $NS"; exit 1; }
 echo "registry-api pod: $POD"
 
-kubectl -n "$NS" exec -i "$POD" -c registry-api -- python3 - <<'PY'
-import asyncio, uuid, httpx
+# Identity P3: /playground routes no longer accept an anonymous caller, so this suite
+# needs a real credential. It previously called them with none and passed, which is
+# itself the finding — the routes were reachable without one.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NS" "$POD"
+
+kubectl -n "$NS" exec -i "$POD" -c registry-api -- env S92_TOKEN="$E2E_TOKEN" python3 - <<'PY'
+import asyncio, os, uuid, httpx
 from sqlalchemy import text
 from db import AsyncSessionLocal
 
@@ -52,7 +58,7 @@ async def cleanup():
         await s.commit()
 
 def get(path):
-    return httpx.get(BASE + path, timeout=15)
+    return httpx.get(BASE + path, headers={"Authorization": "Bearer " + os.environ["S92_TOKEN"]}, timeout=15)
 
 async def main():
     await seed()

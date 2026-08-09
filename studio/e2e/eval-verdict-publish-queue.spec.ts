@@ -4,6 +4,7 @@ import {
   request as pwRequest,
   type APIRequestContext,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // eval-verdict-publish-queue.spec.ts
@@ -32,10 +33,12 @@ import {
 // ---------------------------------------------------------------------------
 
 const TS = Date.now();
-const ADMIN = {
-  "X-User-Sub": "047fad5f-f38c-430a-bfba-6e4d9009314b",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. That literal has no user_team_assignments row on the
+// current cluster (a realm recreation mints new subs), and header identity stopped being
+// identity when R1/R2/R3 + G-R3-6 gated these routes — the calls 401, and the failure
+// surfaces as whatever UI step needed the fixture. adminAuthHeaders() mints a real token
+// and derives the sub FROM it, so header and signature cannot name two different people.
+let ADMIN: Record<string, string> = {};
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
 
 const AGENT_NAME = `e2e-evq-agent-${TS}`;
@@ -53,6 +56,7 @@ test.describe("publish queue — the verdict uses the run's own threshold", () =
   let versionId = "";
 
   test.beforeAll(async () => {
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

@@ -6,8 +6,19 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 POD=$(kubectl get pod -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
+# R1/FR-11: the AGENT block below hits /agents/{name}/deploy, /{name}/versions*,
+# /{name}/deployments and PATCH /{name}/deployments/{id} — all now require a real JWT.
+# The WORKFLOW block is routers/composite_workflows.py (/api/v1/workflows/*), which is
+# NOT one of the ten routers R1 protects, so it stays anonymous.
+#
+# The payloads are SINGLE-quoted, so bash cannot interpolate the token into them; it
+# travels as an env var and the driver reads os.environ["E2E_TOKEN"]. Call
+# e2e_set_token BARE — a command substitution swallows its `exit 1` (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$POD"
+
 run() {
-  kubectl exec -n "$NAMESPACE" "$POD" -- python3 -c "$1"
+  kubectl exec -n "$NAMESPACE" "$POD" -- env E2E_TOKEN="$E2E_TOKEN" python3 -c "$1"
 }
 
 echo "=== Suite 44: Version Management ==="
@@ -17,10 +28,13 @@ echo "=== Suite 44: Version Management ==="
 # --------------------------------------------------------------------------
 echo "T-S44-001..004,009 — Agent: config snapshot, redeploy, upgrade, immutability, delete cascade"
 run '
-import httpx, uuid
+import httpx, os, uuid
 
+# X-User-Sub stays: it is the AUDIT STAMP (created_by/deployed_by), never the
+# authentication. The Bearer is what R1 requires.
 c = httpx.Client(base_url="http://localhost:8000", follow_redirects=True,
-                 headers={"X-User-Sub": "test-suite-44"})
+                 headers={"X-User-Sub": "test-suite-44",
+                          "Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 
 AGENT_NAME = "ver-test-44-" + uuid.uuid4().hex[:6]
 
@@ -134,10 +148,11 @@ print("Agent cleanup done")
 # --------------------------------------------------------------------------
 echo "T-S44-005..008 — Workflow: snapshot, deploy, invalid deploy, re-snapshot"
 run '
-import httpx, uuid
+import httpx, os, uuid
 
 c = httpx.Client(base_url="http://localhost:8000", follow_redirects=True,
-                 headers={"X-User-Sub": "test-suite-44"})
+                 headers={"X-User-Sub": "test-suite-44",
+                          "Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 
 SUFFIX = uuid.uuid4().hex[:6]
 HELPER1 = f"ver-test-44-h1-{SUFFIX}"

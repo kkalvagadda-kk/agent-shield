@@ -68,6 +68,19 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11 added GET /llm-providers/ and POST /agents/{name}/deploy to the routes needing
+# a real JWT. Sections A and E already mint a token for the JWT-guarded /chat and
+# /runs/stream paths; those clients now carry it on EVERY request via BearerAuth, because
+# a section that provisions three agents and then polls wait_running for up to 180s
+# outlives a statically-interpolated token (lib/e2e_auth.py:1-21). Sections C and D touch
+# no R1-protected route and are unchanged.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+# Sourcing the lib does not mint a token — the CALL does. Without it every
+# ${E2E_TOKEN} reference is unbound under `set -u`.
+e2e_set_token "$NAMESPACE" "$API_POD"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 75: Context Storage (POC-0/1) — real path, no fakes ==="
 echo "  Pod:     $API_POD"
 echo "  Suffix:  $SUFFIX   Session: $SESSION"
@@ -155,8 +168,10 @@ tally() {
 #             the created agents/workflow stay live across the assertions.
 # ---------------------------------------------------------------------------
 SECTION_A=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" python3 - <<'PY' 2>/dev/null || true
 import asyncio, os, uuid, json, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from datetime import datetime, timezone
 from sqlalchemy import select
 from db import AsyncSessionLocal
@@ -309,9 +324,11 @@ def memory_ordered(rows):
 async def main():
     token, sub = await get_token()
     auth = {"Authorization": f"Bearer {token}"} if token else {}
-    hdr = {"X-User-Sub": sub or f"s75-owner-{SUFFIX}", "X-User-Team": "platform"}
+    hdr = {"X-User-Sub": sub or f"s75-owner-{SUFFIX, "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}", "X-User-Team": "platform"}
 
-    async with httpx.AsyncClient(timeout=60) as c:
+    # auth=BearerAuth() re-mints per request; `auth` (the static header dict built
+    # above) is still used for the raw /chat and /runs/stream calls further down.
+    async with httpx.AsyncClient(timeout=60, auth=BearerAuth()) as c:
         pid = await provider_id(c)
         if not pid:
             for t in ("T-S75-001", "T-S75-003", "T-S75-004"):
@@ -543,7 +560,7 @@ fi
 echo ""
 echo "--- Section C: T-S75-002 recall survives pod restart ---"
 SECTION_C=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" S75_RESTARTED="$RESTARTED" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" S75_SESSION="$SESSION" S75_RESTARTED="$RESTARTED" env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
 import asyncio, os, json, base64, httpx
 
 ROOT = "http://localhost:8000"; BASE = ROOT + "/api/v1"
@@ -641,14 +658,14 @@ tally "$SECTION_C"
 echo ""
 echo "--- Section D: T-S75-005 durable resume unaffected by shared conversation_id ---"
 SECTION_D=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  python3 - <<'PY' 2>/dev/null || true
-import asyncio, uuid, httpx
+  env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
+import asyncio, os, uuid, httpx
 from sqlalchemy import select
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun, Approval
 
 BASE = "http://localhost:8000/api/v1"
-H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
+H = {"X-User-Sub": os.environ["E2E_ADMIN_SUB"], "X-User-Team": "platform"}
 AGENT = "wf-payout"
 
 def out(tid, verdict, detail=""):
@@ -744,8 +761,10 @@ tally "$SECTION_D"
 echo ""
 echo "--- Section E: T-S75-009/010/011 rich workflow stream (chips + rationale + parity) ---"
 SECTION_E=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
-  env S75_SUFFIX="$SUFFIX" python3 - <<'PY' 2>/dev/null || true
+  env E2E_TOKEN="$E2E_TOKEN" S75_SUFFIX="$SUFFIX" env E2E_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>/dev/null || true
 import asyncio, os, uuid, json, base64, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select
 from db import AsyncSessionLocal
 from models import Agent, Deployment, AgentRun
@@ -822,7 +841,7 @@ async def wait_terminal(run_id, timeout=180):
 async def main():
     token, sub = await get_token()
     auth = {"Authorization": f"Bearer {token}"} if token else {}
-    hdr = {"X-User-Sub": sub or f"s75-owner-{SUFFIX}", "X-User-Team": "platform"}
+    hdr = {"X-User-Sub": sub or f"s75-owner-{SUFFIX, "Authorization": "Bearer " + os.environ["E2E_TOKEN"]}", "X-User-Team": "platform"}
     if not token:
         for t in IDS:
             out(t, "SKIP", "no keycloak token (runs/stream is JWT-guarded)")
@@ -831,7 +850,9 @@ async def main():
     wid = None
     tool_id = None
     try:
-        async with httpx.AsyncClient(timeout=60, headers=hdr) as c:
+        # hdr keeps X-User-Sub/X-User-Team — AUDIT STAMPS; BearerAuth is the R1
+        # authentication and refreshes across this section's 180s deploy waits.
+        async with httpx.AsyncClient(timeout=60, headers=hdr, auth=BearerAuth()) as c:
             pid = await provider_id(c)
             if not pid:
                 for t in IDS:
@@ -1065,7 +1086,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request
 try:
     urllib.request.urlopen(urllib.request.Request(
-        'http://localhost:8000/api/v1/agents/${CHAT_AGENT}', method='DELETE'), timeout=5)
+        'http://localhost:8000/api/v1/agents/${CHAT_AGENT}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception:
     pass
 " 2>/dev/null || true

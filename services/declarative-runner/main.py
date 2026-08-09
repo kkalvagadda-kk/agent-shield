@@ -194,15 +194,57 @@ async def _bind_user_context(request: Request) -> None:
     downgrade to the service identity.
     """
     from agentshield_sdk.graph_builder import _current_user_context
+    import run_context as rc
 
+    auto_approve = request.headers.get("x-agentshield-auto-approve", "").lower() == "true"
+
+    # ─── Identity P1: a VERIFIED context outranks the self-asserted headers ───
+    # `x-user-sub` is whatever the caller typed. It was the only identity available, and
+    # it is the same forgeable-attribution shape R2/R3 deleted from create_agent and
+    # publish_agent — here it decides which user's authority OPA intersects against
+    # (Decision 45), so believing it would let a caller pick their own permissions.
+    #
+    # When a signed RunContext is present it is AUTHORITATIVE and the headers are ignored
+    # entirely — not merged, not used to fill gaps. A token that fails verification yields
+    # NO identity rather than falling back to the headers: falling back would mean an
+    # attacker strips or corrupts the token to be believed on a header instead, which
+    # makes the signature decorative.
+    rct = request.headers.get(rc.RCT_HEADER.lower()) or request.headers.get(rc.RCT_HEADER)
+    if rct:
+        try:
+            ctx = rc.verify(rct)
+        except Exception as exc:  # noqa: BLE001 — fail closed, see above
+            logger.warning(
+                "run context REJECTED (%s) — this run carries NO user identity; a "
+                "user_delegated agent will be denied missing_user_identity", exc,
+            )
+            _current_user_context.set({"user_id": "", "user_team": "", "user_teams": [],
+                                       "auto_approve": auto_approve})
+            return
+        _current_user_context.set({
+            "user_id": ctx.user_sub,
+            "user_team": ctx.user_team,
+            # PLURAL from the start (Decision 45 / P2 2c). One team per user today.
+            "user_teams": [ctx.user_team] if ctx.user_team else [],
+            "origin": ctx.origin,
+            "actor_chain": ctx.actor_chain,
+            "auto_approve": auto_approve,
+        })
+        return
+
+    # TRANSITION ONLY — no token was sent. Every registry-api durable dispatch mints one
+    # since P1, so this path is reached by callers not yet updated. It is deliberately kept
+    # so a partial rollout degrades to the OLD behaviour rather than to a hard failure, and
+    # it must be DELETED once every producer mints (identity P3 closes the last of them:
+    # eval-runner still identifies itself with a bare `X-User-Sub: eval-runner`).
+    legacy_team = request.headers.get("x-agent-team", "")
     _current_user_context.set({
         "user_id": request.headers.get("x-user-sub", ""),
-        "user_team": request.headers.get("x-agent-team", ""),
+        "user_team": legacy_team,
+        "user_teams": [legacy_team] if legacy_team else [],
         # Batch/dataset eval sets this (registry-side, only for the eval-runner
         # identity) so high-risk tools auto-approve instead of hanging on HITL.
-        "auto_approve": request.headers.get(
-            "x-agentshield-auto-approve", ""
-        ).lower() == "true",
+        "auto_approve": auto_approve,
     })
 
 

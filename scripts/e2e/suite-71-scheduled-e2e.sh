@@ -50,31 +50,6 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ADMIN_SUB="75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
-
-PASS=0; FAIL=0
-ok()  { echo "PASS  $1  |  $2"; PASS=$((PASS+1)); }
-bad() { echo "FAIL  $1  |  $2"; FAIL=$((FAIL+1)); }
-
-echo "=== WS-3 / suite-71: scheduled daemon agent+workflow, end-to-end (REAL, no fakes) ==="
-echo "  namespace: $NAMESPACE"
-echo ""
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T-S71-000 — PARITY grep guard (repo source, not the cluster).
-# Assert there is NO scheduled-only dispatch/identity fork: `schedule` is a value
-# threaded through the shared path, never an `if trigger_type == "schedule"`
-# branch in the dispatch/identity core. Any match here is a parity violation.
-# ─────────────────────────────────────────────────────────────────────────────
-echo "--- T-S71-000: parity grep (no scheduled-only dispatch fork) ---"
-PARITY_FILES="services/registry-api/routers/internal.py services/registry-api/durable_dispatch.py services/registry-api/identity.py"
-MATCHES=$(cd "$REPO_ROOT" && grep -nE "trigger_type\s*==\s*[\"']schedule[\"']" $PARITY_FILES 2>/dev/null || true)
-if [ -z "$MATCHES" ]; then
-  ok "T-S71-000 parity: no scheduled-only dispatch fork" "0 matches in {internal,durable_dispatch,identity}"
-else
-  bad "T-S71-000 parity: no scheduled-only dispatch fork" "FOUND: $MATCHES"
-fi
-echo ""
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
@@ -84,6 +59,10 @@ if [ -z "$API_POD" ]; then echo "ERROR: no running registry-api pod"; exit 1; fi
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null   # fail fast + loud if Keycloak is unreachable
 e2e_install_pyauth "$NAMESPACE" "$API_POD"
+# e2e_require_token validates; it does NOT export E2E_SUB. This suite reads ${E2E_SUB}
+# for its admin identity, so it needs the setter too — otherwise the sub is empty and
+# every ownership assertion below compares against "".
+e2e_set_token "$NAMESPACE" "$API_POD"
 
 echo "  driver pod: $API_POD"
 echo ""
@@ -112,7 +91,14 @@ from models import (Agent, AgentVersion, Deployment, AgentIdentity, AgentTrigger
 from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+# ADMIN comes from the ENVIRONMENT, not from heredoc interpolation.
+# This heredoc is QUOTED (`<<'PY'`), so `${E2E_SUB}` is NEVER expanded — it arrived as
+# that literal 12-character string. Decorative in the X-User-Sub header below (the server
+# has ignored it since R2/R3), but this suite also COMPARES it: `trig.armed_by == ADMIN`
+# could never be true, and `rb != ADMIN` passed for the wrong reason. The 748c2fd pass
+# that introduced ${E2E_SUB} wrote it into quoted heredocs across many suites; this is the
+# only one where an assertion depended on it.
+ADMIN = os.environ["S71_ADMIN_SUB"]
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
@@ -321,6 +307,10 @@ async def main():
         d2c = "prereq failed (no parked approval)"; ok2c = False
         if approval_id:
             async with AsyncSessionLocal() as s:
+                # 'agent:reviewer' is a REVIEWER SCOPE, not a global role (Decision 42 / V-5).
+                # approvals.py:48 _DEFAULT_REVIEWER_SCOPE matches this literal via _caller_roles (:266).
+                # ROLE_HIERARCHY.get(...,0)==0 for it is load-bearing. Do not "normalize" it. The FR-12
+                # audit reports it as a matched row, never as litter.
                 await s.execute(text(
                     "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "
                     "VALUES (:u, 'platform', 'agent:reviewer', 'suite-71', :ts)"),
@@ -587,7 +577,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume+4 modes+alert — can take many min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE S71_ADMIN_SUB=$E2E_SUB nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 300); do   # up to ~25 min (prod deploy + park + resume + 4 workflow modes + alert)
   sleep 5
@@ -605,6 +595,37 @@ if [ -z "$RES" ]; then
   echo "SUITE 71 FAILED"
   exit 1
 fi
+
+
+ADMIN_SUB="${E2E_SUB}"
+
+PASS=0; FAIL=0
+ok()  { echo "PASS  $1  |  $2"; PASS=$((PASS+1)); }
+bad() { echo "FAIL  $1  |  $2"; FAIL=$((FAIL+1)); }
+
+echo "=== WS-3 / suite-71: scheduled daemon agent+workflow, end-to-end (REAL, no fakes) ==="
+echo "  namespace: $NAMESPACE"
+echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T-S71-000 — PARITY grep guard (repo source, not the cluster).
+# Assert there is NO scheduled-only dispatch/identity fork: `schedule` is a value
+# threaded through the shared path, never an `if trigger_type == "schedule"`
+# branch in the dispatch/identity core. Any match here is a parity violation.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "--- T-S71-000: parity grep (no scheduled-only dispatch fork) ---"
+PARITY_FILES="services/registry-api/routers/internal.py services/registry-api/durable_dispatch.py services/registry-api/identity.py"
+MATCHES=$(cd "$REPO_ROOT" && grep -nE "trigger_type\s*==\s*[\"']schedule[\"']" $PARITY_FILES 2>/dev/null || true)
+if [ -z "$MATCHES" ]; then
+  ok "T-S71-000 parity: no scheduled-only dispatch fork" "0 matches in {internal,durable_dispatch,identity}"
+else
+  bad "T-S71-000 parity: no scheduled-only dispatch fork" "FOUND: $MATCHES"
+fi
+echo ""
+
+
+
+
 
 ALERT_POS=""; ALERT_NEG=""
 while IFS= read -r line; do

@@ -38,7 +38,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
+from rbac import get_user_global_role, get_user_team
 from credential_provider import CredentialRef, get_provider
 from db import get_db
 from mcp_discovery import _materialize_and_discover
@@ -92,13 +93,45 @@ async def _get_server(server_id: uuid.UUID, db: AsyncSession) -> MCPServer:
 )
 async def create_mcp_server(
     body: MCPServerCreate,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> MCPServerResponse:
+    """Register an MCP server. The registering team OWNS it, and its discovered tools.
+
+    `owner_team` is DERIVED from the caller's team assignment (Decision 46), not taken from
+    the request body — the Studio Register Server modal collects only a name and a URL, so
+    the body field was always absent and `MCPServer(**body.model_dump())` left it NULL.
+
+    That was harmless while tools defaulted to `published`. Migration `0080` made them
+    `private`, and `mcp_discovery.py:154` copies `server.owner_team` onto every tool it
+    discovers — so a NULL server owner produced private tools owned by NOBODY, which the
+    team-scoped catalog filter (`published OR owner_team == caller team`) shows to no one.
+    Registering a server through Studio silently produced a catalog of invisible tools.
+
+    Caught by `mcp-servers.spec.ts` — the tools-source filter had no chip for the server
+    that had just been registered.
+
+    Same fix and same reasoning as `create_tool` (0.2.267): a body-supplied `owner_team` is
+    honoured only for a platform-admin, because seeding and admin-side registration
+    legitimately assign ownership; for anyone else it would let a caller hand their server
+    to a team they are not in.
+    """
     # transport='stdio' and is_external+identity_mode!='none' are already rejected 422
     # by MCPServerCreate's model_validator — no re-check here.
-    caller = (user or {}).get("sub") or x_user_sub
+    caller = claims["sub"]
+    caller_team = await get_user_team(db, caller)
+    if body.owner_team and body.owner_team != caller_team:
+        if await get_user_global_role(db, caller) != "platform-admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Cannot register an MCP server owned by team '{body.owner_team}': you are "
+                    f"in '{caller_team}'. Only a platform-admin may assign ownership elsewhere."
+                ),
+            )
+        owner_team = body.owner_team
+    else:
+        owner_team = caller_team
 
     existing = (
         await db.execute(select(MCPServer).where(MCPServer.name == body.name))
@@ -121,7 +154,12 @@ async def create_mcp_server(
                 detail=f"AuthConfig '{body.auth_config_id}' not found.",
             )
 
-    server = MCPServer(**body.model_dump())
+    # owner_team excluded from the splat: it is DERIVED above and must not be able to
+    # reach the row by a path the guard does not cover.
+    server = MCPServer(**body.model_dump(exclude={"owner_team"}))
+    server.owner_team = owner_team
+    # Propagated onto every tool discovery creates from this server (migration 0081).
+    server.created_by = caller
     db.add(server)
     await db.flush()  # need the generated id for the Secret + discover
 

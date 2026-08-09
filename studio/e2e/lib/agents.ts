@@ -6,10 +6,34 @@ import { expect, type Page, type APIRequestContext } from "@playwright/test";
  * Asserts the POST /agents body carries the tool. Returns the agent name.
  * Reference: tools-picker-drawer.spec.ts.
  */
+/**
+ * Select a model in the create-agent form. THE one definition — do not re-copy it.
+ *
+ * `llm_provider_id` became REQUIRED in studio 0.1.178 (CreateAgentPage.tsx:664,
+ * `z.string().min(1, "Pick a model — an agent without one cannot run.")`), because an
+ * agent with no model was being accepted silently and could never run. Zod then rejects
+ * the submit, so NO POST is issued at all — a spec that only fills the name sits waiting
+ * on a `waitForResponse` that can never arrive and dies at its 20s timeout, which reads
+ * as "creation is broken" rather than "the form has a new required field".
+ *
+ * That cost six specs in the 2026-08-04 baseline (agent-detail-modes, agents,
+ * catalog-overview-parity, deployment-overview, workflow-builder, workflows) — one
+ * product change against ELEVEN private copies of the same create helper. Nobody noticed
+ * because the browser layer could not run against EKS at all (gap G-R0-8).
+ *
+ * Index 1, not 0: option 0 is the "Select a model…" placeholder, whose value is "".
+ */
+export async function pickModel(page: Page): Promise<void> {
+  const select = page.getByLabel("Model", { exact: true });
+  const value = await select.locator("option").nth(1).getAttribute("value");
+  if (value) await select.selectOption(value);
+}
+
 export async function createAgentWithTool(page: Page, name: string, toolLabel: string): Promise<string> {
   await page.goto("/agents/new");
   await page.getByRole("button", { name: /No-code/i }).click();
   await page.getByPlaceholder("my-agent").fill(name);
+  await pickModel(page);
 
   // Tool picker → drawer → select the tile → Done.
   const picker = page.getByTestId("tools-picker");

@@ -1,12 +1,24 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
 import { renderWithProviders } from "../test/utils";
 import Sidebar from "./Sidebar";
 import { STUDIO_BUILD } from "../lib/build";
 
+// getMyTeam/listSchedules must be here even though this file only asserts the approvals
+// badge: Sidebar reads them too. The team query was ABSENT from this mock until 0.1.183
+// because it used a raw `fetch("/api/v1/admin/teams-summary")`, which a module mock
+// cannot see — so the call site that later blanked the whole app was invisible to the
+// component's own test. Routing it through registryApi makes the bypass impossible to
+// reintroduce silently: omit it here and this file fails.
+//
+// 0.1.184 renamed it getTeamsSummary -> getMyTeam when R2 made the admin census
+// platform-admin only and the sidebar moved to the self-scoped /api/v1/me/team. This
+// file failing on the rename is the seam doing its job.
 vi.mock("../api/registryApi", () => ({
   listAgents: vi.fn(),
   listPendingApprovals: vi.fn(),
+  listSchedules: vi.fn().mockResolvedValue([]),
+  getMyTeam: vi.fn().mockResolvedValue({ team: "platform", namespace: null, grants: [] }),
 }));
 
 import { listAgents, listPendingApprovals } from "../api/registryApi";
@@ -33,16 +45,12 @@ function approval(id: string) {
 
 describe("Sidebar — approvals badge", () => {
   beforeEach(() => {
-    // The sidebar's team-grants section fetches directly; stub it so the nav renders.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ json: () => Promise.resolve([]) })
-    );
+    // No global fetch stub. The team-grants section used to fetch directly; since
+    // 0.1.183 it goes through the mocked registryApi module, and a leftover fetch stub
+    // here would imply a private transport that no longer exists.
     mock(listAgents).mockResolvedValue({ items: [] });
     mock(listPendingApprovals).mockResolvedValue([]);
   });
-
-  afterEach(() => vi.unstubAllGlobals());
 
   it("renders the count when approvals are pending", async () => {
     mock(listPendingApprovals).mockResolvedValue([approval("a"), approval("b"), approval("c")]);
@@ -96,15 +104,9 @@ describe("Sidebar — approvals badge", () => {
 
 describe("Sidebar — build marker", () => {
   beforeEach(() => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ json: () => Promise.resolve([]) })
-    );
     mock(listAgents).mockResolvedValue({ items: [] });
     mock(listPendingApprovals).mockResolvedValue([]);
   });
-
-  afterEach(() => vi.unstubAllGlobals());
 
   // `__STUDIO_BUILD` sat unread for 67 tags and silently lied. This asserts it has a
   // reader — the property that makes a stale bundle observable at all.

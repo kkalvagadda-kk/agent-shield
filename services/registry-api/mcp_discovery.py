@@ -152,6 +152,11 @@ async def _materialize_and_discover(
                     side_effecting=True,  # conservative — real side effects unknown
                     pii_deanonymize_allowed=False,  # fail-closed default
                     owner_team=server.owner_team,  # the only work team-scoping needs
+                    # The registrant is the creator (migration 0081). Catalog
+                    # visibility is `published OR created_by == caller`, so a NULL
+                    # creator on a private row is invisible to EVERYONE — the same
+                    # defect shape as mcp-discovered-tools-invisible-after-private-default.
+                    created_by=server.created_by,
                     status="active",
                     mcp_server_id=server.id,
                     mcp_tool_name=raw_name,

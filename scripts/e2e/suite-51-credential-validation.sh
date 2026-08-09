@@ -5,11 +5,23 @@
 # the API key) while still persisting a real credential's value.
 set -euo pipefail
 
+NAMESPACE="${NAMESPACE:-agentshield-platform}"
 POD=$(kubectl get pods -n agentshield-platform -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
+# R1/FR-11: every /api/v1/auth-configs route this suite drives (POST /, GET /, GET /{id},
+# PUT /{id}, DELETE /{id}) is credential-bearing and now requires a real JWT. Only
+# GET /{id}/secret-ref stays exempt (deploy-controller/tool_secrets.py:45, G-R1-4) and
+# this suite never calls it.
+#
+# The payloads are SINGLE-quoted, so bash cannot interpolate the token; it travels as an
+# env var and each driver reads os.environ["E2E_TOKEN"]. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$POD"
+
 run() {
-  kubectl exec -n agentshield-platform "$POD" -c registry-api -- python3 -c "$1"
+  kubectl exec -n agentshield-platform "$POD" -c registry-api -- env E2E_TOKEN="$E2E_TOKEN" python3 -c "$1"
 }
 
 echo "=== Suite 51: Credential Validation ==="
@@ -19,9 +31,10 @@ echo "=== Suite 51: Credential Validation ==="
 # --------------------------------------------------------------------------
 echo "T-S51-001 — Valid api_key credential is accepted + K8s secret holds real value"
 run '
-import base64, httpx, uuid
+import base64, httpx, os, uuid
 from kubernetes import client, config
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 name = "s49-valid-" + uuid.uuid4().hex[:8]
 real = "sk-realKey-" + uuid.uuid4().hex
 r = c.post("/auth-configs/", json={"name":name,"type":"api_key","credentials":{"serper_api_key":real}})
@@ -42,8 +55,9 @@ print("PASS: T-S51-001")
 # --------------------------------------------------------------------------
 echo "T-S51-002 — httpx 403 error string rejected with 422, nothing persisted"
 run '
-import httpx, uuid
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+import httpx, os, uuid
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 name = "s49-bad-" + uuid.uuid4().hex[:8]
 bad = "Client error '"'"'403 Forbidden'"'"' for url '"'"'https://google.serper.dev/search'"'"'"
 r = c.post("/auth-configs/", json={"name":name,"type":"api_key","credentials":{"serper_api_key":bad}})
@@ -59,8 +73,9 @@ print("PASS: T-S51-002")
 # --------------------------------------------------------------------------
 echo "T-S51-003 — empty, oversized, and multi-line inline values rejected (422)"
 run '
-import httpx, uuid
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+import httpx, os, uuid
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 def try_bad(val, label):
     name = "s49-" + label + "-" + uuid.uuid4().hex[:6]
     r = c.post("/auth-configs/", json={"name":name,"type":"api_key","credentials":{"k":val}})
@@ -76,8 +91,9 @@ print("PASS: T-S51-003")
 # --------------------------------------------------------------------------
 echo "T-S51-004 — mtls multi-line PEM credential accepted"
 run '
-import httpx, uuid
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+import httpx, os, uuid
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 name = "s49-mtls-" + uuid.uuid4().hex[:8]
 pem = "-----BEGIN CERTIFICATE-----\n" + ("MIIB" + "a"*300) + "\n-----END CERTIFICATE-----"
 r = c.post("/auth-configs/", json={"name":name,"type":"mtls","credentials":{"tls_cert":pem}})
@@ -92,9 +108,10 @@ print("PASS: T-S51-004")
 # --------------------------------------------------------------------------
 echo "T-S51-005 — PUT with error-shaped value rejected, original secret preserved"
 run '
-import base64, httpx, uuid
+import base64, httpx, os, uuid
 from kubernetes import client, config
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 name = "s49-upd-" + uuid.uuid4().hex[:8]
 good = "goodkey-" + uuid.uuid4().hex
 r = c.post("/auth-configs/", json={"name":name,"type":"api_key","credentials":{"k":good}})
@@ -119,8 +136,9 @@ print("PASS: T-S51-005")
 # --------------------------------------------------------------------------
 echo "T-S51-006 — hyphenated credential key rejected (would be dropped by envFrom)"
 run '
-import httpx, uuid
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+import httpx, os, uuid
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 name = "s51-badkey-" + uuid.uuid4().hex[:8]
 # "serper-dev" is a valid-looking name but an INVALID env var (hyphen) — K8s
 # envFrom would silently drop it, so the agent never gets the credential.
@@ -138,10 +156,11 @@ print("PASS: T-S51-006")
 # --------------------------------------------------------------------------
 echo "T-S51-007 — has_credentials reflects whether a value is actually stored"
 run '
-import httpx, uuid
+import httpx, os, uuid
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
-c = httpx.Client(base_url="http://localhost:8000/api/v1")
+c = httpx.Client(base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 config.load_incluster_config()
 v1 = client.CoreV1Api()
 

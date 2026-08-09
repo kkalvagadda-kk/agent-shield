@@ -17,6 +17,13 @@ fail()  { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# R3 (registry-api 0.2.264): DELETE /api/v1/agents/{name} requires platform-admin or
+# `agent-admin` on the artifact. This suite's cleanup used to delete anonymously, which
+# worked only because the route took no credential at all. Call e2e_set_token BARE — a
+# command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
 [ -n "${API_POD:-}" ] || { echo "FATAL: registry-api pod not found"; exit 1; }
 
 cleanup() {
@@ -24,7 +31,7 @@ cleanup() {
 import urllib.request
 for name in ['${AGENT_A}', '${AGENT_B}']:
     try:
-        req = urllib.request.Request(f'http://localhost:8000/api/v1/agents/{name}', method='DELETE')
+        req = urllib.request.Request(f'http://localhost:8000/api/v1/agents/{name}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
         urllib.request.urlopen(req, timeout=5)
     except Exception:
         pass
@@ -55,29 +62,33 @@ SETUP_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import httpx, sys, json
 
 base = 'http://localhost:8000/api/v1'
+# The R3 pass added the Bearer to the CLEANUP delete only, so every SETUP call below still
+# went out unauthenticated and 401'd. One dict, spread into every call, so the next route
+# that gets gated does not need this discovered a second time.
+H = {'Authorization': 'Bearer ${E2E_TOKEN}'}
 
 # Create two member agents
 for name in ['${AGENT_A}', '${AGENT_B}']:
     r = httpx.post(f'{base}/agents/', json={
         'name': name, 'team': 'default', 'agent_type': 'declarative',
-        'metadata': {'instructions': 'wf member'}})
+        'metadata': {'instructions': 'wf member'}}, headers=H)
     if r.status_code not in (201, 409):
         print(f'FAIL agent create {name}: {r.status_code}'); sys.exit(1)
 
 # Create workflow
 r = httpx.post(f'{base}/workflows', json={
-    'name': '${WF_NAME}', 'team': 'default', 'orchestration': 'sequential'})
+    'name': '${WF_NAME}', 'team': 'default', 'orchestration': 'sequential'}, headers=H)
 if r.status_code != 201:
     print(f'FAIL wf create: {r.status_code} {r.text}'); sys.exit(1)
 wf = r.json()
 
 # Get agent IDs
-a_id = httpx.get(f'{base}/agents/${AGENT_A}').json()['id']
-b_id = httpx.get(f'{base}/agents/${AGENT_B}').json()['id']
+a_id = httpx.get(f'{base}/agents/${AGENT_A}', headers=H).json()['id']
+b_id = httpx.get(f'{base}/agents/${AGENT_B}', headers=H).json()['id']
 
 # Add members
-httpx.post(f'{base}/workflows/{wf[\"id\"]}/members', json={'agent_id': a_id, 'position': 0})
-httpx.post(f'{base}/workflows/{wf[\"id\"]}/members', json={'agent_id': b_id, 'position': 1})
+httpx.post(f'{base}/workflows/{wf[\"id\"]}/members', json={'agent_id': a_id, 'position': 0}, headers=H)
+httpx.post(f'{base}/workflows/{wf[\"id\"]}/members', json={'agent_id': b_id, 'position': 1}, headers=H)
 
 print(wf['id'])
 " 2>&1 | grep -v "^Defaulted" | tail -1)
@@ -182,3 +193,4 @@ print('OK')
 echo ""
 echo "==> Suite 40 Results: ${PASS} passed, ${FAIL} failed"
 [ "$FAIL" -eq 0 ] || exit 1
+

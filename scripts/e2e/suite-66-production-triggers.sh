@@ -55,7 +55,21 @@ import sys as _sys; _sys.path.insert(0, "/tmp")
 # A static Authorization header is evaluated once at client construction and dies
 # mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
 from e2e_auth import BearerAuth
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+# AUTH IS ON THE CLIENT (auth=BearerAuth()), NOT IN THIS FILE.
+# The R3/E2E_SUB scripted passes spliced BASH lines into this Python heredoc
+# (`source .../lib/e2e-auth.sh`, `e2e_set_token ...`). Python received shell text
+# and died with SyntaxError, so the driver produced no result and the suite
+# reported a driver error instead of a test failure. Removed 2026-08-09; the
+# suite already sourced the lib, called e2e_require_token and e2e_install_pyauth
+# ABOVE the heredoc, which is where they belong.
+
+# X-User-Sub removed 2026-08-09: this heredoc is QUOTED, so "${E2E_SUB}" was never
+# interpolated and the header carried that literal 12-character string. It is a
+# fallback the handlers only consult when there is no token (armed_by =
+# (user or {}).get("sub") or x_user_sub), and BearerAuth() below always supplies
+# one — so the value was both wrong and unused. Sending a real sub would need it
+# threaded via env, which nothing here asserts on.
+H={"X-User-Team":"platform"}
 GW="http://agentshield-event-gateway:8091"
 SFX=uuid.uuid4().hex[:6]; NAMES=[f"s66-a-{SFX}",f"s66-b-{SFX}"]; WFN=f"s66-wf-{SFX}"
 INSTR="You answer factual questions. Reply with ONLY the answer — no preamble."
@@ -202,6 +216,8 @@ else
   echo "PASS  T-S66-COMPLETE every gate assertion ran (001-002, none skipped)"
   PASS=$((PASS+1))
 fi
+
+
 
 kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   rm -f "$DRIVER" "$OUTFILE" 2>/dev/null || true

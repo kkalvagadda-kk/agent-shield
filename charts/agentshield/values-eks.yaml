@@ -48,9 +48,9 @@ embeddingSidecar:
 
 # --- eval-runner: full-string image (registry-api spawns eval Jobs) ---
 registry-api:
-  evalRunnerImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
+  evalRunnerImage: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.15"
   env:
-    EVAL_RUNNER_IMAGE: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.10"
+    EVAL_RUNNER_IMAGE: "517602344783.dkr.ecr.us-west-2.amazonaws.com/agentshield/eval-runner:0.1.15"
   # Credential provider (Decision 31). Default pg-fernet (value stays in Postgres)
   # even on EKS. To turn on AWS Secrets Manager here, flip backend to "aws-sm" and
   # set awsRegion (us-west-2) + awsRoleArn to the IRSA role that grants

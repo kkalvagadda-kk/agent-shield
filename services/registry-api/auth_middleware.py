@@ -10,6 +10,9 @@ Usage:
 
     # Required — raises 401 if not authenticated
     user = Depends(require_user)
+
+    # Identity-propagation Phase 3 — who is calling, as ONE answer
+    caller = Depends(resolve_caller)
 """
 from __future__ import annotations
 
@@ -17,7 +20,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal, Mapping
 
 import httpx
 from fastapi import Depends, HTTPException, Query, Request, status
@@ -121,3 +125,120 @@ async def require_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return claims
+
+
+# ── Verifiable service identity (identity-propagation Phase 3) ───────────────
+#
+# WHY THIS EXISTS
+# ---------------
+# Three internal callers — eval-runner, scheduler, event-gateway — asserted who they
+# were with a plain string nobody checked: `X-User-Sub: eval-runner` on ~18 eval-runner
+# calls, and `"run_by": "serviceaccount:scheduler"` in the body of every POST to
+# `/internal/runs/start`. Any caller with VPC network reach could send either.
+#
+# `azp` ("authorized party") is the answer, and specifically NOT a claim the caller
+# chooses: Keycloak sets it to the client-id the token was ISSUED TO, and it sits inside
+# the RS256 signature. Reproducing it requires the client's secret. So the same JWKS
+# verification `require_user` already performs is what makes this unforgeable — there is
+# no second crypto path to get wrong.
+#
+# NOTE this is AUTHENTICATION only. "Which service is this?" is a different question from
+# "may it do this?" — see identity-propagation-architecture.md §4.2. A verified
+# `scheduler` token says the scheduler is calling; it does not say the run it wants to
+# start is one the scheduler may start. Endpoints still apply their own rules.
+_TRUSTED_SERVICE_CLIENTS = frozenset({"eval-runner", "scheduler", "event-gateway"})
+
+
+def is_trusted_service(claims: Mapping[str, Any] | None) -> str | None:
+    """The trusted service this token was issued to, or None.
+
+    Pure function over ALREADY-VERIFIED claims — it performs no I/O and no signature
+    check of its own, because it must never be reachable with an unverified payload.
+    Callers get claims from `_decode_token` (via `get_optional_user` / `resolve_caller`),
+    which is the only thing in this module that turns a string into claims.
+    """
+    if not claims:
+        return None
+    azp = str(claims.get("azp") or "")
+    return azp if azp in _TRUSTED_SERVICE_CLIENTS else None
+
+
+@dataclass(frozen=True)
+class Caller:
+    """WHO is calling — one answer, produced in one place.
+
+    Before this existed each endpoint invented its own resolution and they disagreed:
+
+      * `approvals.decide_approval`  `x_user_sub or x_user_id or JWT.sub or body.reviewer_id`
+      * `playground.create_playground_run`  `JWT.sub or x_user_sub or "dev"`, plus a
+        `_SERVICE_IDENTITIES = {"eval-runner"}` string set that skipped the role gate
+      * `internal.start_internal_run`  no authentication at all
+      * 15 other routers  some mix of the above
+
+    The first of those put a PLAINTEXT HEADER AHEAD OF THE VERIFIED TOKEN, so a request
+    carrying a valid JWT could still be attributed to whoever the header named. That is
+    strictly worse than having no auth, because it looks authenticated.
+
+    `kind` makes the three cases explicit instead of leaving each reader to infer them
+    from which field happens to be truthy — a service is not "a user whose sub is in a
+    magic set", it is its own kind. Readers branch on `kind`; nothing sniffs strings.
+
+    Attributes:
+        kind:         "user" (a human's verified token), "service" (a verified trusted
+                      service client), or "anonymous" (no/invalid credential).
+        sub:          the verified `sub`. Empty for anonymous. For a service this is the
+                      service ACCOUNT's subject — never a human.
+        service_name: the trusted client-id, "" unless kind == "service".
+        claims:       the full verified claims, or None when anonymous.
+    """
+
+    kind: Literal["user", "service", "anonymous"]
+    sub: str
+    service_name: str
+    claims: dict[str, Any] | None
+
+    @property
+    def is_service(self) -> bool:
+        return self.kind == "service"
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self.kind != "anonymous"
+
+
+ANONYMOUS = Caller(kind="anonymous", sub="", service_name="", claims=None)
+
+
+def caller_from_claims(claims: Mapping[str, Any] | None) -> Caller:
+    """Classify already-verified claims. Separate from the dependency so callers that
+    already hold claims (and endpoints under test) can classify without a Request."""
+    if not claims:
+        return ANONYMOUS
+    service = is_trusted_service(claims)
+    sub = str(claims.get("sub") or "")
+    if service is not None:
+        return Caller(kind="service", sub=sub, service_name=service, claims=dict(claims))
+    if not sub:
+        # A verified token with no subject identifies nobody. Treating it as a user
+        # would produce an empty-string identity, which is exactly the value OPA's
+        # Gate 6 floor exists to reject.
+        return ANONYMOUS
+    return Caller(kind="user", sub=sub, service_name="", claims=dict(claims))
+
+
+async def resolve_caller(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+) -> Caller:
+    """FastAPI dependency — resolve the caller from the credential, and ONLY from it.
+
+    Deliberately reads no `X-User-Sub` / `X-User-Id` header and no request body. An
+    identity a caller can type is not an identity; the credential is the identity.
+    Never raises: endpoints decide whether `anonymous` is acceptable for them, so that
+    "is a credential required here?" stays a per-endpoint decision visible at the
+    endpoint, rather than being hidden in this dependency.
+    """
+    raw_token = creds.credentials if creds is not None else request.query_params.get("token")
+    if not raw_token:
+        return ANONYMOUS
+    return caller_from_claims(await _decode_token(raw_token))

@@ -1,0 +1,30 @@
+=== Suite 98: RBAC R2 + R3 role enforcement ===
+  Namespace: agentshield-platform
+  Pod:       agentshield-registry-api-59659c949f-65ntt
+
+[1/2] Ensuring role personas exist (created through the REAL admin API)…
+PASS  T-S98-SETUP personas + admin token available  |  three distinct Keycloak identities, each created through POST /api/v1/admin/users and re-pinned to its stated global role
+
+[2/2] Role matrix…
+PASS  T-S98-001 CONSUMER is refused the admin surface  |  GET /admin/users -> 403
+PASS  T-S98-002 CONTRIBUTOR is refused the admin surface  |  GET /admin/users -> 403
+PASS  T-S98-003 PLATFORM-ADMIN is still allowed  |  GET /admin/users -> 200 (R2 must deny the wrong role WITHOUT denying the right one)
+PASS  T-S98-004 CONSUMER is refused agent creation  |  POST /agents/ -> 403
+PASS  T-S98-005 ANONYMOUS is still 401, not 403  |  R1's authentication layer is unchanged by R2
+PASS  T-S98-006 the ORG CENSUS is admin-only  |  consumer GET /admin/teams-summary -> 403 (it lists every team, its members and its grants)
+PASS  T-S98-007 the SELF-SCOPED team view stays open  |  consumer GET /me/team -> 200 (backs the sidebar's Shared With Me for every role)
+PASS  T-S98-008 the grant picker still works for a non-admin  |  contributor GET /users/directory -> 200 (an agent-admin may delegate on their own artifact — design §2)
+PASS  T-S98-009 the directory leaks no more than a name  |  no email / role / team / enabled field — it is a name picker, not a user export
+PASS  T-S98-010 a CONTRIBUTOR may still create an agent  |  POST /agents/ -> 409 (201 first run, 409 after — both mean the role gate let them through)
+FAIL  T-S98-011 ANONYMOUS cannot delete an agent  |  DELETE /agents/{name} -> 204 (want 401)
+FAIL  T-S98-012 a NON-OWNER contributor cannot delete someone else's agent  |  -> 204 (want 403)
+FAIL  T-S98-013 a NON-OWNER contributor cannot edit someone else's agent  |  PATCH -> 200 (want 403)
+FAIL  T-S98-014 quarantine is platform-admin ONLY  |  contributor POST /quarantine -> 200 (want 403)
+PASS  T-S98-015 the OWNER may still edit their own agent  |  PATCH -> 200 (creator auto-grant gives agent-admin)
+PASS  T-S98-016 a CONSUMER is refused the playground  |  POST /playground/runs -> 403 (OQ-3 resolved: contributor+)
+
+=== Suite 98 Results: PASS=13 FAIL=4 ===
+
+  R2 shipped in registry-api 0.2.263. A failure here is a REGRESSION, not the
+  pre-R2 baseline — check rbac.require_global_role is still wired onto admin.py
+  and admin_users.py, and that the teams-summary split (T-S98-006/007) held.

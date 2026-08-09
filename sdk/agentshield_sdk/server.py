@@ -196,10 +196,48 @@ async def metrics():
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+# ─── Identity P1: adopt the run context the platform minted ───────────────────
+def _adopt_run_context(request: Request) -> None:
+    """Verify the RunContext header and publish it to the per-run ContextVar.
+
+    `graph_builder._current_user_context` has been READ by the governance seam and by
+    `tool_executor` since Phase 9.1 and SET by nothing — an orphan that made every OPA
+    check send `user_id: ""`, which Gate 6 denies. This is the writer.
+
+    Fail-closed and SILENT about the reason to the caller: a bad, expired or absent token
+    leaves the ContextVar empty, OPA sees no user, and a `user_delegated` agent is denied
+    `missing_user_identity`. It must never fall back to a partially-trusted identity — a
+    forged context that verified would be worse than none, because every downstream hop
+    would treat it as checked.
+    """
+    from .graph_builder import _current_user_context
+    from . import run_context as rc
+
+    token = request.headers.get(rc.RCT_HEADER.lower()) or request.headers.get(rc.RCT_HEADER)
+    if not token:
+        _current_user_context.set({})
+        return
+    try:
+        ctx = rc.verify(token)
+    except Exception as exc:  # noqa: BLE001 — see the docstring on failing closed
+        logger.warning("run context REJECTED (%s) — this run carries no user identity", exc)
+        _current_user_context.set({})
+        return
+    _current_user_context.set({
+        "user_id": ctx.user_sub,
+        "user_team": ctx.user_team,
+        # A list from the start (Decision 45 / P2 2c). One team per user today, because
+        # user_team_assignments.user_sub is a primary key.
+        "user_teams": [ctx.user_team] if ctx.user_team else [],
+        "origin": ctx.origin,
+        "actor_chain": ctx.actor_chain,
+    })
+
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    _adopt_run_context(request)
     trace_id = request.headers.get("x-agentshield-trace-id")
     try:
         result = await runner.run(
@@ -219,6 +257,7 @@ async def chat(req: ChatRequest, request: Request):
 async def chat_stream(req: ChatRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    _adopt_run_context(request)
     trace_id = request.headers.get("x-agentshield-trace-id")
 
     async def sse_generator():
@@ -262,6 +301,8 @@ async def run_durable_endpoint(req: DurableRunRequest, request: Request):
     import json
 
     message = req.input_payload.get("message") or json.dumps(req.input_payload)
+    _adopt_run_context(request)
+    _adopt_run_context(request)
     trace_id = request.headers.get("x-agentshield-trace-id") or req.run_id
     asyncio.create_task(
         _execute_durable_run_bg(message, req.run_id, req.callback_url, trace_id, req.eval_mode)
@@ -301,6 +342,7 @@ async def _post_durable_fail(callback_url: str, step_name: str, error_message: s
 async def resume_thread(thread_id: str, req: ResumeRequest, request: Request):
     if runner is None:
         raise HTTPException(status_code=503, detail="Runner not initialised")
+    _adopt_run_context(request)
     trace_id = request.headers.get("x-agentshield-trace-id")
     decision = {"decision": req.decision, "reviewer_id": req.reviewer_id, "reason": req.reason}
 

@@ -14,13 +14,23 @@ from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import require_user
 from db import get_db
 from models import Approval
 from schemas import ApprovalResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/playground", tags=["playground-approvals"])
+# AUTHENTICATED (R1, FR-11). Router-level: its only route, GET /approvals,
+# requires a valid JWT. Authentication only — no role logic, no team scoping, no
+# new 403; the existing X-User-Sub/X-User-Team headers keep their audit-stamp
+# meaning and are never treated as authentication. suite-97 T-S97-011 pins the
+# protected/exempt partition for this router.
+router = APIRouter(
+    prefix="/api/v1/playground",
+    tags=["playground-approvals"],
+    dependencies=[Depends(require_user)],
+)
 
 
 # ---------------------------------------------------------------------------

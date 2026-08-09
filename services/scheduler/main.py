@@ -24,6 +24,7 @@ from apscheduler.triggers.cron import CronTrigger
 from fastapi import FastAPI
 
 import ha
+import service_token
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("scheduler")
@@ -111,6 +112,17 @@ def _on_fire(trigger_id: str, agent_name: str | None, workflow_id: str | None) -
 
     label = agent_name if agent_name else f"workflow:{workflow_id}"
     try:
+        # Prove WHICH service is firing before building the request (identity P3, §4.5).
+        # `run_by` below is now a transport label only — registry-api derives the acting
+        # principal from `resolve_principal` and the SERVICE from this token's `azp`, so a
+        # caller who types "serviceaccount:scheduler" without the secret gets a 401.
+        #
+        # Minted BEFORE the body and before the POST: a mint failure must skip the fire
+        # entirely rather than send an unauthenticated request that registry-api would
+        # reject with a 401 the operator then reads as "the run was refused" instead of
+        # "the scheduler could not authenticate".
+        headers = service_token.auth_header()
+
         if agent_name is not None:
             body: dict = {
                 "agent_name": agent_name,
@@ -128,12 +140,18 @@ def _on_fire(trigger_id: str, agent_name: str | None, workflow_id: str | None) -
         resp = httpx.post(
             f"{REGISTRY_API_URL}/api/v1/internal/runs/start",
             json=body,
+            headers=headers,
             timeout=15.0,
         )
         if resp.status_code in (200, 201):
             logger.info("dispatched scheduled run: %s trigger=%s", label, trigger_id)
         else:
             logger.warning("dispatch failed %s: %d %s", label, resp.status_code, resp.text[:200])
+    except service_token.ServiceTokenError as exc:
+        # Named separately from the generic dispatch error below so the log says WHICH
+        # layer failed. Both skip the fire; only this one means "Keycloak/our client
+        # secret", and diagnosing it as a registry-api problem would waste the session.
+        logger.error("fire %s: cannot mint service token, SKIPPING dispatch: %s", label, exc)
     except Exception as exc:
         logger.error("dispatch error %s: %s", label, exc)
     finally:

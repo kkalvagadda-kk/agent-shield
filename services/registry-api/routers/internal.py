@@ -21,8 +21,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import Caller, resolve_caller
 from db import AsyncSessionLocal
 from embedding_client import embed
+from rbac import get_user_global_role
+from run_context import RCT_HEADER
+from run_context_anchor import anchor_value, build_context, mint_for
 from identity import (
     PrincipalResolutionError,
     resolve_principal,
@@ -170,6 +174,7 @@ async def _dispatch_and_complete(
     trigger_id=None,
     *,
     target: DispatchTarget,
+    rct: str | None = None,
 ) -> None:
     """Shape-aware production dispatch (WS-0 parity core).
 
@@ -201,6 +206,7 @@ async def _dispatch_and_complete(
             input_payload=input_payload,
             callback_url=callback,
             runner_url=target.base_url,
+            rct=rct,
         )
         if not ok:
             await _mark_agent_run_failed(run_id, err, agent_name, trigger_id)
@@ -214,9 +220,14 @@ async def _dispatch_and_complete(
     url = f"{target.base_url}/chat"
     start = time.perf_counter()
     status_val, output, err = "completed", None, None
+    # The REACTIVE branch carries identity too. `_bind_user_context` is an app-wide
+    # dependency on the runner, so the same header works on /chat with no runner change —
+    # and without it a reactive production run reaches OPA with user_id="" exactly like a
+    # durable one did. This is the internal.py half of the ledgered G-45 gap.
+    _hdrs = {RCT_HEADER: rct} if rct else {}
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(url, json={"message": message})
+            resp = await client.post(url, json={"message": message}, headers=_hdrs)
         if resp.status_code == 200:
             data = resp.json()
             output = data.get("output") or data.get("response") or json.dumps(data)
@@ -357,6 +368,24 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         # parked approval can resolve armed_by + reviewer-role config at read time
         # (WS-2 T011 — member walks parent_run_id → this parent → trigger_id).
         trigger_id=body.trigger_id,
+        # ── Identity P1: anchor the WORKFLOW parent ──────────────────────────
+        # This path was missed in the first cut, which wired only the AGENT production
+        # run. The consequence was not cosmetic: `workflow_orchestrator` builds each
+        # member child's anchor with `inherit_anchor(parent.run_context, ...)`, so an
+        # unanchored parent left EVERY member unanchored too, and a member that parks at
+        # HITL then re-hydrated nothing. Found by querying the runs the suites had just
+        # produced rather than by re-reading the diff.
+        #
+        # Same rule as the agent path: straight from the resolved Principal, never
+        # re-derived. A daemon workflow keeps user_id="" and carries its service subject
+        # in service_name — reading run_by into user_sub would hand it a fabricated human.
+        run_context=anchor_value(build_context(
+            user_sub=principal.user_id,
+            user_team=wf.team or "",
+            origin="production",
+            is_service_call=principal.is_service,
+            service_name=principal.run_by if principal.is_service else None,
+        )),
     )
     db.add(run)
     await db.flush()
@@ -447,8 +476,44 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
 )
 async def start_internal_run(
     body: InternalRunStartRequest,
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(_get_db),
 ) -> AgentRun:
+    # ── Authenticate the caller (identity P3, §4.5) ──────────────────────────
+    # This endpoint declared NO auth dependency at all, while taking `run_by` verbatim
+    # from the body — so any workload with VPC network reach could start a production
+    # agent run AND choose whose authority it was recorded under. Measured 2026-08-02: a
+    # POST with an empty body returned 422, i.e. it reached the handler. It also sidestepped
+    # R7 entirely — the schedules READ is deny-by-default and team-scoped, so one team
+    # could not SEE another's schedules but could FIRE them through this door.
+    # Postmortem: docs/bugs/internal-run-door-has-no-authentication.md.
+    #
+    # Two callers are legitimate, and they are named explicitly rather than inferred:
+    #   * a trusted service — scheduler / event-gateway, proven by `azp` inside a
+    #     Keycloak-signed token, not by the "serviceaccount:scheduler" string in the body.
+    #   * a platform-admin — the e2e suites and any future operator manual-fire. A
+    #     team-scoped human "Run now" is Phase 3a and needs its own authenticated,
+    #     team-checked route; it is deliberately NOT enabled here, because a route that
+    #     accepted any contributor would let one team fire another team's production agent.
+    if identity.is_service:
+        logger.info("start_internal_run: service caller %s", identity.service_name)
+    elif identity.kind == "user":
+        role = await get_user_global_role(db, identity.sub)
+        if role != "platform-admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Starting an internal run requires a trusted service credential or "
+                    "the platform-admin role."
+                ),
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to start an internal run.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Composite-workflow target (Decision 22): create a parent run + orchestrate.
     if body.workflow_id is not None:
         return await _start_workflow_run(body, db)
@@ -554,8 +619,31 @@ async def start_internal_run(
     if trace_id:
         run.langfuse_trace_id = trace_id
 
+    # ─── Identity P1: anchor + mint for the PRODUCTION path ──────────────────
+    # P1 threaded `rct` into dispatch_durable_run and claimed "one kwarg covers all three
+    # durable callers". The kwarg landed; only the playground actually passed it, so every
+    # production and scheduled durable run still reached the pod with no identity. Wiring
+    # it here is the rest of P1, not new scope.
+    #
+    # The identity comes from the ALREADY-RESOLVED `Principal`, never re-derived. That
+    # object is the one place this codebase decides "who is acting" for a trigger-run, and
+    # it deliberately keeps `user_id` EMPTY for a daemon while `run_by` holds the service
+    # subject. Mapping those onto the RunContext one-for-one is what keeps a daemon out of
+    # OPA's `user_delegated` arm — reading `run_by` into `user_sub` would hand it a
+    # fabricated human and defeat the identity floor.
+    run_ctx = build_context(
+        user_sub=principal.user_id,
+        user_team=agent.team or "",
+        origin="production",
+        is_service_call=principal.is_service,
+        service_name=principal.run_by if principal.is_service else None,
+    )
+    run.run_context = anchor_value(run_ctx)
+
     await db.commit()
     await db.refresh(run)
+
+    rct = mint_for(run_ctx, label=f"internal run {run.id}")
 
     # Fire-and-forget dispatch; completion is recorded by _dispatch_and_complete.
     import asyncio
@@ -563,7 +651,7 @@ async def start_internal_run(
         _dispatch_and_complete(
             str(run.id), body.agent_name, agent.team, message,
             agent.execution_shape, effective_payload, body.trigger_id,
-            target=target,
+            target=target, rct=rct,
         )
     )
 

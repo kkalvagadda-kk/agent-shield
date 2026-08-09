@@ -17,8 +17,14 @@ test.describe("agent graphs list", () => {
     await expect(
       page.getByRole("heading", { name: /Agent Graphs/i }).first()
     ).toBeVisible();
+    // .first(): AgentGraphsPage renders the "New Agent Graph" CTA TWICE when the list is
+    // empty — once unconditionally in the header (AgentGraphsPage.tsx:49) and once in the
+    // empty-state card (:79). Both are correct. Without .first() this locator resolves to
+    // 2 elements and Playwright fails on strict mode, so the test passed or failed purely
+    // on whether the cluster happened to hold an agent graph — a latent data-dependent
+    // flake, invisible until the browser layer could run against EKS at all (G-R0-8).
     await expect(
-      page.getByRole("button", { name: /New Agent Graph/i })
+      page.getByRole("button", { name: /New Agent Graph/i }).first()
     ).toBeVisible();
   });
 
@@ -58,7 +64,8 @@ test.describe("canvas page (/agent-graphs/new)", () => {
     await page.goto("/agent-graphs");
     await page.waitForLoadState("networkidle");
 
-    await page.getByRole("button", { name: /New Agent Graph/i }).click();
+    // .first() — see the note above: two legitimate CTAs when the list is empty.
+    await page.getByRole("button", { name: /New Agent Graph/i }).first().click();
     await page.waitForURL("**/agent-graphs/new", { timeout: 10_000 });
     await page.waitForLoadState("networkidle");
 

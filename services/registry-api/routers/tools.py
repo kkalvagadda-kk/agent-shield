@@ -9,7 +9,13 @@ Endpoints
   PUT    /api/v1/tools/{id}          — update tool fields
   DELETE /api/v1/tools/{id}          — deprecate tool (soft-delete)
   GET    /api/v1/tools/{id}/agents   — list agents bound to this tool
+  POST   /api/v1/tools/{id}/unpublish — take a tool back out of the org-wide catalog
   POST   /api/v1/tools/{id}/test     — test-invoke the tool (stub)
+
+There is deliberately NO `POST /tools/{id}/publish`. Decision 47 chose option C: tools
+become org-wide by riding along with an agent that a reviewer approved, never on their
+own say-so. A direct publish would be a second door to the same capability with no
+review behind it — the exact shape this repo has three postmortems for.
 """
 
 from __future__ import annotations
@@ -25,7 +31,10 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from auth_middleware import get_optional_user
+from auth_middleware import get_optional_user, require_user
+from catalog_visibility import catalog_visibility_clause
+from publish_cascade import may_unpublish_tool, published_agents_using
+from rbac import get_user_global_role, get_user_team
 from db import get_db
 from models import Agent, AgentTool, AuthConfig, Tool
 from schemas import (
@@ -113,14 +122,53 @@ def _to_tool_response(tool: Tool) -> ToolResponse:
     status_code=status.HTTP_201_CREATED,
     response_model=ToolResponse,
     summary="Register a new tool",
+    # G-R3-6: this router had NO auth at all — POST/PUT/DELETE included. A tool's
+    # risk_level drives the HITL gate and OPA's risk->action rule, so an anonymous
+    # PUT that lowers it relaxes every control for every agent bound to that tool.
+    # MUTATIONS are gated; the READS stay open because in-cluster machine callers
+    # reach them with no Authorization header — declarative-runner
+    # workflow_executor.py:247 (GET /tools/{id}) and the SDK tool_resolver
+    # (GET /tools/). Closing those needs the service identity that
+    # identity-propagation-architecture.md Phase 3 owns.
+    dependencies=[Depends(require_user)],
 )
 async def create_tool(
     body: ToolCreate,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> ToolResponse:
-    caller = (user or {}).get("sub") or x_user_sub
+    """Register a tool. The creating team OWNS it (Decision 46).
+
+    `owner_team` is derived from the CALLER's team assignment, not from the request
+    body. Before this, `Tool(**body.model_dump(...))` took it from the body, which
+    defaults to `None` — and `tool_access.team_may_use_tool` treats a null owner as
+    usable by EVERY team. So creating a tool through Studio produced the most
+    permissive state available: 65 of ~173 rows on the test cluster. Not drift; it is
+    what the create path produced.
+
+    A body-supplied `owner_team` is honoured ONLY for a platform-admin, because
+    seeding and admin-side creation legitimately assign ownership. For anyone else a
+    body field would let a caller assign their tool to a team they are not in, which
+    is the same forgeable-attribution shape as the `X-User-Sub` fallback R2 deleted
+    from `create_agent`.
+    """
+    caller = claims["sub"]
+    caller_team = await get_user_team(db, caller)
+    if body.owner_team and body.owner_team != caller_team:
+        # Only platform-admin may assign ownership elsewhere. get_user_global_role
+        # raises NoPlatformRole for a row-less sub (R0), which main.create_app maps
+        # to 403 — the correct answer for a caller whose identity is corrupt.
+        if await get_user_global_role(db, caller) != "platform-admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Cannot create a tool owned by team '{body.owner_team}': you are in "
+                    f"'{caller_team}'. Only a platform-admin may assign ownership to another team."
+                ),
+            )
+        owner_team = body.owner_team
+    else:
+        owner_team = caller_team
 
     existing = await db.execute(select(Tool).where(Tool.name == body.name))
     if existing.scalar_one_or_none() is not None:
@@ -138,7 +186,9 @@ async def create_tool(
     # over the column default, so resolve it here: an explicit value wins, otherwise
     # infer it from the method (fail-closed). Excluded from the kwargs splat so the
     # two can never both apply.
-    tool = Tool(**body.model_dump(exclude={"side_effecting"}))
+    # owner_team excluded from the splat: it is DERIVED above, never taken from the body.
+    tool = Tool(**body.model_dump(exclude={"side_effecting", "owner_team"}))
+    tool.owner_team = owner_team
     tool.side_effecting = (
         body.side_effecting
         if body.side_effecting is not None
@@ -177,19 +227,28 @@ async def list_tools(
     owner_team: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    claims: dict = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[ToolResponse]:
-    caller = (user or {}).get("sub") or x_user_sub
+    caller = claims["sub"]
 
     q = select(Tool).options(selectinload(Tool.mcp_server))
 
-    # Visibility: published tools visible to all; private only to creator.
-    if caller:
-        q = q.where(or_(Tool.publish_status == "published", Tool.created_by == caller))
-    else:
-        q = q.where(Tool.publish_status == "published")
+    # Visibility (Decision 47 / migration 0080). One producer, shared with list_skills.
+    # CREATOR-scoped, identical to agents.py:248 and composite_workflows.py:205 —
+    # "drafts are yours until you share", the pattern Decision 47 is named for.
+    #
+    # This route no longer has an anonymous arm. It used to, because agent pods fetched the
+    # global catalog by tool name with no credential; they now ask
+    # GET /agents/{name}/tools instead — the binding question, which is what a pod's
+    # authority over a tool has always actually been.
+    q = q.where(
+        catalog_visibility_clause(
+            publish_status_col=Tool.publish_status,
+            created_by_col=Tool.created_by,
+            caller_sub=caller,
+        )
+    )
 
     if name:
         q = q.where(Tool.name == name)
@@ -234,6 +293,7 @@ async def get_tool(
     "/{tool_id}",
     response_model=ToolResponse,
     summary="Update tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def update_tool(
     tool_id: uuid.UUID,
@@ -278,6 +338,7 @@ async def update_tool(
     "/{tool_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Deprecate tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def delete_tool(
     tool_id: uuid.UUID,
@@ -333,12 +394,108 @@ async def list_agents_for_tool(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/v1/tools/{id}/unpublish
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{tool_id}/unpublish",
+    response_model=ToolResponse,
+    summary="Take a tool back out of the org-wide catalog",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
+)
+async def unpublish_tool(
+    tool_id: uuid.UUID,
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> ToolResponse:
+    """Reverse the cascade for ONE tool. Decision 47 #4.
+
+    WHY THIS EXISTS AT ALL
+    ----------------------
+    Without a reverse, catalog visibility only ever moves one way, and the drift is
+    unmeasurable because the metric has no other direction. That is not hypothetical:
+    174 of 174 tools were `published` before migration 0080, reached by a default nobody
+    revisited. The forward path is being built in this same decision; building the reverse
+    alongside it is the cheapest it will ever be.
+
+    WHAT IT DOES NOT DO
+    -------------------
+    * **It does not cascade.** Unpublishing a tool touches exactly one row. Agents bound
+      to it stay published and keep working — binding is by id and USE is governed by
+      `owner_team` plus grants, never by `publish_status`. The reverse of a cascade is not
+      a cascade: the forward direction is one reviewer's decision covering a set they were
+      shown (step D), while this is one owner's decision about one row, and fanning it out
+      would silently retract other teams' dependencies. Decision 47 rejected the mirror
+      case (cascade-unpublish on agent delete) for the same reason.
+    * **It does not check whether anyone is still using it.** `published_agents_using` is
+      rendered to the clicker as a courtesy. Making it a precondition would assert a
+      dependency that does not exist, and would let any team freeze another team's tool in
+      the catalog forever just by binding it to a published agent.
+
+    HOW A TOOL GETS BACK IN
+    -----------------------
+    By re-publishing an agent that binds it — `POST /agents/{name}/publish`, which is
+    idempotent and accepts an already-published agent. Note the consequence honestly: that
+    puts the AGENT back to `pending_review` until a reviewer approves, so re-publishing one
+    tool costs a round trip through the agent's review. That is Decision 47 option C
+    working as chosen, not an oversight, and it is why there is no tool-level publish
+    endpoint to "fix" it with.
+
+    409 rather than a silent no-op on an already-private tool: this is a state transition,
+    and a UI that offers the control on a private row is a bug that a quiet 200 would hide.
+    """
+    caller = claims["sub"]
+    tool = await _get_tool(tool_id, db)
+
+    authority = await may_unpublish_tool(db, tool, caller)
+    if not authority.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Cannot unpublish '{tool.name}': it is owned by team "
+                f"'{tool.owner_team or '(none)'}'. Only its creator, a member of the "
+                f"owning team, or a platform-admin may take it out of the catalog."
+            ),
+        )
+
+    if tool.publish_status != "published":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "tool_not_published",
+                "publish_status": tool.publish_status,
+            },
+        )
+
+    # Read BEFORE the write. This is the audit record — "what was still bound at the
+    # moment it left the catalog" is the question someone asks months later, and it is
+    # unanswerable afterwards. Computed and logged, never branched on: the moment this
+    # list gates the transition it stops being a courtesy and becomes a lock any team can
+    # apply to another team's tool.
+    still_bound = [a.name for a in await published_agents_using(db, tool.id)]
+
+    tool.publish_status = "private"
+    await db.commit()
+    await db.refresh(tool)
+    if tool.mcp_server_id is not None:
+        await db.refresh(tool, ["mcp_server"])
+    # The BASIS is logged, not just the fact: "which arm allowed this" is the part that
+    # matters when someone asks later why a tool left the catalog.
+    logger.info(
+        "unpublish_tool: tool=%r (%s) -> private by %s via %s; %d published agent(s) "
+        "still bound and unaffected: %s",
+        tool.name, tool.id, caller, authority.basis, len(still_bound), still_bound,
+    )
+    return _to_tool_response(tool)
+
+
+# ---------------------------------------------------------------------------
 # POST /api/v1/tools/{id}/test
 # ---------------------------------------------------------------------------
 @router.post(
     "/{tool_id}/test",
     response_model=ToolTestResponse,
     summary="Test-invoke a tool",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
 )
 async def test_tool(
     tool_id: uuid.UUID,

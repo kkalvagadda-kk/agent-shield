@@ -25,6 +25,15 @@ NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 if [ -z "$API_POD" ]; then echo "ERROR: No registry-api pod in $NAMESPACE"; exit 1; fi
+
+# R1/FR-11: GET /llm-providers/ and POST /agents/{name}/deploy now require a real JWT.
+# This driver is DETACHED (nohup) and outlives the 300s token lifespan, so a
+# statically-interpolated Bearer would expire mid-run and 401 on whichever case
+# happened to be last. Install lib/e2e_auth.py and let BearerAuth re-mint per
+# request (lib/e2e-auth.sh:88-96).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_require_token "$NAMESPACE" "$API_POD" >/dev/null
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 echo "=== Suite 68: daemon/scheduled run with NO user input (no fakes) ==="
 echo "  Pod: $API_POD"; echo ""
 
@@ -38,11 +47,28 @@ RUNLOG="/tmp/s68_run_${RUN_TAG}.log"
 
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c "cat > $DRIVER" <<'PY'
 import asyncio, os, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun
 BASE = "http://localhost:8000/api/v1"
-H = {"X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6", "X-User-Team": "platform"}
+# AUTHENTICATION LIVES ON THE CLIENT, NOT IN THIS DICT.
+# The R3 Bearer pass inserted two BASH lines here — `source .../lib/e2e-auth.sh` and
+# `e2e_set_token ...` — INSIDE the `<<'PY'` heredoc that writes this file. Python then
+# got shell text and died with `SyntaxError: invalid syntax` at the `source` line, so the
+# driver never produced a result file and the suite reported "no result file" rather than
+# a test failure. It stayed broken from 748c2fd until 2026-08-09.
+#
+# The suite already authenticates correctly and always did: it sources the lib at the top,
+# calls e2e_install_pyauth, and the client below is built with `auth=BearerAuth()`, which
+# re-mints per request (the token lifetime is 300s and this suite runs longer).
+#
+# X-User-Sub is gone rather than fixed. The heredoc is QUOTED (`<<'PY'`), so `${E2E_SUB}`
+# was never interpolated — it would have been sent as that literal string. A forged-looking
+# sub header is also exactly what R2/R3 deleted from the handlers; BearerAuth is the
+# identity, and the team header is all this driver still needs.
+H = {"X-User-Team": "platform"}
 OUT = os.environ["S68_OUT"]
 SFX = uuid.uuid4().hex[:6]
 NAME = f"s68-daemon-{SFX}"
@@ -80,7 +106,8 @@ async def wait_run_terminal(run_id, t=80):
 
 async def main():
     results = []
-    c = httpx.AsyncClient(base_url=BASE, headers=H, timeout=30.0)
+    # H keeps X-User-Sub/X-User-Team — AUDIT STAMPS, never authentication.
+    c = httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=30.0)
     try:
         pid = await prov(c)
         # Durable DAEMON agent — the class that runs without a live user.
@@ -156,6 +183,8 @@ if [ -z "$RES" ]; then
   kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -30 "$RUNLOG" 2>/dev/null || true
   exit 1
 fi
+
+
 
 PASS=0; FAIL=0
 while IFS= read -r line; do

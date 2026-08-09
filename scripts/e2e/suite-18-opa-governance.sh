@@ -19,9 +19,36 @@
 #   T-S18-009 — Unknown SA subject → deny, deny_reason=agent_unauthenticated
 #   T-S18-010 — Identity mismatch (covered by Rego unit tests)
 #   T-S18-011 — Tool via team grant → allow
-#   T-S18-012 — Daemon agent_class produces valid decision
+#   T-S18-012 — Daemon agent_class is EXEMPT from the identity floor
 #   T-S18-013 — SDK fail-closed code path exists
 #   T-S18-014 — record_decision is generic: an http tool call also lands an opa_decisions row (Decision-27 P11)
+#   T-S18-015 — the identity floor DENIES a user_delegated call with no user_id
+#
+# WHY EVERY ALLOW-PATH CASE CARRIES A user_id  (fixed 2026-08-07, gap G-R1-7)
+# --------------------------------------------------------------------------
+# Gate 6 (`user_identity_ok`, agentshield.rego:22,101-108) is AND-ed into `allow`. A
+# `user_delegated` input with `user_id: ""` is denied `missing_user_identity` NO MATTER
+# what the tool's risk is. Every case below used to send `user_id: ''`, so 004/005/006/011
+# were red for a reason none of them named — and, worse, were asserting NOTHING about the
+# risk->action mapping they exist to prove, because the request never reached that rule.
+#
+# Proven on the cluster before the fix, same tool, same pod, only user_id changed:
+#   email_notifier  uid=''      -> allow=false deny_reason=missing_user_identity
+#   email_notifier  uid='alice' -> allow=true  reason=allow_medium_risk
+#   cic-echo-tool   uid=''      -> allow=false deny_reason=missing_user_identity
+#   cic-echo-tool   uid='alice' -> allow=true  reason=require_approval_high_risk
+#   get_weather     uid=''      -> allow=false deny_reason=missing_user_identity
+#   get_weather     uid='alice' -> allow=true  reason=allow_low_risk
+#
+# So this is NOT weakening a control to make a test green. The floor is still asserted —
+# by T-S18-015, which is the ONLY case that deliberately sends an empty user_id, and by
+# T-S18-012 for the daemon-exempt half. The other cases now send the input a real run
+# sends once identity P1 threads the RunContext through.
+#
+# The DENY cases (007/008/009) also carry the uid now. They passed with an empty one only
+# because the rego's deny_reason precedence happens to put tool_not_granted and
+# tool_risk_denied ahead of missing_user_identity. Relying on that precedence means a rego
+# reordering would flip them to a failure naming the wrong gate.
 #
 # Usage:
 #   bash scripts/e2e/suite-18-opa-governance.sh
@@ -29,6 +56,12 @@ set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 AGENTS_NS="${AGENTS_NS:-agents-platform}"
+
+# The synthetic authorizing human for every allow-path probe. Any non-empty value
+# satisfies Gate 6 — the floor checks presence, not membership (membership is Gate 3's
+# job, keyed on the AGENT's team). Named so a failure log makes the source obvious.
+S18_UID="s18-probe-user"
+S18_UTEAM="platform"
 
 PASS=0
 FAIL=0
@@ -58,21 +91,32 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: the setup block below hits POST /teams/ (routers/teams.py),
+# POST /agents/{name}/versions, POST /agents/{name}/deploy and POST /admin/grants
+# (routers/admin.py) — all now require a real JWT. They share one post() helper, so the
+# Bearer goes there once. /api/v1/tools/* and /api/v1/agents are NOT among R1's ten.
+# Call e2e_set_token BARE — a command substitution swallows its abort (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 cleanup() {
   echo ""
   echo "==> Cleanup: deleting test agent and tools..."
   kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request, json
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 except Exception: pass
 try:
-    r = urllib.request.urlopen('http://localhost:8000/api/v1/tools/?limit=200', timeout=5)
+    # GET /api/v1/tools/ now requires a user token (Decision 47 revert, 0.2.271): the
+    # anonymous arm existed only for agent pods, which now ask
+    # GET /agents/{name}/tools with a ServiceAccount token instead.
+    r = urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/?limit=200', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
     tools = json.loads(r.read()).get('items', [])
     for t in tools:
         if t.get('name','').startswith('opa-s18-') and t.get('name','').endswith('-${SUFFIX}'):
             try:
-                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/' + str(t['id']), method='DELETE'), timeout=5)
+                urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/tools/' + str(t['id']), method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
             except Exception: pass
 except Exception: pass
 " 2>/dev/null || true
@@ -91,7 +135,8 @@ BASE = 'http://localhost:8000/api/v1'
 
 def post(path, body):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
-        headers={'Content-Type': 'application/json'}, method='POST')
+        headers={'Content-Type': 'application/json',
+                 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
     try:
         r = urllib.request.urlopen(req, timeout=10)
         raw = r.read()
@@ -444,7 +489,7 @@ else
   echo ""
   echo "--- T-S18-004: Low-risk tool → allow ---"
   if [ -n "$LOW_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${LOW_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${LOW_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "False" ]; then
@@ -474,7 +519,7 @@ for g in grants:
 " 2>/dev/null || true)
   fi
   if [ -n "$MEDIUM_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${MEDIUM_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${MEDIUM_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "False" ]; then
@@ -490,7 +535,7 @@ for g in grants:
   echo ""
   echo "--- T-S18-006: High-risk tool → require_approval (HITL) ---"
   if [ -n "$HIGH_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${HIGH_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${HIGH_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     REQ_APPR=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('require_approval',''))" 2>/dev/null)
     if [ "$ALLOW" = "True" ] && [ "$REQ_APPR" = "True" ]; then
@@ -519,7 +564,7 @@ for g in grants:
         print(g['name']); break
 " 2>/dev/null || true)
   if [ -n "$CRITICAL_GRANT" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_GRANT}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_GRANT}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
     if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_risk_denied" ]; then
@@ -528,7 +573,7 @@ for g in grants:
       fail "T-S18-007 — Critical '${CRITICAL_GRANT}' got allow=${ALLOW}, deny_reason=${DENY_R}"
     fi
   elif [ -n "$CRITICAL_TOOL" ]; then
-    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+    RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${CRITICAL_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
     ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
     DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
     if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_risk_denied" ]; then
@@ -546,7 +591,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S18-008: Unknown tool → deny (tool_not_granted) ---"
-RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'nonexistent_tool_xyz_$$','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'nonexistent_tool_xyz_$$','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
 DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
 if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "tool_not_granted" ]; then
@@ -560,7 +605,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- T-S18-009: Unknown SA subject → deny ---"
-RESULT=$(opa_query "{'sa_subject':'system:serviceaccount:${AGENTS_NS}:ghost-agent-$$-sa','tool_name':'lookup_order','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+RESULT=$(opa_query "{'sa_subject':'system:serviceaccount:${AGENTS_NS}:ghost-agent-$$-sa','tool_name':'lookup_order','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
 DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
 if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "agent_unauthenticated" ]; then
@@ -594,7 +639,7 @@ for g in grants:
 " 2>/dev/null || true)
 
 if [ -n "$GRANT_TOOL" ]; then
-  RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${GRANT_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+  RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${GRANT_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'${S18_UID}','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
   ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
   if [ "$ALLOW" = "True" ]; then
     pass "T-S18-011 — Team-granted tool '${GRANT_TOOL}' → allow"
@@ -606,17 +651,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# T-S18-012 — Daemon agent_class produces valid decision
+# T-S18-012 — a pod CANNOT relabel itself `daemon` (D-1)
+#
+# REWRITTEN 2026-08-08. This case used to send `agent_class: daemon` in the INPUT against a
+# `user_delegated` agent and assert it was allowed — i.e. it asserted the defect. The SDK
+# composes that input inside the agent pod, so a compromised pod could claim `daemon`, skip
+# the identity floor AND skip Decision 45's intersection, which is the branch that requires
+# no human at all. The policy now reads `agent_class` from the BUNDLE, keyed on the
+# sa_subject Gates 1 and 2 already verified.
+#
+# The daemon-EXEMPT half moved to suite-100 T-S100-006, which picks a genuine daemon out of
+# the live bundle instead of asserting one into existence from the input.
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- T-S18-012: Daemon agent_class → valid decision ---"
+echo "--- T-S18-012: a pod cannot relabel itself daemon (D-1) ---"
 TOOL_FOR_TEST="${ANY_TOOL:-lookup_order}"
-RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${TOOL_FOR_TEST}','args':{},'agent_class':'daemon','playground':False,'sandbox':False,'user_id':'','user_team':''}")
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${TOOL_FOR_TEST}','args':{},'agent_class':'daemon','playground':False,'sandbox':False,'user_id':'','user_team':'','user_teams':[]}")
 ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
-if [ "$ALLOW" = "True" ] || [ "$ALLOW" = "False" ]; then
-  pass "T-S18-012 — Daemon class input → valid OPA decision (allow=${ALLOW})"
+if [ "$ALLOW" = "False" ]; then
+  pass "T-S18-012 — input claiming 'daemon' against a user_delegated agent is DENIED (agent_class comes from the bundle, not the pod)"
 else
-  fail "T-S18-012 — Daemon class got unexpected: ${RESULT}"
+  fail "T-S18-012 — a pod claiming 'daemon' got allow=${ALLOW}. input.agent_class is being trusted, so any pod can skip the identity floor and Decision 45's intersection by relabelling itself."
+fi
+
+# ---------------------------------------------------------------------------
+# T-S18-015 — the identity floor DENIES a user_delegated call with no user_id
+#
+# The deny half of Gate 6, and the ONLY case in this suite that deliberately sends an
+# empty user_id. It exists so that adding the uid to the allow-path cases (see the header)
+# cannot be mistaken for switching the floor off: if Gate 6 were removed or made
+# permissive, every other case here would stay green and this one alone would go red.
+#
+# It is also the live-denial regression guard. Until identity P1 threads the RunContext to
+# the pod, a real user_delegated run reaches OPA with user_id="" and lands exactly here —
+# fail-closed, not a leak. When P1 lands this case must STILL pass, because P1 changes what
+# the pod SENDS, not what the policy DECIDES.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S18-015: identity floor → deny when user_delegated has no user_id ---"
+FLOOR_TOOL="${LOW_TOOL:-${MEDIUM_TOOL:-${ANY_TOOL:-lookup_order}}}"
+RESULT=$(opa_query "{'sa_subject':'${SA_SUBJECT}','tool_name':'${FLOOR_TOOL}','args':{},'agent_class':'user_delegated','playground':False,'sandbox':False,'user_id':'','user_team':'${S18_UTEAM}','user_teams':['${S18_UTEAM}']}")
+ALLOW=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('allow',''))" 2>/dev/null)
+DENY_R=$(echo "$RESULT" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('deny_reason',''))" 2>/dev/null)
+if [ "$ALLOW" = "False" ] && [ "$DENY_R" = "missing_user_identity" ]; then
+  pass "T-S18-015 — user_delegated '${FLOOR_TOOL}' with EMPTY user_id → deny (missing_user_identity)"
+elif [ "$ALLOW" = "True" ]; then
+  fail "T-S18-015 — user_delegated '${FLOOR_TOOL}' with EMPTY user_id was ALLOWED. Gate 6 (agentshield.rego user_identity_ok) is off or no longer AND-ed into allow — an unattributed tool call now authorizes."
+else
+  fail "T-S18-015 — user_delegated '${FLOOR_TOOL}' with EMPTY user_id got allow=${ALLOW}, deny_reason=${DENY_R} (want missing_user_identity). A deny for another reason means this probe's tool is not granted, so the floor itself went untested."
 fi
 
 # ---------------------------------------------------------------------------
@@ -666,7 +748,7 @@ kubectl exec -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 -c "
 import urllib.request, urllib.error
 try:
     urllib.request.urlopen(urllib.request.Request(
-        'http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE'))
+        'http://localhost:8000/api/v1/agents/${AGENT_NAME}', method='DELETE', headers={'Authorization': 'Bearer ${E2E_TOKEN}'}))
     print('deleted ${AGENT_NAME}')
 except Exception as e:
     print(f'cleanup warn: {e}')

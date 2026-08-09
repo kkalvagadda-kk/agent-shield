@@ -27,6 +27,12 @@ if [ -z "$API_POD" ]; then
   exit 1
 fi
 
+# R1/FR-11: POST /agents/{name}/deploy now requires a real JWT. Call e2e_set_token
+# BARE — in a command substitution its `exit 1` kills only the subshell and the
+# deploys below would 401 with no explanation (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+
 echo "=== Suite 50: Version dedup on deploy ==="
 echo "  Pod: $API_POD"
 echo ""
@@ -38,7 +44,7 @@ from sqlalchemy import select, func
 from models import Agent, AgentVersion, Deployment
 
 AG='s50-ver-agent'; BASE='http://localhost:8000/api/v1'
-H={'X-User-Team':'platform'}
+H={'X-User-Team':'platform', 'Authorization':'Bearer ${E2E_TOKEN}'}
 
 async def vcount(db, agent_id):
     return (await db.execute(select(func.count(AgentVersion.id)).where(AgentVersion.agent_id==agent_id))).scalar()
@@ -54,8 +60,12 @@ async def m():
                 await db.delete(v)
             await db.delete(old); await db.commit()
 
+    # POST /agents/ requires a real JWT since R2 (0.2.263). This call had none and has
+    # been 401ing silently — the f-string form `{BASE}/agents/` was invisible to every
+    # literal-path grep used to build the earlier sweep lists.
     httpx.post(f'{BASE}/agents/', json={'name':AG,'team':'platform','agent_type':'declarative',
-               'metadata':{'instructions':'be helpful'}}, timeout=8)
+               'metadata':{'instructions':'be helpful'}}, timeout=8,
+               headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 
     def deploy():
         return httpx.post(f'{BASE}/agents/{AG}/deploy', json={'environment':'sandbox'}, headers=H, timeout=15)

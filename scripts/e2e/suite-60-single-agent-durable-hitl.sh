@@ -24,19 +24,41 @@ set -euo pipefail
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
 API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+# ${E2E_SUB} is the sub DECODED FROM the minted token (lib/e2e-auth.sh). Sourcing alone
+# does not mint — the CALL does, and without it E2E_SUB expands to empty and every
+# identity assertion silently compares against "".
 [ -z "$API_POD" ] && { echo "ERROR: no registry-api pod"; exit 1; }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$API_POD"
+e2e_install_pyauth "$NAMESPACE" "$API_POD"
 
 echo "=== Suite 60: single-agent durable HITL (T4) — real pods, no fakes ==="
 echo "  Pod: $API_POD"
 
-RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- python3 - <<'PY' 2>/dev/null
-import asyncio, uuid, httpx
+# The driver's stderr is KEPT (2>&1) and the substitution failure is HANDLED.
+# It used to read `RESULT=$(kubectl exec ... 2>/dev/null` with no `|| :`, so under
+# `set -e` a driver that died aborted the suite after two echoes, printing nothing at
+# all — exit 1 with no reason. That is the same "cannot fail visibly" shape as the six
+# suites whose drivers never started; a suite that cannot report a failure cannot report
+# a pass either.
+set +e
+RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
+  env S60_ADMIN_SUB="$E2E_SUB" python3 - <<'PY' 2>&1
+import asyncio, os, uuid, httpx
+import sys as _sys; _sys.path.insert(0, "/tmp")
+from e2e_auth import BearerAuth
 from sqlalchemy import select, text
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun, Approval
 
 BASE="http://localhost:8000/api/v1"
-H={"X-User-Sub":"75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6","X-User-Team":"platform"}
+# Read from the ENVIRONMENT, not interpolated. This heredoc is QUOTED (`<<'PY'`), so
+# bash never expanded the "${E2E_SUB}" that used to sit here — the header carried that
+# literal 12-character string. Combined with the missing Bearer below, every call in
+# this driver was ANONYMOUS, which is why the suite died at the first gated write.
+ADMIN = os.environ["S60_ADMIN_SUB"]
+H={"X-User-Sub":ADMIN,"X-User-Team":"platform"}
 AGENT="wf-payout"
 
 async def running(name):
@@ -55,13 +77,21 @@ async def run_status(rid):
 
 async def main():
     out={}
-    c=httpx.AsyncClient(base_url=BASE, headers=H, timeout=60, follow_redirects=True)
+    c=httpx.AsyncClient(base_url=BASE, headers=H, auth=BearerAuth(), timeout=60, follow_redirects=True)
     out["001_wf_payout_running"]= await running(AGENT)
     if not out["001_wf_payout_running"]:
         out["_diag"]="wf-payout not running — deploy it first"; print_res(out); return
 
     r=await c.post("/playground/runs", json={"agent_name":AGENT,"input_payload":{"message":"refund $50 for order A1"},"execution_shape":"durable"})
-    rid=r.json().get("id") or r.json().get("run_id")
+    rid=(r.json() or {}).get("id") or (r.json() or {}).get("run_id")
+    # Assert the run was CREATED. Without this the driver carried rid=None into
+    # run_status() and died 5s later inside uuid.UUID(None) — a TypeError that names
+    # the uuid module, three layers from "the POST was refused". An unchecked response
+    # turns every upstream refusal (403, 404, 422) into the same unrelated crash.
+    if rid is None:
+        out["_diag"]=f"run create failed: HTTP {r.status_code} {r.text[:200]}"
+        out["002_reached_awaiting_approval"]=False
+        print_res(out); return
 
     # wait for park
     parked=False
@@ -96,7 +126,16 @@ def print_res(out):
 asyncio.run(main())
 PY
 )
+DRIVER_RC=$?
+set -e
 echo "$RESULT"
 echo ""
+# A driver that never produced a verdict is a SUITE defect, not a pass and not an
+# ordinary failure — say which. Previously this line did not exist and the `set -e`
+# abort above swallowed the distinction entirely.
+if [ "$DRIVER_RC" -ne 0 ] || ! echo "$RESULT" | grep -qE "^(PASS|FAIL) "; then
+  echo "❌ Suite 60 DRIVER ERROR (rc=$DRIVER_RC) — no PASS/FAIL verdict was produced."
+  exit 1
+fi
 if echo "$RESULT" | grep -q "FAIL"; then echo "❌ Suite 60 FAILED"; exit 1; fi
 echo "✅ Suite 60 PASSED"

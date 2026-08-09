@@ -34,10 +34,19 @@ if [ -z "$API_POD" ]; then
   echo "FAIL  T-ARG-FIXTURE  |  no Running registry-api pod found"; exit 1
 fi
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+
 echo "=== Suite 82: Artifact Delegation Foundation (grants API) ==="
 echo "    pod: $API_POD"
 echo ""
 RUN_TAG="arg-$(date +%s)"
+
+# T-ARG-004's whole persona is `agent-reviewer` — a real caller holding NO artifact
+# role. Since R0/FR-9 the chart creates no Keycloak users, so this suite provisions it
+# through the real POST /api/v1/admin/users. Idempotent. Without it token_for() below
+# raises inside the driver and the suite dies at T-ARG-FIXTURE-000 with a stack trace
+# that names Keycloak, not the missing fixture.
+e2e_ensure_reviewer "$NAMESPACE" "$API_POD"
 
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- \
   bash -c "cd /tmp && PYTHONPATH=/app python3 -" <<PY
@@ -98,7 +107,8 @@ ok("T-ARG-FIXTURE-000 fetched platform-admin + agent-reviewer tokens")
 
 # agent-reviewer must exist in user_team_assignments to resolve as a 'user' grantee
 # (the 403 persona is defined by lacking an ARTIFACT role, not by lacking a team).
-call("PATCH", f"/api/v1/admin/users/{RSUB}", PT, {"team": "platform", "role": "operator"})
+# stated, canonical; the 403 persona is defined by lacking an ARTIFACT role, not a global one
+call("PATCH", f"/api/v1/admin/users/{RSUB}", PT, {"team": "platform", "role": "contributor"})
 ok("T-ARG-FIXTURE-000b ensured agent-reviewer is a resolvable grantee (platform team)")
 
 AGENT_A = "${RUN_TAG}-a"; AGENT_B = "${RUN_TAG}-b"

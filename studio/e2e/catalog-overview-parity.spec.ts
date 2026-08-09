@@ -1,4 +1,5 @@
 import { test, expect, type Browser } from "@playwright/test";
+import { pickModel } from "./lib/agents";
 
 // ---------------------------------------------------------------------------
 // catalog-overview-parity.spec.ts — WS-6 Phase 4.
@@ -33,6 +34,7 @@ async function createAgentViaUI(browser: Browser, agentName: string) {
     await page.getByRole("button", { name: /No-code/i }).click();
     await page.waitForLoadState("domcontentloaded");
     await page.getByPlaceholder("my-agent").fill(agentName);
+    await pickModel(page);  // llm_provider_id is REQUIRED since studio 0.1.178 — see lib/agents.ts
     const createDone = page.waitForResponse(
       (r) =>
         r.url().includes("/api/v1/agents") &&
@@ -163,11 +165,25 @@ test("the catalog artifact overview renders via the SAME shared dispatcher", asy
   await page.goto("/catalog");
   await page.waitForLoadState("networkidle");
 
-  const rows = page.locator("main a[href*='/catalog/']");
+  // AGENT rows only. OverviewForShape dispatches on an AGENT's execution shape
+  // (reactive / durable / scheduled / event-driven); a WORKFLOW artifact renders a
+  // different overview entirely — Member Topology and per-member deploy state — and has
+  // no `overview-for-shape` node by design. Nothing is wrong with that page.
+  //
+  // This previously took `rows.first()` and, on 2026-08-04, landed on a published
+  // workflow (`probe-wf-…`) and failed as though the shared dispatcher were missing.
+  // The header above already forbids exactly this: "a spec that grabs the first catalog
+  // row has a verdict that tracks leftover cluster state and dies on a fixture that
+  // structurally cannot satisfy it." It then did it anyway. The PROOF is unchanged —
+  // only the row selection is constrained to a fixture that can satisfy it.
+  const rows = page
+    .locator("main a[href*='/catalog/']")
+    .filter({ has: page.getByText("agent", { exact: true }) });
   const n = await rows.count();
   test.skip(
     n === 0,
-    "no published catalog artifact in this cluster — the cross-page identity is " +
+    "no published catalog AGENT in this cluster (workflows cannot satisfy this proof — " +
+      "they render a different overview by design) — the cross-page identity is " +
       "asserted by CatalogDetailPage.test.tsx (Vitest, which mounts the real page " +
       "component) and by suite-79 T-S79-000's zero-inline-fork grep. Recorded in the " +
       "WS-6 gap ledger; publishing a fixture is a separate gated journey."
@@ -181,6 +197,36 @@ test("the catalog artifact overview renders via the SAME shared dispatcher", asy
   // navigation/reload.
   const overviewTab = page.getByRole("button", { name: /^overview$/i });
   if ((await overviewTab.count()) > 0) await overviewTab.first().click();
+
+  // The dispatcher is the OPERATE surface and is gated on a RUNNING deployment
+  // (CatalogDetailPage.tsx:481 — `deployment && deployment.status === "running"`),
+  // because it needs a real deploymentId to render anything. That gate is correct: with
+  // nothing deployed there is no operate surface to dispatch to. A published-but-
+  // undeployed artifact therefore CANNOT satisfy this proof, and on 2026-08-04 that is
+  // exactly what it landed on (`s15-alice-agent-…`, shape=reactive, "No active
+  // deployment.") and reported as a missing dispatcher.
+  //
+  // `deployment_count > 0` on the card is NOT the same predicate — it counts deployments
+  // in any state, running or not — so the state has to be read from the page itself.
+  // Skip rather than fail: the absence of a running deployment says nothing about
+  // whether the shared dispatcher is wired, which is the only thing under test here.
+  // RACE the two possible settled states rather than sampling one at an arbitrary
+  // instant. The deployment query resolves after the tab click, so a bare count() here
+  // returns 0 while it is still in flight and the skip silently never fires — which is
+  // how the first attempt at this fix still failed.
+  const dispatcher = page.getByTestId("overview-for-shape");
+  const noneNotice = page.getByText(/No active deployment/i);
+  await expect(dispatcher.or(noneNotice).first()).toBeVisible({ timeout: 15_000 });
+
+  const noDeployment = await noneNotice.count();
+  test.skip(
+    noDeployment > 0,
+    "the first published catalog AGENT has no RUNNING deployment, and the shared " +
+      "operate surface is gated on one (CatalogDetailPage.tsx:481) — it needs a real " +
+      "deploymentId. Nothing here indicates a broken dispatcher. Same coverage as the " +
+      "skip above: CatalogDetailPage.test.tsx mounts the real component, and suite-79 " +
+      "T-S79-000 greps that no inline fork returned."
+  );
 
   const shared = page.getByTestId("overview-for-shape");
   await expect(shared).toBeVisible({ timeout: 15_000 });

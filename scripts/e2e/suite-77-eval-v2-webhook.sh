@@ -190,6 +190,9 @@ if [ -z "$API_POD" ]; then
   echo "ERROR: No registry-api pod found in namespace $NAMESPACE"
   exit 1
 fi
+
+# Sourcing does not mint — the CALL does. Without it ${E2E_SUB} is empty.
+e2e_set_token "$NAMESPACE" "$API_POD"
 # Trigger CRUD needs a real JWT since 76b3570 — X-User-Sub is an audit stamp, not
 # authentication. ONE definition of how a suite authenticates: scripts/e2e/lib/e2e-auth.sh.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
@@ -254,7 +257,7 @@ BASE = "http://localhost:8000/api/v1"
 # The REAL gateway Service, in-cluster — the same door a real sender hits. Never a
 # mocked transport, never an in-process app.
 GW = "http://agentshield-event-gateway:8091"
-ADMIN = "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6"
+ADMIN = os.environ["E2E_ADMIN_SUB"]
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
@@ -1026,7 +1029,7 @@ echo "--- T-S77-001..010: real webhook dataset + real filter + real eval Job + l
 echo "  running detached in-pod driver (1 real agent deploy + a real 6-item eval Job +"
 echo "  a real signed gateway control + a real unhandled-MODE Job — can take ~25-45 min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S77_SFX=$RUN_SFX S77_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app E2E_ADMIN_SUB=$E2E_SUB S77_SFX=$RUN_SFX S77_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 FOUND=""
 for i in $(seq 1 720); do   # up to ~60 min

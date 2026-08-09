@@ -4,11 +4,24 @@
 # cascade-terminate sandbox deployments and block on production references.
 set -euo pipefail
 
+NAMESPACE="${NAMESPACE:-agentshield-platform}"
 POD=$(kubectl get pod -n agentshield-platform -l app.kubernetes.io/name=registry-api \
   --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
 
+# R1/FR-11: the AGENT half of this suite (/agents/{name}/versions*, /deploy,
+# /{name}/deployments) now needs a real JWT. The WORKFLOW half is
+# routers/composite_workflows.py (/api/v1/workflows/*), which is NOT one of the ten
+# routers R1 protects — T-S41-005/006 stay anonymous on purpose.
+#
+# The payloads here are SINGLE-quoted, so bash cannot interpolate the token into them.
+# It travels as an env var instead and the drivers read os.environ["E2E_TOKEN"].
+# Call e2e_set_token BARE — in a command substitution its `exit 1` kills only the
+# subshell and every later call 401s (lib/e2e-auth.sh).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
+e2e_set_token "$NAMESPACE" "$POD"
+
 run() {
-  kubectl exec -n agentshield-platform "$POD" -- python3 -c "$1"
+  kubectl exec -n agentshield-platform "$POD" -- env E2E_TOKEN="$E2E_TOKEN" python3 -c "$1"
 }
 
 echo "=== Suite 41: Version Delete Cascade ==="
@@ -18,12 +31,13 @@ echo "=== Suite 41: Version Delete Cascade ==="
 # --------------------------------------------------------------------------
 echo "T-S41-001 — Delete agent version with no deployments"
 run '
-import httpx, sys
+import httpx, os, sys
 # follow_redirects: FastAPI answers a slashless collection path such as POST /agents
 # with a 307 and an EMPTY body, so .json failed with:
 #   Expecting value: line 1 column 1 char 0
 # a redirect misreported as a malformed response. Real clients follow it; so must this.
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
+AUTH = {"Authorization": "Bearer " + os.environ["E2E_TOKEN"]}
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1", headers=AUTH)
 # Create temp agent
 ag = c.post("/agents", json={"name":"s41-del-agent","team":"default","agent_type":"declarative"}).json()
 # Create version
@@ -43,8 +57,9 @@ print("PASS: T-S41-001")
 # --------------------------------------------------------------------------
 echo "T-S41-002 — Delete agent version cascades sandbox deployment"
 run '
-import httpx, sys
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
+import httpx, os, sys
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 # Create version
 v = c.post("/agents/s41-del-agent/versions", json={"eval_passed":False}).json()
 vid = v["id"]
@@ -71,8 +86,9 @@ print("PASS: T-S41-002")
 # --------------------------------------------------------------------------
 echo "T-S41-003 — Delete agent version blocked by production (409)"
 run '
-import httpx, sys
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
+import httpx, os, sys
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 # Create version with eval_passed so we can publish
 v = c.post("/agents/s41-del-agent/versions", json={"eval_passed":True}).json()
 vid = v["id"]
@@ -102,8 +118,9 @@ else:
 # --------------------------------------------------------------------------
 echo "T-S41-004 — Delete nonexistent version returns 404"
 run '
-import httpx, uuid
-c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1")
+import httpx, os, uuid
+c = httpx.Client(follow_redirects=True, base_url="http://localhost:8000/api/v1",
+                 headers={"Authorization": "Bearer " + os.environ["E2E_TOKEN"]})
 fake_id = str(uuid.uuid4())
 r = c.delete(f"/agents/s41-del-agent/versions/{fake_id}")
 assert r.status_code == 404, f"Expected 404, got {r.status_code}"

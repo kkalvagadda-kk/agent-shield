@@ -91,18 +91,24 @@ Only `Depends(get_db)` — no `require_user`, no `get_optional_user`, no router-
 `dependencies=`, and registry-api installs no global auth middleware (`main.py`). Verified
 per-file 2026-08-02.
 
-| Router | Endpoints | Notable exposure |
-|---|---|---|
-| `deployments.py` | 9 | **deploy to production**, rollback, delete deployment |
-| `agent_runs.py` | 7 | full run history |
-| `workflows.py` | 7 | agent-graph CRUD |
-| `auth_configs.py` | 6 | **tool credential configuration** |
-| `versions.py` | 5 | version create / publish |
-| `teams.py` | 5 | team listing |
-| `llm_providers.py` | 5 | **LLM provider keys** |
-| `agent_tools.py` | 3 | tool binding |
-| `admin.py` | — | **the admin surface itself**: grants, publish-requests, approval-authority |
-| `playground_approvals.py` | — | playground approval decide |
+> **R1 outcome (2026-08-05, `0.2.261`)** added as the last column. `require_user` now covers
+> **47** of these routes; **12** stay open because in-cluster machine callers reach them with no
+> `Authorization` header (V-7 of [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md) lists all eight call
+> sites). The exempt set is pinned by `suite-97` **T-S97-011**, which walks `app.routes` — so a
+> route added without auth fails a test, not a review.
+
+| Router | Endpoints | Notable exposure | R1 outcome |
+|---|---|---|---|
+| `deployments.py` | 9 | **deploy to production**, rollback, delete deployment | 7 protected · **2 exempt** — `GET /` + `PATCH /{id}` (deploy-controller) **G-R1-2** |
+| `agent_runs.py` | 7 | full run history | **0 protected · 7 exempt** — whole router (declarative-runner ×5, eval-runner) **G-R1-1** |
+| `workflows.py` | 7 | agent-graph CRUD | ✅ all 7 protected |
+| `auth_configs.py` | 6 | **tool credential configuration** | 5 protected · **1 exempt** — `GET /{id}/secret-ref` **G-R1-4** |
+| `versions.py` | 5 | version create / publish | 4 protected · **1 exempt** — `GET /{version_id}` **G-R1-3** |
+| `teams.py` | 5 | team listing | ✅ all 5 protected |
+| `llm_providers.py` | 5 | **LLM provider keys** | ✅ all 5 protected |
+| `agent_tools.py` | 3 | tool binding | 2 protected · **1 exempt** — `GET /{name}/tools` **G-R1-5** |
+| `admin.py` | 11 | **the admin surface itself**: grants, publish-requests, approval-authority | ✅ all 11 protected |
+| `playground_approvals.py` | 1 | playground approval decide | ✅ protected |
 
 `bundle.py`, `internal.py`, `internal_mcp.py`, `events.py`, `catalog.py` are also unauthenticated
 but are **intentionally** service-facing — except `internal.py`, which is a real hole owned by
@@ -158,10 +164,23 @@ negative tests shipped with it.
 | `consumer` | browse catalog, view runs, view deployment status | all mutation, playground, HITL approval, deploy |
 
 Legacy values normalize on read (`rbac._normalize_role`): `admin→platform-admin`,
-`operator→contributor`, `viewer→consumer`. Unknown/NULL → `contributor` (`rbac.py:41-43`).
+`operator→contributor`, `viewer→consumer`.
 
-> **Flagged for decision (§7 OQ-1):** defaulting an unknown role to `contributor` is fail-**open**.
-> Once §1.2's flags flip, that default decides what an unmapped user can do.
+> **Decided 2026-08-04 (Decisions 40–42, phase R0).** There is **no auto-provisioning** — users are
+> created by the platform, never from the IdP, and `platform-admin` is the only auto-created user.
+> A subject with **no row is therefore corruption, not a kind of user**, and is refused rather than
+> resolved to an invented role. The old fail-open `NULL → contributor` (`rbac.py:41-43`) goes away,
+> and so does the `role` column's `server_default="operator"`, which silently re-introduced the
+> value migrations `0044`/`0075` removed.
+>
+> **An *unrecognized* value is not corruption and keeps today's behaviour.**
+> `user_team_assignments.role` is a union of `{global role} ∪ {reviewer scope}` — `approvals.py:48`
+> defines `_DEFAULT_REVIEWER_SCOPE = "agent:reviewer"` and `_caller_roles` (`:266`) matches it
+> against this column. So `ROLE_HIERARCHY.get(role, 0) == 0` for a scope literal is **load-bearing,
+> not a bug**: it is the only thing stopping a reviewer-scope holder from being read as a
+> contributor. The split lands in R5 (G-R0-1), not R0.
+>
+> Design: [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md).
 
 ### 2.2 Artifact-scoped roles — in `artifact_role_grants`
 
@@ -200,8 +219,11 @@ Creating an agent or workflow inserts an `agent-admin` grant for the creator,
 
 | Endpoint | Target guard | Today | Evidence |
 |---|---|---|---|
-| `GET/POST/PATCH/DELETE /admin/*` (16 routes) | `require_global_role("platform-admin")` | 🔓 | `admin.py` — `Depends(get_db)` only |
-| `POST /agents/` | `can_create_agent` | ❌ | `agents.py` — `get_optional_user`, audit only |
+| `GET/POST/PATCH/DELETE /admin/*` (16 routes) | `require_global_role("platform-admin")` | ✅ | R2 — router-level on `admin.py` + `admin_users.py` |
+| `GET /admin/teams-summary` (org census) | `require_global_role("platform-admin")` | ✅ | R2 — split from the self-scoped read (Decision 43) |
+| `GET /me/team` (self-scoped team + grants) | authenticated, any role | ✅ | R2 — `me.py`; backs the sidebar for every role |
+| `GET /users/directory` (name + sub only) | authenticated, any role | ✅ | R2 — `users.py`; backs the artifact grant picker |
+| `POST /agents/` | `can_create_agent` | ✅ | R2 — first caller of `can_create_agent`; the `X-User-Sub` identity fallback is deleted. (This row previously read ❌; it was 🔓 — `get_optional_user` meant ANONYMOUS creation with caller-supplied `created_by` **and** a caller-chosen `agent-admin` auto-grant. Postmortem: `docs/bugs/anonymous-agent-creation-with-forged-attribution.md`.) |
 | `PUT/DELETE /agents/{name}` | platform-admin OR `agent-admin` | ❌ | |
 | `POST /agents/{name}/quarantine` | platform-admin | ❌ | |
 | `POST /agents/{name}/deploy` env=sandbox | contributor+ | 🔓 | `deployments.py` |
@@ -230,14 +252,72 @@ Creating an agent or workflow inserts an `agent-admin` grant for the creator,
 Consolidated from the four superseded docs plus the bug record. Tagged per CLAUDE.md.
 
 **not-yet-wired (debt) — security-relevant**
-- G-1 `require_global_role` orphaned + `ENFORCE=False`; all 16 admin routes unguarded. *(§1.2, §1.3)*
+- ~~G-1 `require_global_role` orphaned + `ENFORCE=False`; all 16 admin routes unguarded.~~ **CLOSED
+  by R2 (`0.2.263`)** — the flag is deleted rather than flipped, and the factory is wired onto both
+  admin routers. Measured on `0.2.262` before the fix: `e2e-consumer` → `GET /api/v1/admin/users`
+  → **200**. *(§1.2, §1.3)*
 - G-2 Production deploy has no authorization check; `can_deploy_to_production` orphaned. *(§1.3)*
 - G-3 Trigger/webhook management permit-all via `ENFORCE_TRIGGER_MGMT=False`, 8 sites. *(§1.2)*
 - G-4 `auth_configs.py` (6) + `llm_providers.py` (5) expose credential configuration with no auth. *(§1.4)*
 - G-5 `admin.py`, `deployments.py`, `versions.py`, `workflows.py`, `agent_runs.py`, `teams.py`, `agent_tools.py`, `playground_approvals.py` — no auth dependency. *(§1.4)*
 - G-6 Two role vocabularies; `team_lead` exists nowhere else. Caused `production-hitl-decide-403-authority`. *(§1.5)*
 - G-7 `list_triggers` has no auth — R7's explicitly noted, still-open sub-gap. *(`schedule-lifecycle-and-operations.md` R7)*
-- G-8 `suite-42` has zero negative tests; the design's six 403 cases are unwritten. *(§1.6)*
+- G-8 `suite-42` has zero negative tests; the design's six 403 cases are unwritten. *(§1.6)* —
+  **partly closed:** `suite-98` (10 cases) and `e2e/rbac-role-journeys.spec.ts` (9 cases) now carry the
+  403 assertions for R2's surface. `suite-42` itself is still positive-only.
+- G-R2-1 `/api/v1/users/directory` lets ANY authenticated user enumerate usernames. Deliberate and
+  bounded (Decision 43): a name picker cannot work otherwise, and it carries no email/role/team/
+  enabled field — strictly less than every role could read before R2. `suite-98` T-S98-009 pins the
+  absent fields so it cannot grow back into `/admin/users`. **deferred (intentional)**.
+- ~~G-R3-2 **`start_deployment_chat` has no access check at all.**~~ **CLOSED 2026-08-07
+  (`0.2.266`).** Both entry points now call one shared `_require_agent_access`. **PROVEN
+  cross-team before the fix**: a `consumer` in team `operations` got 403 from
+  `/agents/trigger-demo-b/chat` and **200** from
+  `/agents/trigger-demo-b/deployments/{id}/chat` — same caller, same agent, same moment.
+  Regression: `suite-98` T-S98-017 (cross-team denied) + T-S98-018 (owning team still
+  works). Postmortem: `docs/bugs/deployment-pinned-chat-had-no-access-check.md`. Original
+  finding text:  `chat.py:801`
+  (`POST /{name}/deployments/{dep_id}/chat`) resolves `caller_team` and never compares it to
+  `agent.team`, never calls `_has_grant`. Its sibling `start_chat` (`:550`) enforces both. Studio
+  routes to the UNGUARDED one (`App.tsx:84`) from a fleet row. Two doors to one capability, one
+  guarded — the same shape as `webhook_clients.py`/`agent_endpoints.py` and
+  `approvals._ADMIN_ROLES`. **not-yet-wired (debt), suspected not proven:** the 200 observed was
+  same-team, so the own-team fast path would have allowed it anyway. *(2026-08-07)*
+- G-R3-6 **`tools.py` (7 routes) and `skills.py` (5 routes) are ENTIRELY unauthenticated** —
+  including POST/PUT/DELETE. Measured on `0.2.266`: `protected=0` for both. Neither was among
+  R1's ten routers, so T-S97-011 never covered them. A tool's `risk_level` drives the HITL gate
+  and OPA's risk→action rule, so an anonymous PUT that lowers it relaxes every control for every
+  agent bound to that tool. Blocks Decision 46 (cannot derive `owner_team` from an optional
+  caller). Fix ships with the tool-lifecycle work. *(2026-08-07)*
+- G-R3-3 **`asset_grants` is called visibility in §2 and used as authority in `chat.py:585`.**
+  §2 says "visibility ≠ authority", but `_has_grant` on that table is THE gate for cross-team
+  invoke. Either the doc is wrong or the code trusts a visibility record as an authorization
+  decision. Resolving it determines whether the invoke gate replaces `_has_grant` or sits beside
+  it. Owned by R5 (one role vocabulary). *(2026-08-07)*
+- G-R3-4 **Tool authorization resolves on the agent's team, not the caller's** — so sharing an
+  agent escalates tool access. **Decision 45** resolves; lands in identity P2. *(2026-08-07)*
+- G-R3-5 **`owner_team` is never set at tool creation**, so a Studio-created tool is usable by every
+  team (65 of ~173 rows). **Decision 46** resolves; ships ahead of identity P1. *(2026-08-07)*
+- G-R2-4 `agents.py` is **1 protected / 11 exempt** on the deployed `0.2.263` (measured
+  with T-S97-011's own algorithm). R2 closed `POST /agents/`; the eleven still-open routes
+  include `PATCH /agents/{name}`, `DELETE /agents/{name}` and `POST
+  /agents/{name}/quarantine` — unauthenticated **mutations**. R3's scope. Now pinned in
+  the canary (`"agents": (1, 11)`) so the count is a test, not a memory. *(§3)*
+- G-R2-2 `main.tsx` swallows a `/me` failure (`console.warn`) and renders with `role = null`, which
+  `isAtLeast` treats as `consumer`. With R2 live, a transient `/me` failure silently demotes a
+  platform-admin's UI to a consumer's — Admin nav gone, `/admin/*` deep links redirected — with no
+  message. Denying is the safe direction, but doing it silently is not. **not-yet-wired (debt)**.
+- G-R0-1 `user_team_assignments.role` holds **both** global roles and reviewer scopes (WS-2 T011,
+  `approvals.py:48,266`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`.
+  Until then an unrecognized value must NOT be treated as corruption. *(Decision 42)*
+- G-R0-2 Nothing in the install seeds an assignment row; `seed-platform-admin-role.sh` patches it
+  afterwards and covers only `platform-admin`. Closed by R0. *(Decision 40)*
+- G-R0-3 A stale row survives realm recreation or a hand-deleted admin — harmless (nobody can
+  authenticate as it) but "row count" ≠ "admin count". R0's audit surface reports it; nothing reaps
+  it automatically. *(open question 2 in `rbac-r0-r1-spec.md`)*
+- G-R0-4 `suite-53:49` inserts an assignment row with **no role** and `suite-71:325` inserts a
+  reviewer scope; both regenerate table litter on every run. Fixed in R0 (`FR-7`) — cleaning the
+  cluster without this is a one-time illusion.
 
 **deferred (intentional)**
 - G-9 `approval_authority` table not dropped — historical records retained.
@@ -257,17 +337,64 @@ holes close first. **Number allocation across the three authorization docs** (la
 migration `0078`, `suite-96`): RBAC takes `0079` + `suite-97/98`; identity propagation takes
 `0080–0082` + `suite-99+`; OPA needs no migration. Do not re-allocate without updating all three.
 
-**Phase R1 — close the unauthenticated routers (no behaviour change for legitimate users).**
+**Phase R0 — ✅ SHIPPED 2026-08-05 (registry-api `0.2.260`).** Make "a user with no role row" unrepresentable (prerequisite for R2).
+Decisions 40–42. Platform code, not the chart, creates the sole auto-created user `platform-admin`
+on first init: registry-api `lifespan`, single-flighted across replicas with `pg_try_advisory_lock`
+(reusing the pattern at `mcp_health.py:172-193`), admin identified by *username* so realm
+recreation self-heals, email pinned to `platform-admin@agentshield.local` for Langfuse membership.
+`realm-init-job.yaml` drops both user blocks; `seed-platform-admin-role.sh` becomes a repair tool;
+`agent-reviewer` moves to the four suites that use it (`76/78/82/83`) via `POST /admin/users`.
+`POST /api/v1/admin/users` becomes atomic — `_upsert_team` loses its internal commit so callers own
+the boundary, with a compensating `kc_delete` on failure. `get_user_global_role` raises instead of
+inventing a role, and migration `0079` drops the `role` column's `server_default`. *Test:*
+`suite-97` — fresh install has an admin with a row and no seed script; replica race yields one row;
+realm recreation re-pins (**this case must fail against current code first**); orphan `sub` → 403.
+Design: [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md). Run **with or before R1** — they touch the same
+four e2e suites.
+
+**Phase R1 — ✅ SHIPPED 2026-08-05 (registry-api `0.2.261`).** Close the unauthenticated routers
+(no behaviour change for legitimate users).
+
+> **Caveat, stated because a green tick would hide it:** R1 protects **47** routes and leaves **12**
+> exempt. Five route groups keep accepting anonymous requests because in-cluster machine callers
+> reach them with no `Authorization` header — verified at eight call sites (`deploy-controller` sends
+> no auth headers at all; `eval-runner`'s `_EVAL_HEADERS` is an audit stamp). They are G-R1-1…5, each
+> commented in code with its caller's `file:line`, and `suite-97` **T-S97-011** walks `app.routes` to
+> pin the partition so a new unauthenticated route fails a test rather than a review. Closing them
+> needs the service identity owned by `identity-propagation-architecture.md` (migrations `0080–0082`).
+> **R1 is authentication only** — no role check, no team scope, no new 403. That is R2.
+
 Add `require_user` to the 10 routers in §1.4. Pure authentication, no role logic, so no
 legitimate Studio call changes — Studio already sends the JWT. *Test:* `suite-97` — every route
 in §1.4, anonymous → 401. This is the cheapest large risk reduction available and it blocks
 nothing.
 
-**Phase R2 — turn on global-role enforcement.** Wire `require_global_role("platform-admin")`
-into `admin.py` + `admin_users.py`; flip `rbac.py:205 ENFORCE=True`. The stated precondition is
-already met (§1.2), so this is a flag flip plus 16 decorators. Decide OQ-1 (unknown-role default)
-**before** flipping — it changes who gets locked out. *Test:* `suite-97` gains the design's
-T-S32-013 (contributor → `/admin/users` → 403).
+**Phase R2 — ✅ SHIPPED 2026-08-06 (registry-api `0.2.263` / studio `0.1.184`).** Turn on
+global-role enforcement. `require_global_role` now enforces — the `ENFORCE = False`
+closure-local was **deleted, not flipped**: a permanently-true flag is dead config that reads as
+a switch someone may flip back, and being closure-local it was invisible to grep. Wired onto
+`admin.py` + `admin_users.py`, which had zero call sites, so the flag alone would have changed
+nothing. `can_create_agent` got its first caller on `POST /agents/`, and that handler's
+`X-User-Sub` identity fallback was deleted (an anonymous caller could create an agent and
+attribute it to anyone).
+
+> **R2 was NOT "a flag flip plus 16 decorators", and this section said it was.** Checking the
+> browser before wiring — the step whose omission shipped the blank page — found `GET
+> /admin/teams-summary` had two unrelated readers: the Access Control census, and the **Sidebar +
+> My Agents page that every role sees**. Gating it as written would have silently emptied
+> "Shared With Me" platform-wide; leaving it authenticated-only would have kept handing a
+> `consumer` the entire org's membership map. The same check found the artifact grant picker on
+> the agent Settings tab reading `GET /admin/users`, a panel a contributor reaches. **Decision 43**
+> splits the questions: the census stays admin-only, `GET /api/v1/me/team` answers the self-scoped
+> one, and `GET /api/v1/users/directory` (name + `sub`, nothing else) backs the picker. Both grant
+> reads go through `team_assets.fetch_team_asset_grants` so they cannot drift.
+
+*Test:* `suite-98` — written RED before R2 and now green, 10 cases. Half of them are the guards
+against an over-broad fix: platform-admin still 200, anonymous still 401 (not 403), `/me/team` and
+`/users/directory` still open to non-admins, contributor can still create an agent. **Plus
+`e2e/rbac-role-journeys.spec.ts`** — see §6, R2 is UX-facing and this doc previously said it was
+not. OQ-1 was resolved by R0 (Decision 40/41): there is no unknown-role default to decide, because
+there is no such thing as a legitimate user without a row.
 
 **Phase R3 — guard the deploy path.** Wire `can_deploy_to_production` into the production branch
 of `deployments.py`; sandbox stays contributor+. Wire `can_create_agent` into agent/workflow POST
@@ -301,9 +428,24 @@ and any OPA rego change (OPA contract). A "Run now" style control needs R2's tea
 ## 6. Definition of Done
 
 Per CLAUDE.md, each phase must satisfy:
-1. **Real journey** — a bash suite for the API gate, plus a Playwright spec for R5 (the only
-   UX-facing phase).
-2. **Save → reload → assert** — R5's grant-driven queue filter must survive a reload.
+1. **Real journey** — a bash suite for the API gate, **plus a Playwright spec for any phase that
+   changes what a user can see or do.**
+
+   > **This item used to read "a Playwright spec for R5 (the only UX-facing phase)". That was
+   > wrong and it was load-bearing.** R2 is the first phase that returns a 403 to a real person;
+   > calling it API-only is what let it be planned as sixteen decorators. Worse, *both* test layers
+   > were structurally unable to notice a mistake: all 61 bash suites authenticate as
+   > `platform-admin` (suite-98's header), and until `0.1.184` `global-setup.ts` logged in exactly
+   > one user, so all 47 Playwright specs did too. **A role gate whose only witnesses already pass
+   > every check is a guard that cannot fail.** `global-setup.ts` is now multi-role (Decision 44)
+   > and `e2e/rbac-role-journeys.spec.ts` drives the deployed app as a real consumer and a real
+   > contributor. Every remaining phase (R3's playground/deploy denials, R4's trigger surfaces,
+   > R5's scoped approval queue) is UX-facing on the same terms.
+
+2. **Save → reload → assert** — R5's grant-driven queue filter must survive a reload. For a phase
+   whose change *is* a guard rather than a row, the reload assertion applies to the guard:
+   `T-RJ-005` reloads on `/admin/access` as a consumer, because a gate that only holds on first
+   render fails exactly when role resolution races the route — which is how users arrive.
 3. **No orphans** — after R3, `grep` must show a live caller for `can_deploy_to_production`,
    `can_use_playground`, `can_create_agent`, `require_global_role`, `can_approve_hitl`. This doc's
    §1.3 exists because that check was never run; it is now the phase-exit gate.
@@ -316,10 +458,13 @@ Per CLAUDE.md, each phase must satisfy:
 
 ## 7. Open questions
 
-- **OQ-1 — unknown/NULL global role defaults to `contributor`** (`rbac.py:41-43`), which is
-  fail-open. Once R2 lands, an unmapped user silently gets create/deploy-to-sandbox rights.
-  Fail-closed (`consumer`) is the safer default but will lock out any user whose
-  `user_team_assignments` row is missing. **Decide before Phase R2.**
+- **OQ-1 — ~~unknown/NULL global role defaults to `contributor`~~ — RESOLVED 2026-08-04
+  (Decisions 40–42).** The question presupposed that legitimate users can lack a row. They cannot:
+  users are platform-created, `platform-admin` is the only auto-created one, and platform code
+  creates it. So the answer was not a safer default but **removing the state** — see phase R0 and
+  [`rbac-r0-r1-spec.md`](rbac-r0-r1-spec.md). Two findings came out of resolving it: the `role`
+  column had its own fail-open `server_default="operator"` (a second, independent producer), and an
+  unrecognized value is *not* corruption because the column doubles as a reviewer-scope namespace.
 - **OQ-2 —** should `platform-admin` bypass *artifact-scoped* checks everywhere? It does today
   (`can_deploy_to_production`, `can_manage_artifact`, `can_approve_hitl` all short-circuit). That
   is convenient and it means no artifact is ever un-administrable — but it also means the

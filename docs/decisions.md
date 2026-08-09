@@ -966,6 +966,582 @@ if caller:
 
 ---
 
+## Decision 40: Users are created by the platform; `platform-admin` is the only auto-created one, and CODE creates it
+
+**Date:** 2026-08-04 · **Prerequisite for Decision 25's enforcement**
+
+**Context:** Enforcement (Decision 25) cannot be switched on while a user with no `user_team_assignments` row silently resolves to `contributor`. The question looked like "what default role should such a user get" — but it presupposed that legitimate users can lack a row. They cannot: users are provisioned by the platform, never from the IdP. Keycloak is an implementation detail. Meanwhile the install itself violated that: `realm-init-job.yaml` creates `platform-admin` **and** `agent-reviewer` via `kcadm.sh` and writes no row, and `scripts/seed-platform-admin-role.sh` exists only to patch it afterwards ("Nothing else in the install seeds that row").
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: keep `contributor` as the default** | Status quo | Nobody locked out; but any valid login is a contributor by default, and the illegal state stays legal |
+| **B: default to `consumer`** | Fail-closed default | Safer; but still an invented role, and needs a backfill plus an onboarding path |
+| **C: no auto-provision — platform code creates the sole admin; a missing row is corruption** | Remove the state | No default to argue about; but bootstrap moves into registry-api's startup path |
+
+**Choice: C.** Picking a "safe default" keeps the illegal state legal and merely less dangerous. Removing the state removes the question.
+
+**Consequences / trade-offs:**
+- Bootstrap lives in registry-api's `lifespan`, single-flighted across replicas with `pg_try_advisory_lock` — **reusing** the pattern at `mcp_health.py:172-193` rather than inventing a second one.
+- The admin is looked up by **username**, not by a stored `sub`. Realm-recreation self-healing then falls out for free — that is the 2026-07-20 incident (assignment stranded on a dead `sub`, Admin menu silently gone) fixed structurally instead of by a post-deploy script.
+- **The email is pinned to `platform-admin@agentshield.local`.** Langfuse authorizes trace access by project membership keyed on email; a different address silently breaks admin trace access.
+- **`agent-reviewer` stops being a bootstrap user.** `suite-76/78/82/83` use it as their non-admin persona and must create it themselves via `POST /api/v1/admin/users` — which is the right shape, since the fixture then exercises the real creation path.
+- Bootstrap failure is **non-fatal** to the process (`/ready` red + retry). Keycloak is routinely not ready when registry-api starts; crash-looping a fresh install is worse than degrading.
+- Design: `docs/design/rbac-r0-r1-spec.md`.
+
+---
+
+## Decision 41: A missing role row is corruption — and it had THREE producers, not one
+
+**Date:** 2026-08-04 · **Implements Decision 40**
+
+**Context:** The invented-role problem was scoped as one Python branch. Auditing the live cluster found three independent producers of the same defect.
+
+| # | Producer | Mechanism |
+|---|----------|-----------|
+| 1 | Python, missing row | `_normalize_role(None) → "contributor"` (`rbac.py:41-43`) |
+| 2 | **Postgres, role omitted** | `role` column `server_default="operator"` (migration `0013`) |
+| 3 | Python, unknown value | `ROLE_HIERARCHY.get(role, 0)` → rank 0, silently |
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: fix producer 1 only** | Raise on a missing row | Small; but producer 2 keeps minting `operator` rows behind it |
+| **B: fix 1 and 2** | Raise, and drop the column default | Closes both silent paths; one migration |
+| **C: fix 1, 2 and 3** | Also treat unknown values as corruption | Would break daemon-approval routing by design — see Decision 42 |
+
+**Choice: B.**
+
+**Consequences / trade-offs:**
+- **Producer 2 is the instructive one.** Migration `0044` migrated the data `operator → contributor` and `0075` did `viewer → consumer`, but **neither touched the column default** — so every insert omitting `role` re-introduces the exact legacy value those migrations existed to remove. The live cluster proved it: `agent-reviewer` sat at `role='operator'`, and `suite-53-cost-tracking.sh:44` inserts `(user_sub, team_name)` with no role.
+- `get_user_global_role` raises; `me.py` stops importing `_normalize_role` directly. **One resolution path, not two** — two independent answers to "what role is this" is exactly how `_ADMIN_ROLES` diverged (`production-hitl-decide-403-authority.md`).
+- `_upsert_team` loses its internal `commit()`; callers own the transaction boundary. That is what makes `POST /api/v1/admin/users` atomic (compensating `kc_delete` on row-write failure) — an explicit boundary rather than a `commit: bool` flag sniffed per call site.
+- **One-time cleanup, 2026-08-04:** the audit found 6 Keycloak users / 5 rows — 3 orphan users and 2 stale rows, **all e2e test litter; no real user lacked a role.** Deleted; the table is now 3/3, 1:1. Cleaning alone is insufficient: `suite-53:49` and `suite-71:325` regenerate their rows every run, so the suites are fixed in the same change.
+
+---
+
+## Decision 42: `user_team_assignments.role` knowingly holds two kinds of value — documented in R0, split in R5
+
+**Date:** 2026-08-04 · **Bounds Decision 41**
+
+**Context:** Treating an unrecognized role string as corruption looked obviously right. It is not. `approvals.py:48` defines `_DEFAULT_REVIEWER_SCOPE = "agent:reviewer"`, and `_caller_roles` (`:266`) matches it against `user_team_assignments.role`. WS-2 T011 deliberately uses that column as a namespace for **reviewer scopes** alongside the three global roles.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: document the union; leave it** | R0 changes nothing here | Ships now; the overload stays live and confusing |
+| **B: split the column inside R0** | `CHECK`-constrain `role`; move scopes out | Correct; but drags R5's whole HITL authority rewrite into R0 |
+| **C: A now, split in R5** | Reviewer scopes become `artifact_role_grants` rows | Two releases, but each is a vertical slice |
+
+**Choice: C.**
+
+**Consequences / trade-offs:**
+- R0's job is making the missing state unrepresentable, not untangling the overload. Doing B inside R0 is the horizontal-layer failure CLAUDE.md DoD rule 4 warns about, and R5 already plans to move reviewer authority onto `artifact_role_grants` — the split has a natural home there.
+- **`ROLE_HIERARCHY.get(role, 0) == 0` for `agent:reviewer` is therefore not a bug.** It is the only thing preventing a reviewer-scope holder from being treated as a contributor. Recorded so the next reader does not "fix" it.
+- The cost is stated out loud rather than papered over: between R0 and R5 the column has two meanings, and the gap ledger says so (G-R0-1). This is the Decision 32 lesson — one field, two meanings — sitting in the RBAC foundation.
+
+---
+
+## Decision 43: R2 splits `/admin/teams-summary` rather than gating it — an admin endpoint was doing double duty
+
+**Date:** 2026-08-06 · **Enables R2 (`rbac-and-artifact-authorization.md` §5)**
+
+**Context:** R2's instruction was one line: wire `require_global_role("platform-admin")` onto `admin.py` + `admin_users.py`. Grepping the **browser** before doing it — the step whose omission shipped the blank page (`docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md` lesson 1) — found that `GET /admin/teams-summary` had two unrelated readers: the Admin → Access Control screen, which wants a census of every team, member and grant, and the **Sidebar + My Agents page**, which every role sees and which only ever wanted the caller's own team. The same check found the artifact grant picker (`ArtifactGrantsList`, rendered on the agent Settings tab) reading `GET /admin/users`, and that panel is reachable by a contributor.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: gate it and accept the fallout** | Both routers go platform-admin | "Shared With Me" silently empties for every non-admin; My Agents renders as though nothing is shared. A capability broken by an authorization change, with no error anywhere |
+| **B: leave `teams-summary` at `require_user`** | Authenticated, any role | The sidebar keeps working — and a `consumer` keeps reading the whole org's membership and grant map. R2 would claim to close the admin surface while leaving its most disclosure-heavy read open |
+| **C: split the question** | Census stays admin-only; new self-scoped `GET /api/v1/me/team`; new `GET /api/v1/users/directory` (name + sub only) for the picker | Two new endpoints and a client change, in exchange for both halves being right |
+
+**Choice: C.**
+
+**Consequences / trade-offs:**
+- **One endpoint was answering two questions, and that is the actual defect** — the gating just exposed it. B is the bandaid: it keeps the illegal disclosure legal because a UI depends on it. A is worse, because the breakage is silent.
+- **The split removes a crash site, not only a permission.** The old client had to `.find()` its own team inside an array of all teams by matching `members[].user_sub` — and that exact call, handed a 401 envelope as success data, unmounted the entire app in `0.1.181`. `/me/team` is scoped server-side, so there is no array to search and no member list to return. The fix for the authorization problem and the fix for the crash class are the same change.
+- **`/users/directory` is a deliberate, narrowed disclosure.** Any authenticated user can enumerate usernames. That is inherent to a name picker — you cannot delegate a role to a person you cannot name, and the model explicitly lets an `agent-admin` delegate on their own artifact. What it does *not* return is everything that made `/admin/users` sensitive: no email, no `enabled`, no team, no global role. It is strictly less than every role could already read before R2. `suite-98` T-S98-009 asserts those fields stay absent, so the endpoint cannot quietly grow back into `/admin/users`.
+- **The cost is two more endpoints to keep honest.** Both grant reads go through `team_assets.fetch_team_asset_grants`, one producer, so the census and the self-scoped view cannot drift apart — the same rule that would have prevented the duplicate raw-fetch reader in the first place.
+
+---
+
+## Decision 44: role gates get a browser journey, because every Playwright spec was already an admin
+
+**Date:** 2026-08-06 · **Corrects `rbac-and-artifact-authorization.md` §6, which called R5 "the only UX-facing phase"**
+
+**Context:** R2 is the first phase that returns a 403 to a real user. Both test layers were structurally incapable of noticing if it went wrong: all 61 bash suites authenticate as `platform-admin` (suite-98's header records this), and `global-setup.ts` logged in exactly one user, so all 47 Playwright specs ran as `platform-admin` too. A role gate whose only witnesses already pass every check is a guard that cannot fail — and the immediately preceding bug is the proof: a change that broke the app for **every** user passed the full suite, because nothing drove the screen that broke.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: API-only (suite-98)** | Assert the 403s from inside the pod | Proves the gate, proves nothing about the product. This is exactly what was done before the blank page |
+| **B: add non-admin Playwright sessions** | global-setup provisions the personas and saves a session per role | One more setup dependency; personas must exist on the cluster |
+| **C: mock the roles in Vitest** | Render Sidebar with `role: "consumer"` | Cheap, and worthless here: the failure mode is a real 403 from a real endpoint arriving at a real QueryClient. A mock hands the component whatever the test author imagined |
+
+**Choice: B**, with A retained — the two answer different questions.
+
+**Consequences / trade-offs:**
+- Personas are the **same** identities suite-98 uses and are created through the real `POST /api/v1/admin/users`, not seeded. A fixture that bypasses the creation path proves nothing about it.
+- Provisioning **fails loud**. A role spec that silently does not run is indistinguishable from one that passes, which is how `G-R0-9` stayed red for months; `assertRoleSession` turns a missing session into a named failure.
+- The default `storageState` still points at the admin session, so no existing spec changes behaviour. Roles are opt-in per describe block.
+- This also fixed a real flake: global-setup waited on `networkidle`, which the sidebar's 30-second approvals poll can prevent, leaving a half-written `state.json` that then failed **every** spec in the batch with what looked like an auth regression. It now waits for the build marker — a concrete signal that React mounted.
+
+---
+
+## Decision 45: delegating an agent does NOT delegate its tools — unless the agent is autonomous
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Resolves the gap behind three separate findings
+
+**Context:** Granting team B access to an agent owned by team A currently gives team B everything
+that agent can do. OPA resolves the effective tool set as `agent.tools ∪ data.grants[agent.team]`
+(`agentshield.rego:63,71-74`) — **the agent's team, never the caller's** — and the OPA input carries
+no caller-team dimension at all (`agent_class`, `sa_subject`, `tool_name`, `user_id`). So an admin's
+team→tool grant governs who may *deploy* (`deployments.py:638`, 422 `tool_grants_missing`) and never
+who may *use*. Measured on the test cluster: of 147 active tool grants, **120 were created by
+`auto:deploy` and 27 by `system` — zero by a human admin**, and 65 of ~173 tools have
+`owner_team = NULL`, which `team_may_use_tool` treats as usable by every team.
+
+The practical consequence is a privilege-escalation path: team A cannot grant team B a tool
+directly, but can wrap it in an agent and grant the agent. A shared agent becomes a confused
+deputy — the same hazard §4.8.1 already cites as the reason the MCP proxy has a team floor.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: agent is the unit of delegation** | Today's behaviour. Granting the agent grants its capabilities | Simple, and cross-team sharing "just works". But tool grants are then deploy-time bookkeeping, not a control, and the escalation path stays open |
+| **B: caller must independently hold every tool** | Intersect with the caller's team grants on every run | Closes the escalation. Breaks daemons outright — a scheduled run has no caller, so the intersection is empty and every autonomous agent stops working |
+| **C: split on the identity model** | User-delegated runs intersect; autonomous runs do not | Two rules to hold in your head, but each is right for its case |
+
+**Choice: C.**
+
+    user_delegated → (agent.tools ∪ grants[agent.team]) ∩ grants[caller_team]
+    daemon         →  agent.tools ∪ grants[agent.team]        (unchanged)
+
+**Rationale:** this is not a new axis — it is the distinction the platform already draws.
+`identity-propagation-architecture.md` §4.2 defines exactly these two identity models, and
+`agentshield.rego:101-107` already branches on them for the identity floor: a `daemon` needs no live
+user, a `user_delegated` run denies without one. Tool scope should follow the same seam. When a run
+acts for a person, that person's team is the ceiling; when it acts for itself, the agent's own grants
+are the whole story, because there is no user whose authority could be exceeded.
+
+**Consequences / trade-offs:**
+- **This makes `input.agent_class` load-bearing for TWO gates, and it is self-reported.** §4.6 D-1
+  already records that `agent_class` reaches OPA from the pod rather than the registry, so a
+  compromised pod can relabel itself `daemon` and skip the identity floor. Under this decision the
+  same relabel would ALSO skip the tool intersection. **D-1 must be fixed first or in the same
+  change** — `agent_class` has to come from the registry record. Without that, C is weaker than A.
+- **The bundle does not currently know what "unowned" means.** `bundle_generator` builds
+  `grants_by_team` from `asset_grants` only, so the 65 `owner_team = NULL` tools appear in no team's
+  grant set. They pass today solely because they sit in `agent.tools`. A naive intersection denies
+  all 65 to every cross-team user-delegated run. The rego must mirror `team_may_use_tool`'s rule that
+  an unowned tool is universal — or `owner_team` must become `NOT NULL` and the 65 backfilled. Either
+  is fine; leaving them contradictory is not.
+- **Needs `user_team` in the OPA input, from the verified `RunContext`** — never from a header, or
+  the caller picks their own ceiling. Blocked on identity P1/P2.
+- **`caller_team == ""` must fail closed** on the user-delegated branch. It will be empty until P1
+  lands, so this cannot be switched on before then.
+- **It is a breaking change for anyone relying on cross-team sharing today.** Needs a flag and a
+  measured rollout, not a flip — the same lesson as R2, where the sweep list was written by hand.
+- The same rule governs the *tool-schema filtering* question (a user-delegated run should not be
+  shown a tool it cannot call). Filtering and denial are complementary, not alternatives: filtering
+  keeps the model from proposing it and stops the tool's description leaking; denial ensures
+  filtering is not the only control.
+- **Unchanged by this decision:** an agent grant still controls whether you may *invoke* the agent
+  at all. C narrows what the agent may do *for you*, not whether you may reach it.
+
+---
+
+## Decision 46: a tool's team comes from its creator — `owner_team = NULL` becomes illegal
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Unblocks Decision 45
+
+**Context:** The intended rule — *creating a tool makes it your team's; other teams need a grant* —
+is already implemented in the authorization resolver:
+
+```python
+# tool_access.team_may_use_tool
+if owner_team is None or owner_team == team:  return True   # own-team implicit
+# else: look for an active cross-team AssetGrant
+```
+
+But **nothing populates `owner_team`.** `routers/tools.py::create_tool` builds
+`Tool(**body.model_dump(...))` and sets `created_by` from the JWT; `owner_team` comes from the
+request BODY and `ToolCreate.owner_team` defaults to `None`. Studio's tool form never sends it.
+
+So creating a tool produces the *most permissive* state available: `NULL`, which the resolver
+treats as usable by **every** team. Measured: **65 of ~173 tools are `NULL`**. That is not drift —
+it is what the create path produces.
+
+> **CORRECTION 2026-08-07.** This decision originally also claimed "every tool on the platform is
+> listed to every user", inferred from all eight Studio callers of `listAllTools()` passing no
+> params. **That was wrong** — the visibility filter is not the `owner_team` query param, it is an
+> unconditional predicate in the handler:
+> `where(or_(Tool.publish_status == "published", Tool.created_by == caller))`. Tools already follow
+> the agent list pattern. I inferred from the call sites without reading the handler body — the
+> exact mistake `docs/bugs/studio-blank-page-unauthed-fetch-teams-summary.md` lesson 2 is about.
+>
+> What is true: **every one of the 174 tools is `published`**, because `Tool.publish_status`
+> defaults to `'published'` (`models.py:1258`) where `Agent` and `Workflow` default to `'private'`
+> (`:178`, `:371`). The filter is correct and never bites, because nothing is ever private. Skills
+> have the same default (`:1364`). That is Decision 47.
+>
+> This decision therefore covers only the **use** axis (`owner_team` → `team_may_use_tool`). The
+> **visibility** axis is Decision 47.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: leave it** | `NULL` stays legal and universal | Tool grants remain unenforceable for user-created tools, and Decision 45's intersection cannot be implemented — see below |
+| **B: auto-grant the creator's team** | Write an `AssetGrant` at create | Works, but a grant row for your own team is redundant: the resolver already allows own-team without one. Adds bookkeeping that must then be kept in sync |
+| **C: set `owner_team` from the caller; make `NULL` illegal** | Ownership, not a grant. Genuine builtins get an explicit shared team every team is granted | One backfill decision for the existing 65, then the ambiguity is gone permanently |
+
+**Choice: C.**
+
+**Rationale:** `NULL` currently means two different things — "a deliberately universal builtin" and
+"a tool created through the UI, which never sets the field". Those need opposite treatment and are
+indistinguishable. This is the same shape as Decision 41 (a missing role row is corruption, not a
+kind of user): remove the ambiguous state rather than pick a safe reading of it. `owner_team` is
+derived from the **caller's team, not the request body** — a body field lets a caller assign
+ownership to a team they are not in.
+
+**Consequences / trade-offs:**
+- **This unblocks Decision 45.** The OPA bundle builds `grants_by_team` from `asset_grants` only,
+  so unowned tools appear in no team's grant set. A naive `∩ grants[caller_team]` would deny all 65.
+  With `NULL` illegal and builtins explicitly shared, the bundle and the resolver finally agree on
+  what "unowned" means — because nothing is unowned. Doing this FIRST removes a P2 blocker instead
+  of working around it in the rego.
+- **The backfill is a judgement call and must not be blanket.** Some of the 65 are genuine shared
+  builtins; some are user-created and belong to a team. `created_by` is populated on every row and
+  is the only signal available to tell them apart. Anything ambiguous should go to the shared team
+  (permissive, matching today's behaviour) rather than be guessed into a team — a wrong guess
+  silently revokes a tool from whoever was using it.
+- **The list endpoint must call `team_may_use_tool`, not a new predicate.** The visibility rule is
+  not `owner_team == myteam` — a team holding a cross-team grant must still see the tool. That is
+  exactly the resolver. A second filter would give visibility and authorization two answers, and
+  there is already one such disagreement (resolver vs OPA bundle) that this decision exists to end.
+- **The deploy-time auto-grant may become deletable.** 120 of 147 active tool grants are
+  `auto:deploy:*` — a team granting itself its own agent's tools at deploy. Once `owner_team` is
+  set, the resolver allows own-team tools with no grant row at all. Whether the rows are still
+  needed depends on whether OPA's Gate 3 (`agent.tools ∪ grants[agent.team]`) covers them via
+  `agent.tools`. **Verify before deleting** — this is a check, not a conclusion.
+- **UX consequence either way:** the Deploy modal currently shows Replicas and TTL and says nothing
+  about granting tool access, while Admin → Grants presents a "Create Grant" form that has produced
+  **zero** of the 147 grants. If the auto-grant survives, the modal must name what it grants.
+
+---
+
+## Decision 47: tools are private by default and publish by riding along with an agent
+
+**Date:** 2026-08-07 · **Decided by Kalyan** · Pairs with Decision 46 (use axis); this is the
+visibility axis
+
+**Context:** `Tool.publish_status` defaults to `'published'` (`models.py:1258`); `Agent` and
+`Workflow` default to `'private'` (`:178`, `:371`). `Skill` matches `Tool` (`:1364`). So tools and
+skills are born org-wide visible while agents and workflows are born drafts. All **174** tools on
+the test cluster are `published` — not one is private.
+
+The list filter for the desired behaviour already exists and is correct
+(`where(or_(publish_status == "published", created_by == caller))`). It simply never bites.
+
+There is also **no way to publish a tool**: agents have `POST /agents/{name}/publish`, workflows
+have one, tools have none. The *approve* half exists — `admin.py:341` already sets
+`source_tool.publish_status = "published"` — so someone intended this and stopped halfway. Flipping
+the default without a publish path would make every new tool permanently invisible to everyone but
+its creator.
+
+| Option | Description | Trade-off |
+|--------|-------------|-----------|
+| **A: leave it** | tools born published | Contradicts the agent model; "drafts are yours" is unachievable for tools |
+| **B: flip the default + build a tool publish workflow** | Mirrors agents fully | A second eval-gated, admin-reviewed workflow for an artifact with no versions and no evals — the agent gate does not transfer |
+| **C: flip the default; tools publish by CASCADE when an agent using them is published** | No separate tool workflow | One review covers both; the reviewer must be shown what cascades |
+
+**Choice: C.**
+
+**Rationale:** it lands entirely on machinery that already exists. `publish_agent` already loads the
+agent's bound tools (for the critical-risk check), already requires manage rights (R3), and already
+blocks `critical_risk_not_publishable` — so critical tools cannot ride along by construction. No new
+workflow, no new queue, no new gate.
+
+**Consequences / trade-offs:**
+- **The reviewer must see what they are approving.** Today the publish queue is one flat row:
+  Asset Type · Asset · Submitted By · Submitted At · Last Eval · Status · Risk · Actions. `Risk` is
+  a single `highest_risk_level` chip — it says *high* without saying which tool, what it does, who
+  owns it, or that approving publishes three tools org-wide. A silent cascade inside an existing
+  approval is an escalation the approver cannot see. **Fix:** a review payload —
+  `GET /admin/publish-requests/{id}/review` — returning the agent's config, every bound tool with
+  `risk_level` / `owner_team` / `publish_status` / a *will be published* flag, and the existing eval
+  summary. Rendered as a drawer.
+- **This removes the need for a `cascade_publish` column.** If the tool rows carry `publish_status`
+  and `owner_team`, the cascade is derivable and shown live — no submit-time snapshot that can go
+  stale between submit and approve. The audit record is written at **approve** time from what
+  actually published, which is more accurate than a snapshot anyway.
+- **Cross-team guard.** Cascade only tools the agent's team OWNS. A foreign, unpublished tool must
+  block the request — 422 `tool_not_publishable_cross_team`, same shape as the existing
+  `critical_risk_not_publishable` and `tool_grants_missing`. Without it, publishing an agent becomes
+  a way to expose another team's private tool.
+- **Published is VISIBILITY, never USE.** A cascade-published tool appears in every team's picker
+  and remains unusable without `owner_team` match or a grant (`team_may_use_tool`, Decision 46).
+  Stated explicitly and asserted in a test, because "published" reads like "granted".
+- **Publishing must not be one-way — an owner-initiated unpublish ships WITH the cascade.**
+  (Revised 2026-08-07: originally deferred, then built. The reasoning that changed it is worth
+  keeping.) Without a reverse, everything drifts to published over time — which is exactly today's
+  174/174, reached by a different route — and the drift is unmeasurable because the metric only
+  moves one way. Left alone the ratchet re-creates the very problem this decision exists to solve.
+
+  What made it cheap: **unpublish removes discoverability, never capability.** An agent already
+  bound to the tool keeps working — binding is by id and *use* is governed by `owner_team` and
+  grants, not `publish_status` — so unpublishing cannot break a running agent, and the
+  "is a published agent still using this" check is a courtesy to the clicker, not a safety
+  requirement. Guarded like the cascade: creator or owning team.
+
+  The deciding argument was this platform's record with monotonic states: 174/174 published because
+  a default was never revisited, 120 auto-grants nobody decided on, zero admin-created grants. Every
+  one is a state that only moved one way and nobody went back. Building the reverse while deciding
+  the forward direction is the cheapest it will ever be.
+
+  *Rejected:* cascade-unpublish on agent delete — deleting your agent silently removing tools from
+  other teams' pickers mid-build is a surprise, not a feature.
+- **No backfill.** The existing 174 stay `published` and become the platform's shared library. A
+  blanket backfill to `private` would empty every tool picker until each was republished. Two
+  populations, for a stated reason rather than by drift. **Do not "clean this up" later.**
+- **Skills get the same default change**, or the inconsistency simply relocates.
+- **Already built, do not rebuild:** the eval surface. `PublishRequestResponse` carries
+  `last_eval_score` / `last_eval_run_id` / `last_eval_pass_threshold`, and the page renders a
+  score-vs-threshold chip linking to the full run. One thing to verify: that it is pinned to
+  `source_version_id` and not the agent's latest run — otherwise a reviewer can approve v3 while
+  reading v4's score.
+
+### CORRECTION 2 (2026-08-08) — the FIX in Correction 1 was itself wrong, twice
+
+Correction 1 replaced creator-scoped visibility with **team-scoped**, and added a tokenless
+arm for agent pods. Kalyan rejected both. Recording it because the reasoning matters more
+than the diff, and because getting the same paragraph wrong twice is worth being explicit
+about.
+
+**Team-scoped broke the pattern this decision is named for.** Decision 47 exists because
+Kalyan asked for tools to "take same pattern as agents — *drafts are yours until you
+share*". Agents are creator-scoped (`agents.py:248`); workflows are creator-scoped
+(`composite_workflows.py:205`). Making tools team-scoped made them behave differently from
+the model they were supposed to copy, and left four artifact types with two different rules
+where they had previously agreed.
+
+The justification I gave — *"otherwise a contributor's new tool is invisible to their own
+teammates"* — describes exactly how a draft agent already behaves, and has behaved all
+along. I called the shipped, accepted model a bug in order to justify a change I had
+already made.
+
+It also **conflated the two axes Kalyan separated explicitly**: Decision 46 is the USE axis
+(`owner_team`, who may CALL a tool, `team_may_use_tool`, the cascade) and Decision 47 is the
+VISIBILITY axis (who SEES it). Ownership is team-level; discoverability is creator-level. I
+answered the second question with the first one's column because it was the one already in
+scope.
+
+**The tokenless arm traded a security property for a cost that did not exist.** It applied
+no publish filter at all to any caller without a token, so any workload in the cluster could
+enumerate every team's private tools — `http_url`, `python_code`, `auth_config_id`. I chose
+that over "breaking every SDK agent at startup". Kalyan's correction: the platform is in
+active development, most agents are test fixtures due for cleanup, and regressions are not a
+constraint. The trade was production risk calculus applied to a dev platform — the
+escalate-don't-degrade failure, in the direction of degrading.
+
+**And the pods were asking the wrong question anyway.** `GET /agents/{name}/tools` already
+existed, already returned full `ToolResponse` rows joined on `agent_tools`, and already had
+no publish filter — because a pod's authority over a tool has always been its BINDING. That
+is also the exact set OPA Gate 3 authorizes, so the registry and the policy engine now agree
+by construction instead of by coincidence.
+
+**What shipped instead** (registry-api `0.2.271`, runner `0.1.69`, deploy-controller
+`0.1.43`, sdk `0.2.10`, migration `0081`):
+
+  - visibility back to `published OR created_by == caller`, for tools AND skills
+  - `CallerKind` deleted; there is no anonymous arm
+  - the SDK resolver and the runner call the binding endpoint, authenticated with the pod's
+    projected ServiceAccount token (audience `agentshield-registry-api`), verified by
+    TokenReview in `agent_identity.py` — registry-api already held the ClusterRole
+  - `create_skill` sets `created_by` (it never did) and migration `0081` adds
+    `mcp_servers.created_by` so discovery has one to propagate — a private row with a NULL
+    creator matches neither arm and is invisible to everyone, which is the same defect shape
+    as the MCP regression, caught this time by auditing the writers BEFORE shipping
+
+**Do not re-derive this a third time.** If team-level draft sharing is ever wanted, it is a
+product decision that applies to agents and workflows too, taken deliberately for all four —
+not a side effect of a tool migration.
+
+### CORRECTION (2026-08-07, while implementing step B) — "the list filter already exists and is correct" was WRONG
+
+The Context above says the visibility predicate "already exists and is correct … it simply never
+bites". Both halves of that turned out to be false, and the error is the same one Decision 46 had to
+correct: a claim about a handler inferred from reading around it rather than from reading its body.
+Recording it here because the sentence would otherwise read as a green light to ship the migration
+alone, and the migration alone is a live outage.
+
+`where(or_(publish_status == "published", created_by == caller))` is **creator-scoped**, and it has
+an `else` branch nobody accounted for:
+
+```python
+if caller:  q = q.where(or_(publish_status == "published", created_by == caller))
+else:       q = q.where(publish_status == "published")          # <- the machine path
+```
+
+Two consequences, neither visible while the default was `'published'` (the first clause matched
+essentially every row, so the predicate was inert — which is what "never bites" was picking up on):
+
+1. **Creator-scoped contradicts Decision 46.** Decision 46 makes the creating TEAM the owner. Under
+   a private default, a creator-scoped filter hides a contributor's new tool from their own
+   teammates — the collaboration this decision exists to enable would have broken on day one.
+
+2. **The `else` branch is the SDK, and it would have crashed every agent.** Agent pods hold no token
+   until identity Phase 3. The SDK `tool_resolver` fetches `GET /api/v1/tools/?name=X` at startup and
+   raises `RuntimeError: Tool 'X' not found in the platform registry` on an empty result. With the
+   default flipped, every SDK agent bound to a newly created tool would have died at startup with an
+   error naming a missing tool rather than a visibility filter. `declarative-runner` uses
+   `GET /tools/{id}`, which has no publish filter, so it would have survived — meaning the outage
+   would have hit only SDK agents and looked like an SDK bug.
+
+**What shipped instead of the one-line DDL** (registry-api `0.2.268`, migration `0080`):
+`catalog_visibility.py`, one producer for both `list_tools` and `list_skills`, taking an explicit
+`CallerKind`:
+
+  - `HUMAN` → `published OR owner_team == caller_team`. Team, per Decision 46.
+  - `IN_CLUSTER_MACHINE` (no token) → **no publish filter at all**. A pod's authority over a tool is
+    its binding plus OPA Gate 3, never the catalog flag. `publish_status` answers "may this be
+    discovered and adopted", which is a different question from "may this pod run what it was
+    deployed with" — conflating them is the same visibility-vs-authority mistake `asset_grants`
+    already makes (G-R3-3).
+
+`CallerKind` is a passed parameter rather than something inferred downstream, because this is exactly
+the shared-helper-needs-explicit-context case, and the alternative — branching on whether `?name=`
+happened to be supplied — is the implicit fallthrough the same rule forbids.
+
+**Accepted trade, ledgered:** the machine branch widens what a tokenless in-cluster caller can
+enumerate, from every published row to every row. registry-api's Service is not exposed outside the
+cluster and agent pods are its only tokenless callers, so the alternative was breaking every SDK
+agent. It closes at identity Phase 3, when the predicate becomes "tools this agent is bound to" and
+the branch disappears.
+
+**Two more copies of the same predicate exist and were deliberately NOT changed:**
+`routers/agents.py:248` and `routers/composite_workflows.py:205` are creator-scoped too. Retargeting
+them to teams is a visibility change to agents and workflows that nobody asked for, so it is a gap
+entry, not a side effect of this one.
+
+---
+
+### Step D — the reviewer surface. Five sub-decisions, taken 2026-08-08.
+
+Consequence 1 of option C was that approving an agent silently publishes its tools. The
+control that makes that safe is a human who was *shown* the cascade — and the queue row
+showed a name, a submitter, a timestamp, a percentage and a colour. `grep -c "tool"
+AdminPublishRequestsPage.tsx` returned **0**. Gap G-R3-11.
+
+| Sub-decision | Options | **Choice** | Rationale |
+|---|---|---|---|
+| **D-1** python_code | full text · redacted · hidden | **full text** | It is the thing being approved. A redactor with false negatives advertises a safety it does not have, and this exposes nothing new — the route is platform-admin only and `GET /tools/{id}` already returns the field. |
+| **D-2** credential | name · existence only · name+value | **name only** | The name is the signal ("this tool carries a real credential"); the value is the leak. |
+| **D-3** workflows | in scope · 404 · explicitly unsupported | **explicitly unsupported** | Their tools come through members, so the shape differs. A 404 hides a real request; an empty tool list reads as "no tools". Saying so on screen is the only option that does not mislead. |
+| **D-4** granularity | all-or-nothing · per-tool | **all-or-nothing** | Per-tool refusal needs a partial-cascade concept this decision does not have, and would put a second cascade rule beside `plan_tool_cascade`. |
+| **D-5** grants | show · omit | **show** | `grantee_teams` is already an approve input and was invisible. |
+| **gate** | A optional drawer · B approve inside it · C B + acknowledgement | **B + C when the cascade is non-empty** | B makes "was shown" structural. C reserved for the case that escalates scope, so it does not decay into a click-through. |
+
+**One producer, three readers.** The cascade shown to the reviewer comes from
+`publish_cascade.plan_tool_cascade` — the same function the submit guard and the approve
+action call — derived at request time, never snapshotted. `T-S6-019` proves it: a
+cross-team tool bound *after* submit appears in the payload as `blocked`, which a
+snapshot could not show. The eval triple moved out of `admin.list_publish_requests` into
+`publish_review.resolve_request_evals` for the same reason (Decision 32 is the postmortem
+for that rule being copied).
+
+Implemented: registry-api `0.2.274`, studio `0.1.187`.
+Design: `docs/design/publish-review-surface.md`.
+
+---
+
+### Step E — owner-initiated unpublish. Five sub-decisions, taken 2026-08-08.
+
+Consequence 4 of option C: without a reverse, visibility only ever moves one way and the
+drift is unmeasurable because the metric has no other direction. `POST
+/api/v1/tools/{id}/unpublish`.
+
+| Sub-decision | Options | **Choice** | Rationale |
+|---|---|---|---|
+| **E-1** who may act | creator+owning team (as written) · + platform-admin | **+ platform-admin** | The admin is the actor who *approved* the publish. Without the arm, the only person who can put a tool into the catalog cannot take it out — a one-way ratchet inside the fix for a one-way ratchet. |
+| **E-2** already private | idempotent 200 · 409 | **409 `tool_not_published`** | A state transition, not a PUT. A UI that offers the control on a private row is a bug, and a quiet 200 hides it. Cost accepted: a double-click shows an error for an action that succeeded, so the button is disabled while pending. |
+| **E-3** check order | state then authority · authority then state | **authority first** | An unauthorized caller must get 403, never the 409 that would disclose whether the tool is published. |
+| **E-4** bound published agents | block · warn · ignore | **warn, never block** | Unpublish removes discoverability, never capability — binding is by id and USE is governed by `owner_team` plus grants. Blocking would assert a dependency that does not exist and would let any team freeze another team's tool in the catalog by binding it to a published agent. Computed *before* the write and **logged**, because "what was still bound when it left" is unanswerable afterwards. |
+| **E-5** does it cascade | mirror the forward cascade · one row | **one row** | The forward direction is one reviewer's decision over a set they were *shown* (step D); this is one owner's decision over one row. Fanning it out would silently retract other teams' dependencies — the same reason Decision 47 rejected cascade-unpublish on agent delete. |
+| **mcp_tool rows** | refuse like DELETE · allow | **allow** | `delete_tool` refuses `mcp_tool` because the row's **existence** is owned upstream by the discovering server. Catalog visibility is not an upstream property; it is this platform's decision about its own catalog. Copying the refusal would have made a discovered tool that cascade-published unable to ever leave. |
+
+**Still no `POST /tools/{id}/publish`, and that is the point.** A tool re-enters the catalog
+only by riding along with an agent a reviewer approved (option C). Stated honestly: that
+costs a round trip through the agent's review, because `publish_agent` sets the agent back
+to `pending_review`. `T-S6-029` pins the absence so nobody "fixes" the friction by opening
+a second door with no reviewer behind it.
+
+**Skills are deliberately excluded.** They took the same private-by-default change in step B
+(`models.py:1371`) and **nothing publishes them** — `admin.approve_publish_request` has a
+`skill` branch with no producer anywhere. An unpublish for skills would be orphan code by
+construction. The missing forward path is a real defect, ledgered as **G-E2**, not silently
+absorbed here.
+
+Implemented: registry-api `0.2.275`, studio `0.1.188`.
+
+## Decision 48: identity comes from the credential — a header is never an identity
+
+**Context:** Identity propagation Phase 3 set out to give eval-runner, scheduler and
+event-gateway verifiable identities. Reading the code to do it turned up something larger:
+FOUR endpoints each had their OWN answer to "who is calling", and they disagreed. Three of
+the four could be driven by a string the caller types. All three were confirmed against the
+running cluster before anything was changed — none of this is inferred from source.
+
+| Endpoint | How it resolved the caller | What that allowed |
+|---|---|---|
+| `POST /playground/runs` | `(user or {}).get("sub") or x_user_sub or "dev"` | a request with **no credential at all** reached the handler; `caller` became `"dev"` and both gates below are written `caller != "dev"`, so it skipped the contributor role gate AND the per-agent authority check |
+| `PATCH`/`GET /approvals` | `x_user_sub or x_user_id or JWT.sub or body.reviewer_id` | a **plaintext header outranked the verified token** — name any platform-admin's sub and approve any pending HITL tool call, or read every team's queue |
+| `POST /internal/runs/start` | no auth dependency; `run_by` from the body | start any team's production agent and choose whose authority it ran under |
+| everything else | `require_user` | correct |
+
+The approvals ordering is the worst of the three and deserves naming precisely: it is not
+"missing authentication", it is **authentication that loses to a forged header**. A caller
+presenting a genuine JWT could still be attributed to whoever the header named. A route with
+no auth at least looks like one; this looked authenticated and was not.
+
+| Option | Description | Trade-off |
+|---|---|---|
+| **A: one producer, `Caller`/`resolve_caller`** | A single dependency resolves the caller from the credential and ONLY the credential, returning an explicit `kind` of `user` / `service` / `anonymous`. Endpoints branch on `kind`. | Every reader gets the same answer by construction. Costs a signature change at each of the four endpoints and turns ~7 header-authenticated e2e suites red until they carry tokens. |
+| **B: fix the precedence in place** | Reorder each site so the JWT wins, keep the headers as a fallback. | Small diff, no suite churn. Keeps four implementations of one rule — the exact shape three postmortems in this repo already cover (`start_chat`/`start_deployment_chat`, `webhook_clients`/`agent_endpoints`, `approvals._ADMIN_ROLES`/`rbac`) — and leaves a typed string as a valid identity whenever a token is absent. |
+| **C: `require_user` on all four** | Blanket the routes. | Breaks eval-runner and the scheduler, which are legitimate non-human callers. Would have forced the "degrade the feature to silence the auth error" move this repo forbids. |
+
+**Choice: Option A.** Confirmed by Kalyan 2026-08-09 after reviewing the behavioural blast
+radius rather than the diff.
+
+`auth_middleware.is_trusted_service(claims)` reads `azp` — the client-id Keycloak issued the
+token to, carried INSIDE the RS256 signature, so reproducing it needs the client's secret. The
+same JWKS verification `require_user` already performs is what makes it unforgeable; there is
+no second crypto path to get wrong. Services are a distinct `kind`, not "a user whose sub is
+in a magic set" (`_SERVICE_IDENTITIES = {"eval-runner"}` is deleted).
+
+There is deliberately **no `"dev"` escape hatch**. An implicit anonymous fallback is what
+produced the playground hole; a local-dev bypass belongs behind an explicit flag, not behind
+the absence of a header.
+
+### The playground authority check (the sub-decision)
+
+`playground.py` also carried the only authority decision in the service that never consulted
+`rbac`: a bare `agent.created_by != caller`. Every `can_*` helper short-circuits
+`platform-admin`, and the role table says platform-admin short-circuits every artifact check —
+so this endpoint was the outlier. It now routes through `rbac.can_manage_artifact`
+**additively**: the creator arm is KEPT rather than replaced.
+
+That "additively" is load-bearing and was nearly got wrong. `grant_creator_admin` auto-grants
+the creator `agent-admin`, which makes the grant look equivalent to being the creator —
+**measured on the test cluster, only 956 of 1211 agents carry it.** Replacing the creator arm
+would have silently revoked playground access from the creators of the other 255, a regression
+invisible in the diff and in every green test.
+
+What it unblocks concretely: an agent whose `created_by` names a user deleted by a Keycloak
+realm rebuild (`wf-payout` → `75c7c8b3…`, 404 in Keycloak) could be run in the playground by
+NOBODY, because no live caller can ever equal a deleted sub.
+
+### Consequence for the tests
+
+`suite-93 T-S93-004` **was asserting the vulnerability** — it sent `X-User-Id` with no token
+and expected 200. It is inverted, not deleted: 004a proves a forged header is 401, 004b proves
+`body.reviewer_id` is a label and never an identity. Suites that "acted as" invented subs by
+typing them in a header now use real Keycloak personas, which is strictly better — they
+exercise the path a human actually takes.
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |
@@ -1009,3 +1585,12 @@ if caller:
 | 37 | Schedules read | Deny-by-default + team-scoped, applied **before** the endpoint existed rather than after a leak (the Decision 33 shape). `platform-admin` sees all; no team ⇒ empty list. Sub-gap still open: `list_triggers` has no auth at all. |
 | 38 | Workflow liveness | `status <> 'archived'` — **supersedes R8's `published`**, which matched 0 rows, and `publish_status`, which was too strict. Consequence, unsettled: **a DRAFT workflow's schedule fires.** Chosen because the alternatives were both wrong, not argued on merit; revisit as its own decision. |
 | 39 | Agent delete | **Removes** schedule triggers (migration 0078 reaped 63); webhooks are kept-and-disarmed because `webhook_clients.trigger_id` is ON DELETE CASCADE. Archive/quarantine unchanged. Safe because such a row is provably inert (T-S95-004). Invalidated five correct tests — recorded so the next person finds the decision, not a red test. |
+| 40 | User provisioning | **No auto-provision.** Users are platform-created; `platform-admin` is the only auto-created one and **registry-api code** creates it, not the chart. Looked up by username so realm recreation self-heals; email pinned for Langfuse membership; advisory-lock single-flight reusing `mcp_health.py`'s pattern. `agent-reviewer` stops being a bootstrap user. |
+| 41 | Missing role row | **Corruption, not a user type** — remove the state rather than pick a safe default. Three producers found, two fixed: `_normalize_role(None)` raises, and the `role` column's `server_default="operator"` is dropped (it silently re-introduced the value migrations 0044/0075 removed). One resolution path, not two. One-time cleanup deleted 5 rows/users — all e2e litter, no real user affected. |
+| 42 | Role column overload | `user_team_assignments.role` is a **union of {global role} ∪ {reviewer scope}** (WS-2 T011, `_DEFAULT_REVIEWER_SCOPE="agent:reviewer"`). Documented in R0, split in R5 where scopes move to `artifact_role_grants`. So an unrecognized value is NOT treated as corruption — `ROLE_HIERARCHY.get(role,0)==0` is load-bearing, not a bug. |
+| 43 | R2 endpoint split | `/admin/teams-summary` had TWO readers — the Access Control census and the sidebar/My Agents view every role sees. Gating it as-is would have silently emptied "Shared With Me" platform-wide; leaving it open would keep handing a `consumer` the whole org's membership. **Split:** census stays admin-only, new self-scoped `GET /api/v1/me/team`, new name-only `GET /api/v1/users/directory` for the grant picker. The split also deletes the client-side `.find()` that blanked the app. |
+| 44 | Role gates need a browser | All 61 bash suites and all 47 Playwright specs ran as `platform-admin`, so no role gate could fail a test. `global-setup.ts` is now multi-role (personas created through the real admin API, fail-loud); `e2e/rbac-role-journeys.spec.ts` drives the app as a consumer and a contributor. Corrects the claim that R5 is the only UX-facing RBAC phase. |
+| 45 | Agent vs tool delegation | **Delegating an agent does NOT delegate its tools — unless it is autonomous.** user_delegated runs intersect the agent's effective tool set with the CALLER's team grants; daemon runs keep the agent's own. Follows the §4.2 identity-model seam the identity floor already branches on. Prereqs: D-1 (registry-side `agent_class`, now load-bearing for two gates), an unowned-tool rule in the bundle, and `user_team` in the OPA input from the verified RunContext (identity P1/P2). |
+| 46 | Tool ownership | **A tool's team comes from its creator; `owner_team = NULL` becomes illegal.** Creation currently leaves it NULL, which the resolver treats as usable by EVERY team — 65 of ~173 tools. Ownership, not an auto-grant (own-team needs no grant row). Builtins get an explicit shared team. Unblocks Decision 45 by making the bundle and the resolver agree on what 'unowned' means. List endpoint reuses `team_may_use_tool`. |
+| 47 | Tool visibility | **Tools are private by default and publish by CASCADE when an agent using them is published.** `Tool`/`Skill` default to `published` where `Agent`/`Workflow` default to `private`; all 174 tools are published and the (correct) list filter never bites. No separate tool publish workflow — `publish_agent` already loads the tools and blocks critical-risk ones. Reviewer gets a full review payload (agent config + every tool with risk/owner/publish_status + eval), cascade limited to own-team tools, published ≠ granted, no backfill, owner-initiated unpublish ships with it. |
+| 48 | Identity comes from the credential | **A header is never an identity.** Four endpoints each had their own answer to "who is calling" and three could be driven by a typed string: `/playground/runs` reached the handler with NO credential (`caller = ... or "dev"` then skipped both gates), `/approvals` put a plaintext header AHEAD of the verified JWT (forge an admin sub, approve any HITL call), `/internal/runs/start` had no auth at all. One `Caller`/`resolve_caller` producer now resolves from the credential only, with an explicit user/service/anonymous kind; `is_trusted_service` reads `azp` from inside the RS256 signature. No "dev" fallback. Sub-decision: the playground owner check routes through `rbac.can_manage_artifact` ADDITIVELY — the creator arm stays, because only 956 of 1211 agents carry the creator auto-grant. |

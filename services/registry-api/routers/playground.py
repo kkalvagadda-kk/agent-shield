@@ -28,8 +28,16 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth_middleware import get_optional_user
+from auth_middleware import Caller, get_optional_user, resolve_caller
 from db import get_db
+from rbac import get_user_team
+# The raw primitive is no longer imported here. Minting and anchoring are ONE act
+# (run_context_anchor), and leaving `mint` reachable from this module invites the next
+# edit to mint without anchoring — which is exactly the divergence P1.5 depends on not
+# happening.
+from run_context import RCT_HEADER
+from run_context_anchor import anchor_value, build_context, mint_for, rehydrate
+from rbac import can_manage_artifact, can_use_playground, get_user_global_role
 from models import Agent, Deployment, PlaygroundDataset, PlaygroundRun
 from playground_sa import ensure_playground_sa
 from schemas import (
@@ -148,6 +156,27 @@ async def _create_and_dispatch_playground_run(
         run.langfuse_trace_id = trace_id
         await db.flush()
 
+    # ─── Identity P1: build the run context at the EDGE, and ANCHOR it ───────
+    # This is the only place in the durable path that knows who asked, so it is the only
+    # place that can honestly name them. Everything downstream verifies a signature rather
+    # than trusting a header — which is the whole difference between this and the
+    # `X-User-Sub` fallbacks R2/R3 deleted.
+    #
+    # ANCHORED BEFORE THE COMMIT, ON PURPOSE. The first cut set this after `db.commit()`
+    # and relied on `get_db`'s request-end commit to persist it. That works right up until
+    # anything later in the request raises: the rollback would drop the ANCHOR while the
+    # run row — committed here — survived, leaving a run that exists with no identity and
+    # no error anywhere. Writing it in the same transaction makes "a run row exists" and
+    # "its anchor exists" the same fact instead of two facts that usually agree.
+    ctx = None
+    if caller:
+        ctx = build_context(
+            user_sub=caller,
+            user_team=await get_user_team(db, caller) or "",
+            origin="playground",
+        )
+        run.run_context = anchor_value(ctx)
+
     await db.commit()
 
     logger.info(
@@ -156,11 +185,23 @@ async def _create_and_dispatch_playground_run(
         run_id, agent.name, caller, shape, trigger_type, eval_mode, trace_id,
     )
 
+    # Minting is deliberately AFTER the commit and is best-effort: it fails when
+    # AGENTSHIELD_INTERNAL_SIGNING_KEY is absent, and a run that proceeds with no token is
+    # denied `missing_user_identity` at the first tool call — the SAME outcome as before
+    # P1. So a missing key degrades to the old behaviour rather than to a run that silently
+    # acts unattributed, and the anchor is already durable either way, so a resume after
+    # the key is fixed still knows whose run this is.
+    #
+    # The token and the row come from the SAME RunContext object. Building them separately
+    # would let a run start as one user and resume as another, with OPA correctly
+    # authorizing both — a divergence no test finds by accident.
+    rct = mint_for(ctx, label=f"playground run {run_id}") if ctx else None
+
     # For durable runs, dispatch to the runner pod's /run endpoint.
     if shape == "durable":
         background_tasks.add_task(
             _dispatch_durable_run, run_id, agent.name, input_payload, db,
-            eval_mode,
+            eval_mode, rct,
         )
 
     return {
@@ -181,11 +222,35 @@ async def _create_and_dispatch_playground_run(
 async def create_playground_run(
     body: PlaygroundRunCreate,
     background_tasks: BackgroundTasks,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
-    user: dict | None = Depends(get_optional_user),
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Create a playground run for an agent. Returns run_id and stream_url."""
+    # ── Authenticate FIRST (identity P3, §4.5) ───────────────────────────────
+    # This route used to resolve its caller as
+    #     caller = (user or {}).get("sub") or x_user_sub or "dev"
+    # on a router with NO auth dependency. Measured on the test cluster 2026-08-09:
+    # a POST with NO credential of any kind reached the handler (a bogus agent name
+    # returned 404 "Agent not found", i.e. the agent lookup ran). `caller` then became
+    # the literal "dev", and BOTH gates below are written as `caller != "dev"` — so an
+    # anonymous request skipped the contributor role gate AND the per-agent authority
+    # check and could start a real run, spending real tokens, on any agent.
+    #
+    # The header arm was the same defect one step less severe: `X-User-Sub: eval-runner`
+    # put the caller in `_SERVICE_IDENTITIES` and bought the identical bypass.
+    #
+    # Both are gone. A run needs a VERIFIED identity — a human's token or a trusted
+    # service's client-credentials token — and nothing here reads a header a caller can
+    # type. There is deliberately no "dev" escape hatch: an implicit anonymous fallback
+    # is what produced this, and a local-dev bypass belongs behind an explicit flag, not
+    # behind the absence of a header.
+    if not identity.is_authenticated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to start a playground run.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Look up agent
     result = await db.execute(
         select(Agent).where(Agent.name == body.agent_name)
@@ -197,30 +262,76 @@ async def create_playground_run(
             detail=f"Agent '{body.agent_name}' not found.",
         )
 
-    # Resolve caller identity: JWT sub takes precedence over X-User-Sub header
-    caller = (user or {}).get("sub") or x_user_sub or "dev"
+    # `caller` is the verified subject — a human's sub, or the service account's. For a
+    # service, `identity.service_name` is the client-id Keycloak issued the token to
+    # (`azp`), which is inside the signature and therefore not caller-chosen.
+    caller = identity.sub
+    caller_is_service = identity.is_service
 
-    # Owner check (skip in dev mode when no header, and for reserved service
-    # identities like the eval-runner that run agents they don't own).
-    if (
-        caller != "dev"
-        and caller not in _SERVICE_IDENTITIES
-        and agent.created_by
-        and agent.created_by != caller
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the agent owner can run it in the playground.",
-        )
+    # ── Role gate: the playground is contributor+ (R3, OQ-3 resolved 2026-08-07) ──
+    # `can_use_playground` has existed and been correct in rbac.py since R-phase 1 with
+    # ZERO callers (§1.3). OQ-3 asked whether a `consumer` should get the playground;
+    # decided NO — consumers browse the catalog and view runs, which is what the role
+    # table in rbac-and-artifact-authorization.md §2 already said. So wiring it changes
+    # no rule, it just makes the existing rule real.
+    #
+    # G-R3-1 IS NOW CLOSED (2026-08-09). The note that stood here said the limit "cannot
+    # be closed — closing it requires eval-runner to hold a real verifiable identity,
+    # which is Phase 3". Phase 3 is this change: eval-runner mints a Keycloak
+    # client_credentials token, so `identity.is_service` is decided by a signature rather
+    # than by a header string, and no caller can put themselves in the service branch.
+    if not caller_is_service:
+        if not await can_use_playground(db, caller):
+            role = await get_user_global_role(db, caller)
+            logger.warning("playground: DENY sub=%s role=%s — needs contributor+", caller, role)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"The playground requires the 'contributor' role or higher; you have "
+                    f"'{role}'. Consumers can browse the catalog and view runs."
+                ),
+            )
+
+    # ── Who may run THIS agent here (Decision 48, 2026-08-09) ────────────────
+    # Was a bare `agent.created_by != caller`, which never consulted `rbac` — the ONLY
+    # authority decision in the service that did not. Every `can_*` helper in rbac.py
+    # short-circuits `platform-admin` (rbac.py:139,147,155,175,185) and the role table
+    # says platform-admin short-circuits every artifact check, so this endpoint was the
+    # outlier: one rule with two implementations, the shape three postmortems in this
+    # repo already cover (`start_chat`/`start_deployment_chat`,
+    # `webhook_clients`/`agent_endpoints`, `approvals._ADMIN_ROLES`/`rbac`).
+    #
+    # ADDITIVE, never subtractive — the creator arm is KEPT rather than replaced by
+    # `can_manage_artifact` alone. `grant_creator_admin` auto-grants the creator
+    # `agent-admin`, so it is tempting to treat the grant as equivalent; measured on the
+    # test cluster, only 956 of 1211 agents carry that grant. Dropping the creator arm
+    # would have silently revoked playground access from the creators of the other 255 —
+    # a regression invisible in the diff and in every green test.
+    #
+    # What this unblocks concretely: an agent whose `created_by` names a user deleted by
+    # a Keycloak realm rebuild (`wf-payout` → `75c7c8b3…`, 404 in Keycloak) could be run
+    # by NOBODY, because no live caller can ever equal a deleted sub.
+    if not caller_is_service:
+        is_creator = bool(agent.created_by) and agent.created_by == caller
+        if not is_creator and not await can_manage_artifact(db, caller, agent.id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "You need to be the agent's creator, hold agent-admin on it, or be a "
+                    "platform-admin to run it in the playground."
+                ),
+            )
 
     # Ensure per-user playground SA exists (best-effort; non-blocking)
     background_tasks.add_task(ensure_playground_sa, caller)
 
-    # Requester provenance for the HITL panel (WHO): username from the JWT, team
-    # from user_team_assignments. Skipped for service identities (eval-runner).
-    requested_by_username = (user or {}).get("preferred_username")
+    # Requester provenance for the HITL panel (WHO): username from the VERIFIED claims,
+    # team from user_team_assignments. Skipped for a verified service — a service has no
+    # username and no team, and looking one up by its service-account sub would either
+    # find nothing or, worse, find a collision.
+    requested_by_username = (identity.claims or {}).get("preferred_username")
     requested_by_team = None
-    if caller and caller not in _SERVICE_IDENTITIES:
+    if caller and not caller_is_service:
         _tr = await db.execute(
             text("SELECT team_name FROM user_team_assignments WHERE user_sub = :sub LIMIT 1"),
             {"sub": caller},
@@ -320,6 +431,7 @@ async def _dispatch_durable_run(
     input_payload: dict | None,
     db: AsyncSession,
     eval_mode: str = "live",
+    rct: str | None = None,
 ) -> None:
     """Dispatch a durable playground run to the declarative-runner /run endpoint.
 
@@ -360,6 +472,7 @@ async def _dispatch_durable_run(
         callback_url=callback,
         runner_url=runner_url,
         eval_mode=eval_mode,
+        rct=rct,
     )
     if not ok:
         logger.warning("_dispatch_durable_run: marking playground run %s failed: %s", run_id, err)
@@ -2034,6 +2147,13 @@ async def resume_stream_playground_run(
     decision_str = approval.status  # "approved" or "denied"
     reviewer = approval.reviewer_id or "playground-user"
 
+    # Identity P1.5 — re-mint from the durable anchor before the pod re-enters the graph.
+    # This is the SELF-SERVICE approval path (the user approves their own sandbox run in
+    # the Playground), and it re-crosses the governed tool edge exactly like the console
+    # decide does. Covering the console path and not this one would make identity survive
+    # a reviewer's approval but not the user's own — the sandbox/production split again.
+    _resume_rct = await rehydrate(db, str(thread_id))
+
     async def _proxy_resume() -> AsyncIterator[str]:
         try:
             async with httpx.AsyncClient(timeout=_AGENT_STREAM_TIMEOUT) as aclient:
@@ -2052,7 +2172,10 @@ async def resume_stream_playground_run(
                         # deliver its post-approval tool calls for real.
                         "eval_mode": run.eval_mode,
                     },
-                    headers={"Accept": "text/event-stream"},
+                    headers={
+                        "Accept": "text/event-stream",
+                        **({RCT_HEADER: _resume_rct} if _resume_rct else {}),
+                    },
                 ) as response:
                     if response.status_code != 200:
                         err = await response.aread()

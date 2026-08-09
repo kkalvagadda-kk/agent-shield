@@ -67,6 +67,13 @@ test.describe.serial("lifecycle journey", () => {
   });
 
   test("leg 3 — deploy agent to sandbox", async ({ page }) => {
+    // deployAndWaitReady polls 40 x 3000ms = up to 120s and then returns
+    // { ready: false } ON PURPOSE — this leg only requires the deployment ROW, not a warm
+    // pod (see the assertion below). Playwright's default test timeout is 60s, so the
+    // helper's graceful give-up path was unreachable: the test was killed mid-poll and
+    // reported a timeout instead of the tolerated cold-pod outcome it was written for.
+    // Budget must exceed the helper's own, not the happy path's.
+    test.setTimeout(210_000);
     const res = await deployAndWaitReady(page, user, AGENT);
     depId = res.depId;
     depReady = res.ready;

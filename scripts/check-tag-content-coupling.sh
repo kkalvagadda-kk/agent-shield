@@ -306,8 +306,20 @@ for row in "${SERVICES[@]}"; do
     tag_ts=$(git log -1 --format=%ct -G"^${tagvar}=" "$AT_REF" -- "$DEPLOY_SH" 2>/dev/null)
   else
     tag_ts=$(git log -1 --format=%ct -G"^${tagvar}=" -- "$DEPLOY_SH" 2>/dev/null)
-    if git diff -- "$DEPLOY_SH" 2>/dev/null | grep -qE "^[+-]${tagvar}=" \
-       || git diff --cached -- "$DEPLOY_SH" 2>/dev/null | grep -qE "^[+-]${tagvar}="; then
+    # `git diff ... | grep -qE ...` under `set -o pipefail` (line 63) is a RACE, and it
+    # made this gate flap roughly one run in three: `grep -q` exits the instant it
+    # matches, `git diff` then dies on SIGPIPE with 141, and pipefail reports the
+    # PIPELINE as failed even though the pattern was found. Whether git had already
+    # finished writing decided the verdict. The observable symptom was
+    # `REGISTRY_API_TAG` reported as un-bumped on some runs and fine on others, with no
+    # edit in between — i.e. the gate said the tag lied when it did not.
+    #
+    # A gate that flaps is worse than no gate: it teaches people to re-run until green,
+    # which is exactly how a real drift gets waved through. Capture first, test after —
+    # no pipeline status to misread.
+    _tagdiff="$( { git diff -- "$DEPLOY_SH"; git diff --cached -- "$DEPLOY_SH"; } 2>/dev/null \
+                 | grep -E "^[+-]${tagvar}=" || true )"
+    if [ -n "$_tagdiff" ]; then
       tag_ts=$NOW
     fi
   fi

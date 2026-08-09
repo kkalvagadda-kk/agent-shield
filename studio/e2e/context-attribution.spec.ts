@@ -5,6 +5,7 @@ import {
   type Browser,
   type APIRequestContext,
 } from "@playwright/test";
+import { adminAuthHeaders } from "./lib/api";
 
 // ---------------------------------------------------------------------------
 // context-attribution.spec.ts  (context-storage POC-2)
@@ -54,10 +55,11 @@ const TOGGLE_WORKFLOW = `e2e-ctx-wf-${TS}`;
 // Header-auth identity for the REST fixture setup (same admin the browser logs in
 // as — platform-admin's real Keycloak sub — so created_by matches and the browser
 // can trigger the run it navigates to). Mirrors webhook-public-url.spec's ADMIN.
-const ADMIN = {
-  "X-User-Sub": "75c7c8b3-7d2d-46e1-8a7b-938dd3c157c6",
-  "X-User-Team": "platform",
-};
+// Replaced a hardcoded X-User-Sub. That literal has no user_team_assignments row on the
+// current cluster (a realm recreation mints new subs), and header identity stopped being
+// identity when R1/R2/R3 + G-R3-6 gated these routes. adminAuthHeaders() mints a real
+// token and derives the sub FROM it, so header and signature cannot disagree.
+let ADMIN: Record<string, string> = {};
 // The REST API is reachable at the same origin the browser uses (Studio's nginx
 // proxies /api/v1 → registry-api); baseURL comes from PLAYWRIGHT_BASE_URL.
 const API_BASE = process.env.PLAYWRIGHT_BASE_URL || "http://localhost:8080";
@@ -88,7 +90,12 @@ async function createAgentViaUI(browser: Browser, agentName: string): Promise<vo
     );
     await page.getByRole("button", { name: /Create Agent/i }).click();
     await done;
-    await page.waitForURL(`**/agents/${agentName}`, { timeout: 15_000 });
+    // The 201 above IS the proof of creation. The wizard navigates to the agent LIST
+    // (/agents, CreateAgentPage.tsx:785), NOT /agents/{name}, so waiting for the detail
+    // URL here hung for 15s and failed a beforeAll — taking every test in the file with
+    // it. catalog-overview-parity.spec.ts already documented this exact drift and named
+    // these specs as still carrying it: "a navigation is a side effect of creation, not
+    // proof of it; the 201 is the proof."
   } finally {
     await ctx.close();
   }
@@ -130,6 +137,7 @@ test.describe("catalog workflow attribution", () => {
   const createdAgents: string[] = [];
 
   test.beforeAll(async () => {
+    ADMIN = await adminAuthHeaders();
     api = await pwRequest.newContext({
       baseURL: API_BASE,
       ignoreHTTPSErrors: true,

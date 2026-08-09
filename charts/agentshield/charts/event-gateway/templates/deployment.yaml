@@ -67,6 +67,20 @@ spec:
                 secretKeyRef:
                   name: agentshield-encryption
                   key: key
+            # Identity P3 (§4.5) — this pod's own Keycloak credential, used to prove it
+            # is the event-gateway when POSTing /internal/runs/start. Replaces the
+            # self-asserted "run_by": "serviceaccount:event-gateway" body string.
+            - name: SERVICE_CLIENT_ID
+              value: "event-gateway"
+            - name: SERVICE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agentshield-service-clients
+                  key: event-gateway
+            - name: KEYCLOAK_URL
+              value: "http://{{ .Release.Name }}-keycloak"
+            - name: KEYCLOAK_REALM
+              value: "agentshield"
             # Redis (rate limit + replay nonce). $(REDIS_PASSWORD) is substituted
             # by kubelet because it is declared before REDIS_URL.
             - name: REDIS_PASSWORD
