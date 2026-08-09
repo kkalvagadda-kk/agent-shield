@@ -51,9 +51,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/playground", tags=["playground"])
 
-# Reserved service identities that bypass the per-agent owner check — they run
-# agents they don't own (e.g. the eval-runner Job iterating a dataset).
-_SERVICE_IDENTITIES = {"eval-runner"}
+# `_SERVICE_IDENTITIES = {"eval-runner"}` USED TO LIVE HERE and is deliberately gone.
+#
+# It gated a HITL AUTO-APPROVE header on `run.user_id == "eval-runner"` — a string read back
+# out of the database. Identity P3 made `PlaygroundRun.user_id` the VERIFIED subject
+# (`identity.sub`), which for eval-runner is its Keycloak service-account UUID, so the branch
+# stopped matching real eval-runner runs and still matched legacy rows carrying the literal.
+# It fired for the wrong set in both directions: dead where it was needed, live where it was
+# not. A HITL bypass keyed on a mutable DB string is not a thing to leave standing.
+#
+# What is LOST by deleting it, recorded honestly rather than papered over: a REACTIVE eval
+# item that trips a HITL gate no longer auto-approves. The DURABLE path never used this — it
+# self-approves explicitly (services/eval-runner/main.py `_self_approve`). Restoring the
+# reactive capability correctly needs the run row to REMEMBER that a trusted service created
+# it, because the stream (and `resume-stream`) is a separate request whose caller may be a
+# different principal — so `Caller.kind` is not available where the decision is made. That is
+# a `PlaygroundRun` column set from `identity.service_name` at creation plus a migration, and
+# it is in the gap ledger rather than smuggled into this change. `eval_mode` cannot stand in:
+# it is `live`/`record` on EVERY playground run, interactive ones included.
 
 
 # ---------------------------------------------------------------------------
@@ -708,12 +723,11 @@ async def _real_agent_stream(
                 req_headers["x-agent-team"] = user_team
             if deployment_id:
                 req_headers["x-deployment-id"] = deployment_id
-            # Batch/dataset eval runs non-interactively — no human to approve HITL.
-            # Only the internal eval-runner service identity may auto-approve; the
-            # SDK re-checks this identity as defense-in-depth. Interactive chats
-            # (real user subs) never take this branch.
-            if user_id in _SERVICE_IDENTITIES:
-                req_headers["x-agentshield-auto-approve"] = "true"
+            # NO auto-approve header is set here any more. It used to be
+            # `if user_id in _SERVICE_IDENTITIES` — a HITL bypass decided by string-matching
+            # a database value against the literal "eval-runner". See the block at the top of
+            # this module for why that branch became both dead and wrong after identity P3,
+            # and for the run-row column that restores the capability properly.
             async with aclient.stream(
                 "POST",
                 f"{agent_svc_url}/chat/stream",
@@ -1992,7 +2006,19 @@ class PlaygroundApprovalDecision(BaseModel):
 async def decide_playground_approval(
     approval_id: str,
     body: PlaygroundApprovalDecision,
-    x_user_sub: Optional[str] = Header(None, alias="X-User-Sub"),
+    # This route DECIDES a HITL approval and had no auth dependency at all: `x_user_sub` was
+    # read only as an audit label (`approval.reviewer_id = x_user_sub or "playground-user"`),
+    # so any VPC-reachable caller could approve any pending playground gate and attribute it
+    # to anyone. T-S102-014a is the case.
+    #
+    # `is_authenticated` and NOT `require_user_sub()` — deliberately. Unlike
+    # `approvals.decide_approval`, a trusted SERVICE legitimately decides here: eval-runner
+    # self-approves a gated durable step while iterating a dataset
+    # (services/eval-runner/main.py `_self_approve`). Refusing services would close the hole
+    # and break batch eval, which is why T-S102-014b asserts a verified service still reaches
+    # the handler. The two routes differ in WHO may act, so they ask different questions —
+    # rather than one helper with a mode flag deciding it by priority.
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Lightweight decide endpoint for playground approvals.
@@ -2003,6 +2029,13 @@ async def decide_playground_approval(
     """
     from datetime import timedelta
     from models import Approval
+
+    if not identity.is_authenticated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to decide a playground approval.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     try:
         parsed_id = uuid.UUID(approval_id)
@@ -2027,7 +2060,11 @@ async def decide_playground_approval(
     db_status = "rejected" if body.decision == "denied" else body.decision
     approval.status = db_status
     approval.decision_at = now
-    approval.reviewer_id = x_user_sub or "playground-user"
+    # The VERIFIED subject, not a header. `x_user_sub` is gone from this signature: it was
+    # the audit stamp AND the only thing naming a reviewer, so the record of who approved a
+    # gate was whatever the caller typed. A service stamps its service name, which is a
+    # truthful "no human decided this" rather than a fake reviewer.
+    approval.reviewer_id = identity.service_name if identity.is_service else identity.sub
     approval.version = approval.version + 1
     await db.commit()
 

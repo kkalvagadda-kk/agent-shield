@@ -31,10 +31,27 @@
 #   T-S102-007  is_trusted_service rejects a USER token (azp is agentshield-studio)
 #   T-S102-008  is_trusted_service accepts a real scheduler client_credentials token
 #   T-S102-009  a verified user token still starts a playground run (no false positive)
+#   T-S102-010  a verified SERVICE token cannot decide an approval EVEN AS platform-admin
+#   T-S102-011  GET  /approvals/{id}          with no credential -> 401 (was: full detail)
+#   T-S102-012  POST /approvals/{id}/reopen   with no credential -> 401 (was: un-rejected it)
+#   T-S102-013  PATCH /playground/datasets/{id} no credential    -> 401 (was: applied it)
+#   T-S102-014a POST /playground/approvals/{id}/decide, no cred  -> 401 (was: decided it)
+#   T-S102-014b the same route WITH a verified service token still reaches the handler
 #
 # T-S102-008 is the one that proves the mechanism rather than the refusal: it mints a REAL
 # token with the scheduler's client secret and checks `azp` survives verification. Without
 # it, every other case here would still pass if the fix were "deny everything".
+# T-S102-009 and T-S102-014b are the same guard from the other side: a verified USER and a
+# verified SERVICE must each still get through on the routes that are theirs.
+#
+# 011/012 assert 401 rather than 404 on a RANDOM uuid on purpose — the auth decision must
+# happen before the row lookup, or existence leaks to anyone willing to probe IDs.
+#
+# 010 needs the extra platform-admin grant to mean anything. Measured on the cluster: the
+# scheduler service account has NO user_team_assignments row, so a bare "service decides ->
+# 403" already passes — by absence of a grant, not because the caller is a service. The
+# grant makes the real question visible: is a service refused on KIND, or only when nothing
+# happens to have granted it a role? Row is removed in a finally.
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-agentshield-platform}"
@@ -130,6 +147,11 @@ st, body = call("GET", "/approvals?context=production&limit=1")
 rec("T-S102-006 list approvals with NO credential is 401", st == 401, f"got {st} {body[:120]}")
 
 # ── T-S102-007 / 008 — the mechanism itself ──────────────────────────────────
+# Hoisted out of the try below so the cases that CONSUME a service token (010, 014b) can
+# report "prereq failed" instead of dying on a NameError — a suite that crashes tells you
+# less than a suite that names which prerequisite broke.
+svc_token = None
+svc_claims = None
 sys.path.insert(0, "/app")
 try:
     from auth_middleware import _decode_token, is_trusted_service
@@ -159,6 +181,135 @@ try:
 except Exception as exc:  # noqa: BLE001
     rec("T-S102-007 is_trusted_service rejects a USER token", False, f"{type(exc).__name__}: {exc}")
     rec("T-S102-008 is_trusted_service accepts a real scheduler token", False, f"{type(exc).__name__}: {exc}")
+
+# ── T-S102-010 — a SERVICE is not a reviewer, whatever rows point at its subject ──
+# WHY THIS CASE IS SHAPED THIS WAY. A plain "scheduler token decides -> 403" assertion
+# already passes on 0.2.280, but for the wrong reason: the scheduler's service-account sub
+# simply has no 'user_team_assignments' row (measured: 0 rows, 21 in the table), so it is
+# denied by ABSENCE OF A GRANT rather than by being a service. '_caller_roles'
+# (approvals.py:289) is a bare 'SELECT role FROM user_team_assignments WHERE user_sub = :sub'
+# — it cannot tell a human from a service account. So the moment anything writes a row for
+# that subject, a service silently becomes a valid HITL reviewer, and with 'platform-admin'
+# it takes the 'caller_is_admin' short-circuit at :855 and can decide ANY approval on the
+# platform. That is authorization by accident, and this case is what makes it visible.
+#
+# So: grant the scheduler SA platform-admin, then decide. Today 200. Required 403 — a
+# service is refused on KIND, before any role lookup happens. Row removed in the finally.
+try:
+    import asyncio as _aio
+    from sqlalchemy import text as _text
+    from db import AsyncSessionLocal
+
+    svc_sub = (svc_claims or {}).get("sub")
+    if not svc_token or not svc_sub:
+        raise RuntimeError("prereq failed: no scheduler token/sub (see T-S102-008)")
+
+    async def _s102_010():
+        # 'Approval.agent_id' is a ForeignKey("agents.id") (models.py:771), so a random UUID
+        # is a 500, not a fixture. Borrow any existing agent — this case is about WHO may
+        # decide, not about which agent parked.
+        async with AsyncSessionLocal() as s:
+            agent_id = (await s.execute(_text("SELECT id FROM agents LIMIT 1"))).scalar()
+        if not agent_id:
+            return None, "SETUP: no agents on this cluster to hang an approval off"
+        # A real pending approval. POST /approvals/ needs no credential (recorded as an
+        # open gap — the SDK's governed_tool posts it from pods with no platform identity),
+        # which is what lets this case build its own fixture.
+        tid = f"s102-{uuid.uuid4().hex[:8]}"
+        st_c, body_c = call("POST", "/approvals/", {
+            "agent_id": str(agent_id), "agent_name": "s102-svc-decide",
+            "team": "platform", "thread_id": tid,
+            "tool_name": "refund_action", "tool_args": {"amount": 1},
+            "risk_level": "high", "context": "production", "timeout_seconds": 1800,
+        })
+        if st_c not in (200, 201):
+            return None, f"SETUP: could not create approval ({st_c} {body_c[:100]})"
+        # Read the row back rather than parsing the response: 'call()' truncates bodies to
+        # 300 chars so every other case can print one safely, and an ApprovalResponse is
+        # longer than that. The thread_id we just chose is the key.
+        async with AsyncSessionLocal() as s:
+            row = (await s.execute(_text(
+                "SELECT id, version FROM approvals WHERE thread_id = :t "
+                "ORDER BY created_at DESC LIMIT 1"), {"t": tid})).first()
+        if not row:
+            return None, f"SETUP: approval created ({st_c}) but no row for thread_id={tid}"
+        aid, ver = row[0], row[1]
+        async with AsyncSessionLocal() as s:
+            await s.execute(_text(
+                "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "
+                "VALUES (:u, 'platform', 'platform-admin', 'suite-102', now()) "
+                "ON CONFLICT (user_sub) DO UPDATE SET role = 'platform-admin'"),
+                {"u": svc_sub})
+            await s.commit()
+        try:
+            st_d, body_d = call("PATCH", f"/approvals/{aid}",
+                                {"decision": "approved", "version": ver,
+                                 "reviewer_id": "suite-102-service"},
+                                {"Authorization": "Bearer " + svc_token})
+            return st_d, f"got {st_d} {body_d[:120]}"
+        finally:
+            # Both halves matter. Leaving the grant behind would hand a service account
+            # platform-admin permanently — a test must not widen the platform it measures.
+            # Leaving the approval behind puts a stray pending/approved row in a real queue.
+            async with AsyncSessionLocal() as s:
+                await s.execute(_text(
+                    "DELETE FROM user_team_assignments WHERE user_sub = :u AND assigned_by = 'suite-102'"),
+                    {"u": svc_sub})
+                await s.execute(_text("DELETE FROM approvals WHERE thread_id = :t"), {"t": tid})
+                await s.commit()
+
+    st10, d10 = _aio.run(_s102_010())
+    rec("T-S102-010 a verified SERVICE token cannot decide an approval even as platform-admin",
+        st10 == 403, d10)
+except Exception as exc:  # noqa: BLE001
+    rec("T-S102-010 a verified SERVICE token cannot decide an approval even as platform-admin",
+        False, f"{type(exc).__name__}: {exc}")
+
+# ── T-S102-011 / 012 — the two approvals doors P3 left with no identity at all ──
+# 401 must beat 404: a random UUID proves the auth decision happens BEFORE the row lookup,
+# so existence is not disclosed by probing IDs. Same rule the decide path already states
+# (approvals.py:830-836) and the tool-unpublish path already enforces (403 over 409).
+st, body = call("GET", f"/approvals/{uuid.uuid4()}")
+rec("T-S102-011 read one approval with NO credential is 401 (not 404)",
+    st == 401, f"got {st} {body[:120]}")
+
+# A VALID body on purpose: 'reopen_approval' takes a required 'ReopenRequest', and an empty
+# request answers 422 before it ever reaches an identity question — which would let this case
+# "pass" for a reason that has nothing to do with auth.
+st, body = call("POST", f"/approvals/{uuid.uuid4()}/reopen", {"timeout_seconds": 1800})
+rec("T-S102-012 reopen an approval with NO credential is 401 (not 404)",
+    st == 401, f"got {st} {body[:120]}")
+
+# ── T-S102-013 — the dataset write door ──────────────────────────────────────
+# '_resolve_dataset' gated ownership on 'require_owner and caller and ...' under
+# get_optional_user, so no credential meant caller=None and the ONLY ownership check was
+# skipped: any dataset editable/deletable by anyone. Pre-existing, not a P3 regression.
+st, body = call("PATCH", f"/playground/datasets/{uuid.uuid4()}", {"name": "s102-should-not-apply"})
+rec("T-S102-013 update a dataset with NO credential is 401 (not 404/200)",
+    st == 401, f"got {st} {body[:120]}")
+
+# ── T-S102-014 — the playground decide door, and NO false positive ───────────
+# This route decides a HITL approval and can resume a run. It had no auth dependency and no
+# ownership check; 'x_user_sub' was only an audit label. It is ALSO the one approval route a
+# service legitimately calls (eval-runner, services/eval-runner/main.py:338), so refusing
+# every service here would be the wrong fix — hence the second half of this case.
+st, body = call("POST", f"/playground/approvals/{uuid.uuid4()}/decide",
+                {"decision": "approved"})
+rec("T-S102-014a playground decide with NO credential is 401",
+    st == 401, f"got {st} {body[:120]}")
+
+# A verified TRUSTED SERVICE must still reach the handler — 404 (approval not found) is the
+# success signal, exactly as T-S102-009 uses it for a user. Without this, "deny everything"
+# would pass 014a and break batch eval.
+if svc_token:
+    st, body = call("POST", f"/playground/approvals/{uuid.uuid4()}/decide",
+                    {"decision": "approved"},
+                    {"Authorization": "Bearer " + svc_token})
+    rec("T-S102-014b a verified service token still reaches the playground decide handler",
+        st == 404, f"got {st} {body[:120]}")
+else:
+    rec("T-S102-014b a verified service token still reaches the playground decide handler",
+        False, "prereq failed: no scheduler token (see T-S102-008)")
 
 # ── T-S102-009 — no false positive: a real user still works ──────────────────
 # The whole suite would also pass if the fix were "refuse everything", so prove a VERIFIED

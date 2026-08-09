@@ -188,7 +188,8 @@ if [ -n "${APPROVAL_ID_001:-}" ]; then
 import urllib.request, json
 try:
     r = urllib.request.urlopen(
-        'http://localhost:8000/api/v1/approvals/?status=pending',
+        urllib.request.Request('http://localhost:8000/api/v1/approvals/?status=pending',
+            headers={'Authorization': 'Bearer ${E2E_TOKEN}'}),
         timeout=10
     )
     d = json.loads(r.read())
@@ -238,7 +239,10 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${APPROVAL_ID_001}',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    # PATCH /approvals/{id} requires a credential since identity P3 (0.2.279): the caller
+    # used to be 'x_user_sub or x_user_id or JWT.sub or body.reviewer_id', so a plaintext
+    # header outranked the token. There is no header form any more.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='PATCH'
 )
 try:
@@ -316,7 +320,10 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${TIMEOUT_ID}',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    # PATCH /approvals/{id} requires a credential since identity P3 (0.2.279): the caller
+    # used to be 'x_user_sub or x_user_id or JWT.sub or body.reviewer_id', so a plaintext
+    # header outranked the token. There is no header form any more.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='PATCH'
 )
 try:
@@ -343,7 +350,12 @@ ERR")
   # Check if background worker has transitioned status to timed_out
   TCHECK=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/approvals/${TIMEOUT_ID}', timeout=5)
+# GET /approvals/{id} requires a credential since 0.2.281 — it returns the full record
+# plus principal_display/requested_by/team, so it was the last unauthenticated way to
+# read a team's governance detail. This read is a status assertion, not the subject.
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/approvals/${TIMEOUT_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 d = json.loads(r.read())
 print(d.get('status', ''))
 " 2>/dev/null || echo "unknown")
@@ -383,7 +395,10 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${REJECT_ID}',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    # PATCH /approvals/{id} requires a credential since identity P3 (0.2.279): the caller
+    # used to be 'x_user_sub or x_user_id or JWT.sub or body.reviewer_id', so a plaintext
+    # header outranked the token. There is no header form any more.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='PATCH'
 )
 try:
@@ -437,7 +452,10 @@ body = json.dumps({
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/approvals/${LOCK_ID}',
     data=body,
-    headers={'Content-Type': 'application/json'},
+    # PATCH /approvals/{id} requires a credential since identity P3 (0.2.279): the caller
+    # used to be 'x_user_sub or x_user_id or JWT.sub or body.reviewer_id', so a plaintext
+    # header outranked the token. There is no header form any more.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='PATCH'
 )
 try:

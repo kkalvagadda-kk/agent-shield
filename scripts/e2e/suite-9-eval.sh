@@ -60,19 +60,24 @@ for name in ['${AGENT_NAME}', 's9-bypass-agent']:
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/playground/datasets/${DATASET_ID}', method='DELETE'), timeout=5)
+    # DELETE needs the credential since 0.2.281 (see the PATCH below). Without it this
+    # cleanup silently 401s and leaves the dataset behind for the next run to trip over.
+    urllib.request.urlopen(urllib.request.Request(
+        'http://localhost:8000/api/v1/playground/datasets/${DATASET_ID}',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, method='DELETE'), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1/playground/datasets'
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
 try:
-    r = urllib.request.urlopen(urllib.request.Request(base, headers={'X-User-Sub': 's9'}), timeout=5)
+    r = urllib.request.urlopen(urllib.request.Request(base, headers=AUTH), timeout=5)
     for ds in json.loads(r.read()):
         if ds.get('name','') in ('s9-real-ds', 's9-fail-ds'):
             try:
-                urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers={'X-User-Sub': 's9'}, method='DELETE'), timeout=5)
+                urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers=AUTH, method='DELETE'), timeout=5)
             except Exception: pass
 except Exception: pass
 " 2>/dev/null || true
@@ -155,7 +160,11 @@ body = json.dumps({
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/datasets',
   data=body,
-  headers={'Content-Type': 'application/json', 'X-User-Sub': '$TEST_USER'},
+  # Bearer since 0.2.281: the dataset router takes its caller from the credential on EVERY
+  # route, create included. That is deliberate — while create read X-User-Sub and the write
+  # paths read the token, the OWNER recorded at create and the caller compared at write came
+  # from different sources, so the owner got 403 on their own dataset.
+  headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
   method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -182,7 +191,7 @@ if [ -n "$DATASET_ID" ]; then
 import urllib.request, json
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/datasets',
-  headers={'X-User-Sub': '$TEST_USER'}
+  headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -210,7 +219,13 @@ body = json.dumps({
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/datasets/$DATASET_ID',
   data=body,
-  headers={'Content-Type': 'application/json', 'X-User-Sub': '$TEST_USER'},
+  # Bearer, not X-User-Sub. Since 0.2.281 the dataset write paths take the caller from the
+  # CREDENTIAL: the ownership guard skipped entirely when no credential was present, and a
+  # typed X-User-Sub let any caller name the owner. This suite relied on that header.
+  # NO BACKTICKS in this comment: run_test passes its body as a DOUBLE-QUOTED bash string,
+  # so a backtick is command substitution and bash ran it (line 206: require_owner: command
+  # not found) before python ever saw the code.
+  headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
   method='PATCH'
 )
 r = urllib.request.urlopen(req)
@@ -237,7 +252,11 @@ body = json.dumps({
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/eval-runs',
   data=body,
-  headers={'Content-Type': 'application/json', 'X-User-Sub': '$TEST_USER'},
+  # Bearer, and the LIST below uses the same. An eval run is scoped to its caller; naming that
+  # caller one way here and another way there makes the run invisible to the test that created
+  # it. (eval_runner.py still has its own 'or "dev"' fallback — gap ledger G-ID-3 item 4 —
+  # which is why this suite must supply a real credential rather than rely on the default.)
+  headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
   method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -269,7 +288,10 @@ if [ -n "$EVAL_RUN_ID" ]; then
 import urllib.request, json
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/eval-runs',
-  headers={'X-User-Sub': '$TEST_USER'}
+  # Bearer, matching the CREATE above. An eval-run list is scoped to its caller, so if the
+  # create and the list name their caller differently the run is invisible to the very test
+  # that just created it — the same owner/modifier split that made the dataset DELETE 403.
+  headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -401,7 +423,10 @@ if [ -n "$DATASET_ID" ]; then
 import urllib.request, urllib.error
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/datasets/$DATASET_ID',
-  headers={'X-User-Sub': '$TEST_USER'},
+  # Bearer since 0.2.281 — the dataset write paths no longer read X-User-Sub, so this
+  # header authenticated nothing and the DELETE returned 401. This case asserts FK
+  # behaviour with an active EvalRun reference, which it cannot observe from a 401.
+  headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
   method='DELETE'
 )
 try:
@@ -463,11 +488,23 @@ print(last)
 " 2>/dev/null || echo unknown
 }
 
-run_test "T-S9-011 eval-runner identity starts a run for an agent it does not own → 201" "
+# INVERTED, NOT DELETED (identity P3 / 0.2.279). This case used to assert that typing
+# 'X-User-Sub: eval-runner' on a request with NO credential started a run on an agent the
+# caller does not own — i.e. it asserted the BYPASS as if it were the feature, exactly like
+# 'suite-93' T-S93-004 did for approvals. '_SERVICE_IDENTITIES = {"eval-runner"}' made that
+# string skip both the contributor role gate and the per-agent authority check, so anyone
+# VPC-reachable could run any agent by naming a service in a header.
+#
+# A service identity is now a Keycloak client_credentials token whose 'azp' sits inside the
+# RS256 signature (suite-102 T-S102-004/008 cover the mechanism). The header is just text.
+# So the correct assertion is the refusal — and it must be 401, not 403: the caller is not a
+# weak identity, it is NO identity.
+run_test "T-S9-011 forged 'X-User-Sub: eval-runner' with no credential is REFUSED 401 (was: 201)" "
 import urllib.request, json, urllib.error
 base = 'http://localhost:8000/api/v1'
 try:
-    urllib.request.urlopen(urllib.request.Request(base + '/agents/s9-bypass-agent', method='DELETE'))
+    urllib.request.urlopen(urllib.request.Request(base + '/agents/s9-bypass-agent',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, method='DELETE'))
 except urllib.error.HTTPError:
     pass
 req = urllib.request.Request(base + '/agents/',
@@ -480,19 +517,27 @@ except urllib.error.HTTPError as e:
 req = urllib.request.Request(base + '/playground/runs',
     data=json.dumps({'agent_name': 's9-bypass-agent', 'input_message': 'hi'}).encode(),
     headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'}, method='POST')
-r = urllib.request.urlopen(req, timeout=5)
-assert r.status == 201, f'expected 201 got {r.status}'
-print('eval-runner ran an agent owned by system (201)')
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    raise AssertionError(f'forged service header was ACCEPTED ({r.status}) — the P3 bypass is back')
+except urllib.error.HTTPError as e:
+    assert e.code == 401, f'expected 401 for a credential-less forged identity, got {e.code}'
+    print('forged X-User-Sub: eval-runner refused 401 (identity comes from the credential)')
 "
 
 run_test "T-S9-012 GET /playground/runs/{id} exposes judge fields" "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1'
+# The SUBJECT of this case is the judge fields on the response, not who may start a run. It
+# used to create its run with the forged 'X-User-Sub: eval-runner' header, which P3 refuses —
+# so it needs a real credential to get as far as its actual assertion. The admin token owns
+# s9-bypass-agent (created above with the same token), so the owner check is satisfied.
 req = urllib.request.Request(base + '/playground/runs',
     data=json.dumps({'agent_name': 's9-bypass-agent', 'input_message': 'judge'}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'}, method='POST')
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 rid = json.loads(urllib.request.urlopen(req, timeout=5).read())['run_id']
-r = urllib.request.urlopen(base + '/playground/runs/' + rid, timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(base + '/playground/runs/' + rid,
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 d = json.loads(r.read())
 for k in ('judge_score', 'judge_status', 'judge_reason'):
     assert k in d, f'{k} missing: {d}'
@@ -504,10 +549,10 @@ EVAL_RUN_S9=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base='http://localhost:8000/api/v1'
 db=json.dumps({'name':'s9-real-ds','items':[{'input':'ping','expected_output':'x'},{'input':'ping2','expected_output':'y'}]}).encode()
-did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json'},method='POST'),timeout=5).read()).get('id')
+did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json','Authorization':'Bearer ${E2E_TOKEN}'},method='POST'),timeout=5).read()).get('id')
 eb=json.dumps({'agent_name':'s9-bypass-agent','dataset_id':did}).encode()
 try:
-    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','X-User-Sub':'s9'},method='POST'),timeout=10)
+    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','Authorization':'Bearer ${E2E_TOKEN}'},method='POST'),timeout=10)
     print(json.loads(r.read()).get('id',''))
 except Exception:
     print('')
@@ -542,10 +587,10 @@ EVAL_FAIL_S9=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base='http://localhost:8000/api/v1'
 db=json.dumps({'name':'s9-fail-ds','items':[{'input':'a'},{'input':'b'}]}).encode()
-did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json'},method='POST'),timeout=5).read()).get('id')
+did=json.loads(urllib.request.urlopen(urllib.request.Request(base+'/playground/datasets',data=db,headers={'Content-Type':'application/json','Authorization':'Bearer ${E2E_TOKEN}'},method='POST'),timeout=5).read()).get('id')
 eb=json.dumps({'agent_name':'does-not-exist-agent-s9','dataset_id':did}).encode()
 try:
-    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','X-User-Sub':'s9'},method='POST'),timeout=10)
+    r=urllib.request.urlopen(urllib.request.Request(base+'/playground/eval-runs',data=eb,headers={'Content-Type':'application/json','Authorization':'Bearer ${E2E_TOKEN}'},method='POST'),timeout=10)
     print(json.loads(r.read()).get('id',''))
 except Exception:
     print('')
@@ -581,7 +626,7 @@ if [ -n "$DATASET_ID" ]; then
 import urllib.request
 req = urllib.request.Request(
   'http://localhost:8000/api/v1/playground/datasets/$DATASET_ID',
-  headers={'X-User-Sub': '$TEST_USER'},
+  headers={'Authorization': 'Bearer ${E2E_TOKEN}'},
   method='DELETE'
 )
 try:
@@ -609,7 +654,7 @@ except Exception as e:
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1/playground/datasets'
-req = urllib.request.Request(base, headers={'X-User-Sub': 's9'})
+req = urllib.request.Request(base, headers={'Authorization': 'Bearer ${E2E_TOKEN}'})
 try:
     r = urllib.request.urlopen(req, timeout=5)
     datasets = json.loads(r.read())

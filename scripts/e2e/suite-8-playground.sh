@@ -576,7 +576,12 @@ body = json.dumps({'decision': 'approved'}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/approvals/${PG_APPROVAL_ID}/decide',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    # Credential required since 0.2.281. This route DECIDES a HITL approval and had no auth
+    # dependency at all — X-User-Sub was only an audit label, so any caller could approve any
+    # pending playground gate and attribute it to anyone. It accepts a verified USER or a
+    # verified trusted SERVICE (eval-runner self-approves gated durable eval steps), so the
+    # admin token is a valid caller here; what is refused is having no credential.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req, timeout=5)
@@ -597,7 +602,10 @@ print('self-approval succeeded: status=approved, thread_id present')
 
   run_test "T-S8-018b approval status=approved after decide" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/approvals/${PG_APPROVAL_ID}', timeout=5)
+# Credential required since 0.2.281 (GET /approvals/{id} had no identity parameter).
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/approvals/${PG_APPROVAL_ID}',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 data = json.loads(r.read())
 assert data.get('status') == 'approved', f'expected approved got {data.get(\"status\")}'
 print('approval.status=approved confirmed')
@@ -628,7 +636,11 @@ print(f'{len(data)} items, all context=playground')
 # ---------------------------------------------------------------------------
 run_test "T-S8-020 GET /approvals/ (production) excludes playground context" "
 import urllib.request, json
-r = urllib.request.urlopen('http://localhost:8000/api/v1/approvals/', timeout=5)
+# Credential required since identity P3 (list_approvals: 'no identity must never be the
+# widest identity' — an unscoped list returned every team's queue).
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/approvals/',
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 data = json.loads(r.read())
 items = data.get('items', []) if isinstance(data, dict) else data
 pg_items = [i for i in items if i.get('context') == 'playground']

@@ -205,6 +205,53 @@ class Caller:
     def is_authenticated(self) -> bool:
         return self.kind != "anonymous"
 
+    def require_user_sub(self) -> str:
+        """The verified HUMAN subject, or the correct error. 401 anonymous, 403 service.
+
+        WHY THIS EXISTS RATHER THAN `if caller and ...` AT EACH CALL SITE.
+        `is_authenticated` answers "is there a credential", which is a different question
+        from "is there a person". Four handlers in `routers/approvals.py` needed the second
+        one and each re-derived it from the truthiness of `identity.sub` plus a magic
+        literal:
+
+            caller = identity.sub
+            if caller and caller != "system" and not caller_is_admin:
+                ... 403
+
+        Two defects live in that shape. First, a guard that no-ops when its subject is
+        falsy is a guard that fails OPEN — and `sub` is not guaranteed non-empty for
+        `kind == "service"` (the service arm below returns before the empty-`sub` check),
+        so "authenticated" does not imply "identifiable". Second, and this one was
+        MEASURED on the cluster: a service token that reaches an authority check is judged
+        by `SELECT role FROM user_team_assignments WHERE user_sub = :sub`, which cannot
+        tell a human from a service account. The scheduler was refused only because nothing
+        had granted its subject a role; granting it `platform-admin` let it approve a real
+        pending HITL request (T-S102-010, 200 before this fix). That is authorization by
+        accident.
+
+        So the question "is this a person" is answered ONCE, from `kind`, and a caller that
+        is not one cannot proceed to a role lookup at all. HITL is the control that stops an
+        agent taking a dangerous action; a service account is never the human in the loop.
+
+        Routes that legitimately accept a service (eval-runner deciding a playground
+        approval) must NOT call this — they branch on `kind` themselves.
+        """
+        if self.kind == "anonymous":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if self.kind == "service":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="service_identity_cannot_act_as_user",
+            )
+        # `kind == "user"` is built only from a non-empty `sub` (see caller_from_claims),
+        # so this is a non-empty human subject by construction — nothing downstream needs
+        # to re-check it.
+        return self.sub
+
 
 ANONYMOUS = Caller(kind="anonymous", sub="", service_name="", claims=None)
 

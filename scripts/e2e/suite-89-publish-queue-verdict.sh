@@ -246,13 +246,20 @@ try:
             f"status={st} rows={n} — no JWT and no X-User-Sub must yield 0 rows, "
             f"not an unfiltered full-table read")
 
+    # TIGHTENED IN 0.2.281 — this case used to accept '200 []'. The dataset router now derives
+    # its caller from the credential on EVERY route, so an anonymous read is refused outright
+    # rather than answered with a filtered-to-empty list. 401 is strictly stronger: an empty
+    # 200 is indistinguishable from "you own nothing", so it told an anonymous caller that the
+    # endpoint was theirs to call. It also cannot silently widen if the filter is ever dropped
+    # again, which is the failure this case was originally written for. '200 []' is no longer
+    # accepted — the assertion was inverted, not deleted.
     st, anon_ds = call("GET", "/api/v1/playground/datasets", None, anon=True)
-    n = len(anon_ds) if isinstance(anon_ds, list) else -1
-    if st == 200 and n == 0:
-        ok("T-S89-006 anonymous GET /playground/datasets returns [] (deny-by-default)")
+    if st == 401:
+        ok("T-S89-006 anonymous GET /playground/datasets is 401 (credential required, 0.2.281)")
     else:
+        n = len(anon_ds) if isinstance(anon_ds, list) else -1
         bad("T-S89-006 anonymous caller read datasets",
-            f"status={st} rows={n} — datasets carry test inputs and expected outputs")
+            f"status={st} rows={n} — expected 401; datasets carry test inputs and expected outputs")
 
     # ------------------------------------------- T-S89-007  no over-correction
     st, mine = call("GET", "/api/v1/playground/eval-runs", PT)

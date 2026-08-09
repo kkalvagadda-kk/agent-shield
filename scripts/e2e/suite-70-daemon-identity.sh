@@ -139,6 +139,32 @@ async def m():
     async with e.connect() as c:
         print((await c.execute(text(\"select user_sub from user_team_assignments where role='platform-admin' order by user_sub limit 1\"))).scalar() or '')
 asyncio.run(m())" 2>/dev/null | tr -d '[:space:]')"
+
+# ── REAL personas for T-S70-003/004, not invented subs ───────────────────────
+# These two cases used to be expressed with 'uuid.uuid4()' strings typed into an
+# 'X-User-Sub' header while the driver's client carried 'auth=BearerAuth()'. httpx merges
+# per-request headers over client headers but RE-APPLIES 'auth=' on every request, so both
+# calls went out as platform-admin: T-S70-003's "non-reviewer" WAS an admin (caller_is_admin
+# true -> the 403 branch skipped -> 200), and T-S70-004 passed through the admin bypass
+# without ever exercising the reviewer-scope path it claims to prove.
+#
+# Since identity P3 a sub with no Keycloak user cannot authenticate at all, so a second
+# persona needs a second CREDENTIAL. e2e_ensure_persona creates the user through the real
+# POST /api/v1/admin/users (which also writes its user_team_assignments row) and aborts
+# loudly if Keycloak refuses; the driver then self-refreshes each persona's token via
+# BearerAuth(username, password), because this driver outlives the 300s token life.
+# The reviewer's role IS 'agent:reviewer' rather than a second row alongside 'contributor':
+# 'user_team_assignments' has PRIMARY KEY (user_sub) — measured, one role per user — and
+# '_caller_can_review' (approvals.py:414) asks whether the routed scope is IN that user's
+# roles. 'admin_users._upsert_team' is an ON CONFLICT (user_sub) DO UPDATE and 'UserCreate.role'
+# is a free-form string, so the real API writes it; 'set_user_realm_role' no-ops for a name
+# that is not a realm role, which is fine here because this path reads the DB row, not the
+# realm. That replaces the hand-written INSERT the driver used to do.
+S70_NONREV_USER="s70-nonrev"
+S70_REVIEWER_USER="s70-reviewer"
+e2e_ensure_persona "$NAMESPACE" "$API_POD" "$S70_NONREV_USER"   "contributor"    >/dev/null
+e2e_ensure_persona "$NAMESPACE" "$API_POD" "$S70_REVIEWER_USER" "agent:reviewer" >/dev/null
+echo "  personas: $S70_NONREV_USER (contributor — no reviewer authority), $S70_REVIEWER_USER (agent:reviewer)"
 echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,14 +197,23 @@ import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
 # mid-suite — see docs/bugs/trigger-e2e-suites-dead-since-require-user.md.
-from e2e_auth import BearerAuth
+from e2e_auth import BearerAuth, sub_of
 HDR = {"X-User-Sub": ADMIN, "X-User-Team": "platform"}
+
+# ── The two personas T-S70-003/004 act as ────────────────────────────────────
+# Each gets its OWN auth object, because identity now comes from the credential and a
+# per-request header cannot override the client's 'auth='. Their subs are read OUT of
+# their tokens (sub_of) — never chosen here. A sub this suite invents is a sub no
+# Keycloak user owns, which is precisely why the old version tested nothing.
+PERSONA_PASS = os.environ["S70_PERSONA_PASS"]
+NONREV_AUTH = BearerAuth(os.environ["S70_NONREV_USER"], PERSONA_PASS)
+REVIEWER_AUTH = BearerAuth(os.environ["S70_REVIEWER_USER"], PERSONA_PASS)
+NONREV_SUB = sub_of(NONREV_AUTH.token())
+REVIEWER_SUB = sub_of(REVIEWER_AUTH.token())
 OUT = os.environ["S70_OUT"]
 SFX = uuid.uuid4().hex[:6]
 AGENT = f"s70-agent-{SFX}"
 WF = f"s70-wf-{SFX}"
-REVIEWER_SUB = str(uuid.uuid4())          # a real, granted 'agent:reviewer'
-NONREV_SUB = str(uuid.uuid4())            # a real caller with NO roles
 SENTINEL = f"scheduler-body-sentinel-{SFX}"  # body.run_by we expect to be OVERRIDDEN
 NS = "agents-platform"
 # Force the LLM to call the high-risk refund_action tool first (mirrors wf-payout) so
@@ -342,29 +377,91 @@ async def main():
         if approval_id:
             g = await c.get(f"/approvals/{approval_id}")
             ver = g.json()["version"]; scope = g.json().get("reviewer_scope")
-            nr = await c.patch(f"/approvals/{approval_id}",
-                               json={"decision": "approved", "version": ver, "reviewer_id": NONREV_SUB},
-                               headers={"X-User-Sub": NONREV_SUB})
-            ok3 = (nr.status_code == 403 and scope == "agent:reviewer")
-            d3 = f"status={nr.status_code} detail={nr.text[:80]} reviewer_scope={scope}"
+            tool = g.json().get("tool_name")
+
+            # ── MAKE THE PRECONDITION TRUE, DON'T ASSUME IT ──────────────────
+            # "Non-reviewer" has to mean: holds neither the routed reviewer role nor an
+            # explicit per-tool grant — those are two of the three arms of
+            # '_caller_can_review'. The persona satisfies the first by construction
+            # ('contributor'). It does NOT satisfy the second, and not by accident:
+            # deploying an agent with a risky tool AUTO-GRANTS ApprovalAuthority for that
+            # tool to EVERY MEMBER OF THE TEAM ('routers/deployments.py:92-118'). Measured
+            # on this cluster: 'refund_action' carries 27 active grants and every
+            # 'contributor' in 'user_team_assignments' holds one. So the deploy this suite
+            # performs hands the "non-reviewer" authority over the very tool it is about to
+            # be tested on, and the decide is then CORRECTLY allowed — which is why this
+            # case read 200 even after the identity fix.
+            #
+            # Revoke it here, AFTER the deploy that created it and BEFORE the decide, and
+            # assert the revoke actually happened. A precondition a test needs is a
+            # precondition the test must establish.
+            async with AsyncSessionLocal() as s:
+                await s.execute(text(
+                    "UPDATE approval_authority SET revoked_at = :ts "
+                    "WHERE resource_type = 'tool' AND resource_id = :tool "
+                    "AND approver_user_id = :u AND revoked_at IS NULL"),
+                    {"ts": datetime.now(timezone.utc), "tool": tool, "u": NONREV_SUB})
+                await s.commit()
+                still = (await s.execute(text(
+                    "SELECT count(*) FROM approval_authority WHERE resource_type='tool' "
+                    "AND resource_id = :tool AND approver_user_id = :u AND revoked_at IS NULL"),
+                    {"tool": tool, "u": NONREV_SUB})).scalar()
+                roles = [r[0] for r in (await s.execute(text(
+                    "SELECT role FROM user_team_assignments WHERE user_sub = :u"),
+                    {"u": NONREV_SUB})).all()]
+
+            # Its OWN credential, on its OWN client. A per-call Authorization header on 'c'
+            # would be overwritten by that client's auth hook — which is exactly how this
+            # case used to go out as platform-admin. 'auth=' (not a static header) because
+            # we reach here AFTER a production deploy + park, minutes past the 300s token
+            # life; a token minted at suite start would 401 and the case would go red for
+            # the wrong reason.
+            async with httpx.AsyncClient(base_url=BASE, timeout=60.0, auth=NONREV_AUTH) as nc:
+                nr = await nc.patch(f"/approvals/{approval_id}",
+                                    json={"decision": "approved", "version": ver, "reviewer_id": NONREV_SUB})
+            # The precondition is part of the assertion: if the persona still holds a grant,
+            # or somehow holds the routed role, a 403 would prove nothing and a 200 would be
+            # correct. Both are checked so the case cannot pass or fail for a hidden reason.
+            ok3 = (nr.status_code == 403 and scope == "agent:reviewer"
+                   and still == 0 and scope not in roles and "platform-admin" not in roles)
+            d3 = (f"status={nr.status_code} detail={nr.text[:60]} reviewer_scope={scope} "
+                  f"nonrev_roles={roles} nonrev_active_grants_on_{tool}={still}")
         record("T-S70-003 non-reviewer decide REJECTED 403 (reviewer_scope=agent:reviewer)", ok3, d3)
 
         # ── T-S70-004: a REVIEWER decide (holds the routed role) resumes the run ──
         d4 = "prereq failed (no parked approval)"
         ok4 = False
         if approval_id:
-            # Grant a REAL reviewer role (real authority provisioning, like arming a trigger).
+            # No hand-written role INSERT here any more. 'e2e_ensure_persona' created this
+            # user through the real POST /api/v1/admin/users with role 'agent:reviewer',
+            # which writes the user_team_assignments row itself (PRIMARY KEY (user_sub) —
+            # one role per user, so a second row is not even representable).
+            #
+            # Revoke this persona's AUTO-GRANTED per-tool authority too, for the opposite
+            # reason to T-S70-003: the deploy granted it, so without this the decide could
+            # succeed through '_caller_can_review''s per-tool arm and the case would prove
+            # nothing about the ROUTED ROLE it claims to test. With both personas stripped of
+            # tool grants, 003 and 004 differ in exactly one thing — whether the caller holds
+            # 'agent:reviewer' — which is the rule under test.
             async with AsyncSessionLocal() as s:
                 await s.execute(text(
-                    "INSERT INTO user_team_assignments (user_sub, team_name, role, assigned_by, assigned_at) "
-                    "VALUES (:u, 'platform', 'agent:reviewer', 'suite-70', :ts)"),
-                    {"u": REVIEWER_SUB, "ts": datetime.now(timezone.utc)})
+                    "UPDATE approval_authority SET revoked_at = :ts "
+                    "WHERE resource_type = 'tool' AND resource_id = :tool "
+                    "AND approver_user_id = :u AND revoked_at IS NULL"),
+                    {"ts": datetime.now(timezone.utc), "tool": tool, "u": REVIEWER_SUB})
                 await s.commit()
+                rv_grants = (await s.execute(text(
+                    "SELECT count(*) FROM approval_authority WHERE resource_type='tool' "
+                    "AND resource_id = :tool AND approver_user_id = :u AND revoked_at IS NULL"),
+                    {"tool": tool, "u": REVIEWER_SUB})).scalar()
+                rv_roles = [r[0] for r in (await s.execute(text(
+                    "SELECT role FROM user_team_assignments WHERE user_sub = :u"),
+                    {"u": REVIEWER_SUB})).all()]
             g = await c.get(f"/approvals/{approval_id}")
             ver = g.json()["version"]
-            rv = await c.patch(f"/approvals/{approval_id}",
-                               json={"decision": "approved", "version": ver, "reviewer_id": REVIEWER_SUB},
-                               headers={"X-User-Sub": REVIEWER_SUB})
+            async with httpx.AsyncClient(base_url=BASE, timeout=60.0, auth=REVIEWER_AUTH) as rc:
+                rv = await rc.patch(f"/approvals/{approval_id}",
+                                    json={"decision": "approved", "version": ver, "reviewer_id": REVIEWER_SUB})
             decided_ok = rv.status_code == 200 and rv.json().get("status") == "approved"
             # Resume runs in the background; poll the run to LEAVE awaiting_approval.
             terminal = None
@@ -375,8 +472,15 @@ async def main():
                     terminal = run.status; break
             # Strongest REAL state: the reviewer decide committed (approved) AND the run
             # left the parked state (ideally 'completed'; same few-pods boundary as 58/60).
-            ok4 = decided_ok and terminal in ("completed", "failed", "running")
-            d4 = f"decide_status={rv.status_code} approval={rv.json().get('status') if rv.status_code==200 else rv.text[:80]} run_after={terminal}"
+            # The precondition is part of the assertion here too: the decide must have been
+            # allowed by the ROUTED ROLE, so the persona must hold 'agent:reviewer' and NO
+            # per-tool grant. Otherwise a 200 proves only that some arm let it through.
+            ok4 = (decided_ok and terminal in ("completed", "failed", "running")
+                   and rv_grants == 0 and "agent:reviewer" in rv_roles)
+            d4 = (f"decide_status={rv.status_code} "
+                  f"approval={rv.json().get('status') if rv.status_code==200 else rv.text[:80]} "
+                  f"run_after={terminal} reviewer_roles={rv_roles} "
+                  f"reviewer_active_grants_on_{tool}={rv_grants}")
         record("T-S70-004 reviewer decide accepted (200) + run resumes off awaiting_approval", ok4, d4)
 
         # ── T-S70-005: daemon WORKFLOW — parent + members carry the workflow service id ──
@@ -462,7 +566,10 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume can take a few min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE ADMIN_SUB=$ADMIN_SUB nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE ADMIN_SUB=$ADMIN_SUB \
+   S70_NONREV_USER=$S70_NONREV_USER S70_REVIEWER_USER=$S70_REVIEWER_USER \
+   S70_PERSONA_PASS='$E2E_PERSONA_PASS' \
+   nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 150); do   # up to ~12.5 min (production deploy + park + resume)
   sleep 5

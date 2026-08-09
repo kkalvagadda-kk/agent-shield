@@ -182,6 +182,19 @@ TypeError without a failed deploy cycle.
 - **P6 — Don't depend on model-provider mechanics.** Providers implement the same capability differently (or not at all — Bedrock Converse has no parallel-tool-calls control and crashes on it). Enforce cross-cutting behavior in our graph/registry.
 - **P7 — Test the layer that can actually fail.** `kubectl exec` API tests can't see nginx, JWT, EventSource, or React. Prove UX with Playwright against the https gateway. Verify library quirks in-pod before rebuilding.
 - **P8 — Cold-start windows hide in poll intervals + readiness gates.** Multi-minute "flaky" waits are usually a sum of poll delays + a status gate (see C-2), not a single slow step.
+- **P9 — A red suite's cause comes from the request it SENDS, not from the diff that turned it red.** Two attributions in `8392a61`'s `KNOWN RED` block were derived by reading the diff and both were wrong (`017-suite-70-the-403-that-was-a-200.md`). Before reading the handler, dump what the driver actually puts on the wire: client-level `auth=`, client-level `headers=`, and per-call overrides all interact, and `httpx` **re-applies `auth=` on every request** so it beats a same-named per-call header. A "non-reviewer" expressed as `headers={"X-User-Sub": ...}` on a client carrying `auth=BearerAuth()` IS the admin.
+- **P10 — `is_authenticated` is not `is_a_person`.** A verified SERVICE token passes an authentication gate and then gets judged by a per-USER table (`SELECT role FROM user_team_assignments WHERE user_sub = :sub`), which cannot tell a human from a service account. A service refused today may be refused only because nothing granted its subject a role — incidental, not structural. Query the rows before concluding a control works.
+- **P11 — A guard conditional on its own subject fails OPEN.** `if caller and ... : raise 403` does nothing when `caller` is empty. Check every such guard after you delete whatever used to make the subject unconditionally truthy — P3 removed a `body.reviewer_id` fallback and left two branches leaning on it. Also guard the CHEAP door: `decide` was hardened while `reopen` (which resets a decided approval to `pending`) had no identity at all.
+
+## Part 3b — Symptom → first command, for auth/authorization reds
+
+| Symptom | FIRST command (before reading the handler) | What the evidence means |
+|---|---|---|
+| test asserts 403, gets 200, right after an auth change | print the driver's client construction: `auth=`, `headers=`, and the per-call `headers=` | if `auth=` names a different identity than the header, the header is decorative — `auth=` wins per request |
+| test asserts 401, gets 404 | nothing — a 404 on a RANDOM uuid already proves it | the row lookup ran before any auth decision, i.e. there is no auth decision on that route |
+| "a service/role is correctly refused" | `SELECT * FROM user_team_assignments WHERE user_sub = '<sub>'` and `approval_authority` for the same sub | zero rows means the refusal is incidental; grant a role and re-run before believing the control |
+| a `${E2E_SUB}`/`${E2E_TOKEN}` reference inside a suite | check whether the heredoc is quoted (`<<'PY'`) | a quoted heredoc never expands it — pass values as `env` vars instead (hygiene rule 8d) |
+| persona token 401s late in a long driver | the token's age vs 300s | Keycloak tokens live 300s; a token minted once in bash dies mid-run. Use `BearerAuth(user, pass)` (per-instance, self-refreshing), not a static header |
 
 ---
 

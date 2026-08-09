@@ -769,7 +769,7 @@ registry-api:
     # intersects the agent reach with the caller's teams); agent_class from the bundle.
     # 0.2.273: deny_reason precedence — the identity floor outranks the Decision 45
     # intersection, and two rules it made unreachable are guarded on agent reach.
-    tag: "0.2.280"
+    tag: "0.2.282"
     pullPolicy: IfNotPresent
 
   evalRunnerImage: "registry.internal/agentshield/eval-runner:0.1.15"

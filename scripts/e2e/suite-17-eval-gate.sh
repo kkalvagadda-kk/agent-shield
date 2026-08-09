@@ -53,13 +53,18 @@ for name in ['eval-gate-s17-agent', 'eval-gate-s17-noversion', 'eval-gate-s17-ri
   kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1/playground/datasets'
-for user in ('smoke-user', 'dev'):
+# ONE authenticated pass. X-User-Sub authenticates nothing on this router since 0.2.282, so
+# this cleanup 401'd inside its own 'except Exception: pass' and left rows behind — silently,
+# which is the worst property a cleanup can have. 'dev' was never a user either; it was the
+# literal 'or "dev"' fallback create_dataset used to apply.
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+if True:
     try:
-        r = urllib.request.urlopen(urllib.request.Request(base, headers={'X-User-Sub': user}), timeout=5)
+        r = urllib.request.urlopen(urllib.request.Request(base, headers=AUTH), timeout=5)
         for ds in json.loads(r.read()):
             if ds.get('name','') in ('s17auto-ds', 's17fail-ds'):
                 try:
-                    urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers={'X-User-Sub': user}, method='DELETE'), timeout=5)
+                    urllib.request.urlopen(urllib.request.Request(base + '/' + str(ds['id']), headers=AUTH, method='DELETE'), timeout=5)
                 except Exception: pass
     except Exception: pass
 " 2>/dev/null || true
@@ -334,13 +339,19 @@ assert ver.get('eval_passed') in (False, None), f'version should start with eval
 # Create a dataset (required by create_eval_run)
 req = urllib.request.Request(base + '/playground/datasets',
     data=json.dumps({'name': 's17auto-ds', 'items': [{'input': 'hello', 'expected': 'hi'}]}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    # Bearer since 0.2.281/0.2.282: the dataset router derives its caller from the credential
+    # on every route, so an X-User-Sub-only POST is now 401 and the eval-run this case needs
+    # never gets created. Keeping the header would authenticate nothing.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 ds = json.loads(urllib.request.urlopen(req).read())
 ds_id = ds['id']
 # Create an EvalRun for that version
 req = urllib.request.Request(base + '/playground/eval-runs',
     data=json.dumps({'agent_name': 'eval-gate-s17-auto', 'agent_version_id': ver_id, 'dataset_id': ds_id}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    # Bearer since 0.2.281/0.2.282: the dataset router derives its caller from the credential
+    # on every route, so an X-User-Sub-only POST is now 401 and the eval-run this case needs
+    # never gets created. Keeping the header would authenticate nothing.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     run_resp = urllib.request.urlopen(req)
     er = json.loads(run_resp.read())
@@ -389,13 +400,19 @@ ver_id = ver['id']
 # Create a dataset
 req = urllib.request.Request(base + '/playground/datasets',
     data=json.dumps({'name': 's17fail-ds', 'items': [{'input': 'hello', 'expected': 'hi'}]}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    # Bearer since 0.2.281/0.2.282: the dataset router derives its caller from the credential
+    # on every route, so an X-User-Sub-only POST is now 401 and the eval-run this case needs
+    # never gets created. Keeping the header would authenticate nothing.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 ds = json.loads(urllib.request.urlopen(req).read())
 ds_id = ds['id']
 # Create an EvalRun for that version
 req = urllib.request.Request(base + '/playground/eval-runs',
     data=json.dumps({'agent_name': 'eval-gate-s17-fail', 'agent_version_id': ver_id, 'dataset_id': ds_id}).encode(),
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'}, method='POST')
+    # Bearer since 0.2.281/0.2.282: the dataset router derives its caller from the credential
+    # on every route, so an X-User-Sub-only POST is now 401 and the eval-run this case needs
+    # never gets created. Keeping the header would authenticate nothing.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST')
 try:
     er = json.loads(urllib.request.urlopen(req).read())
 except urllib.error.HTTPError as e:
@@ -434,15 +451,18 @@ done
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1/playground/datasets'
-for user in ('smoke-user', 'dev'):
-    req = urllib.request.Request(base, headers={'X-User-Sub': user})
+# ONE authenticated pass — see the twin comment in suite-13. 'dev' was never a user; it was
+# the literal 'or "dev"' fallback create_dataset used to apply, which 0.2.281 removed.
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+if True:
+    req = urllib.request.Request(base, headers=AUTH)
     try:
         r = urllib.request.urlopen(req, timeout=5)
         datasets = json.loads(r.read())
         for ds in datasets:
             if ds.get('name','') in ('s17auto-ds', 's17fail-ds'):
                 dreq = urllib.request.Request(base + '/' + str(ds['id']),
-                    headers={'X-User-Sub': user}, method='DELETE')
+                    headers=AUTH, method='DELETE')
                 try:
                     urllib.request.urlopen(dreq, timeout=5)
                     print(f'deleted dataset {ds[\"name\"]}')

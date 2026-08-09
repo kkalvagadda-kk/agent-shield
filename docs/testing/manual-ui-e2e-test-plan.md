@@ -45,6 +45,102 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
+## G-ID-0 — deploy-time auto-grant makes a routed reviewer scope decorative — 2026-08-09
+
+**NEEDS A DECISION (not a bug I fixed — it changes behaviour, so it is Kalyan's call).**
+
+Found while making `suite-70 T-S70-003` test what it claims. A DAEMON approval is routed to a
+reviewer role (`reviewer_scope = "agent:reviewer"`), and `_caller_can_review`
+(`routers/approvals.py:408-422`) allows three arms: the routed role, an admin role, **or an
+explicit per-tool `ApprovalAuthority` grant**.
+
+Deploying an agent with risky tools **auto-grants that tool's ApprovalAuthority to EVERY MEMBER
+OF THE TEAM** (`routers/deployments.py:92-118`, "N members × M risky tools"). Measured on the
+EKS cluster:
+
+```
+approval_authority rows for refund_action: 27 active grants
+every `contributor` sub in user_team_assignments holds one
+```
+
+So the third arm is near-universal inside a team, and the routed reviewer scope decides
+almost nothing: any team contributor can decide a daemon approval routed to `agent:reviewer`.
+`T-S70-003` read 200 even after the identity fix for exactly this reason — its "non-reviewer"
+persona had been auto-granted authority over the very tool under test by the suite's own
+deploy.
+
+**The suite now revokes that grant before deciding and asserts the revoke happened**, so the
+case tests the routed-scope rule rather than an accident. That fixes the test, not the design.
+
+**The design question:** should the per-tool-grant arm apply to a DAEMON, reviewer-routed
+approval at all? Arguments both ways —
+* *Keep it:* a per-tool grant is an explicit authority record; honouring it is consistent with
+  the interactive production path, and the docstring says it is intended.
+* *Remove it for the reviewer-scoped branch:* routing an approval to a role states WHO should
+  review it. If a blanket deploy-time grant overrides that, the routing is decoration, and the
+  auto-grant was written for interactive per-tool approvals, not for daemon routing.
+
+Not changed unilaterally: it would tighten a live authorization path and could 403 reviewers who
+decide today.
+
+## G-ID-1 — reactive-eval HITL auto-approve was removed, not replaced — 2026-08-09 (0.2.281)
+
+**not-yet-wired (debt).** `_SERVICE_IDENTITIES = {"eval-runner"}` set
+`x-agentshield-auto-approve: true` when `PlaygroundRun.user_id == "eval-runner"` — a HITL bypass
+keyed on a database string. Identity P3 made `user_id` the verified subject, which for
+eval-runner is a service-account UUID, so the branch stopped matching real eval-runner runs and
+kept matching legacy rows holding the literal: **dead where it was needed, live where it was
+not.** Deleted in 0.2.281.
+
+**What is lost:** a REACTIVE eval item that trips a HITL gate no longer auto-approves. The
+DURABLE path is unaffected — eval-runner self-approves explicitly
+(`services/eval-runner/main.py::_self_approve`).
+
+**Why it is not fixed in the same change:** the decision is made in `_real_agent_stream`, and
+the stream (and `resume-stream`) is a SEPARATE request whose caller may be a different
+principal — so `Caller.kind` is not available there. Doing it right means the run row
+**remembers** what kind of principal created it: a `PlaygroundRun` column written from
+`identity.service_name` at creation, plus a migration, plus a reactive-eval-with-HITL test that
+does not exist yet. `eval_mode` cannot stand in — it is `live`/`record` on **every** playground
+run, interactive ones included.
+
+## G-ID-2 — `POST /api/v1/approvals/` still needs no credential — 2026-08-09
+
+**not-yet-wired (debt).** Every other approvals route now requires a verified caller (0.2.281).
+This one cannot yet: the SDK's `governed_tool` POSTs it from agent pods that hold no platform
+identity, so gating it is an agent-identity change (pods must mint or be issued a credential),
+not a router change. Until then, an approval ROW can be injected by anything VPC-reachable —
+deciding one cannot.
+
+## G-ID-3 — remaining "empty value widens access" sites, ranked — 2026-08-09
+
+**not-yet-wired (debt).** Found by an AST sweep for authorization guards that no-op when their
+subject is falsy. The approvals/datasets/playground-decide instances were fixed in 0.2.281; these
+were left, deliberately, to keep that change's blast radius readable:
+
+1. `routers/catalog.py:61` — `if x_user_team:` with `Header(default="")`. Omit the header and
+   the whole cross-team grant filter vanishes. Also identity-from-plaintext-header.
+2. `tool_access.py:46` — `if owner_team is None or owner_team == team: return True`, so a NULL
+   owner is usable by **every** team. Fed by `routers/tools.py:157` and
+   `routers/mcp_servers.py:123`, which can write NULL when `get_user_team` returns `None`
+   (`rbac.py:104-109`). `bundle_generator.py:212` deliberately diverges from it.
+3. `routers/playground_approvals.py:44` — accepts `x_user_sub` and never uses it; returns every
+   user's playground approvals.
+4. Literal-identity fallbacks the P3 commit message said it had deleted, still live:
+   `datasets.py:108`, `eval_runner.py:306`, `playground.py:1894`,
+   `composite_workflows.py:222, 992, 1072, 1271`.
+5. `memory.py:198`, `:259` — `if user_id:` per-user scoping with no `else`. Already declared a
+   Tighten (S9) concern.
+
+**Correct template when picking these up:** `routers/eval_runner.py:472-474` and
+`routers/composite_workflows.py:204` — an explicit `else` that NARROWS, with the deny-by-default
+rationale in a comment.
+
+**Not a bug — do not re-report:** the eight `can_manage_artifact` 403s in `routers/triggers.py`
+(`:65, 233, 271, 312`) and `routers/composite_workflows.py` (`:776, 867, 905, 939`) are gated on
+`ENFORCE_TRIGGER_MGMT`, which is `False` (`rbac.py:237`). They log-and-permit today, knowingly
+carried by R4.
+
 ## G-D45-1 — Decision 45 filters tools at CALL time, not at PLAN time — 2026-08-09
 
 **not-yet-wired (debt).** Raised by Kalyan while reviewing identity P3. **Agreed — this is real.**

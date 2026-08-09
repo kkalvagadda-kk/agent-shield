@@ -610,15 +610,20 @@ done
 kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request, json
 base = 'http://localhost:8000/api/v1/playground/datasets'
-for user in ('s13-user', 's13-fb-user', 's13-test'):
-    req = urllib.request.Request(base, headers={'X-User-Sub': user})
+# ONE authenticated pass, not a loop over invented owner strings. Since 0.2.281 the dataset
+# router derives its caller from the credential on every route, so (a) X-User-Sub authenticates
+# nothing and this cleanup silently 401'd, and (b) the datasets this suite creates are now
+# owned by the CREDENTIAL's subject, which is one identity — there is nothing to iterate.
+AUTH = {'Authorization': 'Bearer ${E2E_TOKEN}'}
+if True:
+    req = urllib.request.Request(base, headers=AUTH)
     try:
         r = urllib.request.urlopen(req, timeout=5)
         datasets = json.loads(r.read())
         for ds in datasets:
             if 's13-eval-ds' in ds.get('name', ''):
                 dreq = urllib.request.Request(base + '/' + str(ds['id']),
-                    headers={'X-User-Sub': user}, method='DELETE')
+                    headers=AUTH, method='DELETE')
                 try:
                     urllib.request.urlopen(dreq, timeout=5)
                 except Exception:

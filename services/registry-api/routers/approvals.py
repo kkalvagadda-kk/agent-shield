@@ -422,6 +422,78 @@ async def _caller_can_review(
     return await _has_authority_for_tool(caller, approval.tool_name, db)
 
 
+async def _require_authority_to_decide(
+    caller: str, approval: Approval, db: AsyncSession
+) -> None:
+    """Raise 403 unless `caller` may decide `approval`. One rule, one place.
+
+    `caller` MUST already be a verified human subject (`Caller.require_user_sub()`); this
+    function answers "may this person decide THIS approval", not "who is calling".
+
+    A DAEMON trigger-run's approval is routed ASYNC to a reviewer role (WS-2 T011) — no live
+    user is on the connection — so it is gated by the routed reviewer scope, NOT the per-tool
+    ApprovalAuthority path. Deriving a non-None `reviewer_scope` IS the discriminator
+    (explicit, no `agent_class` sniffing).
+
+    PLATFORM-ADMIN SPECIAL CASE: an admin-role caller may decide ANY approval, in any
+    context, without also holding a per-tool grant. Admins are the trusted reviewers the
+    console is built for; requiring a per-tool grant on top of the role is what 403'd them.
+    Roles come from `user_team_assignments`, the same source as `/me`.
+
+    WHY THIS IS A FUNCTION NOW. The rule used to be inline in `decide_approval` only, so
+    `reopen_approval` — which resets a decided approval back to `pending` and is therefore
+    the cheaper way to reach the same outcome — enforced nothing. Two copies of an
+    authorization rule is two places to forget.
+
+    The guards below are UNCONDITIONAL. They used to read
+    `if caller and caller != "system" and not caller_is_admin:` — two dead operands wrapped
+    around a live decision:
+
+      * `caller and` made an authorization guard NO-OP when its own subject was falsy, i.e.
+        fail OPEN. `caller` was truthy only by accident: it used to fall back to
+        `body.reviewer_id`, a value the CALLER types. Identity P3 removed that fallback and
+        left the branch that leaned on it.
+      * `caller != "system"` was a bypass reachable only by typing the literal, which the
+        header path allowed and a verified JWT `sub` cannot be. The timeout worker never used
+        this route — it mutates the row in-process and POSTs the pod directly
+        (`approval_timeout_worker.py`) — so nothing legitimate needed it.
+
+    A guard with nothing to skip cannot be skipped.
+    """
+    caller_is_admin = bool((await _caller_roles(caller, db)) & _ADMIN_ROLES)
+    if caller_is_admin:
+        return
+
+    reviewer_scope, _ = await _derive_reviewer_audit(approval, None, db)
+    if reviewer_scope is not None:
+        # Daemon approval → fail-closed reviewer-role authority. A caller not in the
+        # reviewer scope (nor an explicit grantee) is REJECTED, never silently allowed.
+        if not await _caller_can_review(caller, approval, reviewer_scope, db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="not_authorized_to_decide",
+            )
+        return
+
+    if approval.context == "production":
+        # Interactive / user-delegated production approval — per-tool grant path.
+        if await _has_authority_for_tool(caller, approval.tool_name, db):
+            return
+        # Or the tool carries a role-based authority record. Existence check —
+        # scalar_one_or_none() would 500 on 2+ role rows for one tool.
+        role_q = select(ApprovalAuthority).where(
+            ApprovalAuthority.resource_type == "tool",
+            ApprovalAuthority.resource_id == approval.tool_name,
+            ApprovalAuthority.revoked_at.is_(None),
+            ApprovalAuthority.approver_role.in_(list(_ADMIN_ROLES)),
+        ).limit(1)
+        if (await db.execute(role_q)).first() is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="not_authorized_to_decide",
+            )
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/approvals/
 # ---------------------------------------------------------------------------
@@ -579,14 +651,14 @@ async def list_approvals(
     # An unauthenticated caller used to fall through with caller_sub=None, which SKIPPED
     # the scoping block entirely and returned every team's approval queue. "No identity"
     # must never be the widest identity.
-    if not identity.is_authenticated:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required to list approvals.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    caller_sub = identity.sub
-    if caller_sub and not (await _caller_roles(caller_sub, db)) & _ADMIN_ROLES:
+    #
+    # `require_user_sub()` rather than `is_authenticated`: the latter is true for a service
+    # token, whose `sub` is NOT guaranteed non-empty (caller_from_claims returns the service
+    # arm before the empty-`sub` check) — and an empty `caller_sub` skipped the very scoping
+    # block this 401 was added to protect. The queue is a human surface; there is no service
+    # that needs to read every team's pending approvals.
+    caller_sub = identity.require_user_sub()
+    if not (await _caller_roles(caller_sub, db)) & _ADMIN_ROLES:
         # Non-admin caller → scope to tools where they hold authority OR a tool that has
         # an admin-role authority record. (Admins skip this block and see everything.)
         auth_tool_names = await _get_authority_tool_names(caller_sub, db)
@@ -767,10 +839,20 @@ async def _load_provenance(
 )
 async def get_approval(
     approval_id: uuid.UUID,
+    # Identity P3 closed `list_approvals` on the rule "no identity must never be the widest
+    # identity", and `decide_approval` on "the first question is who are you, never what are
+    # you asking about" — but this route, the by-ID read of the SAME rows, kept no identity
+    # at all. It returns the full record plus `principal_display`, `requested_by`,
+    # `requested_by_team`, `deployment_name` and `environment`, so anyone holding an ID read
+    # a team's governance detail without a credential, and a 404-vs-200 answered whether an
+    # ID exists. T-S102-011 is the case: it was 404 on a random UUID, i.e. the row lookup ran
+    # before any auth decision.
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
     """Fetch a single approval. Reviewers call this first to get the current
     `version` field needed for the optimistic-lock PATCH."""
+    identity.require_user_sub()
     approval = await _resolve(approval_id, db)
     item = ApprovalResponse.model_validate(approval)
     # Provenance (requester) + WS-2 T011 reviewer scope / audit display — same
@@ -824,9 +906,9 @@ async def decide_approval(
     identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
-    """Submit approve/reject. Caller must have an active ApprovalAuthority
-    record for this approval's tool_name. 'system' bypasses authority check
-    (testing only). `version` must match current row version (optimistic lock)."""
+    """Submit approve/reject. Caller must be a HUMAN holding either an admin role, the
+    routed reviewer role, or an active ApprovalAuthority record for this approval's
+    tool_name. `version` must match current row version (optimistic lock)."""
     # AUTHENTICATE BEFORE TOUCHING THE ROW. This check sat AFTER `_resolve` in the first
     # cut of the P3 change and `T-S102-005` caught it: an uncredentialed caller got
     # 404 "Approval '<id>' not found" instead of 401, which both leaks existence — probe
@@ -834,60 +916,20 @@ async def decide_approval(
     # Same rule as the tool-unpublish path (Decision 47 step E), where 403 must win over
     # 409 so publish state is not disclosed to a caller with no authority: the FIRST
     # question is always "who are you", never "what are you asking about".
-    if not identity.is_authenticated:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required to decide an approval.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    caller = identity.sub
+    #
+    # `require_user_sub()` rather than `is_authenticated`, because "has a credential" was
+    # never the question this route needed answered. A SERVICE token passed that check and
+    # then got judged by `SELECT role FROM user_team_assignments WHERE user_sub = :sub`,
+    # which cannot tell a human from a service account: the scheduler was refused only
+    # because nothing had granted its subject a role. T-S102-010 grants it `platform-admin`
+    # and the decide returned 200 — a service approving a real pending HITL request. HITL is
+    # the control that stops an agent taking a dangerous action, so the actor must be a
+    # person, decided on `kind` before any role lookup runs.
+    caller = identity.require_user_sub()
 
     approval = await _resolve(approval_id, db)
 
-    # Authority check. A DAEMON trigger-run's approval is routed ASYNC to a reviewer
-    # role (WS-2 T011) — no live user is on the connection — so it is gated by the
-    # routed reviewer scope, NOT the per-tool ApprovalAuthority path. Deriving a
-    # non-None reviewer_scope IS the discriminator (explicit, no agent_class sniffing).
-    # PLATFORM-ADMIN SPECIAL CASE: an admin-role caller may decide ANY approval, in any
-    # context, without also holding a per-tool ApprovalAuthority grant. Admins are the
-    # trusted reviewers the console is built for; requiring a per-tool grant on top of the
-    # role is what 403'd them. Roles come from user_team_assignments (same source as /me).
-    caller_is_admin = bool(
-        caller
-        and caller != "system"
-        and (await _caller_roles(caller, db)) & _ADMIN_ROLES
-    )
-    reviewer_scope, _ = await _derive_reviewer_audit(approval, None, db)
-    if reviewer_scope is not None:
-        # Daemon approval → fail-closed reviewer-role authority. A caller not in the
-        # reviewer scope (nor an admin / explicit grantee) is REJECTED (403), never
-        # silently allowed. 'system' is the internal auto-actor (timeout worker).
-        if caller and caller != "system" and not caller_is_admin:
-            if not await _caller_can_review(caller, approval, reviewer_scope, db):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="not_authorized_to_decide",
-                )
-    elif approval.context == "production":
-        # Interactive / user-delegated production approval — per-tool grant path, unless
-        # the caller is an admin (special case above).
-        if caller and caller != "system" and not caller_is_admin:
-            has_auth = await _has_authority_for_tool(caller, approval.tool_name, db)
-            if not has_auth:
-                # Check if the tool has a role-based authority record (existence check —
-                # scalar_one_or_none() would 500 on 2+ role rows for one tool).
-                role_q = select(ApprovalAuthority).where(
-                    ApprovalAuthority.resource_type == "tool",
-                    ApprovalAuthority.resource_id == approval.tool_name,
-                    ApprovalAuthority.revoked_at.is_(None),
-                    ApprovalAuthority.approver_role.in_(list(_ADMIN_ROLES)),
-                ).limit(1)
-                role_result = await db.execute(role_q)
-                if role_result.first() is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="not_authorized_to_decide",
-                    )
+    await _require_authority_to_decide(caller, approval, db)
 
     if approval.status != "pending":
         raise HTTPException(
@@ -960,13 +1002,28 @@ async def decide_approval(
 async def reopen_approval(
     approval_id: uuid.UUID,
     body: ReopenRequest,
+    # Reopening is a DECISION ABOUT A DECISION and it had no identity parameter at all.
+    # It resets a `rejected` or `timed_out` approval to `pending`, clears `reviewer_id` and
+    # `reviewer_notes`, and grants a fresh expiry window — so reject → reopen → decide was a
+    # complete route around HITL for a caller with no credential, and it also erased the
+    # record of who rejected it. `list_approvals` and `decide_approval` in this same file
+    # both got `resolve_caller` in P3; this one was missed. T-S102-012 is the case.
+    identity: Caller = Depends(resolve_caller),
     db: AsyncSession = Depends(get_db),
 ) -> ApprovalResponse:
     """Reset a timed-out or rejected approval back to 'pending' with a fresh expiry window.
 
+    Requires the same authority as deciding it: reopening is how a decided approval becomes
+    decidable again, so anything less would be the cheaper way in.
+
     Only approvals in 'timed_out' or 'rejected' status may be reopened.
     Attempting to reopen a 'pending' or 'approved' approval returns 409."""
+    caller = identity.require_user_sub()
     approval = await _resolve(approval_id, db)
+
+    # SAME authority as decide_approval, deliberately sharing one helper rather than
+    # restating the rule: a second copy is a second thing to forget to update.
+    await _require_authority_to_decide(caller, approval, db)
 
     if approval.status in ("pending", "approved"):
         raise HTTPException(
