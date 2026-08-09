@@ -63,13 +63,21 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment, AgentRun, EvalRun, Approval
 BASE="http://localhost:8000/api/v1"
-# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
-# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
-# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
+# AUTH IS ON THE CLIENT (auth=BearerAuth()), NOT IN THIS FILE.
+# The R3/E2E_SUB scripted passes spliced BASH lines into this Python heredoc
+# (`source .../lib/e2e-auth.sh`, `e2e_set_token ...`). Python received shell text
+# and died with SyntaxError, so the driver produced no result and the suite
+# reported a driver error instead of a test failure. Removed 2026-08-09; the
+# suite already sourced the lib, called e2e_require_token and e2e_install_pyauth
+# ABOVE the heredoc, which is where they belong.
 
-H={"X-User-Sub":"${E2E_SUB}","X-User-Team":"platform"}
+# X-User-Sub removed 2026-08-09: this heredoc is QUOTED, so "${E2E_SUB}" was never
+# interpolated and the header carried that literal 12-character string. It is a
+# fallback the handlers only consult when there is no token (armed_by =
+# (user or {}).get("sub") or x_user_sub), and BearerAuth() below always supplies
+# one — so the value was both wrong and unused. Sending a real sub would need it
+# threaded via env, which nothing here asserts on.
+H={"X-User-Team":"platform"}
 SFX=uuid.uuid4().hex[:6]
 WORK=f"s65-work-{SFX}"; FINAL=f"s65-final-{SFX}"
 WORK_INSTR=("You answer factual questions. Reply with ONLY the answer — no preamble. "

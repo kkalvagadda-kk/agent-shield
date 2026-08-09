@@ -91,7 +91,14 @@ from models import (Agent, AgentVersion, Deployment, AgentIdentity, AgentTrigger
 from identity import workflow_service_subject
 
 BASE = "http://localhost:8000/api/v1"
-ADMIN = "${E2E_SUB}"
+# ADMIN comes from the ENVIRONMENT, not from heredoc interpolation.
+# This heredoc is QUOTED (`<<'PY'`), so `${E2E_SUB}` is NEVER expanded — it arrived as
+# that literal 12-character string. Decorative in the X-User-Sub header below (the server
+# has ignored it since R2/R3), but this suite also COMPARES it: `trig.armed_by == ADMIN`
+# could never be true, and `rb != ADMIN` passed for the wrong reason. The 748c2fd pass
+# that introduced ${E2E_SUB} wrote it into quoted heredocs across many suites; this is the
+# only one where an assertion depended on it.
+ADMIN = os.environ["S71_ADMIN_SUB"]
 import sys as _sys; _sys.path.insert(0, "/tmp")
 # Per-REQUEST auth: Keycloak tokens live 300s and these drivers run far longer.
 # A static Authorization header is evaluated once at client construction and dies
@@ -570,7 +577,7 @@ PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume+4 modes+alert — can take many min)…"
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
-  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
+  "cd /app && PYTHONPATH=/app S71_OUT=$OUTFILE S71_ADMIN_SUB=$E2E_SUB nohup python3 $DRIVER > $RUNLOG 2>&1 & echo started"
 
 for i in $(seq 1 300); do   # up to ~25 min (prod deploy + park + resume + 4 workflow modes + alert)
   sleep 5

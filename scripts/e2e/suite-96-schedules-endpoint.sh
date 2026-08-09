@@ -87,16 +87,24 @@ from db import AsyncSessionLocal
 from models import Agent, AgentVersion, Deployment
 
 BASE = "http://localhost:8000/api/v1"
-# R2/R3 gated agents mutations; the relative-path call form hid this from earlier greps.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
+# AUTH IS ON THE CLIENT (auth=BearerAuth()), NOT IN THIS FILE.
+# The R3/E2E_SUB scripted passes spliced BASH lines into this Python heredoc
+# (`source .../lib/e2e-auth.sh`, `e2e_set_token ...`). Python received shell text
+# and died with SyntaxError, so the driver produced no result and the suite
+# reported a driver error instead of a test failure. Removed 2026-08-09; the
+# suite already sourced the lib, called e2e_require_token and e2e_install_pyauth
+# ABOVE the heredoc, which is where they belong.
 
-ADMIN = "${E2E_SUB}"
+# X-User-Sub removed 2026-08-09: this heredoc is QUOTED, so "${E2E_SUB}" was never
+# interpolated and the header carried that literal 12-character string. It is a
+# fallback the handlers only consult when there is no token (armed_by =
+# (user or {}).get("sub") or x_user_sub), and BearerAuth() below always supplies
+# one — so the value was both wrong and unused. Sending a real sub would need it
+# threaded via env, which nothing here asserts on.
 # Bearer: POST /agents/ is gated (R2). This suite passed only because its agent create
 # tolerates a non-201, so the 401 was absorbed and the later cases ran on rows left
 # behind by earlier runs — green while asserting against stale fixtures.
-H = {"X-User-Sub": ADMIN, "X-User-Team": "platform",
-     "Authorization": "Bearer ${E2E_TOKEN}"}
+H = {"X-User-Team": "platform"}
 OUT = os.environ["S96_OUT"]
 SFX = uuid.uuid4().hex[:6]
 SBX  = f"s96-sbx-{SFX}"      # sandbox only  -> will_fire False, env reason

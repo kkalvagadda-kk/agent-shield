@@ -53,13 +53,22 @@ from sqlalchemy import select, desc
 from db import AsyncSessionLocal
 from models import Agent, Deployment, PlaygroundRun
 BASE = "http://localhost:8000/api/v1"
-# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
-# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
-# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
-
-H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
+# AUTHENTICATION LIVES ON THE CLIENT, NOT IN THIS DICT.
+# The R3 Bearer pass inserted two BASH lines here — `source .../lib/e2e-auth.sh` and
+# `e2e_set_token ...` — INSIDE the `<<'PY'` heredoc that writes this file. Python then
+# got shell text and died with `SyntaxError: invalid syntax` at the `source` line, so the
+# driver never produced a result file and the suite reported "no result file" rather than
+# a test failure. It stayed broken from 748c2fd until 2026-08-09.
+#
+# The suite already authenticates correctly and always did: it sources the lib at the top,
+# calls e2e_install_pyauth, and the client below is built with `auth=BearerAuth()`, which
+# re-mints per request (the token lifetime is 300s and this suite runs longer).
+#
+# X-User-Sub is gone rather than fixed. The heredoc is QUOTED (`<<'PY'`), so `${E2E_SUB}`
+# was never interpolated — it would have been sent as that literal string. A forged-looking
+# sub header is also exactly what R2/R3 deleted from the handlers; BearerAuth is the
+# identity, and the team header is all this driver still needs.
+H = {"X-User-Team": "platform"}
 OUT = os.environ["S68_OUT"]
 SFX = uuid.uuid4().hex[:6]
 NAME = f"s68-daemon-{SFX}"

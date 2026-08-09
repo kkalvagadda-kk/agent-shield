@@ -327,6 +327,51 @@ for p in sorted(pathlib.Path("scripts/e2e").glob("suite-*.sh")):
                 f"block early, which truncates the program bash hands to python3"
             )
 
+    # 8c — a HEREDOC-written Python driver must compile too.
+    #
+    # Rule 8b covers `python3 -c '<program>'`. Several suites instead write the driver to a
+    # file first (`bash -c "cat > $DRIVER" <<'PY' ... PY`) and run it detached, and 8b is
+    # blind to those. That blindness cost SIX suites: the R3 Bearer pass and the E2E_SUB
+    # pass both inserted `source .../lib/e2e-auth.sh` and `e2e_set_token ...` INSIDE the
+    # heredoc, so Python received shell text and died with `SyntaxError: invalid syntax`.
+    #
+    # The symptom is why it survived: a driver that never starts produces no result file,
+    # so the suite reports "no result file" / "driver did not finish" instead of a test
+    # failure. That reads as infrastructure flakiness, not as a broken suite. suite-64, 65,
+    # 66, 68, 94 and 96 sat broken from 748c2fd until 2026-08-09, when one of them was run
+    # as blast radius for an unrelated change.
+    #
+    # Same exact property as 8b: compile the heredoc body. Only bodies that are actually
+    # Python are checked — either the opening command mentions python3, or the body starts
+    # with an import.
+    _lines = t.splitlines()
+    for _i, _ln in enumerate(_lines):
+        _hd = re.search(r"<<-?\s*'([A-Za-z_][A-Za-z0-9_]*)'\s*(?:2>[^ ]*\s*)?$", _ln)
+        if not _hd:
+            continue
+        _term = _hd.group(1)
+        _end = None
+        for _j in range(_i + 1, len(_lines)):
+            if _lines[_j].strip() == _term:
+                _end = _j
+                break
+        if _end is None:
+            continue
+        _body = "\n".join(_lines[_i + 1:_end])
+        if not _body.strip():
+            continue
+        _first = _body.lstrip().split("\n")[0]
+        if "python3" not in _ln and not re.match(r"\s*(import|from)\s", _first):
+            continue
+        try:
+            compile(_body, "<heredoc>", "exec")
+        except SyntaxError as _se:
+            FAIL.append(
+                f"{p.name}:{_i + 1 + (_se.lineno or 1)}  heredoc-written Python driver does "
+                f"not compile ({_se.msg}) — usually a bash line (source/e2e_set_token) "
+                f"spliced INSIDE the heredoc, which makes the driver never run at all"
+            )
+
     # 8 — a header VARIABLE that carries no Authorization.
     # Rule 5 asks "does the file mention Authorization anywhere", which a suite passes by
     # authenticating just its cleanup. suite-29 and suite-40 did exactly that: the R3 pass

@@ -93,11 +93,13 @@ from db import AsyncSessionLocal
 from models import Agent, Deployment, AgentRun
 
 BASE = "http://localhost:8000/api/v1"
-# R2/R3 gated agents/tools/skills mutations. This suite authenticated with X-User-Sub
-# alone and has been 401ing on setup; the relative-path form `c.post('/agents/', ...)`
-# hid it from every earlier grep. Call e2e_set_token BARE (lib/e2e-auth.sh).
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
-e2e_set_token "$NAMESPACE" "$API_POD"
+# AUTH IS ON THE CLIENT (auth=BearerAuth()), NOT IN THIS FILE.
+# The R3/E2E_SUB scripted passes spliced BASH lines into this Python heredoc
+# (`source .../lib/e2e-auth.sh`, `e2e_set_token ...`). Python received shell text
+# and died with SyntaxError, so the driver produced no result and the suite
+# reported a driver error instead of a test failure. Removed 2026-08-09; the
+# suite already sourced the lib, called e2e_require_token and e2e_install_pyauth
+# ABOVE the heredoc, which is where they belong.
 
 # Trigger CRUD is gated by `require_user` (routers/triggers.py), and since R1/FR-11 so
 # are /llm-providers/, /agents/{name}/deploy and /agents/{name}/versions — `X-User-Sub`
@@ -107,7 +109,13 @@ e2e_set_token "$NAMESPACE" "$API_POD"
 # detached and its last deploy lands long after a single token would have expired. The
 # grant itself lives in lib/e2e_auth.py — one definition, every suite — rather than a
 # private token_for() copy.
-H = {"X-User-Sub": "${E2E_SUB}", "X-User-Team": "platform"}
+# X-User-Sub removed 2026-08-09: this heredoc is QUOTED, so "${E2E_SUB}" was never
+# interpolated and the header carried that literal 12-character string. It is a
+# fallback the handlers only consult when there is no token (armed_by =
+# (user or {}).get("sub") or x_user_sub), and BearerAuth() below always supplies
+# one — so the value was both wrong and unused. Sending a real sub would need it
+# threaded via env, which nothing here asserts on.
+H = {"X-User-Team": "platform"}
 try:
     mint()  # prove a token is obtainable NOW so a bad fixture fails loud, not at case 6
 except Exception as _exc:  # surfaced as a case failure below, never a silent skip
