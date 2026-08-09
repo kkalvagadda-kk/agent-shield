@@ -88,6 +88,33 @@ that never finishes and names nothing. `rehydrate` is now **total** by contract,
 its docstring and asserted by `T-S101-006`, rather than five copies of a try/except at the
 call sites.
 
+## Two MORE defects, found the same way, one commit later (`0.2.278`)
+
+Both were in the fix above. Neither was visible in the diff; both were obvious the moment
+the runs the suites had just produced were queried.
+
+**4. The production WORKFLOW parent was never anchored.** The fix wired the AGENT
+production path and stopped there. `workflow_orchestrator` derives every member child's
+anchor from its parent's (`inherit_anchor`), so an unanchored parent left the whole member
+tree unanchored — and a member that parks at HITL re-hydrated nothing. This is the *same
+shape as the original bug*: a claim true of one caller, applied to a family.
+
+**5. `JSONB` stored Python `None` as JSON `null`, not SQL NULL.** SQLAlchemy's `JSONB`
+defaults to `none_as_null=False`. So `run_context IS NOT NULL` was **TRUE for 52 rows that
+carried no identity**. Behaviour was never wrong — `rehydrate` deserializes JSON `null` to
+`None` and its `if not claims` guard treats it as absent — but the DATA lied, and an
+identity column that answers "yes, I have one" when it does not is precisely what a future
+audit query builds a wrong conclusion on. Same class as a permission-bearing field
+inventing its most permissive value when absent. Model now declares
+`JSONB(none_as_null=True)`; migration `0083` normalizes the existing rows; `T-S101-001b`
+holds the invariant.
+
+**How they were found matters more than what they were.** Not by re-reading the diff, and
+not by a test — by running `SELECT ... FROM agent_runs WHERE run_context IS NOT NULL` after
+the suites had gone green and looking at what came back. Six of the rows were real, 52 were
+`null`, and the `null` ones all traced to one unwired path. "Reason from the running
+product" applies to your own change, one hour old, as much as it does to a stale design doc.
+
 ## Lessons
 
 1. **A shared kwarg is not propagation.** Threading a parameter through a helper is the

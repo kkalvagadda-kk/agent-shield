@@ -366,6 +366,24 @@ async def _start_workflow_run(body: InternalRunStartRequest, db: AsyncSession) -
         # parked approval can resolve armed_by + reviewer-role config at read time
         # (WS-2 T011 — member walks parent_run_id → this parent → trigger_id).
         trigger_id=body.trigger_id,
+        # ── Identity P1: anchor the WORKFLOW parent ──────────────────────────
+        # This path was missed in the first cut, which wired only the AGENT production
+        # run. The consequence was not cosmetic: `workflow_orchestrator` builds each
+        # member child's anchor with `inherit_anchor(parent.run_context, ...)`, so an
+        # unanchored parent left EVERY member unanchored too, and a member that parks at
+        # HITL then re-hydrated nothing. Found by querying the runs the suites had just
+        # produced rather than by re-reading the diff.
+        #
+        # Same rule as the agent path: straight from the resolved Principal, never
+        # re-derived. A daemon workflow keeps user_id="" and carries its service subject
+        # in service_name — reading run_by into user_sub would hand it a fabricated human.
+        run_context=anchor_value(build_context(
+            user_sub=principal.user_id,
+            user_team=wf.team or "",
+            origin="production",
+            is_service_call=principal.is_service,
+            service_name=principal.run_by if principal.is_service else None,
+        )),
     )
     db.add(run)
     await db.flush()

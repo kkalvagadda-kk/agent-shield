@@ -25,6 +25,7 @@
 #
 # CASES
 #   T-S101-001 — migration 0082 applied: run_context exists on BOTH run tables
+#   T-S101-001b — an absent anchor is SQL NULL, never JSON null (0083)
 #   T-S101-002 — a REAL POST /playground/runs writes an anchor naming the caller
 #   T-S101-003 — the anchor re-hydrates into a token that VERIFIES with the same identity
 #   T-S101-004 — re-hydration works AFTER the original token has expired  ← the point
@@ -195,6 +196,23 @@ async def main():
     else:
         check("T-S101-004", False, "no run from 002 — case proved nothing")
 
+    # ── 001b — an absent anchor is SQL NULL, never JSON null ─────────────────
+    # Folded into 001 because it is the same question: does the column tell the truth
+    # about its own presence. SQLAlchemy JSONB defaults to none_as_null=False, so
+    # assigning Python None wrote JSON `null` — a value for which `run_context IS NOT
+    # NULL` is TRUE while there is no identity. 52 such rows existed in agent_runs before
+    # the fix (workflow member children inheriting from an unanchored parent). Behaviour
+    # was fine; the DATA lied, and every future audit query would inherit the lie.
+    async with AsyncSessionLocal() as s:
+        jn = {}
+        for tbl in ("playground_runs", "agent_runs"):
+            jn[tbl] = (await s.execute(text(
+                "SELECT count(*) FROM " + tbl + " WHERE jsonb_typeof(run_context) = :t"
+            ), {"t": "null"})).scalar()
+    check("T-S101-001b", all(v == 0 for v in jn.values()),
+          "rows storing JSON null instead of SQL NULL: %s (model declares "
+          "JSONB(none_as_null=True); migration 0083 cleaned the pre-existing ones)" % jn)
+
     # ── 005 — no anchor => NO token. Never a fabricated empty user ────────────
     async with AsyncSessionLocal() as s:
         missing = await anchor.rehydrate(s, str(uuid.uuid4()))
@@ -275,7 +293,7 @@ async def main():
 asyncio.run(main())
 ' 2>&1 || true)"
 
-for tid in T-S101-001 T-S101-002 T-S101-003 T-S101-004 T-S101-005 T-S101-006 T-S101-007 T-S101-008; do
+for tid in T-S101-001 T-S101-001b T-S101-002 T-S101-003 T-S101-004 T-S101-005 T-S101-006 T-S101-007 T-S101-008; do
   line="$(echo "$RESULT" | grep "^${tid}|" || true)"
   if [ -z "$line" ]; then
     record FAIL "${tid} produced no result  |  driver tail: $(echo "$RESULT" | tail -3 | tr '\n' ' ')"

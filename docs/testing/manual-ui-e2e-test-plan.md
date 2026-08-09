@@ -374,32 +374,40 @@ that the payload carries **no** `tools` key at all.
 **What closing it needs:** resolve a workflow's members → each member's bound tools →
 a cascade plan across the union. `plan_tool_cascade` is per-agent today.
 
-## G-P1-PROD — the PRODUCTION identity anchor is not proven on the cluster — 2026-08-09
+## G-P1-PROD — ✅ MOSTLY CLOSED 2026-08-09. Correcting my own over-pessimistic entry.
 
-**not-yet-wired (debt) — verification debt, not code debt.**
+**Original claim (wrong):** "the production anchor is proven structurally but NOT end to
+end, because the cluster has no running production agent deployment."
 
-`internal.py::start_internal_run` now builds a `RunContext` from the resolved `Principal`,
-writes it to `agent_runs.run_context` in the same transaction as the row, and passes the
-minted token to both the durable dispatch and the reactive `/chat` POST (`0.2.277`). That is
-proven by code review, an in-pod import check, and `suite-101`'s coverage of the anchor
-mechanics — but **not end to end**, because the cluster has **no running production agent
-deployment**. Every production run currently dies at the admission check
-(*"agent X has no running production deployment — it is deployed to sandbox"*) before
-identity is consulted.
+**Measured instead of assumed:** `suite-64` deploys REAL `-production` pods and runs a
+production workflow to completion with live LLM output; `suite-28` and `suite-94` produce
+production runs that reach a pod. Querying `agent_runs` afterwards found **6 real object
+anchors on `context='production'`** — including `evt-test-*` carrying a real human
+`user_sub`, and `s94-prodok-*` carrying `user_sub: ""` with a service name, which is the
+DAEMON case behaving exactly as designed (no human, service subject kept out of `user_sub`).
 
-So the sandbox/playground path is proven end to end (`T-S101-002/003/004`) and the
-production path is proven only structurally. Do not read `suite-101` 9/0 as "production
-identity works".
+So the production **agent** path IS proven end to end. The earlier entry generalized from
+`suite-37`, whose agent happens to be sandbox-only, to the whole platform.
 
-**What closes it:** the same fixture that closes `suite-37/45/59/60` — a pre-seeded,
-always-running PRODUCTION agent deployment. That one fixture is the highest-leverage test
-work left (see `docs/testing/red-test-ledger.md`), and it would turn this from a structural
-claim into an assertion.
+**The same query found two real defects, which is why this entry is worth keeping:**
 
-**How it was found:** `suite-37`'s ledger entry blamed exactly this code for its red. The
-code shipped, the suite did not move, and reading `agent_runs.error_message` showed it never
-reached a pod. A red-test root cause that is wrong is worse than none — it makes a suite look
-self-healing.
+1. The production **workflow** parent was never anchored — only the agent path was wired.
+   Because `workflow_orchestrator` derives each member child's anchor from the parent's,
+   an unanchored parent left every member unanchored, so a member parking at HITL
+   re-hydrated nothing. Fixed in `0.2.278`.
+2. `JSONB` defaults to `none_as_null=False`, so Python `None` was stored as JSON `null` —
+   a value for which `run_context IS NOT NULL` is **TRUE while there is no identity**. 52
+   such rows existed. Behaviour was always correct (`rehydrate` treats it as absent), but
+   the data lied to every audit query. Model now declares `JSONB(none_as_null=True)`;
+   migration `0083` normalizes the existing rows; `T-S101-001b` is the standing invariant.
+
+**Still open (small):** no suite ASSERTS on a production anchor — the evidence above is a
+manual query. Closing it needs a case in a suite that already deploys production pods
+(`suite-64` is the natural home).
+
+**Lesson worth more than the fix:** both defects were invisible in the diff and obvious in
+the data. "Read the running product, not the design doc" applies to your own change, one
+hour old, as much as to a stale doc.
 
 ## G-E1 — re-publishing an unpublished tool costs a trip through the AGENT's review — 2026-08-08
 
