@@ -1110,6 +1110,194 @@ for tid in T-S6-017 T-S6-018 T-S6-019 T-S6-020 T-S6-021 T-S6-022; do
 done
 
 # ---------------------------------------------------------------------------
+# T-S6-023..029 — Decision 47 #4: owner-initiated UNPUBLISH (the reverse)
+#
+# The forward direction (013..016) is a cascade a reviewer approves. The reverse is one
+# owner acting on one row, and the two are deliberately NOT symmetric. These seven cases
+# are the ways that asymmetry gets broken:
+#
+#   023  it works, and it SURVIVES A RELOAD. The optimistic response is not the assertion;
+#        the round trip is.
+#   024  a second unpublish is 409, not a silent 200. A UI offering the control on a
+#        private row is a bug, and a quiet success hides it.
+#   025  authority is checked BEFORE state: an unauthorized caller gets 403 on a PRIVATE
+#        tool, not the 409 that would tell them what state it is in.
+#   026  the OWNING-TEAM arm, exercised by someone who did not create the tool. Without
+#        it a tool becomes unmaintainable the day its creator leaves.
+#   027  it does NOT cascade. The agent stays published and the binding survives —
+#        unpublish removes discoverability, never capability.
+#   028  the courtesy list has a real source. The UI names the published agents still
+#        bound; if GET /tools/{id}/agents could not answer that, the dialog would be
+#        showing a number it invented.
+#   029  there is still no way to publish a tool directly. If one appeared, every guard
+#        013..016 proves would have a second door with no reviewer behind it.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- T-S6-023..029: Decision 47 owner-initiated unpublish ---"
+
+# Late in a long suite: the 300s token may already be dead (lib/e2e-auth.sh).
+e2e_refresh_token "$NAMESPACE" "$API_POD"
+
+# A CONTRIBUTOR in team `platform` — not a platform-admin, so the admin arm cannot mask a
+# broken owning-team arm in 026, and not the creator of anything here.
+UNPUB_PERSONA_TOK="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "e2e-unpub-member" "contributor")" || UNPUB_PERSONA_TOK=""
+
+UNPUB_OUT=$(kubectl exec -n "$NAMESPACE" "$API_POD" -- env TOK="${E2E_TOKEN}" PTOK="${UNPUB_PERSONA_TOK}" python3 -c '
+import json, os, time, urllib.request, urllib.error
+
+BASE = "http://localhost:8000/api/v1"
+TOK = os.environ["TOK"]
+PTOK = os.environ.get("PTOK") or ""
+TS = str(int(time.time()))
+out = []
+
+def call(method, path, body=None, tok=None):
+    data = json.dumps(body).encode() if body is not None else None
+    h = {"Authorization": "Bearer " + (tok or TOK)}
+    if data: h["Content-Type"] = "application/json"
+    req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try: return e.code, (json.loads(raw) if raw else {})
+        except Exception: return e.code, {"raw": raw[:200].decode("utf-8", "replace")}
+
+def check(tid, ok, detail):
+    verdict = "PASS" if ok else "FAIL"
+    out.append(tid + "|" + verdict + "|" + str(detail)[:320])
+
+AGENT = "s6u-unpub-" + TS
+TOOL_A = "s6u_a_" + TS      # platform-owned, cascades, unpublished by its CREATOR
+TOOL_B = "s6u_b_" + TS      # platform-owned, cascades, unpublished by a TEAMMATE
+TOOL_C = "s6u_c_" + TS      # operations-owned, stays private, used for the 403
+
+IDS = ["T-S6-023", "T-S6-024", "T-S6-025", "T-S6-026", "T-S6-027", "T-S6-028", "T-S6-029"]
+
+# --- fixtures -------------------------------------------------------------
+call("POST", "/teams/", {"name": "operations", "namespace": "agents-operations"})
+def mk(name, team=None):
+    body = {"name": name, "type": "http", "description": "unpublish probe",
+            "risk_level": "low", "http_method": "GET",
+            "http_url": "https://example.invalid/" + name}
+    if team: body["owner_team"] = team
+    _, r = call("POST", "/tools/", body)
+    return r.get("id")
+
+a_id, b_id, c_id = mk(TOOL_A), mk(TOOL_B), mk(TOOL_C, "operations")
+
+sc, _ = call("POST", "/agents/", {"name": AGENT, "team": "platform",
+                                  "description": "suite 6 unpublish probe"})
+if sc != 201 or not (a_id and b_id and c_id):
+    for tid in IDS:
+        check(tid, False, "fixture failed: agent=%s a=%s b=%s c=%s" % (sc, a_id, b_id, c_id))
+    print("\n".join(out)); raise SystemExit(0)
+
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": a_id})
+call("POST", "/agents/" + AGENT + "/tools", {"tool_id": b_id})
+call("POST", "/agents/" + AGENT + "/versions",
+     {"image_tag": "registry.internal/s6u:v1", "eval_passed": True, "adversarial_eval_passed": True})
+_, pub = call("POST", "/agents/" + AGENT + "/publish", {})
+pr_id = pub.get("publish_request_id")
+apr = 0
+if pr_id:
+    apr, _ = call("POST", "/admin/publish-requests/" + pr_id + "/approve", {"grantee_teams": ["platform"]})
+
+# The whole block is about taking something OUT of the catalog. If the cascade never put
+# it in, every case below would pass vacuously — so gate on it.
+_, a_now = call("GET", "/tools/" + str(a_id))
+_, b_now = call("GET", "/tools/" + str(b_id))
+if a_now.get("publish_status") != "published" or b_now.get("publish_status") != "published":
+    for tid in IDS:
+        check(tid, False, "cascade did not publish the fixtures (approve=%s a=%s b=%s) "
+                          "— cases proved nothing"
+              % (apr, a_now.get("publish_status"), b_now.get("publish_status")))
+    call("DELETE", "/agents/" + AGENT)
+    for tid in (a_id, b_id, c_id): call("DELETE", "/tools/" + str(tid))
+    print("\n".join(out)); raise SystemExit(0)
+
+# --- 028: the courtesy list has a real source, BEFORE anything changes ----
+# Ordered first because this is what the dialog reads at the moment the user opens it.
+_, bound = call("GET", "/tools/" + str(a_id) + "/agents")
+names = [i.get("name") for i in bound.get("items", [])]
+pubd = [i.get("name") for i in bound.get("items", []) if i.get("publish_status") == "published"]
+check("T-S6-028", AGENT in names and AGENT in pubd,
+      "bound=%s published_bound=%s (the dialog names these; a count with no source is invented)"
+      % (names, pubd))
+
+# --- 023: unpublish, then RELOAD FROM THE BACKEND -------------------------
+code, body = call("POST", "/tools/" + str(a_id) + "/unpublish")
+_, reread = call("GET", "/tools/" + str(a_id))
+check("T-S6-023", code == 200 and body.get("publish_status") == "private"
+      and reread.get("publish_status") == "private",
+      "code=%s response=%s reread=%s" % (code, body.get("publish_status"), reread.get("publish_status")))
+
+# --- 024: a second unpublish is a CONFLICT, not a quiet success -----------
+code, body = call("POST", "/tools/" + str(a_id) + "/unpublish")
+det = body.get("detail") or {}
+err = det.get("error") if isinstance(det, dict) else str(det)
+check("T-S6-024", code == 409 and err == "tool_not_published",
+      "code=%s error=%s" % (code, err))
+
+# --- 027: NO cascade — the agent and the binding are untouched ------------
+_, ag = call("GET", "/agents/" + AGENT)
+_, ag_tools = call("GET", "/agents/" + AGENT + "/tools")
+still_bound = any(t.get("id") == a_id or t.get("name") == TOOL_A
+                  for t in (ag_tools.get("items", []) if isinstance(ag_tools, dict) else ag_tools))
+check("T-S6-027", ag.get("publish_status") == "published" and still_bound,
+      "agent_publish_status=%s tool_still_bound=%s (unpublish removes discoverability, "
+      "never capability)" % (ag.get("publish_status"), still_bound))
+
+# --- 025 / 026: the two persona arms --------------------------------------
+if not PTOK:
+    check("T-S6-025", False, "no persona token — case proved nothing")
+    check("T-S6-026", False, "no persona token — case proved nothing")
+else:
+    # 025 — TOOL_C is PRIVATE and owned by another team. A caller with no authority must
+    # get 403, not the 409 that would disclose its state.
+    code, body = call("POST", "/tools/" + str(c_id) + "/unpublish", tok=PTOK)
+    check("T-S6-025", code == 403,
+          "code=%s (403 must win over 409: authority before state) detail=%s"
+          % (code, str(body.get("detail"))[:120]))
+
+    # 026 — same caller, a tool their TEAM owns but they did not create.
+    code, body = call("POST", "/tools/" + str(b_id) + "/unpublish", tok=PTOK)
+    _, b_re = call("GET", "/tools/" + str(b_id))
+    check("T-S6-026", code == 200 and b_re.get("publish_status") == "private",
+          "code=%s reread=%s (owning-team arm, caller is NOT the creator)"
+          % (code, b_re.get("publish_status")))
+
+# --- 029: still no direct publish path for a tool -------------------------
+code, _ = call("POST", "/tools/" + str(a_id) + "/publish", {})
+check("T-S6-029", code in (404, 405),
+      "code=%s (Decision 47 option C: a tool re-enters the catalog only by riding along "
+      "with an agent a reviewer approved)" % code)
+
+# --- cleanup --------------------------------------------------------------
+call("DELETE", "/agents/" + AGENT)
+for tid in (a_id, b_id, c_id):
+    if tid: call("DELETE", "/tools/" + str(tid))
+
+print("\n".join(out))
+' 2>&1 || true)
+
+for tid in T-S6-023 T-S6-024 T-S6-025 T-S6-026 T-S6-027 T-S6-028 T-S6-029; do
+  line="$(echo "$UNPUB_OUT" | grep "^${tid}|" || true)"
+  if [ -z "$line" ]; then
+    echo "  FAIL: ${tid} produced no result | driver tail: $(echo "$UNPUB_OUT" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  elif [ "$(echo "$line" | cut -d'|' -f2)" = "PASS" ]; then
+    echo "  PASS: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${tid} $(echo "$line" | cut -d'|' -f3)"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

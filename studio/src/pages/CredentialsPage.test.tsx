@@ -54,6 +54,11 @@ const SERPER_TOOL: RegistryTool = {
   http_url: "https://google.serper.dev/search",
   http_headers: { "Content-Type": "application/json", "X-API-KEY": "{{serper_api_key}}" },
   config: {},
+  // Required on RegistryTool since Decision 47 step E surfaced catalog visibility on
+  // the client. Irrelevant to this file's subject (credential key derivation), but a
+  // fixture that omits a required field is a fixture that has drifted from the type.
+  publish_status: "published",
+  created_by: "someone-else",
 };
 
 function seedApis() {

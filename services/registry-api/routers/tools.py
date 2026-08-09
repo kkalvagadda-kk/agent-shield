@@ -9,7 +9,13 @@ Endpoints
   PUT    /api/v1/tools/{id}          — update tool fields
   DELETE /api/v1/tools/{id}          — deprecate tool (soft-delete)
   GET    /api/v1/tools/{id}/agents   — list agents bound to this tool
+  POST   /api/v1/tools/{id}/unpublish — take a tool back out of the org-wide catalog
   POST   /api/v1/tools/{id}/test     — test-invoke the tool (stub)
+
+There is deliberately NO `POST /tools/{id}/publish`. Decision 47 chose option C: tools
+become org-wide by riding along with an agent that a reviewer approved, never on their
+own say-so. A direct publish would be a second door to the same capability with no
+review behind it — the exact shape this repo has three postmortems for.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from sqlalchemy.orm import selectinload
 
 from auth_middleware import get_optional_user, require_user
 from catalog_visibility import catalog_visibility_clause
+from publish_cascade import may_unpublish_tool, published_agents_using
 from rbac import get_user_global_role, get_user_team
 from db import get_db
 from models import Agent, AgentTool, AuthConfig, Tool
@@ -384,6 +391,101 @@ async def list_agents_for_tool(
         items=[AgentResponse.model_validate(a) for a in rows],
         total=total,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/tools/{id}/unpublish
+# ---------------------------------------------------------------------------
+@router.post(
+    "/{tool_id}/unpublish",
+    response_model=ToolResponse,
+    summary="Take a tool back out of the org-wide catalog",
+    dependencies=[Depends(require_user)],  # G-R3-6 — see create_tool above
+)
+async def unpublish_tool(
+    tool_id: uuid.UUID,
+    claims: dict = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+) -> ToolResponse:
+    """Reverse the cascade for ONE tool. Decision 47 #4.
+
+    WHY THIS EXISTS AT ALL
+    ----------------------
+    Without a reverse, catalog visibility only ever moves one way, and the drift is
+    unmeasurable because the metric has no other direction. That is not hypothetical:
+    174 of 174 tools were `published` before migration 0080, reached by a default nobody
+    revisited. The forward path is being built in this same decision; building the reverse
+    alongside it is the cheapest it will ever be.
+
+    WHAT IT DOES NOT DO
+    -------------------
+    * **It does not cascade.** Unpublishing a tool touches exactly one row. Agents bound
+      to it stay published and keep working — binding is by id and USE is governed by
+      `owner_team` plus grants, never by `publish_status`. The reverse of a cascade is not
+      a cascade: the forward direction is one reviewer's decision covering a set they were
+      shown (step D), while this is one owner's decision about one row, and fanning it out
+      would silently retract other teams' dependencies. Decision 47 rejected the mirror
+      case (cascade-unpublish on agent delete) for the same reason.
+    * **It does not check whether anyone is still using it.** `published_agents_using` is
+      rendered to the clicker as a courtesy. Making it a precondition would assert a
+      dependency that does not exist, and would let any team freeze another team's tool in
+      the catalog forever just by binding it to a published agent.
+
+    HOW A TOOL GETS BACK IN
+    -----------------------
+    By re-publishing an agent that binds it — `POST /agents/{name}/publish`, which is
+    idempotent and accepts an already-published agent. Note the consequence honestly: that
+    puts the AGENT back to `pending_review` until a reviewer approves, so re-publishing one
+    tool costs a round trip through the agent's review. That is Decision 47 option C
+    working as chosen, not an oversight, and it is why there is no tool-level publish
+    endpoint to "fix" it with.
+
+    409 rather than a silent no-op on an already-private tool: this is a state transition,
+    and a UI that offers the control on a private row is a bug that a quiet 200 would hide.
+    """
+    caller = claims["sub"]
+    tool = await _get_tool(tool_id, db)
+
+    authority = await may_unpublish_tool(db, tool, caller)
+    if not authority.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Cannot unpublish '{tool.name}': it is owned by team "
+                f"'{tool.owner_team or '(none)'}'. Only its creator, a member of the "
+                f"owning team, or a platform-admin may take it out of the catalog."
+            ),
+        )
+
+    if tool.publish_status != "published":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "tool_not_published",
+                "publish_status": tool.publish_status,
+            },
+        )
+
+    # Read BEFORE the write. This is the audit record — "what was still bound at the
+    # moment it left the catalog" is the question someone asks months later, and it is
+    # unanswerable afterwards. Computed and logged, never branched on: the moment this
+    # list gates the transition it stops being a courtesy and becomes a lock any team can
+    # apply to another team's tool.
+    still_bound = [a.name for a in await published_agents_using(db, tool.id)]
+
+    tool.publish_status = "private"
+    await db.commit()
+    await db.refresh(tool)
+    if tool.mcp_server_id is not None:
+        await db.refresh(tool, ["mcp_server"])
+    # The BASIS is logged, not just the fact: "which arm allowed this" is the part that
+    # matters when someone asks later why a tool left the catalog.
+    logger.info(
+        "unpublish_tool: tool=%r (%s) -> private by %s via %s; %d published agent(s) "
+        "still bound and unaffected: %s",
+        tool.name, tool.id, caller, authority.basis, len(still_bound), still_bound,
+    )
+    return _to_tool_response(tool)
 
 
 # ---------------------------------------------------------------------------

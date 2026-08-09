@@ -167,6 +167,17 @@ export interface RegistryTool {
   mcp_server_scan_results?: boolean | null;
   // Decision 27 / FR-MCP-51 — per-tool de-anonymize permission (every tool type).
   pii_deanonymize_allowed?: boolean;
+  // Catalog VISIBILITY — 'private' | 'published'. Distinct from `status`
+  // (active/deprecated/inactive), which is operational. `ToolResponse` has carried
+  // both since Decision 47 step B flipped the default to private; this interface
+  // omitted `publish_status`, so the screen could not show which of its rows were
+  // org-wide and which were the caller's own drafts. Required, not optional: the
+  // server declares it with no default for exactly this reason.
+  publish_status: string;
+  // The `created_by == caller` arm of both the visibility filter and the unpublish
+  // authority check. Needed here so the page can decide whether to offer Unpublish
+  // without a second round trip.
+  created_by: string | null;
 }
 
 /**
@@ -1060,6 +1071,29 @@ export const updateTool = async (
 
 export const deleteTool = async (id: string): Promise<void> => {
   await http.delete(`/tools/${id}`);
+};
+
+/** Agents bound to this tool. Used by the unpublish confirmation to name the
+ *  published agents that keep working afterwards — see `unpublishTool`. Returns
+ *  every binding regardless of publish status; the caller filters, because the
+ *  same endpoint serves "what would this change affect" and "what uses this". */
+export const listAgentsForTool = async (id: string): Promise<Paginated<Agent>> => {
+  const { data } = await http.get<Paginated<Agent>>(`/tools/${id}/agents`);
+  return data;
+};
+
+/** Take a tool back out of the org-wide catalog (Decision 47 #4).
+ *
+ *  There is intentionally no `publishTool` counterpart. Tools go org-wide only by
+ *  riding along with an agent a reviewer approved (Decision 47 option C); a direct
+ *  publish would be a second door to the same capability with no review behind it.
+ *  To put an unpublished tool back, re-publish an agent that binds it.
+ *
+ *  Throws 403 unless the caller is the tool's creator, in its owning team, or a
+ *  platform-admin; 409 if the tool is already private. */
+export const unpublishTool = async (id: string): Promise<RegistryTool> => {
+  const { data } = await http.post<RegistryTool>(`/tools/${id}/unpublish`);
+  return data;
 };
 
 // ---------------------------------------------------------------------------

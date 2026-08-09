@@ -173,3 +173,19 @@ accident later.
 - Workflow tool review (D-3, **deferred (intentional)** — the drawer says so on screen).
 - Editing anything from the drawer. It is a **read** surface; approve/reject remain the only
   writes.
+
+## 11. Step E — the reverse. Shipped, recorded elsewhere.
+
+This doc scopes step **D** only. Step **E** — owner-initiated unpublish,
+`POST /api/v1/tools/{id}/unpublish` — shipped in registry-api `0.2.275` / studio `0.1.188`,
+and its five sub-decisions (E-1..E-5) live in `docs/decisions.md` under Decision 47 rather
+than here, because each is a decision rather than a payload design.
+
+The one-line reason the two are not symmetric, so nobody reads this doc and infers a mirror:
+**D is one reviewer's decision over a set they were shown; E is one owner's decision over one
+row, and it does not cascade.** Fanning the reverse out would silently retract other teams'
+dependencies.
+
+Tests: `suite-6` `T-S6-023..029` (endpoint), `studio/e2e/tool-unpublish.spec.ts` (journey),
+7 Vitest cases on `ToolsPage`. Open gaps: **G-E1** (re-publishing costs a trip through the
+agent's review — deliberate), **G-E2** (skills have no forward publish path at all — debt).

@@ -1446,6 +1446,37 @@ for that rule being copied).
 Implemented: registry-api `0.2.274`, studio `0.1.187`.
 Design: `docs/design/publish-review-surface.md`.
 
+---
+
+### Step E — owner-initiated unpublish. Five sub-decisions, taken 2026-08-08.
+
+Consequence 4 of option C: without a reverse, visibility only ever moves one way and the
+drift is unmeasurable because the metric has no other direction. `POST
+/api/v1/tools/{id}/unpublish`.
+
+| Sub-decision | Options | **Choice** | Rationale |
+|---|---|---|---|
+| **E-1** who may act | creator+owning team (as written) · + platform-admin | **+ platform-admin** | The admin is the actor who *approved* the publish. Without the arm, the only person who can put a tool into the catalog cannot take it out — a one-way ratchet inside the fix for a one-way ratchet. |
+| **E-2** already private | idempotent 200 · 409 | **409 `tool_not_published`** | A state transition, not a PUT. A UI that offers the control on a private row is a bug, and a quiet 200 hides it. Cost accepted: a double-click shows an error for an action that succeeded, so the button is disabled while pending. |
+| **E-3** check order | state then authority · authority then state | **authority first** | An unauthorized caller must get 403, never the 409 that would disclose whether the tool is published. |
+| **E-4** bound published agents | block · warn · ignore | **warn, never block** | Unpublish removes discoverability, never capability — binding is by id and USE is governed by `owner_team` plus grants. Blocking would assert a dependency that does not exist and would let any team freeze another team's tool in the catalog by binding it to a published agent. Computed *before* the write and **logged**, because "what was still bound when it left" is unanswerable afterwards. |
+| **E-5** does it cascade | mirror the forward cascade · one row | **one row** | The forward direction is one reviewer's decision over a set they were *shown* (step D); this is one owner's decision over one row. Fanning it out would silently retract other teams' dependencies — the same reason Decision 47 rejected cascade-unpublish on agent delete. |
+| **mcp_tool rows** | refuse like DELETE · allow | **allow** | `delete_tool` refuses `mcp_tool` because the row's **existence** is owned upstream by the discovering server. Catalog visibility is not an upstream property; it is this platform's decision about its own catalog. Copying the refusal would have made a discovered tool that cascade-published unable to ever leave. |
+
+**Still no `POST /tools/{id}/publish`, and that is the point.** A tool re-enters the catalog
+only by riding along with an agent a reviewer approved (option C). Stated honestly: that
+costs a round trip through the agent's review, because `publish_agent` sets the agent back
+to `pending_review`. `T-S6-029` pins the absence so nobody "fixes" the friction by opening
+a second door with no reviewer behind it.
+
+**Skills are deliberately excluded.** They took the same private-by-default change in step B
+(`models.py:1371`) and **nothing publishes them** — `admin.approve_publish_request` has a
+`skill` branch with no producer anywhere. An unpublish for skills would be orphan code by
+construction. The missing forward path is a real defect, ledgered as **G-E2**, not silently
+absorbed here.
+
+Implemented: registry-api `0.2.275`, studio `0.1.188`.
+
 ## Summary of Locked Decisions
 
 | # | Area | Choice |

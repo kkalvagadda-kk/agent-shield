@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { Code, ExternalLink, Loader2, Pencil, Plus, Server, Trash2, Wrench, X } from 'lucide-react';
+import { Code, ExternalLink, EyeOff, Loader2, Pencil, Plus, Server, Trash2, Wrench, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
@@ -16,7 +16,9 @@ import {
   type CreateToolPayload,
   type RegistryTool,
 } from '../api/registryApi';
+import UnpublishToolDialog from '../components/tools/UnpublishToolDialog';
 import { useAuth } from '../contexts/AuthContext';
+import { canUnpublishTool } from '../lib/toolAuthority';
 import { cn } from '../lib/utils';
 
 // ---------------------------------------------------------------------------
@@ -82,6 +84,11 @@ export default function ToolsPage() {
   const qc = useQueryClient();
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [editingTool, setEditingTool] = useState<RegistryTool | null>(null);
+  const [unpublishing, setUnpublishing] = useState<RegistryTool | null>(null);
+  // The three arms of the unpublish rule need the caller's sub, team and role. All
+  // three are already on the auth context; see lib/toolAuthority.ts for why this is an
+  // affordance and the server is the authority.
+  const { user, team: myTeam, role } = useAuth();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['registry-tools'],
@@ -182,7 +189,12 @@ export default function ToolsPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-slate-100 bg-slate-50">
-                  {['Name', 'Type', 'Source', 'Risk', 'Team', 'Status', ''].map((h) => (
+                  {/* 'Visibility' is publish_status (private/published — who can SEE
+                      it); 'Status' is the operational lifecycle (active/deprecated).
+                      Two different questions that both used to be answered by one
+                      column, so the screen could not show which rows were org-wide
+                      after migration 0080 made private the default. */}
+                  {['Name', 'Type', 'Source', 'Risk', 'Team', 'Visibility', 'Status', ''].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider"
@@ -252,10 +264,42 @@ export default function ToolsPage() {
                       <td className="px-4 py-3 text-slate-600">
                         {tool.owner_team ?? '—'}
                       </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={cn(
+                            'badge',
+                            tool.publish_status === 'published'
+                              ? 'bg-blue-100 text-blue-700'
+                              : 'bg-slate-100 text-slate-600',
+                          )}
+                          data-testid={`tool-visibility-${tool.name}`}
+                        >
+                          {tool.publish_status === 'published' ? 'Published' : 'Private'}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 text-slate-600">
                         {tool.status ?? '—'}
                       </td>
                       <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-3">
+                        {/* Unpublish sits OUTSIDE the mcp/non-mcp branch on purpose.
+                            Delete refuses mcp_tool rows because the row's EXISTENCE is
+                            owned upstream by the MCP server that discovered it. Its
+                            catalog visibility is not an upstream property — it is this
+                            platform's decision about its own catalog. Copying the
+                            refusal would have put a one-way ratchet inside the fix for
+                            a one-way ratchet: a discovered tool that cascade-published
+                            with an agent could never leave the catalog again. */}
+                        {canUnpublishTool(tool, { sub: user?.sub ?? null, team: myTeam, role }) && (
+                          <button
+                            onClick={() => setUnpublishing(tool)}
+                            className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-900 transition-colors"
+                            data-testid={`tool-unpublish-${tool.name}`}
+                          >
+                            <EyeOff size={12} />
+                            Unpublish
+                          </button>
+                        )}
                         {/* MCP tools are server-owned: their lifecycle lives on the
                             MCP Servers screen, so no Edit/Delete here — only a link
                             back to the source server. */}
@@ -298,6 +342,7 @@ export default function ToolsPage() {
                             </button>
                           </div>
                         )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -306,6 +351,13 @@ export default function ToolsPage() {
             </table>
           </div>
         )
+      )}
+
+      {unpublishing && (
+        <UnpublishToolDialog
+          tool={unpublishing}
+          onClose={() => setUnpublishing(null)}
+        />
       )}
     </div>
   );

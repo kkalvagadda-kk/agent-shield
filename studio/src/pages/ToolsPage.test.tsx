@@ -11,6 +11,12 @@ vi.mock("../api/registryApi", () => ({
   listAllTools: vi.fn(),
   updateTool: vi.fn(),
   getMyTeam: vi.fn(),
+  // Reached only through UnpublishToolDialog. The mock factory replaces the WHOLE
+  // module, so an omitted export is `undefined` at the call site rather than a
+  // missing-mock error — the dialog would fail with "not a function" and the failure
+  // would name the dialog, not this list.
+  listAgentsForTool: vi.fn(),
+  unpublishTool: vi.fn(),
 }));
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
@@ -18,11 +24,26 @@ vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: v
 // isAtLeast() => false, so the DEFAULT for every test here is the non-admin path — which
 // is the one that regressed. The admin case overrides this mock explicitly.
 const isAtLeastMock = vi.fn<(r: string) => boolean>(() => false);
+// Decision 47 step E: the unpublish affordance reads sub/team/role off the same context.
+// Mutable so a test can BE the creator, a teammate, or an admin. Defaults to none of the
+// three, so every pre-existing test keeps the "no Unpublish button" world it was written in.
+const authState: { sub: string | null; team: string | null; role: string | null } = {
+  sub: null, team: null, role: null,
+};
 vi.mock("../contexts/AuthContext", () => ({
-  useAuth: () => ({ isAtLeast: isAtLeastMock, user: null, logout: vi.fn() }),
+  useAuth: () => ({
+    isAtLeast: isAtLeastMock,
+    user: authState.sub ? { sub: authState.sub } : null,
+    team: authState.team,
+    role: authState.role,
+    logout: vi.fn(),
+  }),
 }));
 
-import { createTool, listAuthConfigs, listAllTools, updateTool, getMyTeam } from "../api/registryApi";
+import {
+  createTool, listAuthConfigs, listAllTools, updateTool, getMyTeam,
+  listAgentsForTool, unpublishTool,
+} from "../api/registryApi";
 
 const mock = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
 
@@ -91,8 +112,12 @@ beforeEach(() => {
   mock(listAuthConfigs).mockResolvedValue({ items: [], total: 0 });
   mock(getMyTeam).mockResolvedValue({ team: "platform", namespace: "agents-platform", grants: [] });
   isAtLeastMock.mockReturnValue(false);
+  authState.sub = null;
+  authState.team = null;
+  authState.role = null;
   mock(createTool).mockResolvedValue({ ...EXISTING_TOOL, id: "t2" });
   mock(updateTool).mockResolvedValue(EXISTING_TOOL);
+  mock(listAgentsForTool).mockResolvedValue({ items: [], total: 0 });
 });
 
 const clickNewTool = async () =>
@@ -349,5 +374,153 @@ describe("ToolsPage — tool ownership (Decision 46)", () => {
 
     await waitFor(() => expect(mock(createTool)).toHaveBeenCalled());
     expect(mock(createTool).mock.calls[0][0]).toMatchObject({ owner_team: "operations" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Decision 47 step E — catalog visibility and the reverse of the cascade
+// ---------------------------------------------------------------------------
+const PUBLISHED_TOOL = {
+  id: "pub-1",
+  name: "issue_refund",
+  display_name: "Issue Refund",
+  description: "Refund a payment",
+  type: "http",
+  risk_level: "high" as const,
+  owner_team: "platform",
+  status: "active",
+  publish_status: "published",
+  created_by: "alice",
+  http_method: "POST",
+  http_url: "https://payments.internal/refund",
+  config: {},
+};
+
+const PRIVATE_TOOL = {
+  ...PUBLISHED_TOOL,
+  id: "priv-1",
+  name: "draft_tool",
+  display_name: "Draft Tool",
+  publish_status: "private",
+};
+
+describe("ToolsPage — catalog visibility (Decision 47)", () => {
+  it("distinguishes Visibility from Status — two columns, two questions", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL, PRIVATE_TOOL]);
+    renderWithProviders(<ToolsPage />);
+
+    // The screen carried `status` (active/deprecated) alone until step E. After
+    // migration 0080 made private the default, a user could not tell which of their
+    // rows were org-wide — the field existed on the wire and nowhere on the page.
+    expect(await screen.findByTestId("tool-visibility-issue_refund")).toHaveTextContent(
+      "Published"
+    );
+    expect(screen.getByTestId("tool-visibility-draft_tool")).toHaveTextContent("Private");
+  });
+
+  it("offers no Unpublish to someone who is neither creator, teammate, nor admin", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL]);
+    authState.sub = "bob";
+    authState.team = "operations";
+    authState.role = "contributor";
+    renderWithProviders(<ToolsPage />);
+
+    await screen.findByTestId("tool-visibility-issue_refund");
+    expect(screen.queryByTestId("tool-unpublish-issue_refund")).toBeNull();
+  });
+
+  it("offers Unpublish to the CREATOR", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL]);
+    authState.sub = "alice";
+    authState.team = "operations"; // deliberately the WRONG team — the creator arm alone
+    authState.role = "contributor";
+    renderWithProviders(<ToolsPage />);
+    expect(await screen.findByTestId("tool-unpublish-issue_refund")).toBeInTheDocument();
+  });
+
+  it("offers Unpublish to a member of the OWNING TEAM who did not create it", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL]);
+    authState.sub = "carol";
+    authState.team = "platform";
+    authState.role = "contributor";
+    renderWithProviders(<ToolsPage />);
+    // Ownership is team-level (Decision 46) precisely so a tool does not become
+    // unmaintainable when its creator leaves.
+    expect(await screen.findByTestId("tool-unpublish-issue_refund")).toBeInTheDocument();
+  });
+
+  it("never offers Unpublish on an ALREADY-PRIVATE tool, even to its creator", async () => {
+    mock(listAllTools).mockResolvedValue([PRIVATE_TOOL]);
+    authState.sub = "alice";
+    authState.team = "platform";
+    authState.role = "platform-admin";
+    renderWithProviders(<ToolsPage />);
+
+    // The server answers 409 here, not 403. Rendering the control would put an error
+    // in front of a user who did nothing wrong.
+    await screen.findByTestId("tool-visibility-draft_tool");
+    expect(screen.queryByTestId("tool-unpublish-draft_tool")).toBeNull();
+  });
+
+  it("names the published agents still bound, and unpublishes anyway", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL]);
+    mock(listAgentsForTool).mockResolvedValue({
+      items: [
+        { id: "a1", name: "refund-bot", team: "platform", publish_status: "published" },
+        { id: "a2", name: "draft-bot", team: "platform", publish_status: "private" },
+      ],
+      total: 2,
+    });
+    mock(unpublishTool).mockResolvedValue({ ...PUBLISHED_TOOL, publish_status: "private" });
+    authState.sub = "alice";
+    authState.team = "platform";
+    authState.role = "contributor";
+    renderWithProviders(<ToolsPage />);
+
+    await userEvent.click(await screen.findByTestId("tool-unpublish-issue_refund"));
+    const dialog = await screen.findByTestId("unpublish-tool-dialog");
+
+    // The PUBLISHED one is the one that matters — a private agent's binding is not a
+    // discoverability consequence anybody else can see.
+    //
+    // findBy, NOT getBy. The dialog mounts before its bound-agents query resolves, so a
+    // synchronous getBy here passes only because the mock happens to settle within the
+    // awaits above — a timing coincidence, not a logical guarantee. Same class as the
+    // false pass in PublishReviewDrawer.test.tsx, where `toBeDisabled()` was green
+    // because the drawer was still LOADING.
+    expect(await within(dialog).findByTestId("unpublish-agent-refund-bot")).toBeInTheDocument();
+    // Only meaningful AFTER the list has rendered — before that everything is absent.
+    expect(within(dialog).queryByTestId("unpublish-agent-draft-bot")).toBeNull();
+
+    // COURTESY, NOT A GATE. This assertion is the whole point of the case: a bound
+    // published agent must not disable the button. If it ever does, any team can freeze
+    // another team's tool in the catalog forever by binding it.
+    const confirmBtn = within(dialog).getByTestId("unpublish-confirm");
+    expect(confirmBtn).toBeEnabled();
+    await userEvent.click(confirmBtn);
+    await waitFor(() => expect(mock(unpublishTool)).toHaveBeenCalledWith("pub-1"));
+  });
+
+  it("surfaces the 403 sentence rather than a generic failure", async () => {
+    mock(listAllTools).mockResolvedValue([PUBLISHED_TOOL]);
+    mock(unpublishTool).mockRejectedValue({
+      response: { data: { detail: "Cannot unpublish 'issue_refund': it is owned by team 'platform'." } },
+    });
+    authState.sub = "alice";
+    authState.team = "platform";
+    authState.role = "contributor";
+    renderWithProviders(<ToolsPage />);
+
+    await userEvent.click(await screen.findByTestId("tool-unpublish-issue_refund"));
+    await userEvent.click(await screen.findByTestId("unpublish-confirm"));
+
+    // The server's detail names the owning team; "Failed to unpublish" would strip the
+    // one piece of information that tells the user what to do next.
+    const { toast } = await import("sonner");
+    await waitFor(() =>
+      expect(mock(toast.error)).toHaveBeenCalledWith(
+        expect.stringContaining("owned by team 'platform'")
+      )
+    );
   });
 });

@@ -366,6 +366,46 @@ that the payload carries **no** `tools` key at all.
 **What closing it needs:** resolve a workflow's members → each member's bound tools →
 a cascade plan across the union. `plan_tool_cascade` is per-agent today.
 
+## G-E1 — re-publishing an unpublished tool costs a trip through the AGENT's review — 2026-08-08
+
+**deferred (intentional).** Decision 47 step E, and a direct consequence of option C.
+
+There is no `POST /tools/{id}/publish` — by design (`T-S6-029` pins its absence). A tool
+re-enters the org-wide catalog only by riding along with an agent a reviewer approves. That
+path works and is idempotent, but `publish_agent` sets `agent.publish_status` back to
+`pending_review`, so **putting one tool back takes the agent out of the catalog until a
+reviewer approves again**.
+
+**Not a bug and not being "fixed".** A tool-level publish endpoint would be a second door to
+org-wide visibility with no reviewer behind it, which is exactly what options A and B were
+rejected for. Recorded so the friction is a known cost rather than a surprise, and so nobody
+resolves it by opening that door. If it becomes painful, the honest fix is a re-approval
+flow that does not un-publish the agent while it is pending — a change to the AGENT
+lifecycle, not a new tool endpoint.
+
+## G-E2 — skills are private by default with NO way to publish one — 2026-08-08
+
+**not-yet-wired (debt).** Postmortem: `docs/bugs/skills-are-private-with-no-publish-path.md`.
+
+Step B gave `Skill.publish_status` the same private default as `Tool` (`models.py:1371`) and
+`catalog_visibility.py` filters both from one producer. The forward path did **not**
+transfer: tools ride along with an agent via `plan_tool_cascade`, and skills are in no such
+join. `admin.approve_publish_request` has a `skill` branch (`admin.py:377`) with **no
+producer anywhere** — grep finds the reader, the CHECK constraints and a `team_assets` join,
+and no writer of a `PublishRequest` with `asset_type='skill'`.
+
+So every skill created after migration `0080` is visible only to its creator, permanently.
+
+**Why step E did not absorb it.** Step E builds the REVERSE. An unpublish for skills could
+only ever return 409, because nothing reaches `published` — orphan code by construction. The
+missing piece is the forward path, and choosing its shape (skills have no agent binding to
+ride along with) is Decision-47-sized work, not a side effect of an unrelated step.
+
+**Blast radius, measured not assumed:** pre-`0080` skills kept `published` (no backfill, per
+Decision 47), so the existing library is intact; only post-`0080` skills are affected, and
+only their discoverability. `create_skill` sets `created_by` as of `0.2.271`, so the author
+still sees their own.
+
 ## G-R3-8 — ✅ CLOSED 2026-08-08. The tokenless catalog branch is DELETED, not narrowed.
 
 Closed sooner than the "identity Phase 3" this entry originally deferred it to, because the
@@ -590,8 +630,22 @@ which phases are scaffolding for it.
                D-1..D-5 resolved in docs/decisions.md; D-3 (workflows) deferred and
                ledgered as G-D3 -- review_supported=false WITH a reason, never an
                empty tool list. suite-6 33/0.
-        [ ] E. owner-initiated unpublish (Decision 47 #4 = option B)
-        [ ] F. tests: suite-6 extension + Playwright drawer case
+        [x] E. owner-initiated unpublish (Decision 47 #4 = option B)
+                                                       SHIPPED 0.2.275 / 0.1.188.
+               POST /tools/{id}/unpublish. E-1..E-5 in docs/decisions.md: the
+               platform-admin arm added on purpose (the approver must be able to
+               reverse), 409 not a silent 200, AUTHORITY BEFORE STATE so 403 never
+               leaks the publish state, bound published agents WARN and never block,
+               and it does NOT cascade. Skills excluded on purpose -- nothing
+               publishes them, so an unpublish would be orphan by construction (G-E2).
+               Two defects found on the way: the Tools page never rendered
+               publish_status at all (bug doc, fixed here), and the skills forward
+               path was never built (G-E2). suite-6 T-S6-023..029.
+        [x] F. tests: suite-6 extension + Playwright drawer case
+               Closed by D and E together. D shipped T-S6-017..022 +
+               e2e/publish-review-drawer.spec.ts; E shipped T-S6-023..029 +
+               e2e/tool-unpublish.spec.ts + 7 Vitest cases on ToolsPage. Both
+               registered in scripts/test-manifest.txt (--audit clean).
       NOTE G-R3-6 (tools/skills fully unauthenticated) was a PREREQUISITE of A
            -- owner_team cannot be derived from an optional caller. Shipped with
            A; postmortem in tools-and-skills-routers-had-no-authentication.md.

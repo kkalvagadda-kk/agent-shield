@@ -1,6 +1,14 @@
-"""Which tools ride along when an agent is published — one producer, two readers.
+"""A tool's catalog visibility — forward by cascade, reverse by its owner.
 
-Decision 47 option C. Companion to migration 0080.
+Decision 47 options C (forward) and #4 (reverse). Companion to migration 0080.
+
+THE REVERSE LIVES HERE TOO, DELIBERATELY
+----------------------------------------
+`plan_tool_cascade` decides which tools become org-wide; `may_unpublish_tool` decides who
+may take one back. Both answer "whose decision is a tool's visibility", and splitting them
+across two modules is how the two ends of one lifecycle drift apart. Note they are NOT
+symmetric and must not be made so — see `may_unpublish_tool` for why the reverse is not a
+cascade.
 
 WHY A MODULE
 ------------
@@ -44,7 +52,8 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import AgentTool, Tool
+from models import Agent, AgentTool, Tool
+from rbac import get_user_global_role, get_user_team
 
 
 @dataclass(frozen=True)
@@ -97,6 +106,79 @@ async def plan_tool_cascade(db: AsyncSession, agent_id, agent_team: str | None) 
         will_publish=will_publish,
         blocked=blocked,
         already_published=already_published,
+    )
+
+
+@dataclass(frozen=True)
+class UnpublishAuthority:
+    """Why the caller may (or may not) unpublish, not merely whether."""
+
+    allowed: bool
+    # 'creator' | 'owner_team' | 'platform-admin' | None
+    basis: str | None
+
+
+async def may_unpublish_tool(db: AsyncSession, tool: Tool, caller_sub: str) -> UnpublishAuthority:
+    """Decision 47 #4 — who may take a tool back out of the org-wide catalog.
+
+    Three arms, in the order a human would reason about them:
+
+      * **creator** — you published it by riding along with your agent; you can take it
+        back. This is the arm Decision 47 names first.
+      * **owning team** — ownership is team-level (Decision 46). A tool must not become
+        unmaintainable because the one person who created it left; the team that OWNS it
+        can act on it.
+      * **platform-admin** — NOT in Decision 47's sentence, and added deliberately. A
+        platform-admin is the person who APPROVED the publish. Without this arm the only
+        actor who can put a tool into the org-wide catalog cannot take it back out, which
+        is precisely the one-way ratchet the decision exists to break. Leaving it out
+        would have rebuilt the problem inside its own fix.
+
+    Note what this is NOT: it is not `catalog_visibility_clause`. Seeing a tool is
+    creator-scoped; *acting on ownership* is team-scoped. Those are the two axes Decision
+    46/47 separate, and answering one with the other's column is the error CORRECTION 2
+    records. A teammate can unpublish a tool they could not have seen as a draft — correct,
+    because by the time it is published everyone can see it anyway.
+    """
+    if tool.created_by and tool.created_by == caller_sub:
+        return UnpublishAuthority(True, "creator")
+
+    # owner_team is checked before the role lookup so the common case costs one query.
+    caller_team = await get_user_team(db, caller_sub)
+    if tool.owner_team and caller_team and tool.owner_team == caller_team:
+        return UnpublishAuthority(True, "owner_team")
+
+    # Raises NoPlatformRole for a row-less sub (Decision 40/41), which main.create_app
+    # maps to 403 — the right answer for a caller whose identity is corrupt, and not
+    # something to swallow into a quiet "not allowed".
+    if await get_user_global_role(db, caller_sub) == "platform-admin":
+        return UnpublishAuthority(True, "platform-admin")
+
+    return UnpublishAuthority(False, None)
+
+
+async def published_agents_using(db: AsyncSession, tool_id) -> list[Agent]:
+    """Published agents still bound to this tool — a COURTESY, never a gate.
+
+    Decision 47: *unpublish removes discoverability, never capability.* A bound agent
+    keeps working, because binding is by id and USE is governed by `owner_team` plus
+    grants (`tool_access.team_may_use_tool`) — never by `publish_status`. The pod does not
+    even read the catalog: since the CORRECTION-2 fix the SDK resolver calls
+    `GET /agents/{name}/tools`, the binding endpoint, which has no publish filter.
+
+    So this list must be SHOWN and must never BLOCK. Turning it into a precondition would
+    assert a dependency that does not exist, and would let any team freeze another team's
+    tool in the catalog forever by binding it to a published agent.
+    """
+    return list(
+        (
+            await db.execute(
+                select(Agent)
+                .join(AgentTool, AgentTool.agent_id == Agent.id)
+                .where(AgentTool.tool_id == tool_id, Agent.publish_status == "published")
+                .order_by(Agent.name)
+            )
+        ).scalars().all()
     )
 
 
