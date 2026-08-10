@@ -438,14 +438,47 @@ async def _caller_can_review(
     fall back to platform-admins only. On the test cluster that was already the case —
     every non-admin subject there is a test fixture.
 
-    Regression: `T-S70-006` (holds the auto-granted tool, no routed role → 403) and
-    `T-S70-004` (holds the routed role, grant revoked → 200).
+    ARTIFACT-SCOPED GRANTS ARE THE THIRD ARM, and they are the one the platform was
+    designed around. `user_team_assignments` holds ONE GLOBAL role per user (PRIMARY KEY
+    (user_sub) — measured), so "reviewer" can never be expressed there without spending a
+    user's only global role on it. `artifact_role_grants` is the multi-valued table:
+    `(artifact_type, artifact_id, role, grantee_type user|team|application, grantee_id)`,
+    so one person can be approver for many agents. That is how the product means to say
+    "Alice reviews refund-bot", and `rbac.can_approve_hitl` already implements it.
+
+    It had ZERO CALLERS. `rbac.py:12` says so in as many words. Meanwhile this function
+    answered the same question from the global table alone — the same shape Decision 48
+    fixed for the playground, where `can_use_playground` had existed and been correct with
+    no callers while the router hand-rolled `agent.created_by != caller`. Measured on the
+    cluster: **19 active `approver` grants** (team-scoped) that this function was ignoring,
+    against **0** users holding the routed scope. Wiring `can_approve_hitl` changes no rule;
+    it makes the existing rule real.
+
+    Note the naming gap this exposes, deliberately not papered over: `reviewer_scope`
+    defaults to `agent:reviewer` (`_DEFAULT_REVIEWER_SCOPE`, or the trigger's
+    `approver_role`), but `artifact_role_grants.role` is CHECK-constrained to
+    `agent-admin | approver | invoker`. So the routed name matches neither table, which is
+    precisely why nobody held it. Both spellings are accepted below — the artifact-scoped
+    `approver` grant (the real mechanism) and a global role literally equal to the routed
+    scope (kept so a trigger's custom `approver_role` still works if someone provisions it).
+
+    Regression: `T-S70-006` (holds the auto-granted tool, no routed role, no artifact grant
+    → 403) and `T-S70-004` (holds the routed role, grant revoked → 200).
     """
     roles = await _caller_roles(caller, db)
+    # Cheapest first: both arms below are already-loaded global roles, no extra query.
     if reviewer_scope in roles:
         return True
     if roles & _ADMIN_ROLES:
         return True
+    # ARTIFACT-SCOPED: is this caller an approver for THIS agent (directly, or via a team
+    # grant)? Additive — it can only widen, never narrow, so no caller who could decide
+    # before this arm existed loses access to it.
+    if approval.agent_id is not None:
+        from rbac import can_approve_hitl
+
+        if await can_approve_hitl(db, caller, approval.agent_id):
+            return True
     return False
 
 

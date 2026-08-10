@@ -51,6 +51,12 @@ fi
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_set_token "$NAMESPACE" "$API_POD"
 
+# A REAL non-owner for T-S8-023. contributor on purpose: it must clear the playground role
+# gate so the 403 it asserts comes from the per-agent OWNERSHIP check and not from the role
+# check — otherwise the case would pass for the wrong reason, which is how it read 403 before
+# identity P3 while actually proving nothing.
+S8_MALLORY_TOKEN="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "s8-mallory" "contributor")"
+
 DATASET_ID=""
 cleanup() {
   echo ""
@@ -66,7 +72,8 @@ for name in ['pg-s8-run-agent', 'pg-s8-hitl-agent']:
     kubectl exec -n "$NAMESPACE" "$API_POD" -- python3 -c "
 import urllib.request
 try:
-    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/playground/datasets/${DATASET_ID}', method='DELETE'), timeout=5)
+    urllib.request.urlopen(urllib.request.Request('http://localhost:8000/api/v1/playground/datasets/${DATASET_ID}',
+        headers={'Authorization': 'Bearer ${E2E_TOKEN}'}, method='DELETE'), timeout=5)
 except Exception: pass
 " 2>/dev/null || true
   fi
@@ -161,7 +168,10 @@ import urllib.request, json, time
 body = json.dumps({'name': 'e2e-s8-ds-' + str(int(time.time())), 'items': []}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/datasets',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST'
+    # Credential required since 0.2.282 (all five dataset routes take the caller from it).
+    # Without this the create 401s, DATASET_ID is empty, and T-S8-016 fails for a reason
+    # that has nothing to do with save-to-dataset.
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
 )
 try:
     r = urllib.request.urlopen(req, timeout=5)
@@ -184,7 +194,10 @@ body = json.dumps({'agent_name': 'pg-s8-run-agent', 'input_message': 'Hello S8'}
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    # Bearer since identity P3: POST /playground/runs takes its caller from the credential.
+    # X-User-Sub was the whole identity here, so this returned 401 and every later case
+    # keyed on RUN_ID went down with it.
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -214,7 +227,9 @@ import urllib.request, json, urllib.error
 body = json.dumps({'agent_name': 'no-such-agent-s8-xyz', 'input_message': 'hi'}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
-    data=body, headers={'Content-Type': 'application/json'}, method='POST'
+    # 404 is only reachable AFTER authentication. With no credential this is 401, and the
+    # case then cannot tell 'unknown agent' from 'unknown caller'.
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'}, method='POST'
 )
 try:
     urllib.request.urlopen(req, timeout=5)
@@ -254,7 +269,11 @@ if [ -n "$RUN_ID" ]; then
 import urllib.request, json
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
-    headers={'X-User-Sub': 'smoke-user'}
+    # The run list is scoped to its CALLER, so it has to be the same identity that created
+    # the run in T-S8-001 — which is the credential, not a header. Listing as
+    # 'X-User-Sub: smoke-user' asked as nobody and the run was invisible: the same
+    # creator/reader split that made the dataset DELETE 403.
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}
 )
 r = urllib.request.urlopen(req, timeout=5)
 assert r.status == 200, f'expected 200 got {r.status}'
@@ -453,7 +472,11 @@ import urllib.request, json
 body = json.dumps({'agent_name': 'pg-s8-run-agent', 'input_message': 'feedback test 2'}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
-    data=body, headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    # Bearer: POST /playground/runs needs the credential, and it must be the SAME identity
+    # the feedback cases below act as. With only X-User-Sub this 401'd, RUN_ID2 was empty,
+    # and T-S8-014 took the SKIP branch — which increments FAIL without printing one, so
+    # the suite reported a failure with no name attached to it.
+    data=body, headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 r = urllib.request.urlopen(req)
@@ -679,8 +702,16 @@ check_manual "T-S8-021" \
 echo ""
 echo "--- T-S8-022..024: service-identity bypass + GET /runs/{id} judge fields ---"
 
-run_test "T-S8-022 POST /playground/runs X-User-Sub=eval-runner (agent owned by smoke-user) → 201" "
-import urllib.request, json
+# INVERTED, NOT REPAIRED (identity P3). This asserted that typing 'X-User-Sub: eval-runner'
+# with NO credential started a run on an agent the caller does not own — 201. It asserted the
+# BYPASS as the contract: _SERVICE_IDENTITIES = {"eval-runner"} made that string skip BOTH the
+# contributor role gate and the per-agent authority check, so anyone who could reach the API
+# could run any agent by naming a service in a header. A service identity is now a Keycloak
+# client_credentials token whose azp sits inside the RS256 signature (suite-102 T-S102-004/008
+# cover the mechanism), and _SERVICE_IDENTITIES is deleted outright. 401, not 403: the caller
+# is not a weak identity, it is NO identity. Same shape as T-S9-011 and T-S93-004a.
+run_test "T-S8-022 forged 'X-User-Sub: eval-runner' with no credential is REFUSED 401 (was: 201)" "
+import urllib.request, json, urllib.error
 body = json.dumps({'agent_name': 'pg-s8-run-agent', 'input_message': 'eval-runner bypass'}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
@@ -688,28 +719,40 @@ req = urllib.request.Request(
     headers={'Content-Type': 'application/json', 'X-User-Sub': 'eval-runner'},
     method='POST'
 )
-r = urllib.request.urlopen(req, timeout=5)
-assert r.status == 201, f'expected 201 got {r.status}'
-d = json.loads(r.read())
-assert d.get('run_id'), f'missing run_id: {d}'
-print('eval-runner service identity ran an agent it does not own (201)')
+try:
+    r = urllib.request.urlopen(req, timeout=5)
+    raise AssertionError(f'forged service header was ACCEPTED ({r.status}) — the P3 bypass is back')
+except urllib.error.HTTPError as e:
+    assert e.code == 401, f'expected 401 for a credential-less forged identity, got {e.code}'
+    print('forged X-User-Sub: eval-runner refused 401 (identity comes from the credential)')
 "
 
-run_test "T-S8-023 POST /playground/runs X-User-Sub=mallory-not-owner → 403 (owner check still enforced)" "
+# T-S8-023 is NOT just "make it 401 too". It asserted 'X-User-Sub: mallory-not-owner' → 403
+# with the note "owner check still enforced", and it only ever passed because the header was
+# BELIEVED. Post-P3 it returns 401, so the assertion fails while the system is strictly more
+# secure — and if it were collapsed to 401 it would duplicate T-S8-022 and THE OWNERSHIP
+# CHECK WOULD STOP BEING TESTED AT ALL: the suite would go green having lost coverage.
+#
+# So the identity becomes real and the subject stays ownership. s8-mallory is a REAL
+# 'contributor' — it clears the contributor role gate (can_use_playground) and then fails the
+# per-agent authority check on an agent it neither created nor holds agent-admin on, which is
+# the 403 this case exists for. Decision 48's creator arm is additive, so a non-creator with
+# no grant is still refused.
+run_test "T-S8-023 a REAL non-owner (own token, contributor) → 403, ownership still enforced" "
 import urllib.request, json, urllib.error
 body = json.dumps({'agent_name': 'pg-s8-run-agent', 'input_message': 'not owner'}).encode()
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'mallory-not-owner'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${S8_MALLORY_TOKEN}'},
     method='POST'
 )
 try:
     urllib.request.urlopen(req, timeout=5)
-    raise AssertionError('expected 403, got 2xx')
+    raise AssertionError('expected 403, got 2xx — a non-owner started a run')
 except urllib.error.HTTPError as e:
-    assert e.code == 403, f'expected 403 got {e.code}'
-    print('non-owner correctly blocked with 403')
+    assert e.code == 403, f'expected 403 (authenticated, not authorized) got {e.code}'
+    print('authenticated non-owner correctly blocked with 403 — not 401, so this still tests OWNERSHIP')
 "
 
 run_test "T-S8-024 GET /playground/runs/{id} → 200 with judge fields" "
@@ -718,11 +761,13 @@ body = json.dumps({'agent_name': 'pg-s8-run-agent', 'input_message': 'judge fiel
 req = urllib.request.Request(
     'http://localhost:8000/api/v1/playground/runs',
     data=body,
-    headers={'Content-Type': 'application/json', 'X-User-Sub': 'smoke-user'},
+    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ${E2E_TOKEN}'},
     method='POST'
 )
 run_id = json.loads(urllib.request.urlopen(req, timeout=5).read())['run_id']
-r = urllib.request.urlopen('http://localhost:8000/api/v1/playground/runs/' + run_id, timeout=5)
+r = urllib.request.urlopen(urllib.request.Request(
+    'http://localhost:8000/api/v1/playground/runs/' + run_id,
+    headers={'Authorization': 'Bearer ${E2E_TOKEN}'}), timeout=5)
 assert r.status == 200, f'expected 200 got {r.status}'
 d = json.loads(r.read())
 for k in ('judge_score', 'judge_status', 'judge_reason'):

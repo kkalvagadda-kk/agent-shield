@@ -556,6 +556,69 @@ async def main():
             d5 = f"exception: {exc}"
         record("T-S70-005 daemon workflow parent + members carry the WORKFLOW service identity", ok5, d5)
 
+        # ── T-S70-007: the ARTIFACT-SCOPED arm — the mechanism the platform was built on ──
+        # 'user_team_assignments' holds ONE global role per user (PK user_sub), so "reviewer"
+        # cannot be expressed there without spending a person's only global role. The
+        # multi-valued table is 'artifact_role_grants' (artifact_id, role, grantee_type
+        # user|team, grantee_id), which is how one person is approver for many agents, and
+        # 'rbac.can_approve_hitl' implements exactly that. It had ZERO CALLERS — measured: 19
+        # active 'approver' grants that '_caller_can_review' was ignoring, against 0 users
+        # holding the routed scope. So the routed reviewer scope authorized nobody, and the
+        # ONLY way in was platform-admin.
+        #
+        # This case proves the wiring against a REAL daemon approval: the workflow member run
+        # T-S70-005 just left parked. Grant the SAME no-role persona that was refused 403 in
+        # T-S70-003/006 an 'approver' grant ON THAT AGENT, and it must now decide — 200.
+        # Same caller, same daemon routing, one row different.
+        d7 = "prereq failed (no parked workflow-member approval)"
+        ok7 = False
+        try:
+            m_appr = None
+            for _ in range(20):
+                async with AsyncSessionLocal() as s:
+                    row = (await s.execute(text(
+                        "SELECT a.id, a.agent_id, a.tool_name FROM approvals a "
+                        "JOIN agent_runs r ON r.id::text = a.thread_id "
+                        "WHERE r.parent_run_id = :p AND a.status = 'pending' LIMIT 1"),
+                        {"p": parent_id})).first()
+                if row:
+                    m_appr = row; break
+                await asyncio.sleep(4)
+            if m_appr:
+                m_id, m_agent_id, m_tool = m_appr
+                async with AsyncSessionLocal() as s:
+                    # Belt: make sure the ONLY thing authorizing this caller is the artifact
+                    # grant — no leftover per-tool grant, and its global role is contributor.
+                    await s.execute(text(
+                        "UPDATE approval_authority SET revoked_at = :ts WHERE resource_type='tool' "
+                        "AND resource_id = :tool AND approver_user_id = :u AND revoked_at IS NULL"),
+                        {"ts": datetime.now(timezone.utc), "tool": m_tool, "u": NONREV_SUB})
+                    await s.execute(text(
+                        "INSERT INTO artifact_role_grants "
+                        "  (artifact_type, artifact_id, role, grantee_type, grantee_id, granted_by, granted_at) "
+                        "VALUES ('agent', :aid, 'approver', 'user', :u, 'suite-70', now())"),
+                        {"aid": m_agent_id, "u": NONREV_SUB})
+                    await s.commit()
+                g = await c.get(f"/approvals/{m_id}")
+                mver = g.json()["version"]; mscope = g.json().get("reviewer_scope")
+                async with httpx.AsyncClient(base_url=BASE, timeout=60.0, auth=NONREV_AUTH) as ac:
+                    ar = await ac.patch(f"/approvals/{m_id}",
+                                        json={"decision": "approved", "version": mver,
+                                              "reviewer_id": NONREV_SUB})
+                ok7 = ar.status_code == 200 and mscope is not None
+                d7 = (f"status={ar.status_code} reviewer_scope={mscope} "
+                      f"caller=the SAME persona 403'd in T-S70-003/006, now holding an "
+                      f"artifact 'approver' grant on agent {str(m_agent_id)[:8]}")
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "UPDATE artifact_role_grants SET revoked_at = now() "
+                        "WHERE granted_by = 'suite-70' AND revoked_at IS NULL"))
+                    await s.commit()
+        except Exception as exc:
+            d7 = f"exception: {type(exc).__name__}: {exc}"
+        record("T-S70-007 an artifact-scoped 'approver' grant DOES authorize a daemon approval "
+               "(rbac.can_approve_hitl wired)", ok7, d7)
+
     except Exception as exc:
         # FAIL LOUD (the suite-74 lesson). Without this, a bare run writes only the cases
         # recorded BEFORE the crash and the bash summary (PASS>0, FAIL==0) reports the
