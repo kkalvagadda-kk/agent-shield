@@ -37,6 +37,9 @@
 #   T-S102-013  PATCH /playground/datasets/{id} no credential    -> 401 (was: applied it)
 #   T-S102-014a POST /playground/approvals/{id}/decide, no cred  -> 401 (was: decided it)
 #   T-S102-014b the same route WITH a verified service token still reaches the handler
+#   T-S102-015  GET  /catalog                  with no credential -> 401 (was: 200, 86 rows)
+#   T-S102-016  a REVOKED asset grant does NOT confer catalog visibility
+#   T-S102-017  un-revoking the SAME grant makes it visible (the filter IS the grant)
 #
 # T-S102-008 is the one that proves the mechanism rather than the refusal: it mints a REAL
 # token with the scheduler's client secret and checks `azp` survives verification. Without
@@ -62,6 +65,11 @@ API_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=registry-ap
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/e2e-auth.sh"
 e2e_set_token "$NAMESPACE" "$API_POD"
 
+# A NON-ADMIN caller for the catalog cases. platform-admin sees the whole catalog by design
+# (every can_* helper in rbac.py short-circuits that role), so the grant filter can only be
+# observed as somebody else.
+S102_MEMBER_TOKEN="$(e2e_ensure_persona "$NAMESPACE" "$API_POD" "s102-member" "contributor")"
+
 echo "=== Suite 102: verifiable service identity (identity P3) ==="
 echo "  Pod: $API_POD"
 
@@ -76,6 +84,7 @@ SCHED_SECRET=$(kubectl get secret agentshield-service-clients -n "$NAMESPACE" \
 set +e
 RESULT=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- env \
   S102_TOKEN="$E2E_TOKEN" S102_SUB="$E2E_SUB" S102_SCHED_SECRET="$SCHED_SECRET" \
+  S102_MEMBER_TOKEN="$S102_MEMBER_TOKEN" \
   python3 - <<'PY' 2>&1
 import json, os, sys, urllib.error, urllib.parse, urllib.request
 import uuid
@@ -86,6 +95,7 @@ BASE = "http://localhost:8000/api/v1"
 TOKEN = os.environ["S102_TOKEN"]
 SUB = os.environ["S102_SUB"]
 SCHED_SECRET = os.environ["S102_SCHED_SECRET"]
+MEMBER_TOKEN = os.environ["S102_MEMBER_TOKEN"]
 
 results = []
 
@@ -310,6 +320,88 @@ if svc_token:
 else:
     rec("T-S102-014b a verified service token still reaches the playground decide handler",
         False, "prereq failed: no scheduler token (see T-S102-008)")
+
+# ── T-S102-015/016/017 — the marketplace catalog: grant filter + revoked grants ──
+# GET /api/v1/catalog required NO credential and scoped by 'X-User-Team', a header defaulting
+# to "". Two defects, and the FIRST WAS ALREADY LIVE: the Studio client never sends that header
+# (zero occurrences in studio/src), so 'if x_user_team:' was skipped on every real request and
+# the marketplace listed every team's published artifacts to anyone who asked. Measured before
+# the fix: 200 with 86 artifacts and no credential. Only one team publishes today, which is why
+# nothing looked wrong; it would have leaked the moment a second team did.
+st, body = call("GET", "/catalog")
+rec("T-S102-015 catalog with NO credential is 401 (was: 200 with every team's artifacts)",
+    st == 401, f"got {st} {body[:120]}")
+
+# The second defect: the grant subquery honoured REVOKED and EXPIRED grants, so revoking a
+# share did not un-share it. Measured: 408 asset_grants, 26 revoked, 1 expired. This case
+# builds the fixture directly — a published artifact owned by ANOTHER team, plus one grant to
+# the member's team that starts REVOKED. Visible only if the filter ignores revoked_at.
+try:
+    import asyncio as _aio2
+    from sqlalchemy import text as _t2
+    from sqlalchemy.ext.asyncio import create_async_engine as _mk_engine
+
+    # A DEDICATED engine, created and disposed inside this coroutine's own event loop.
+    # NOT db.AsyncSessionLocal: T-S102-010 above already used it inside its own
+    # asyncio.run(), which bound that engine's connection pool to THAT loop. A second
+    # asyncio.run() gets a new loop and the pooled connections do not transfer —
+    # "got Future attached to a different loop". Per-loop engine, no shared pool.
+
+    OTHER_TEAM = "zzz-s102-otherteam"
+    MEMBER_HDR = {"Authorization": "Bearer " + MEMBER_TOKEN}
+
+    def catalog_names():
+        """Full, UNTRUNCATED catalog list as the member. Deliberately not call(), which
+        caps bodies at 300 chars so every other case can print one safely — a catalog
+        listing is far longer than that and json.loads would raise on the slice."""
+        req = urllib.request.Request(BASE + "/catalog", headers=MEMBER_HDR, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return r.status, [x.get("name") for x in json.loads(r.read())]
+        except urllib.error.HTTPError as e:
+            return e.code, []
+
+    async def _s102_catalog():
+        eng = _mk_engine(os.environ["DATABASE_URL"])
+        async with eng.begin() as s:
+            # Column list read off the live table, not assumed: published_artifacts is
+            # (id, name, type, description, source_id, team, created_at, updated_at) — every
+            # row here IS published by definition, so there is no publish_status column.
+            aid = (await s.execute(_t2(
+                "INSERT INTO published_artifacts (id, name, type, team, created_at, updated_at) "
+                "VALUES (gen_random_uuid(), 's102-other-artifact', 'agent', :t, now(), now()) "
+                "RETURNING id"), {"t": OTHER_TEAM})).scalar()
+            await s.execute(_t2(
+                "INSERT INTO asset_grants (id, asset_id, asset_type, grantee_team, granted_by, "
+                "  granted_at, revoked_at) "
+                "VALUES (gen_random_uuid(), :a, 'agent', 'platform', 'suite-102', now(), now())"),
+                {"a": aid})
+        # revoked grant -> must NOT be visible
+        st_r, names_r = catalog_names()
+        hidden = st_r == 200 and "s102-other-artifact" not in names_r
+        # un-revoke the SAME grant -> must become visible, so the case cannot pass by the
+        # artifact being invisible for some unrelated reason
+        async with eng.begin() as s:
+            await s.execute(_t2("UPDATE asset_grants SET revoked_at = NULL WHERE asset_id = :a"),
+                            {"a": aid})
+        st_a, names_a = catalog_names()
+        shown = st_a == 200 and "s102-other-artifact" in names_a
+        async with eng.begin() as s:
+            await s.execute(_t2("DELETE FROM asset_grants WHERE asset_id = :a"), {"a": aid})
+            await s.execute(_t2("DELETE FROM published_artifacts WHERE id = :a"), {"a": aid})
+        await eng.dispose()
+        return hidden, shown, st_r, st_a
+
+    h, sh, sr, sa = _aio2.run(_s102_catalog())
+    rec("T-S102-016 a REVOKED asset grant does not confer catalog visibility",
+        h, f"revoked: status={sr}, artifact hidden={h}")
+    rec("T-S102-017 un-revoking the SAME grant makes it visible (filter really is the grant)",
+        sh, f"active: status={sa}, artifact visible={sh}")
+except Exception as exc:  # noqa: BLE001
+    rec("T-S102-016 a REVOKED asset grant does not confer catalog visibility", False,
+        f"{type(exc).__name__}: {exc}")
+    rec("T-S102-017 un-revoking the SAME grant makes it visible", False,
+        f"{type(exc).__name__}: {exc}")
 
 # ── T-S102-009 — no false positive: a real user still works ──────────────────
 # The whole suite would also pass if the fix were "refuse everything", so prove a VERIFIED

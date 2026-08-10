@@ -153,11 +153,96 @@ run, interactive ones included.
 
 ## G-ID-2 — `POST /api/v1/approvals/` still needs no credential — 2026-08-09
 
-**not-yet-wired (debt).** Every other approvals route now requires a verified caller (0.2.281).
-This one cannot yet: the SDK's `governed_tool` POSTs it from agent pods that hold no platform
-identity, so gating it is an agent-identity change (pods must mint or be issued a credential),
-not a router change. Until then, an approval ROW can be injected by anything VPC-reachable —
-deciding one cannot.
+**not-yet-wired (debt), DELIBERATELY DEFERRED 2026-08-09 with a design.** Every other approvals
+route now requires a verified caller (0.2.281/0.2.284). This one does not.
+
+**Correcting an earlier read in this same file.** It said the pod "holds no platform identity",
+so gating this needed an agent-identity project. That was wrong: the pod DOES carry a
+credential. `sdk/agentshield_sdk/run_context.py` vendors `RCT_HEADER`, `server.py:216` verifies
+it, and `routers/approvals.py:174-179` already imports `RCT_HEADER` + `rehydrate` to SEND one
+when resuming a pod. Verifying one in `create_approval` is a two-line import — HMAC,
+in-process, no network. So the obstacle is not "no credential". It is these three:
+
+1. **The raw token is discarded at the pod edge.** `server.py:216-234` verifies it and stores
+   only the DECODED CLAIMS in `_current_user_context`; the token itself is dropped, so
+   `hitl.py:90` has nothing to forward. Fixing that is an **SDK change**, and the SDK is baked
+   into agent images — so it needs an SDK bump and a redeploy of every agent pod BEFORE the
+   route can be gated.
+2. **TTL, and this is the sharp one.** `DEFAULT_TTL_SECONDS = 900`. An approval is created when
+   a run PARKS, which on a durable run is routinely past 15 minutes — so the token would be
+   expired at exactly the moment it is needed. Fail closed and approval creation fails, the run
+   cannot park, and that is WORSE than the open route. P1.5's `rehydrate` exists because tokens
+   expire mid-run, and its docstring is explicit that "no identity" must never become a mint
+   with `user_sub=""`. Solve this explicitly; do not discover it.
+3. **An RCT does not answer the question this route asks.** It proves "a run authorized by user
+   X is in flight", not "this pod may create an approval for agent Y". The nearest real check is
+   `actor_chain` — assert the requesting agent is in the lineage — which is a NEW authorization
+   rule to design, not a credential to attach.
+
+**Sequence when picked up. Steps 2 and 3 cannot ship together:**
+
+1. **Measure, do not enforce.** Verify an RCT/token in `create_approval` when present, record
+   which credential arrived, and LOG when none did. No SDK change, no redeploys, nothing can
+   break — and it tells you who actually calls this route before you gate it. Same discipline
+   that turned G-ID-0 from a guess into "41 tools, 28 holders, 19 ignored approver grants".
+2. **Then the SDK carries it:** stash the raw token beside the claims, attach `RCT_HEADER` in
+   `hitl.py`, bump the SDK, redeploy the fleet.
+3. **Then flip to enforce behind a flag**, the way `ENFORCE_TRIGGER_MGMT` (`rbac.py:237`)
+   already does log-and-permit, until the fleet is confirmed on the new SDK.
+
+**Why deferring is a judgment and not an oversight — the severity DROPPED today.** Injecting an
+approval row is no longer a HITL bypass: `decide_approval` and `reopen_approval` are both gated
+(0.2.281), so a forged row cannot be acted on. What remains is queue pollution, audit noise
+(rows attributable to any `agent_id`/`team`), and phishing a reviewer into approving something
+fabricated. In-cluster only — there is no Envoy edge exposing it. Real, bounded, not urgent.
+
+## G-ID-4 — the team-less tools 0080 deferred: 5 real, 31 test fixtures — 2026-08-09
+
+**data decision (deliberate), NOT a code bug.** Migration `0080` (Decision 47, 2026-08-07)
+already named this and deliberately left it alone: `tool_access.team_may_use_tool` treats a
+NULL `owner_team` as "usable by every team", and 0080 grandfathered the existing rows rather
+than backfill them, because *"flipping 174 rows private would strand every agent whose tool
+bindings cross a team boundary today."* Decision 46 (`0.2.267`) already fixed the CAUSE —
+`owner_team` now derives from the creator's team instead of defaulting to NULL — so no new
+NULL-owner tools are being created. **The resolver is behaving as documented; do not "fix" it.**
+
+What 0080 did not have is the risk breakdown. Measured 2026-08-09: **65 of 348 tools (19%)
+have NULL `owner_team`, and 37 of those are high or critical risk.** But the number is
+misleading, which is the point of recording it:
+
+**31 of the 37 are test fixtures that suites never cleaned up:**
+
+| pattern | count | bindings | created by |
+|---|---|---|---|
+| `s6-critical-tool-<ts>` | 10 (ALL the `critical` ones) | 0 | `suite-6-asset-lifecycle.sh` |
+| `journey-echo-*` | 13 | 0–1 | a journey suite (name no longer in `scripts/` — deleted or in a worktree) |
+| `s54-risky-*` | 8 | 1 | `suite-54-agent-class-shape-dispatch.sh` |
+
+Every `critical` entry is a fixture with **zero bindings**. That is the alarming half of the
+number and it is litter. Worth fixing at the source — a suite that leaves risky tools behind
+is a suite-hygiene bug, and it inflates every future audit of this table.
+
+**The real exposure is 5 tools:**
+
+| tool | risk | bindings | side-effecting |
+|---|---|---|---|
+| `refund_action` | high | **43** | yes |
+| `issue_refund` | high | 1 | yes |
+| `quarantine_action` | high | 1 | yes |
+| `quarantine_account` | high | 0 | yes |
+| `cic-echo-tool` | high | 1 | no |
+
+`refund_action` is the one that matters: 43 agent bindings, side-effecting, callable by every
+team. It is the same tool whose 27 auto-granted approval authorities produced **G-ID-0** — it
+keeps surfacing because it is the platform's canonical dangerous tool.
+
+**So the deferred decision is two small jobs, not "review 174 tools":** give those 5 an
+`owner_team` — checking first which of the 43 `refund_action` bindings cross a team boundary,
+because that is exactly the blast radius 0080 warned about — and delete the 31 fixture rows.
+
+**Correcting an earlier entry in this file:** G-ID-3 below ranked `tool_access.py:46` as the
+sharpest remaining item. That was wrong on two counts. It is a closed decision, not an open
+hole, and the count that made it look severe was mostly test debris.
 
 ## G-ID-3 — remaining "empty value widens access" sites, ranked — 2026-08-09
 
@@ -165,9 +250,18 @@ deciding one cannot.
 subject is falsy. The approvals/datasets/playground-decide instances were fixed in 0.2.281; these
 were left, deliberately, to keep that change's blast radius readable:
 
-1. `routers/catalog.py:61` — `if x_user_team:` with `Header(default="")`. Omit the header and
-   the whole cross-team grant filter vanishes. Also identity-from-plaintext-header.
-2. `tool_access.py:46` — `if owner_team is None or owner_team == team: return True`, so a NULL
+1. ~~`routers/catalog.py:61`~~ — **FIXED 0.2.285.** The filter was worse than described: it was
+   DEAD CODE, because the Studio client never sends `X-User-Team` (measured, zero occurrences
+   in `studio/src`), so the marketplace listed every team's published artifacts to an
+   uncredentialed caller — reproduced as `200` with 86 artifacts. The same six lines also
+   honoured REVOKED and EXPIRED grants (408 grants, 26 revoked, 1 expired). Team now comes from
+   the credential, the filter is unconditional, stale grants are excluded. Regression
+   `T-S102-015/016/017`.
+2. ~~`tool_access.py:46`~~ — **NOT A BUG; see G-ID-4 above.** Documented behaviour on rows
+   migration `0080` deliberately grandfathered, and the cause was already fixed by Decision 46.
+   The open part is a DATA decision over 5 real tools (plus 31 fixture rows to delete), not a
+   resolver change. This entry previously ranked it as the sharpest remaining hole — wrong.
+3. `tool_access.py:46` consumers — `if owner_team is None or owner_team == team: return True`, so a NULL
    owner is usable by **every** team. Fed by `routers/tools.py:157` and
    `routers/mcp_servers.py:123`, which can write NULL when `get_user_team` returns `None`
    (`rbac.py:104-109`). `bundle_generator.py:212` deliberately diverges from it.

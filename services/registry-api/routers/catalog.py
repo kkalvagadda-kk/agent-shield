@@ -13,10 +13,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth_middleware import Caller, resolve_caller
 from db import get_db
+from rbac import get_user_global_role, get_user_team
 from observability_backend import get_observability_backend
 from models import (
     AgentRun,
@@ -46,9 +48,32 @@ async def list_catalog(
     team: str | None = Query(None),
     type_filter: str | None = Query(None, alias="type"),
     db: AsyncSession = Depends(get_db),
-    x_user_team: str = Header(default="", alias="X-User-Team"),
+    # `X-User-Team` is GONE from this signature. The caller's team comes from the VERIFIED
+    # credential, for the same reason the approvals and dataset routes stopped reading
+    # `X-User-Sub`: a team the caller types is not a team the caller belongs to.
+    identity: Caller = Depends(resolve_caller),
 ) -> list[CatalogArtifactResponse]:
     """List published artifacts visible to the caller's team."""
+    # This route had NO credential requirement and derived the team from a header defaulting
+    # to "". Two defects, and the first one was already live:
+    #
+    #   1. `if x_user_team:` skipped the grant filter entirely when the header was absent —
+    #      and MEASURED 2026-08-09, the Studio client never sends it (zero occurrences in
+    #      studio/src). So the filter was dead code on every real request and the marketplace
+    #      listed every team's published artifacts to everyone. It reads as scoped; it was
+    #      not. Only one team publishes today (86 artifacts, all `platform`), which is why
+    #      nothing looked wrong — it would have leaked the moment a second team published.
+    #   2. The grant subquery honoured REVOKED and EXPIRED grants. Measured: 408 asset_grants,
+    #      26 revoked, 1 expired. Revoking a share did not un-share it.
+    caller = identity.require_user_sub()
+    # Role FIRST: `get_user_global_role` raises `NoPlatformRole` for a subject with no
+    # `user_team_assignments` row, which main.py:206 turns into a 403. That is the fail-closed
+    # answer for "we do not know who you are on this platform" (Decision 40/41 — users are
+    # platform-created, so a missing row is corruption, not a guest). It also means
+    # `caller_team` below cannot be None once this line returns: both read the same row.
+    caller_role = await get_user_global_role(db, caller)
+    caller_team = await get_user_team(db, caller) or ""
+
     q = select(PublishedArtifact)
 
     if type_filter:
@@ -57,13 +82,19 @@ async def list_catalog(
     if team:
         q = q.where(PublishedArtifact.team == team)
 
-    # Filter by grants: show artifacts where caller's team is owner or grantee
-    if x_user_team:
+    # UNCONDITIONAL now — there is no header to omit. A platform-admin sees the whole
+    # catalog (consistent with every `can_*` helper in rbac.py, which short-circuits that
+    # role); everyone else sees their own team's artifacts plus what is ACTIVELY granted to
+    # their team. A caller with no team row sees nothing, which is fail-closed: `None` means
+    # "we do not know your team", never "show everything".
+    if caller_role != "platform-admin":
         granted_ids = select(AssetGrant.asset_id).where(
-            AssetGrant.grantee_team == x_user_team
+            AssetGrant.grantee_team == caller_team,
+            AssetGrant.revoked_at.is_(None),
+            or_(AssetGrant.expires_at.is_(None), AssetGrant.expires_at > func.now()),
         )
         q = q.where(
-            (PublishedArtifact.team == x_user_team)
+            (PublishedArtifact.team == caller_team)
             | (PublishedArtifact.id.in_(granted_ids))
         )
 
