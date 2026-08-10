@@ -45,9 +45,30 @@ guarded, but creating it needs the two existing duplicate pairs resolved first �
 are not losslessly mergeable (within each pair one row pins a version and the other does
 not). Deleting rows from a live queue is an operator decision, not a migration's.
 
-## G-ID-0 — deploy-time auto-grant makes a routed reviewer scope decorative — 2026-08-09
+## G-ID-0 — deploy-time auto-grant made a routed reviewer scope decorative — RESOLVED 0.2.283
 
-**NEEDS A DECISION (not a bug I fixed — it changes behaviour, so it is Kalyan's call).**
+**DECIDED by Kalyan 2026-08-09: the per-tool arm no longer applies to a reviewer-scoped
+(daemon) approval.** `_caller_can_review` now allows only the routed reviewer role or an
+admin role. The interactive production path is **unchanged** and still honours per-tool
+grants (`_require_authority_to_decide`). Regression: `T-S70-006` (holds the auto-granted
+tool, no routed role → 403; returned **200** before) and `T-S70-004` (holds the routed role,
+grant revoked → 200).
+
+**Rollout note for a cluster with real reviewers:** assign `agent:reviewer` — or whatever
+scope `_derive_reviewer_audit` routes to — BEFORE deploying this, or daemon approvals fall
+back to platform-admins only. On the test cluster that was already the situation: measured,
+**zero** users held `agent:reviewer`, and every non-admin subject there is a test fixture
+(`s93-*`, `s5-*`, `s15-*`, `s70-*`, `e2e-*`, `uicreate-*`) with `kalyan` the only real human
+and a platform-admin. So the tightening removed no real person's access.
+
+**Also done in the same pass:** 60 orphaned tool grants held by 11 subjects **absent from
+Keycloak** were revoked (each re-verified against Keycloak at write time, not from a typed
+list). Active grants **285 → 225**, distinct holders **28 → 17**, grant holders with no role
+row **11 → 0**. They could not authenticate, so this was hygiene rather than exposure — but
+it is why the grant table read far wider than it was, and an authorization table that
+overstates itself cannot be audited.
+
+The original finding, kept because the numbers are the argument:
 
 Found while making `suite-70 T-S70-003` test what it claims. A DAEMON approval is routed to a
 reviewer role (`reviewer_scope = "agent:reviewer"`), and `_caller_can_review`
@@ -80,8 +101,11 @@ approval at all? Arguments both ways —
   review it. If a blanket deploy-time grant overrides that, the routing is decoration, and the
   auto-grant was written for interactive per-tool approvals, not for daemon routing.
 
-Not changed unilaterally: it would tighten a live authorization path and could 403 reviewers who
-decide today.
+**Resolved as the second option.** The concern that it "could 403 reviewers who decide today"
+was checked rather than assumed: on this cluster the 25 affected subjects are all test
+fixtures, so nobody real lost access. That check is exactly why the rollout note above exists
+— on a cluster with real reviewers the answer would have been the same, but the ordering
+(grant the role, then tighten) would have mattered.
 
 ## G-ID-1 — reactive-eval HITL auto-approve was removed, not replaced — 2026-08-09 (0.2.281)
 

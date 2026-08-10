@@ -410,16 +410,43 @@ async def _caller_can_review(
 ) -> bool:
     """Fail-closed authority for a DAEMON reviewer-scoped approval.
 
-    A caller may decide only if they actually hold the routed reviewer role, OR an
-    admin role (platform_admin/team_lead — matching the existing admin-authority
-    pattern), OR an explicit per-tool ApprovalAuthority grant. No role → cannot decide.
+    A caller may decide only if they hold the ROUTED reviewer role, or an admin role
+    (platform-admin/team_lead — matching the existing admin-authority pattern).
+
+    A PER-TOOL `ApprovalAuthority` GRANT IS DELIBERATELY NOT ENOUGH HERE (gap G-ID-0,
+    decided 2026-08-09). It used to be a third arm, and that made the routing decorative:
+    deploying an agent with risky tools auto-grants each tool to EVERY MEMBER OF THE TEAM
+    (`routers/deployments.py:92-118`, "N members × M risky tools"). Measured on the cluster
+    before this change:
+
+        41 tools carried active grants, 28 distinct holders
+        25 of those could reach a daemon approval ONLY via the per-tool arm
+        0 users held `agent:reviewer` — so the routed role authorized nobody
+
+    Routing an approval to a reviewer role is a statement about WHO should review it. A
+    blanket deploy-time grant, written for the interactive per-tool path, was silently
+    overriding that statement — so any team contributor (and, measured, one `consumer`)
+    could decide a daemon HITL gate. Two mechanisms, one of them conferring the other's
+    authority by accident.
+
+    THE INTERACTIVE PRODUCTION PATH IS UNCHANGED and still honours the per-tool grant —
+    see `_require_authority_to_decide`. The two paths answer different questions, which is
+    why this is a separate function rather than a flag.
+
+    ROLLOUT NOTE for a cluster with real reviewers: assign `agent:reviewer` (or whatever
+    scope `_derive_reviewer_audit` routes to) BEFORE deploying this, or daemon approvals
+    fall back to platform-admins only. On the test cluster that was already the case —
+    every non-admin subject there is a test fixture.
+
+    Regression: `T-S70-006` (holds the auto-granted tool, no routed role → 403) and
+    `T-S70-004` (holds the routed role, grant revoked → 200).
     """
     roles = await _caller_roles(caller, db)
     if reviewer_scope in roles:
         return True
     if roles & _ADMIN_ROLES:
         return True
-    return await _has_authority_for_tool(caller, approval.tool_name, db)
+    return False
 
 
 async def _require_authority_to_decide(

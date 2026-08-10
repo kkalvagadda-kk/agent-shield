@@ -395,6 +395,37 @@ async def main():
             # Revoke it here, AFTER the deploy that created it and BEFORE the decide, and
             # assert the revoke actually happened. A precondition a test needs is a
             # precondition the test must establish.
+            #
+            # ── T-S70-006 FIRST, because the pre-revoke state IS the case ─────
+            # G-ID-0: the routed reviewer scope says WHO should review a daemon approval, and
+            # the auto-grant handed the same authority to every member of the team. Measured
+            # before this change: 41 tools, 28 grant holders, 25 of whom could reach a daemon
+            # approval ONLY through the per-tool arm, and ZERO users holding 'agent:reviewer'
+            # — the routing decided nothing. Decision: the per-tool arm no longer applies to a
+            # reviewer-scoped (daemon) approval. The interactive production path keeps it.
+            #
+            # This case costs nothing extra: the grant the deploy just created is still live,
+            # so deciding here with a non-reviewer that HOLDS the grant is exactly the
+            # scenario. It returned 200 before the change.
+            pre_grants = None
+            async with AsyncSessionLocal() as s:
+                pre_grants = (await s.execute(text(
+                    "SELECT count(*) FROM approval_authority WHERE resource_type='tool' "
+                    "AND resource_id = :tool AND approver_user_id = :u AND revoked_at IS NULL"),
+                    {"tool": tool, "u": NONREV_SUB})).scalar()
+            d6 = f"prereq: nonrev holds no auto-grant on {tool} (pre_grants={pre_grants})"
+            ok6 = False
+            if pre_grants:
+                async with httpx.AsyncClient(base_url=BASE, timeout=60.0, auth=NONREV_AUTH) as gc:
+                    gr = await gc.patch(f"/approvals/{approval_id}",
+                                        json={"decision": "approved", "version": ver,
+                                              "reviewer_id": NONREV_SUB})
+                ok6 = gr.status_code == 403
+                d6 = (f"status={gr.status_code} detail={gr.text[:60]} "
+                      f"nonrev_active_grants_on_{tool}={pre_grants} (auto-granted by the deploy)")
+            record("T-S70-006 a per-tool grant does NOT authorize a reviewer-scoped daemon "
+                   "approval (G-ID-0)", ok6, d6)
+
             async with AsyncSessionLocal() as s:
                 await s.execute(text(
                     "UPDATE approval_authority SET revoked_at = :ts "
@@ -565,6 +596,10 @@ asyncio.run(main())
 PY
 
 echo "  running detached in-pod driver (create+deploy+park+resume can take a few min)…"
+# The pod's UID at launch. A rollout keeps the Deployment name and gives you a NEW pod, so
+# comparing UIDs afterwards is what separates "the driver broke" from "the pod was replaced
+# under the driver" — see the non-report branch below.
+POD_UID_AT_LAUNCH=$(kubectl get pod -n "$NAMESPACE" "$API_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
 kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- bash -c \
   "cd /app && PYTHONPATH=/app S70_OUT=$OUTFILE ADMIN_SUB=$ADMIN_SUB \
    S70_NONREV_USER=$S70_NONREV_USER S70_REVIEWER_USER=$S70_REVIEWER_USER \
@@ -580,8 +615,29 @@ done
 
 RES=$(kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- cat "$OUTFILE" 2>/dev/null || true)
 if [ -z "$RES" ]; then
-  echo "ERROR: no driver result file — last log lines:"
-  kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null || true
+  # NAME THE CAUSE. "driver did not report" has two completely different meanings and they
+  # send you to opposite places: (a) the driver crashed — read $RUNLOG; (b) THE POD WAS
+  # REPLACED under it, which kills the detached process and takes /tmp with it, so there is
+  # no log to read and nothing is wrong with the driver at all. (b) happened on 2026-08-09:
+  # a deploy's final helm step rolled the Deployment while this suite was mid-flight, and the
+  # bare non-report read exactly like a broken edit. Distinguish them by the pod's UID, which
+  # a replacement cannot preserve.
+  POD_UID_NOW=$(kubectl get pod -n "$NAMESPACE" "$API_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)
+  if [ -z "$POD_UID_NOW" ]; then
+    echo "ERROR: pod $API_POD NO LONGER EXISTS — it was deleted mid-run (deploy/rollout/eviction)."
+    echo "       The detached driver died with it and /tmp went with the pod. This is NOT a"
+    echo "       driver defect and there is no log to recover. Wait for the deploy to EXIT"
+    echo "       (not merely for the new tag to appear in the Service) and re-run."
+  elif [ -n "$POD_UID_AT_LAUNCH" ] && [ "$POD_UID_NOW" != "$POD_UID_AT_LAUNCH" ]; then
+    echo "ERROR: pod $API_POD was REPLACED mid-run (uid $POD_UID_AT_LAUNCH -> $POD_UID_NOW)."
+    echo "       Same name, different instance: the detached driver died with the old one."
+    echo "       Not a driver defect. Re-run against a settled Deployment"
+    echo "       (kubectl get deploy … -o jsonpath='{.metadata.generation} {.status.observedGeneration}' must match)."
+  else
+    echo "ERROR: no driver result file and the pod is the SAME instance — the driver itself"
+    echo "       failed. Last log lines:"
+    kubectl exec -i -n "$NAMESPACE" "$API_POD" -c registry-api -- tail -40 "$RUNLOG" 2>/dev/null || true
+  fi
   echo ""
   echo "=== suite-70 summary: PASS=$PASS FAIL=(driver did not report) ==="
   echo "SUITE 70 FAILED"
