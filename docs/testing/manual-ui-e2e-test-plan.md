@@ -54,9 +54,32 @@ grants (`_require_authority_to_decide`). Regression: `T-S70-006` (holds the auto
 tool, no routed role → 403; returned **200** before) and `T-S70-004` (holds the routed role,
 grant revoked → 200).
 
-**Rollout note for a cluster with real reviewers:** assign `agent:reviewer` — or whatever
-scope `_derive_reviewer_audit` routes to — BEFORE deploying this, or daemon approvals fall
-back to platform-admins only. On the test cluster that was already the situation: measured,
+**Grant `approver` on the agent, NOT the global role.** `0.2.284` wired
+`rbac.can_approve_hitl`, so the way to make someone a daemon-approval reviewer is an
+`artifact_role_grants` row `(artifact_type='agent', artifact_id=<agent>, role='approver',
+grantee_type='user'|'team')`. That is additive and per-agent: a `contributor` stays a
+contributor and reviews only the agents you name.
+
+Do NOT hand anyone the global role `agent:reviewer`. `user_team_assignments.role` is one
+column doing two jobs (Decision 42 / V-5), and `agent:reviewer` is absent from
+`ROLE_HIERARCHY`, so every capability check reads `ROLE_HIERARCHY.get(role, 0)` → **0**. The
+holder can decide a daemon approval and **nothing else** — no playground, no agent creation.
+`rbac.py:60-70` says that rank-0 behaviour is load-bearing and must not be "fixed" there; the
+column split lands in R5 (G-R0-1).
+
+**Rollout note for a cluster with real reviewers:** create those `approver` grants BEFORE
+deploying, or daemon approvals fall back to platform-admins only.
+
+**DECIDED 2026-08-09 (Kalyan): the `agent:reviewer` default and `agent_triggers.approver_role`
+stay as they are.** Not an oversight — do not re-open it as a tidy-up. `approver_role` came in
+with WS-2 T014 (migration `0062`, 2026-07-15) as `VARCHAR(256)` with **no** CHECK constraint,
+i.e. designed to hold any role name, which is the opposite assumption to
+`artifact_role_grants.role`'s three-value constraint. Reconciling them means widening that
+constraint and deciding whether free-form approver routing is a real feature — a product call,
+not a cleanup. Consequence to know: the global arm matches `reviewer_scope` literally, the
+artifact arm always requires `approver`, so a trigger's custom `approver_role` is honoured
+only through the global arm. 1 of 215 trigger rows sets it, to the default value, so nothing
+depends on the asymmetry today. On the test cluster that was already the situation: measured,
 **zero** users held `agent:reviewer`, and every non-admin subject there is a test fixture
 (`s93-*`, `s5-*`, `s15-*`, `s70-*`, `e2e-*`, `uicreate-*`) with `kalyan` the only real human
 and a platform-admin. So the tightening removed no real person's access.
